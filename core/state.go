@@ -16,6 +16,7 @@ const (
 	PhaseRequestSent         Phase = "request_sent"
 	PhaseResponseSaved       Phase = "response_saved"
 	PhaseEffectSaved         Phase = "effect_saved"
+	PhaseJobBound            Phase = "job_bound"
 	PhaseAwaitingObservation Phase = "awaiting_observation"
 	PhaseCancelling          Phase = "cancelling"
 	PhaseReturned            Phase = "returned"
@@ -30,7 +31,8 @@ const (
 	IntentPrepareRequest Intent = "prepare_request"
 	IntentSendRequest    Intent = "send_request"
 	IntentDecode         Intent = "decode"
-	IntentDispatch       Intent = "dispatch"
+	IntentBind           Intent = "bind"
+	IntentStart          Intent = "start"
 	IntentInspect        Intent = "inspect"
 	IntentCancel         Intent = "cancel"
 	IntentHalt           Intent = "halt"
@@ -88,7 +90,9 @@ func (s State) Intent() Intent {
 	case PhaseResponseSaved:
 		return IntentDecode
 	case PhaseEffectSaved:
-		return IntentDispatch
+		return IntentBind
+	case PhaseJobBound:
+		return IntentStart
 	case PhaseAwaitingObservation:
 		return IntentInspect
 	case PhaseCancelling:
@@ -139,19 +143,32 @@ func (s State) Next(event Event) (State, error) {
 		if s.Phase == PhaseResponseSaved {
 			return s.decide(e.Body), nil
 		}
-	case JobStarted:
+	case JobBound:
 		switch s.Phase {
 		case PhaseEffectSaved:
-			s.Phase = PhaseAwaitingObservation
+			s.Phase = PhaseJobBound
 			s.JobID = e.JobID
 			return s, nil
 		case PhaseCancelling:
 			s.JobID = e.JobID
 			return s, nil
+		case PhaseNeedsResolution:
+			s.JobID = e.JobID
+			if s.Reason != "" {
+				s.Phase = PhaseCancelling
+				return s, nil
+			}
+			s.Phase = PhaseAwaitingObservation
+			return s, nil
+		}
+	case JobStarted:
+		if s.Phase == PhaseJobBound {
+			s.Phase = PhaseAwaitingObservation
+			return s, nil
 		}
 	case Observed:
 		switch s.Phase {
-		case PhaseEffectSaved, PhaseAwaitingObservation:
+		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation:
 			return s.advance(), nil
 		case PhaseCancelling:
 			s.Phase = PhaseStopped
@@ -159,7 +176,7 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case OutcomeUnknown:
 		switch s.Phase {
-		case PhaseEffectSaved, PhaseAwaitingObservation, PhaseCancelling:
+		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
 			s.Phase = PhaseNeedsResolution
 			return s, nil
 		}
@@ -169,7 +186,7 @@ func (s State) Next(event Event) (State, error) {
 			s.Phase = PhaseStopped
 			s.Reason = e.Reason
 			return s, nil
-		case PhaseEffectSaved, PhaseAwaitingObservation:
+		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation:
 			s.Phase = PhaseCancelling
 			s.Reason = e.Reason
 			return s, nil
@@ -210,7 +227,7 @@ func (s State) validate(event Event) error {
 		if len(e.Body) == 0 {
 			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
 		}
-	case JobStarted:
+	case JobBound:
 		if err := s.claimEffect(e.EffectID); err != nil {
 			return err
 		}
@@ -219,6 +236,16 @@ func (s State) validate(event Event) error {
 		}
 		if s.JobID != "" && s.JobID != e.JobID {
 			return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, e.JobID, s.JobID)
+		}
+	case JobStarted:
+		if err := s.claimEffect(e.EffectID); err != nil {
+			return err
+		}
+		if e.JobID == "" {
+			return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
+		}
+		if s.JobID != e.JobID {
+			return fmt.Errorf("%w: job %q is not the bound job %q", ErrInvalidEvent, e.JobID, s.JobID)
 		}
 	case Observed:
 		if err := s.claimEffect(e.EffectID); err != nil {

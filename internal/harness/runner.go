@@ -52,33 +52,58 @@ func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, 
 	return next, nil
 }
 
-// Dispatch hands the committed effect to the executor and commits what it
-// learned. A returned job ID becomes JobStarted whatever its status snapshot;
+// Bind hands the committed effect to the executor and commits the job that
+// owns it. A returned job ID becomes JobBound whatever its status snapshot;
 // an executor error or a job without an ID becomes OutcomeUnknown with the
 // failure text. Cancellation observed around the call returns without
 // committing, so a resume finds the job by effect ID.
-func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, error) {
-	if state.Intent() != core.IntentDispatch {
-		return state, fmt.Errorf("harness: phase %q does not dispatch", state.Phase)
+func (r Runner) Bind(ctx context.Context, state core.State) (core.State, error) {
+	if state.Intent() != core.IntentBind {
+		return state, fmt.Errorf("harness: phase %q does not bind", state.Phase)
 	}
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
-	job, err := r.executor.StartOrResume(ctx, Effect{ID: state.EffectID, Command: state.Decision.Payload})
+	job, err := r.executor.Bind(ctx, Effect{ID: state.EffectID, Command: state.Decision.Payload})
 	if err == nil && job.ID == "" {
 		err = fmt.Errorf("executor returned no job ID with status %q", job.Status)
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return state, ctx.Err()
-		}
-		next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{EffectID: state.EffectID}, Facts{Failure: err.Error()})
-		if commitErr != nil {
-			return state, fmt.Errorf("%w; executor: %w", commitErr, err)
-		}
-		return next, nil
+		return r.keepUnknown(ctx, state, err)
 	}
-	return r.Commit(ctx, state, core.JobStarted{EffectID: state.EffectID, JobID: job.ID}, Facts{})
+	return r.Commit(ctx, state, core.JobBound{EffectID: state.EffectID, JobID: job.ID}, Facts{})
+}
+
+// Start issues the start of the bound job and commits that it was issued. An
+// executor error or a job other than the bound one becomes OutcomeUnknown
+// with the failure text, because the start may or may not have happened.
+// Cancellation observed around the call returns without committing.
+func (r Runner) Start(ctx context.Context, state core.State) (core.State, error) {
+	if state.Intent() != core.IntentStart {
+		return state, fmt.Errorf("harness: phase %q does not start", state.Phase)
+	}
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	job, err := r.executor.Start(ctx, state.EffectID)
+	if err == nil && job.ID != state.JobID {
+		err = fmt.Errorf("executor started job %q instead of bound job %q", job.ID, state.JobID)
+	}
+	if err != nil {
+		return r.keepUnknown(ctx, state, err)
+	}
+	return r.Commit(ctx, state, core.JobStarted{EffectID: state.EffectID, JobID: state.JobID}, Facts{})
+}
+
+func (r Runner) keepUnknown(ctx context.Context, state core.State, cause error) (core.State, error) {
+	if ctx.Err() != nil {
+		return state, ctx.Err()
+	}
+	next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{EffectID: state.EffectID}, Facts{Failure: cause.Error()})
+	if commitErr != nil {
+		return state, fmt.Errorf("%w; executor: %w", commitErr, cause)
+	}
+	return next, nil
 }
 
 func (f Facts) check(event core.Event) error {

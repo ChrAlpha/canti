@@ -51,7 +51,15 @@ type ResponseLoaded struct {
 	Body    []byte
 }
 
-// JobStarted reports the backend job that owns the committed effect.
+// JobBound reports the backend job that owns the named effect. Binding
+// records identity only; it does not report or authorize execution.
+type JobBound struct {
+	EffectID string
+	JobID    string
+}
+
+// JobStarted reports that a start was issued for the bound job of the named
+// effect. From here on, side effects may exist.
 type JobStarted struct {
 	EffectID string
 	JobID    string
@@ -83,6 +91,7 @@ func (AttemptStarted) event()     {}
 func (ResponseSaved) event()      {}
 func (ResponseIncomplete) event() {}
 func (ResponseLoaded) event()     {}
+func (JobBound) event()           {}
 func (JobStarted) event()         {}
 func (Observed) event()           {}
 func (OutcomeUnknown) event()     {}
