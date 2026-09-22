@@ -64,6 +64,9 @@ func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, respons
 	if err := r.store.SaveDecision(ctx, DecisionRecord{RunID: runID, StepID: stepID, Decision: decision}); err != nil {
 		return Outcome{}, fmt.Errorf("harness: save decision: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 
 	if decision.Kind == core.Return {
 		if err := r.store.SaveReturn(ctx, ReturnRecord{RunID: runID, StepID: stepID, Decision: decision}); err != nil {

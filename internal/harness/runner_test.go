@@ -139,7 +139,7 @@ func TestApplyDecisionRejectsInvalidInputBeforeWriting(t *testing.T) {
 }
 
 func TestApplyDecisionCancellation(t *testing.T) {
-	for _, cancelAt := range []string{"before", "effect"} {
+	for _, cancelAt := range []string{"before", "decision", "effect"} {
 		t.Run(cancelAt, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -161,6 +161,9 @@ func TestApplyDecisionCancellation(t *testing.T) {
 				t.Fatalf("error = %v, want cancellation", err)
 			}
 			var want []string
+			if cancelAt == "decision" {
+				want = []string{"decision"}
+			}
 			if cancelAt == "effect" {
 				want = []string{"decision", "effect"}
 			}
@@ -168,6 +171,30 @@ func TestApplyDecisionCancellation(t *testing.T) {
 				t.Fatalf("events = %v, want %v", events.events, want)
 			}
 		})
+	}
+}
+
+func TestApplyDecisionCancellationBeforeReturnCommit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := &eventRecorder{after: func(event string) {
+		if event == "decision" {
+			cancel()
+		}
+	}}
+	runner, err := NewRunner(recordingStore{events}, &recordingExecutor{eventRecorder: events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.ApplyDecision(ctx, "run-1", "step-1", Response{
+		Body:     []byte(`{"kind":"return","payload":"handoff"}`),
+		Complete: true,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+	if !reflect.DeepEqual(events.events, []string{"decision"}) {
+		t.Fatalf("events = %v, want [decision]", events.events)
 	}
 }
 
