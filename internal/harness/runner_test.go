@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -346,9 +347,11 @@ func TestDispatchStopsAtStoreFailureAfterStart(t *testing.T) {
 		rec          *recorder
 		wantLog      []string
 		wantExecutor bool
+		wantText     string
 	}{
-		{"job commit fails", &recorder{job: Job{ID: "job-1", Status: JobRunning}, failAt: core.PhaseAwaitingObservation}, []string{"start", "commit:awaiting_observation"}, false},
-		{"unknown outcome commit fails", &recorder{jobErr: errExecutor, failAt: core.PhaseNeedsResolution}, []string{"start", "commit:needs_resolution"}, true},
+		{"job commit fails", &recorder{job: Job{ID: "job-1", Status: JobRunning}, failAt: core.PhaseAwaitingObservation}, []string{"start", "commit:awaiting_observation"}, false, ""},
+		{"unknown outcome commit fails", &recorder{jobErr: errExecutor, failAt: core.PhaseNeedsResolution}, []string{"start", "commit:needs_resolution"}, true, errExecutor.Error()},
+		{"missing job ID commit fails", &recorder{job: Job{Status: JobRunning}, failAt: core.PhaseNeedsResolution}, []string{"start", "commit:needs_resolution"}, false, "no job ID"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -359,6 +362,9 @@ func TestDispatchStopsAtStoreFailureAfterStart(t *testing.T) {
 			}
 			if errors.Is(err, errExecutor) != tt.wantExecutor {
 				t.Fatalf("error = %v, want executor failure in chain: %v", err, tt.wantExecutor)
+			}
+			if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("error %q does not mention %q", err, tt.wantText)
 			}
 			if got != from || len(tt.rec.commits) != 0 {
 				t.Fatalf("Dispatch() = %#v with commits %v; want unchanged state and nothing committed", got, tt.rec.commits)

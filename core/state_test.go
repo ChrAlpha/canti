@@ -112,6 +112,7 @@ func legalTransitions() []transition {
 		{"awaiting observation cancels", at(core.PhaseAwaitingObservation, withExec, withJob), core.StopRequested{Reason: core.StopBudgetExhausted}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopBudgetExhausted))},
 
 		{"cancelling finds job", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.JobStarted{JobID: "job-1"}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled))},
+		{"cancelling confirms known job", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.JobStarted{JobID: "job-1"}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled))},
 		{"cancelling records missing job as cancelled", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionCancelled}, at(core.PhaseStopped, withExec, withReason(core.StopCancelled))},
 		{"cancelling records true result", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionExited}, at(core.PhaseStopped, withExec, withJob, withReason(core.StopCancelled))},
 		{"cancelling keeps unknown outcome", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.OutcomeUnknown{}, at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled))},

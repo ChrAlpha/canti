@@ -60,8 +60,8 @@ var (
 	// ErrIllegalTransition reports a valid event that the current phase does
 	// not accept.
 	ErrIllegalTransition = errors.New("core: illegal transition")
-	// ErrInvalidEvent reports an event whose content the current state cannot
-	// accept in any phase.
+	// ErrInvalidEvent reports an event whose content is malformed or
+	// contradicts the identities the state has recorded.
 	ErrInvalidEvent = errors.New("core: invalid event")
 )
 

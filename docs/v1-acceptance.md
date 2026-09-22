@@ -15,7 +15,7 @@ V1 durability is **not complete**.
 | Counted attempts | `AttemptStarted` in `request_sent` consumes an attempt and stops at `MaxAttempts` in `core/state_test.go` | No adapter sends anything yet |
 | Commit before dispatch | Shared event log shows the effect commit before `StartOrResume`; a store failure after the start leaves `effect_saved` and wraps both errors in `runner_test.go` | Recording store/executor, no durable backend |
 | Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing; repeated stop requests in `cancelling` and `needs_resolution` are recorded without changing phase | No process-tree cleanup or persistent cancellation |
-| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` and, without a recorded job, anything but `failed_to_start` or `cancelled` | No real backend inspection |
+| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` and, without a recorded job, anything but `failed_to_start` in `effect_saved` or `cancelled` in `cancelling` | No real backend inspection |
 | Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing and wrap `ErrFacts`; core sentinels survive `Commit` | Recording store only |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
 | Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through ten committed phases | No model, inspect, or restart |

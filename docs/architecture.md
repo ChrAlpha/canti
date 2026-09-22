@@ -114,8 +114,9 @@ Rules the table enforces:
   `protocol_failure`. An empty response body is an invalid event, not a retry.
 - An `exec` decision commits `effect_saved` with an effect ID derived from the
   run ID and step. A `return` decision closes the run as `returned`.
-- `Observed` completes the step: the run continues in `idle` at the next step
-  with identities cleared, or stops with `steps_exhausted`. `Observed` rejects
+- Outside `cancelling`, `Observed` completes the step: the run continues in
+  `idle` at the next step with identities cleared, or stops with
+  `steps_exhausted`. `Observed` rejects
   the `unknown` execution state, which must be reported as `OutcomeUnknown`.
   Without a recorded job, `effect_saved` accepts only `failed_to_start` and
   `cancelling` only `cancelled`; any other outcome must first record its job

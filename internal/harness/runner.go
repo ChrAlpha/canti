@@ -65,6 +65,9 @@ func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, err
 		return state, err
 	}
 	job, err := r.executor.StartOrResume(ctx, Effect{ID: state.EffectID, Command: state.Decision.Payload})
+	if err == nil && job.ID == "" {
+		err = fmt.Errorf("executor returned no job ID with status %q", job.Status)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return state, ctx.Err()
@@ -74,10 +77,6 @@ func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, err
 			return state, fmt.Errorf("%w; executor: %w", commitErr, err)
 		}
 		return next, nil
-	}
-	if job.ID == "" {
-		failure := fmt.Sprintf("executor returned no job ID with status %q", job.Status)
-		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: failure})
 	}
 	return r.Commit(ctx, state, core.JobStarted{JobID: job.ID}, Facts{})
 }
