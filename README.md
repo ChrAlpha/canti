@@ -1,11 +1,15 @@
 # canti
 
-`canti` is named after the plural of *canto*: the project explores how to
-compose the right information for each agent step.
+`canti` is named after *canti*, the plural of *canto*, and focuses on composing
+the right information for each agent step.
 
-This repository is an experimental Go implementation of a deliberately thin
-agent core and a durable single-machine harness. It is an architectural probe
-for a future Memoh agent runtime, not a drop-in replacement for one.
+This repository contains a stateless Go decision core and the boundaries for a
+durable single-machine harness. It is an architectural experiment for a future
+Memoh agent runtime. **The current implementation is a skeleton, not a complete
+durable agent.**
+
+[Architecture](docs/architecture.md) | [Development](docs/development.md) |
+[V1 acceptance](docs/v1-acceptance.md) | [Contributing](CONTRIBUTING.md)
 
 ## Why two layers?
 
@@ -34,9 +38,9 @@ The `internal/harness` package defines the long-running boundaries around that
 kernel:
 
 - independent model requests and raw response provenance;
-- durable fact records and bounded input frames;
-- stable effect identities and an external job backend;
-- recovery phases, output references, and explicit commit boundaries.
+- fact record types and an input frame shape;
+- stable effect identities and a queryable job backend interface;
+- recovery phase types, output references, and decision ordering.
 
 `Runner.ApplyDecision` demonstrates the essential ordering. It decodes and
 persists a decision first. A `return` decision is then persisted as a handoff.
@@ -44,8 +48,9 @@ An `exec` decision is persisted as an effect before the executor receives it.
 The same effect ID can therefore be used by a concrete executor to look up an
 existing job after a harness restart.
 
-This is a boundary skeleton. SQLite storage, a concrete model adapter, and a
-queryable execution backend are intentionally separate follow-up units.
+SQLite storage, a concrete model adapter, a queryable execution backend, and
+recovery reads are not implemented. The store methods do not provide cross-record
+transactions, and input frame validation does not enforce resource budgets.
 `return` means control was handed back; it does not claim that the task
 succeeded.
 
@@ -54,7 +59,7 @@ succeeded.
 Requirements:
 
 - Go 1.25 or newer
-- a POSIX shell for the Makefile targets
+- Make and a POSIX shell for the Makefile targets
 
 Run the full local check:
 
@@ -74,8 +79,8 @@ The command entry point currently exposes only a version/help surface:
 go run ./cmd/canti -version
 ```
 
-It intentionally does not pretend that the durable runner is implemented
-before its storage and execution contracts have a concrete implementation.
+There is no runnable model loop yet. See the [development guide](docs/development.md)
+for build, race-check, and CLI smoke commands.
 
 ## Design rules
 
@@ -111,3 +116,10 @@ unknown external state.
 Before opening a pull request, run `make check` and describe any additional
 fault or recovery cases exercised. The repository CI runs the same command on
 pushes to `main` and on pull requests.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for ownership,
+verification, and review rules. Report vulnerabilities using [SECURITY.md](SECURITY.md).
+
+## License
+
+Copyright 2026 ChrAlpha. Licensed under [Apache-2.0](LICENSE).
