@@ -11,14 +11,18 @@ V1 durability is **not complete**.
 | Strict decision protocol | Valid/invalid input tests in `core/decode_test.go` | Offline parsing only |
 | Stateless calls | Concurrent decode tests and race checks | Does not test model or runtime behavior |
 | Complete transition table | Every legal phase/event pair asserts the full resulting state and every other pair is rejected unchanged in `core/state_test.go` | Offline values only |
+| Causal event identity | Attempt/response events name their step and attempt; effect events name their effect; echoes from an earlier attempt, step, or effect are invalid and trajectory tests walk two real steps plus a protocol repair | Offline values only |
+| State invariants | `State.Validate` rejects unreachable projections; legal transitions are tested to preserve the invariants; the runner refuses commit/bind/start for invalid states | No loader exists yet |
 | Budgets and stop reasons | Transport, lost-send, protocol, and step exhaustion tests | No wall-time, token, or storage measurement |
-| Counted attempts | `AttemptStarted` in `request_sent` consumes an attempt and stops at `MaxAttempts` in `core/state_test.go` | No adapter sends anything yet |
-| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume`; a store failure after the start leaves `effect_saved` and wraps both errors in `runner_test.go` | Recording store/executor, no durable backend |
-| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing; repeated stop requests in `cancelling` and `needs_resolution` are recorded without changing phase | No process-tree cleanup or persistent cancellation |
-| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` and, without a recorded job, anything but `failed_to_start` in `effect_saved` or `cancelled` in `cancelling` | No real backend inspection |
+| Counted attempts | `AttemptStarted` in `request_sent` consumes an attempt and stops at `MaxAttempts`; protocol repair returns to `idle` and freezes a new revision under the same budget | No adapter sends anything yet |
+| Sequenced commits | Every accepted event advances `Snapshot.Seq` even on state self-loops; a stale snapshot cannot commit after a self-loop; an identical retry after a lost acknowledgement is confirmed without a second record | Recording store only |
+| Commit before bind, bind before start | Shared event log shows the effect commit before `Bind` and the `job_bound` commit before `Start`; a store failure after either call leaves the prior phase and wraps both errors | Recording store/executor, no durable backend |
+| Cancellation | Cancel before commit, before bind/start, and around either call leaves the snapshot unchanged and writes nothing; repeated stop requests in `cancelling` and `needs_resolution` are recorded without changing phase | No process-tree cleanup or persistent cancellation |
+| Unknown outcomes | Executor error, missing job ID, or a foreign job commits `OutcomeUnknown` with failure text; `needs_resolution` accepts a found job to resume verification; resolving to `unknown` abandons the run as `unresolved` instead of fabricating an outcome | No real backend inspection |
 | Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing and wrap `ErrFacts`; core sentinels survive `Commit` | Recording store only |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
-| Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through ten committed phases | No model, inspect, or restart |
+| Stable event kinds | Every event exposes a unique persisted kind and `SemanticsVersion` pins the transition rules | No encoder or migration exists yet |
+| Offline loop shape | Exec then return steps drive `Commit`/`Bind`/`Start` through eleven committed phases with strictly increasing sequences | No model, inspect, or restart |
 | Input requirements | Missing goal/environment tests | No size or token budget |
 | CLI entry point | Build and version/help smoke check | No runnable agent workflow |
 
@@ -75,15 +79,18 @@ sample or hide failed samples from the result set.
 
 ## Implementation order
 
-1. Implement `Store.Commit` and recovery reads for `core.State`, the frozen
-   request, and the saved response in SQLite with workspace ownership, and
-   test crash recovery of persisted transitions.
-2. Add a queryable executor with stable job identity, retained output, explicit
-   uncertainty, and bounded cancellation/cleanup.
+1. Implement `Store.Commit` and recovery reads for the latest `Snapshot`, the
+   frozen request, and the saved response in SQLite with workspace ownership,
+   and test crash recovery of persisted transitions, sequence conflicts, and
+   idempotent retries.
+2. Add a queryable executor with stable job identity, a bind that never
+   executes, a fencing cancel, retained output, explicit uncertainty, and
+   bounded cancellation/cleanup.
 3. Add one model adapter and bounded input builder with frozen request replay
    and attempt/usage accounting.
 4. Wire the loop and CLI, then exercise every integration gate above, including
    cold restart after each step.
 
-Revisit interface shapes when a concrete transaction requires it. Preserve
-the small core instead of moving lifecycle or recovery state into its API.
+Revisit interface shapes when a concrete transaction requires it. Run rules
+stay in the core's transition table; I/O, storage, and execution stay in the
+harness. Neither layer restates the other's responsibility.

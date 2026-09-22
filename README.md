@@ -32,21 +32,29 @@ The `core` package is a stateless semantic kernel:
 - `core.Decode` accepts exactly one complete JSON decision; the only decisions
   are `exec` and `return`.
 - `core.State` is the complete projection needed to continue a run: run, step,
-  attempt, phase, limits, last decision, effect and job identity, stop reason.
+  attempt, request revision, phase, limits, last decision, effect and job
+  identity, stop reason. `State.Validate` rejects projections no legal run
+  reaches.
 - `State.Intent` names the single action the harness may take next; closed and
   unknown phases halt.
 - `State.Next` applies one reported fact and returns the new state, or the
-  unchanged state with an error for invalid or illegal events.
+  unchanged state with an error for invalid or illegal events. Events name the
+  step, attempt, or effect they belong to; a result from an earlier position
+  is invalid, not late.
+- Binding a backend job and authorizing its start are separate committed
+  phases, so an unstarted bind can never execute.
 - It owns no model client, history, session, filesystem, clock, or executor,
   and imports only the standard library.
 
 The `internal/harness` package interprets those intents:
 
 - `Runner.Commit` derives the next state and hands one `Transition` with its
-  attached facts to the `Store`, which must persist it atomically.
-- `Runner.Dispatch` runs after the effect is committed, hands it to the
-  `Executor` by stable effect ID, and commits the started job or an unknown
-  outcome.
+  attached facts to the `Store` at the next sequence of a `Snapshot`, with a
+  deterministic event ID so an identical retry after a lost acknowledgement
+  is confirmed, not repeated, and a stale controller cannot commit.
+- `Runner.Bind` runs after the effect is committed and records the job that
+  owns it; `Runner.Start` runs after the binding is committed and records
+  that the start was issued; anything uncertain becomes an unknown outcome.
 - `Model`, `Executor`, `Frame`, and `Observation` define the remaining
   boundaries as interfaces and record types.
 

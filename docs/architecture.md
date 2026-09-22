@@ -17,12 +17,12 @@ that target from the current skeleton.
 | Area | Owns | Current implementation |
 | --- | --- | --- |
 | `core/decode.go` | Decision protocol and decoding | Implemented with offline tests |
-| `core/state.go`, `core/event.go` | Run state, events, intents, transition rules | Implemented with a full transition-table test |
+| `core/state.go`, `core/event.go` | Run state, events, intents, transition rules, state invariants | Implemented with a full transition-table test and trajectory tests |
 | `internal/harness/frame.go` | Input frame shape | Required goal/environment validation only |
 | `internal/harness/model.go` | Independent requests and raw responses | Interface and provenance fields only |
-| `internal/harness/store.go` | Atomic transition commits | Interface and record types only |
-| `internal/harness/runner.go` | Intent interpretation: commit and dispatch | Implemented against store/executor interfaces |
-| `internal/harness/executor.go` | External jobs keyed by effect ID | Interface and status types only |
+| `internal/harness/store.go` | Sequenced atomic transition commits | Interface, snapshot, and record types only |
+| `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Implemented against store/executor interfaces |
+| `internal/harness/executor.go` | External jobs keyed by effect ID, bind/start split | Interface and status types only |
 | `internal/harness/artifacts.go` | Observations and output references | Types only |
 | `cmd/canti` | User-facing entry point | Help and development version only |
 
@@ -63,21 +63,50 @@ values. It does not extract JSON from Markdown. Transport completeness is a
 separate adapter responsibility: valid JSON alone does not prove that a model
 response completed.
 
+A raw provider response and the decision payload are different layers. The
+adapter records the complete raw response with its provenance
+(model/protocol/adapter); it then extracts exactly one decision JSON, which
+`ResponseLoaded` carries into the core and which is persisted as part of that
+transition. The core never sees provider content blocks or HTTP framing.
+
+## Identity and causality
+
+Every external result must name the position it belongs to; the core rejects
+a result that claims a different position instead of adopting it:
+
+| Identity | Meaning | Where it lives |
+| --- | --- | --- |
+| `RunID` | One autonomous run | `State.RunID` |
+| `Step` | One decision position | `State.Step`; on attempt/response events |
+| `RequestRev` | Which frozen request of the step is current | `State.RequestRev` |
+| `Attempt` | One authorized send within a step | `State.Attempt`; on attempt/response events |
+| `EffectID` | One committed action, derived from run and step | `State.EffectID`; on effect events |
+| `JobID` | The backend job bound to the effect | `State.JobID`; on job events |
+
+Derived record identities need no extra fields: request bytes belong to
+(run, step, revision); a response belongs to (run, step, attempt); attempts
+never reset within a step, so a late response from an earlier attempt or an
+earlier step is invalid. Observations, unknown outcomes, resolutions, and job
+events name their effect; an event for a foreign effect is invalid. Delivery
+identity (deduplicating one commit) is separate from causal identity and is
+carried by the commit protocol below, not by core events.
+
 ## Run state and transitions
 
 `core.State` is the complete projection a harness needs to continue a run:
 
 ```go
 type State struct {
-	RunID    string
-	Step     int
-	Attempt  int
-	Phase    Phase
-	Limits   Limits
-	Decision Decision
-	EffectID string
-	JobID    string
-	Reason   StopReason
+	RunID      string
+	Step       int
+	Attempt    int
+	RequestRev int
+	Phase      Phase
+	Limits     Limits
+	Decision   Decision
+	EffectID   string
+	JobID      string
+	Reason     StopReason
 }
 ```
 
@@ -88,60 +117,91 @@ state, or the unchanged state with `ErrInvalidEvent` or `ErrIllegalTransition`.
 Both are pure functions of their inputs. A legal event may leave the state
 equal to its input; the harness still records it.
 
+`State.Validate` checks the invariants every reachable state satisfies —
+phase-appropriate references, budgets, and identities. A state loaded from
+storage or received from another host must pass validation before any intent
+is acted on; the runner refuses I/O for an invalid state with
+`ErrInvalidState`. `Next` itself stays total over state values, and unknown
+phases halt rather than act.
+
 | Phase | Intent | Legal events |
 | --- | --- | --- |
 | `idle` | `prepare_request` | `RequestFrozen`, `StopRequested` |
 | `request_frozen` | `send_request` | `AttemptStarted`, `StopRequested` |
 | `request_sent` | `send_request` | `AttemptStarted`, `ResponseSaved`, `ResponseIncomplete`, `StopRequested` |
 | `response_saved` | `decode` | `ResponseLoaded`, `StopRequested` |
-| `effect_saved` | `dispatch` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
+| `effect_saved` | `bind` | `JobBound`, `Observed`, `OutcomeUnknown`, `StopRequested` |
+| `job_bound` | `start` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `awaiting_observation` | `inspect` | `Observed`, `OutcomeUnknown`, `StopRequested` |
-| `cancelling` | `cancel` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
-| `needs_resolution` | `halt` | `Resolved`, `StopRequested` |
+| `cancelling` | `cancel` | `JobBound`, `Observed`, `OutcomeUnknown`, `StopRequested` |
+| `needs_resolution` | `halt` | `JobBound`, `Resolved`, `StopRequested` |
 | `returned`, `stopped`, unknown | `halt` | none |
 
 Rules the table enforces:
 
 - Every I/O is preceded by a committed phase that authorizes it. A restart
   resumes by asking `Intent` again, so recovery and fresh steps share one path.
-- `AttemptStarted` is committed before each model send. In `request_sent` it
-  means the previous send never reported a result, so it consumes an attempt;
-  sends are therefore counted even when a crash loses their outcome. The bound
-  is on authorized sends: a crash between the `AttemptStarted` commit and the
-  send consumes an attempt without sending.
-- `ResponseIncomplete` and an undecodable response return to `request_frozen`
-  as a new attempt until `MaxAttempts`, then stop with `attempts_exhausted` or
-  `protocol_failure`. An empty response body is an invalid event, not a retry.
-- An `exec` decision commits `effect_saved` with an effect ID derived from the
-  run ID and step. A `return` decision closes the run as `returned`.
+- `RequestFrozen` increments the step's request revision. `AttemptStarted` is
+  committed before each model send and names its step and attempt. In
+  `request_sent` it names the next attempt and reports the previous send lost,
+  so sends are counted even when a crash loses their outcome. The bound is on
+  authorized sends: a crash between the `AttemptStarted` commit and the send
+  consumes an attempt without sending.
+- Retry taxonomy is explicit. A transport failure (`ResponseIncomplete`)
+  returns to `request_frozen`: same frozen bytes, next attempt. An
+  undecodable decision returns to `idle`: the next `prepare_request` freezes a
+  new request revision that may carry protocol feedback (the harness can
+  reproduce the decode error by calling `core.Decode` on the saved body).
+  Both consume attempts from the same per-step budget until `MaxAttempts`,
+  stopping with `attempts_exhausted` or `protocol_failure`. An adapter must
+  map conditions a retry cannot fix — authentication, configuration,
+  exhausted quota — to `StopRequested` with a reason, not to
+  `ResponseIncomplete`.
+- An `exec` decision commits `effect_saved` with an effect ID derived from
+  the run ID and step. A `return` decision closes the run as `returned`.
+- Binding and starting are separate boundaries. `JobBound` records which
+  backend job owns the effect and never implies execution; only from a
+  committed `job_bound` phase may a start be issued, recorded as
+  `JobStarted`. From then on side effects may exist. `job_bound` also accepts
+  a direct `Observed` for a resumed start that finds the job already finished.
 - Outside `cancelling`, `Observed` completes the step: the run continues in
   `idle` at the next step with identities cleared, or stops with
-  `steps_exhausted`. `Observed` rejects
-  the `unknown` execution state, which must be reported as `OutcomeUnknown`.
+  `steps_exhausted`. That stop is deliberate: the final observation is
+  recorded but the model gets no closing call. `Observed` rejects the
+  `unknown` execution state, which must be reported as `OutcomeUnknown`.
   Without a recorded job, `effect_saved` accepts only `failed_to_start` and
   `cancelling` only `cancelled`; any other outcome must first record its job
-  with `JobStarted`.
-- `OutcomeUnknown` enters `needs_resolution`; only an explicit `Resolved`
-  leaves it, continuing the run or completing a pending stop.
+  with `JobBound`.
+- `OutcomeUnknown` enters `needs_resolution`. It accepts a later `JobBound`
+  to resume verification (continuing to `awaiting_observation`, or to
+  `cancelling` when a stop is pending), or an explicit `Resolved`: a known
+  outcome continues the run or completes a pending stop; resolving to
+  `unknown` abandons the run as `stopped` with reason `unresolved`,
+  preserving the uncertainty instead of fabricating an outcome.
 - `StopRequested` stops immediately while no effect exists and enters
   `cancelling` once one may exist. `cancelling` records the true result before
   the run becomes `stopped`. In `cancelling` and `needs_resolution` a stop
   request is recorded without changing phase; the first reason is kept.
-- `JobStarted` requires a job ID and must match a job already known.
+- `JobBound` requires effect and job IDs and must match a job already known;
+  `JobStarted` must name the bound job.
 - Adding a capability must not add an event kind; capabilities are payloads.
 
 ## Implemented interpreter
 
-`Runner.Commit` takes the committed state, one event, and the facts that event
-permits. It checks cancellation once, derives the next state with
-`core.State.Next`, validates the facts, and hands a single `Transition` to the
-store. Any error returns the unchanged state; nothing is written. Core errors
-keep their sentinels; fact errors wrap `ErrFacts`.
+Runs commit against a `Snapshot{Seq, State}`: the state plus the sequence of
+the last committed transition. `Runner.Commit` takes the snapshot, one event,
+and the facts that event permits. It checks cancellation once, validates the
+state, derives the next state with `core.State.Next`, validates the facts,
+and hands a single `Transition` to the store at sequence `Seq+1` with a
+deterministic event ID derived from run, sequence, and event content.
 
 ```text
-Commit:   check cancellation -> Next -> check facts -> Store.Commit(Transition)
-Dispatch: require dispatch intent -> check cancellation -> Executor.StartOrResume
-          -> Commit(JobStarted) | Commit(OutcomeUnknown) | return cancellation
+Commit: check cancellation -> Validate -> Next -> check facts
+        -> Store.Commit(Transition{Seq+1, EventID, From, Event, To, Facts})
+Bind:   require bind intent -> Validate -> check cancellation -> Executor.Bind
+        -> Commit(JobBound) | Commit(OutcomeUnknown) | return cancellation
+Start:  require start intent -> Validate -> check cancellation -> Executor.Start
+        -> Commit(JobStarted) | Commit(OutcomeUnknown) | return cancellation
 ```
 
 Each event permits a fixed set of facts and anything else is rejected:
@@ -152,20 +212,21 @@ the event; `OutcomeUnknown` failure text. Facts learned after the harness's
 own context was cancelled must be committed with a separate context, because
 `Commit` writes nothing once its context is done.
 
-`Runner.Dispatch` runs only from `effect_saved` and hands the committed effect
-ID and decision payload to the executor. A returned job ID commits
-`JobStarted` whatever its status snapshot, because `Inspect` is the authority
-on the outcome. An executor error or a job without an ID commits
-`OutcomeUnknown` with the failure text; if that commit fails, the returned
-error wraps both causes and the state stays `effect_saved`. A cancellation
-observed around the call returns without committing, so a resume finds the job
-by effect ID. The executor must still honor cancellation before creating a
-job; a check in the runner cannot close that race.
+A rejected transition writes nothing, but a store error does not prove the
+commit failed: the transaction may have committed before the acknowledgement
+was lost. The caller resolves this by retrying the identical snapshot and
+event — the derived event ID is the same, and the store confirms the recorded
+transition without recording twice. `Runner.Bind` and `Runner.Start` commit
+what the executor reported: a bound job whatever its status snapshot, because
+`Inspect` is the authority on outcomes; an executor error, a missing job ID,
+or a job other than the bound one becomes `OutcomeUnknown` with the failure
+text. A cancellation observed around either call returns without committing,
+so a resume finds the job by effect ID.
 
 An effect ID hashes a length-prefixed run ID followed by the step number. The
 same pair produces the same ID. A concrete store and executor must reject
 conflicting content under an existing identity and accept identical retries
-without starting another job.
+without creating another job.
 
 These guarantees currently have recording fixtures. There is no concrete
 backend enforcing atomic commits, durable writes, or job deduplication.
@@ -177,36 +238,53 @@ outputs. JSONL may expose a read-only history projection. Agent-editable notes
 must not become the authority for whether an action occurred.
 
 The store contract is one atomic `Commit(Transition)`. Inside that transaction
-a concrete implementation must verify that the durable state equals `From` and
-reject the transition otherwise; this compare-and-set is what keeps one pending
-intent per run when a stale or competing harness commits. `To` may equal
-`From`, because a legal event can leave the state unchanged and is still
-recorded, so enforce the check against the current state rather than as a
-uniqueness rule on `From`. The store must persist the new state and the facts
-attached to the event: request bytes and provenance at `RequestFrozen`, the
-response at `ResponseSaved`, the observation at `Observed` or `Resolved`, and
-failure text at `ResponseIncomplete` or `OutcomeUnknown`. It must also provide
-recovery reads for the last committed state, the frozen request, and the saved
-response. The current interface defines the commit but no recovery reads and
-no workspace-lock API. `core.State` is the recovery projection; loading it and
-re-deriving the intent is the resume path, but no loader or loop exists yet.
+a concrete implementation must verify that `Seq` is exactly one past the last
+committed sequence for the run and reject the transition with
+`ErrStaleSnapshot` otherwise. The sequence, not the state value, is the
+compare-and-set: a legal event can leave the state unchanged and is still
+recorded, so equality of states cannot detect a competing commit. If a record
+already exists at `Seq`, an identical retry (same event ID and content) must
+succeed without recording again, and conflicting content must fail and never
+overwrite. `SemanticsVersion` and the event `Kind` belong in each record;
+events must be encoded by their stable kind, never by Go type names, and a
+record with an unknown kind or version must be refused, not reinterpreted.
+
+The store must persist the facts attached to the event: request bytes and
+provenance at `RequestFrozen` (keyed by step and revision), the response at
+`ResponseSaved` (keyed by step and attempt), the observation at `Observed` or
+`Resolved`, and failure text at `ResponseIncomplete` or `OutcomeUnknown`. It
+must provide recovery reads for the latest `Snapshot`, the frozen request of
+the current revision, and the saved response of the current attempt. Facts
+that arrive after a run is closed — the true result of a cancelled job, late
+usage numbers — are archived outside run transitions; `returned` and
+`stopped` accept no events and archival never reactivates a closed run.
+
+Three operations must never share a name. Event replay rebuilds or verifies a
+state from committed transitions and causes no external effect. Run resume
+loads the latest snapshot, validates it, verifies external jobs, and continues
+pending operations. Request resend calls the model again: it can cost money
+and return a different response, and it may reuse only the currently frozen
+bytes — building different input requires a new revision via `RequestFrozen`.
 
 Use short transactions, never one held across a model call or job wait. The
 concrete store must specify crash and power-loss assumptions; SQLite WAL with
 `synchronous=FULL` is the intended durability baseline, subject to filesystem
 and device sync guarantees. A cross-process workspace lock must prevent two
-harnesses from acting on the same pending intent.
+harnesses from acting on the same pending intent; a database that rejects a
+stale writer does not, by itself, stop that writer from touching the
+execution backend.
 
 | Last committed phase | Intent on resume | Required behavior, not implemented yet |
 | --- | --- | --- |
-| `idle` | `prepare_request` | Build the bounded input from committed facts and freeze it |
+| `idle` | `prepare_request` | Build the bounded input from committed facts and freeze it as the next revision; a mid-step repair includes the decode feedback |
 | `request_frozen` | `send_request` | Commit `AttemptStarted`, then send the frozen bytes |
-| `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop |
+| `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop. In-process, this phase also covers an attempt that is still in flight; only a restart interprets it as lost |
 | `response_saved` | `decode` | Load the saved bytes; never call the model again for this attempt |
-| `effect_saved` | `dispatch` | `StartOrResume` by effect ID; find the existing job before creating one |
+| `effect_saved` | `bind` | `Bind` by effect ID; find the existing job before creating one; binding must not execute anything |
+| `job_bound` | `start` | `Start` the bound job; idempotent for an already-started job |
 | `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
-| `cancelling` | `cancel` | `Inspect` by effect ID. With no job recorded, observe a missing job as `cancelled` and record a found job with `JobStarted`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
-| `needs_resolution` | `halt` | Wait for an explicitly recorded `Resolved`; never redispatch |
+| `cancelling` | `cancel` | `Inspect` by effect ID. With no job recorded, a missing job is observed as `cancelled` — sound because an unstarted bind can never execute and `Cancel` fences late binds. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
+| `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` or `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
 
@@ -215,6 +293,23 @@ Request replay can incur another charge and does not promise the same response.
 A stable effect ID deduplicates job identity, not arbitrary command side effects
 or a later decision with a new identity. Timeouts, cancellation, and non-zero
 exit codes do not prove that no business effect occurred.
+
+## Lifecycle boundaries
+
+Three lifetimes must not be conflated. A workspace is the environment and its
+files; it outlives runs. A run is one autonomous progression from `NewState`
+to a terminal phase; `returned` and `stopped` are final, and a user reply
+after `return` starts a new run that may reuse the same workspace. The
+association between runs and a caller conversation is the host's concern and
+never enters the core. Waiting for approval inside a run would need an
+explicit non-terminal phase; `return` must not be reused for it.
+
+Context cancellation and run cancellation are different facts. A cancelled
+`ctx` is controller shutdown: nothing is committed and a new controller
+resumes from the last snapshot. A persistent stop is `StopRequested` with a
+reason. An operation timeout is a harness observation reported through the
+matching event for its boundary (`ResponseIncomplete`, `StopRequested`, or a
+`timed_out` observation).
 
 ## Input and execution target
 
@@ -229,27 +324,42 @@ before sending. Request slices and record structs are mutable Go values today;
 immutability requires owned copies and durable storage. Credentials must remain
 outside those facts. Future attempt records must capture errors, completeness,
 usage, timeouts, and the configuration and code revision used for the run.
+Resending a revision must reuse its frozen bytes; reading notes again or
+changing input selection requires a new revision.
 
-The execution backend is keyed by the stable effect ID. `StartOrResume` finds
-or starts the job; `Inspect` and `Cancel` never create one, and `Cancel` is
-idempotent because the `cancelling` resume path may call it again. The backend
-must provide retained results, bounded output previews, and explicit artifact
-availability. A PID alone is insufficient for recovery. Cancellation needs a
-bounded cleanup and result-recording phase independent of the already-cancelled
-execution context.
+The execution backend is keyed by the stable effect ID. `Bind` finds or
+creates the job that owns the effect and must not execute anything; a
+deterministic per-effect identity (for Docker, a create with a name derived
+from the effect ID) makes late duplicates collide instead of running twice.
+`Start` may only start the bound job and is idempotent for an already-started
+one. `Inspect` and `Cancel` never create or start a job; `Cancel` is
+idempotent and must fence the effect so an unstarted bind — including one that
+lands after the cancel — can never start. A concrete executor must bind the
+effect ID to the full execution specification it runs under (backend,
+workspace, working directory, interpretation of the command, resource
+limits), not only the command text, and must reject changed content under an
+existing identity. The backend must provide retained results, bounded output
+previews, and explicit artifact availability. A PID alone is insufficient for
+recovery. Cancellation needs a bounded cleanup and result-recording phase
+independent of the already-cancelled execution context.
 
-Step and attempt budgets are `core.Limits` and are enforced by `Next`.
-Wall-time, token, storage, and cost budgets are measured by the harness and
-reported as `StopRequested` with a reason. Stop on return, cancellation,
-exhausted budgets, protocol failure, or `needs_resolution`; the state preserves
-the reason. No loop, model adapter, budget measurement, sandbox, or cleanup
-implementation exists yet. See [V1 acceptance](v1-acceptance.md) for the
-required evidence.
+Step and attempt budgets are `core.Limits` and are enforced by `Next`:
+`MaxSteps` bounds decision positions per run and `MaxAttempts` bounds
+authorized sends per step, shared by lost sends, transport retries, and
+protocol repairs. Neither a new revision, a restart, nor a stop-and-resume
+grants new budget within a run. Wall-time, token, storage, and cost budgets
+are measured by the harness and reported as `StopRequested` with a reason.
+Stop on return, cancellation, exhausted budgets, protocol failure, or
+abandonment; the state preserves the reason. No loop, model adapter, budget
+measurement, sandbox, or cleanup implementation exists yet. See
+[V1 acceptance](v1-acceptance.md) for the required evidence.
 
 ## Complexity budget
 
 Keep one Go module and the current package split. Start with one model protocol,
 one SQLite implementation, and one queryable executor. Distributed scheduling,
-multi-tenant policy, generic workflow graphs, automatic planning, and automatic
-memory compaction are outside the initial experiment. New run rules belong in
-`core.State.Next` with a transition-table test, not in the harness.
+multi-tenant policy, generic workflow graphs, automatic planning, automatic
+memory compaction, and mid-run user input are outside the initial experiment;
+so are separate response IDs and input revisions, which stay derivable from
+the position identities above until a real consumer needs them. New run rules
+belong in `core.State.Next` with a transition-table test, not in the harness.

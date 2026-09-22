@@ -34,8 +34,10 @@ Retry, termination, and cancellation rules live in `core.State.Next`; change
 them there with a transition-table test. Before changing a harness boundary,
 specify its durable commit point, attached facts, and behavior after restart.
 Model request bytes and provenance must be committed before sending; decisions
-and effects before dispatch; observations together with run progress in one
-`Transition`.
+and effects before binding; the bound job before starting; observations
+together with run progress in one `Transition`. Events carry the step,
+attempt, or effect they belong to, and commits are sequenced: changing either
+identity scheme is a semantics change and must bump `core.SemanticsVersion`.
 
 `return` hands control back; it does not assert success. An unknown execution
 result must remain uncertain until inspected or explicitly resolved. A stable
