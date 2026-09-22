@@ -6,12 +6,15 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-// Store commits one transition and its attached facts atomically. Commit must
-// verify, inside the same transaction, that the durable state equals From and
+// Store commits one transition and its attached facts atomically. Inside the
+// same transaction Commit must verify that the durable state equals From and
 // reject the transition otherwise, so a stale or competing harness cannot
-// commit a second successor of one state. Records are immutable: identical
-// retries may succeed, but conflicting content for an existing identity must
-// fail. A concrete store also owns crash safety and workspace ownership.
+// advance from a state that is no longer current. To may equal From: a legal
+// event can leave the state unchanged and is still recorded, so enforce this
+// as a compare-and-set on the current state, not as a uniqueness rule on
+// From. Records are immutable: identical retries may succeed, but conflicting
+// content for an existing identity must fail. A concrete store also owns
+// crash safety and workspace ownership.
 type Store interface {
 	Commit(context.Context, Transition) error
 }

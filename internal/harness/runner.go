@@ -8,6 +8,10 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
+// ErrFacts reports facts that are missing, inconsistent, or not permitted for
+// the committed event.
+var ErrFacts = errors.New("harness: facts do not match event")
+
 // Runner interprets core intents against the durable store and the effect
 // executor. Every I/O happens after the phase that authorizes it is committed.
 type Runner struct {
@@ -28,17 +32,18 @@ func NewRunner(store Store, executor Executor) (Runner, error) {
 
 // Commit derives the next state for event and records it together with the
 // facts the event permits. On any error the returned state is unchanged and
-// nothing is written. Commit writes nothing once ctx is done, so facts learned
-// after the harness's own context was cancelled need a separate context.
+// nothing is written; core errors keep their sentinels and fact errors wrap
+// ErrFacts. Commit writes nothing once ctx is done, so facts learned after the
+// harness's own context was cancelled need a separate context.
 func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, facts Facts) (core.State, error) {
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
-	if err := facts.check(event); err != nil {
-		return state, err
-	}
 	next, err := state.Next(event)
 	if err != nil {
+		return state, err
+	}
+	if err := facts.check(event); err != nil {
 		return state, err
 	}
 	if err := r.store.Commit(ctx, Transition{From: state, Event: event, To: next, Facts: facts}); err != nil {
@@ -66,7 +71,7 @@ func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, err
 		}
 		next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: err.Error()})
 		if commitErr != nil {
-			return state, fmt.Errorf("%w; executor: %v", commitErr, err)
+			return state, fmt.Errorf("%w; executor: %w", commitErr, err)
 		}
 		return next, nil
 	}
@@ -82,17 +87,17 @@ func (f Facts) check(event core.Event) error {
 	switch e := event.(type) {
 	case core.RequestFrozen:
 		if f.Request == nil || len(f.Request.Body) == 0 {
-			return errors.New("harness: frozen request bytes are required")
+			return fmt.Errorf("%w: frozen request bytes are required", ErrFacts)
 		}
 		allowed.Request = f.Request
 	case core.ResponseSaved:
 		if f.Response == nil || !f.Response.Complete || len(f.Response.Body) == 0 {
-			return errors.New("harness: complete response with a body is required")
+			return fmt.Errorf("%w: complete response with a body is required", ErrFacts)
 		}
 		allowed.Response = f.Response
 	case core.ResponseIncomplete:
 		if f.Response != nil && f.Response.Complete {
-			return errors.New("harness: incomplete response cannot be marked complete")
+			return fmt.Errorf("%w: incomplete response cannot be marked complete", ErrFacts)
 		}
 		allowed.Response, allowed.Failure = f.Response, f.Failure
 	case core.Observed:
@@ -109,17 +114,17 @@ func (f Facts) check(event core.Event) error {
 		allowed.Failure = f.Failure
 	}
 	if f != allowed {
-		return fmt.Errorf("harness: facts do not belong to %T", event)
+		return fmt.Errorf("%w: records do not belong to %T", ErrFacts, event)
 	}
 	return nil
 }
 
 func (f Facts) checkObservation(execution core.ExecutionState) error {
 	if f.Observation == nil {
-		return errors.New("harness: observation record is required")
+		return fmt.Errorf("%w: observation record is required", ErrFacts)
 	}
 	if f.Observation.Execution != execution {
-		return fmt.Errorf("harness: observation %q does not match event %q", f.Observation.Execution, execution)
+		return fmt.Errorf("%w: observation %q does not match event %q", ErrFacts, f.Observation.Execution, execution)
 	}
 	return nil
 }

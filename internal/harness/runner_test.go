@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -120,6 +119,19 @@ func TestCommitRecordsTransitionWithFacts(t *testing.T) {
 	}
 }
 
+func TestCommitWritesSelfLoopTransition(t *testing.T) {
+	rec := &recorder{}
+	from := advance(t, effectSaved(t), core.StopRequested{Reason: core.StopCancelled}, core.OutcomeUnknown{})
+
+	got, err := newRunner(t, rec).Commit(context.Background(), from, core.StopRequested{Reason: core.StopTimedOut}, Facts{})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if got != from || len(rec.commits) != 1 || rec.commits[0].From != rec.commits[0].To {
+		t.Fatalf("Commit() = %#v, commits %#v; want the unchanged state recorded once", got, rec.commits)
+	}
+}
+
 func TestCommitRequiresFactsForEvent(t *testing.T) {
 	awaiting := advance(t, effectSaved(t), core.JobStarted{JobID: "job-1"})
 	observation := Observation{Execution: core.ExecutionExited}
@@ -147,8 +159,33 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := &recorder{}
 			got, err := newRunner(t, rec).Commit(context.Background(), tt.from, tt.event, tt.facts)
-			if err == nil {
-				t.Fatal("Commit() succeeded, want error")
+			if !errors.Is(err, ErrFacts) {
+				t.Fatalf("error = %v, want facts error", err)
+			}
+			if got != tt.from || len(rec.log) != 0 {
+				t.Fatalf("rejected commit changed state to %#v or wrote %v", got, rec.log)
+			}
+		})
+	}
+}
+
+func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
+	tests := []struct {
+		name  string
+		from  core.State
+		event core.Event
+		facts Facts
+		want  error
+	}{
+		{"invalid event with permitted facts", stateAt(t, core.PhaseIdle), &core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}}, core.ErrInvalidEvent},
+		{"illegal transition with wrong facts", stateAt(t, core.PhaseStopped), core.RequestFrozen{}, Facts{}, core.ErrIllegalTransition},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{}
+			got, err := newRunner(t, rec).Commit(context.Background(), tt.from, tt.event, tt.facts)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
 			if got != tt.from || len(rec.log) != 0 {
 				t.Fatalf("rejected commit changed state to %#v or wrote %v", got, rec.log)
@@ -192,18 +229,6 @@ func TestCommitStopsAtStoreFailure(t *testing.T) {
 	}
 	if got != from {
 		t.Fatalf("failed commit changed state to %#v", got)
-	}
-}
-
-func TestCommitRejectsIllegalEventWithoutWriting(t *testing.T) {
-	rec := &recorder{}
-	from := stateAt(t, core.PhaseStopped)
-	got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
-	if !errors.Is(err, core.ErrIllegalTransition) {
-		t.Fatalf("error = %v, want illegal transition", err)
-	}
-	if got != from || len(rec.log) != 0 {
-		t.Fatalf("illegal event changed state to %#v or wrote %v", got, rec.log)
 	}
 }
 
@@ -251,9 +276,20 @@ func TestDispatchCommitsEffectBeforeStartingJob(t *testing.T) {
 }
 
 func TestDispatchKeepsJobIdentityWhateverItsStatus(t *testing.T) {
-	for _, status := range []JobStatus{JobPending, JobSucceeded, JobFailed, JobUnknown, ""} {
-		t.Run(string(status), func(t *testing.T) {
-			rec := &recorder{job: Job{ID: "job-1", Status: status}}
+	tests := []struct {
+		name   string
+		status JobStatus
+	}{
+		{"pending", JobPending},
+		{"running", JobRunning},
+		{"succeeded", JobSucceeded},
+		{"failed", JobFailed},
+		{"unknown", JobUnknown},
+		{"empty", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{job: Job{ID: "job-1", Status: tt.status}}
 			got, err := newRunner(t, rec).Dispatch(context.Background(), effectSaved(t))
 			if err != nil {
 				t.Fatalf("Dispatch() error = %v", err)
@@ -306,13 +342,13 @@ func TestDispatchKeepsUnknownOutcome(t *testing.T) {
 
 func TestDispatchStopsAtStoreFailureAfterStart(t *testing.T) {
 	tests := []struct {
-		name     string
-		rec      *recorder
-		wantLog  []string
-		wantText string
+		name         string
+		rec          *recorder
+		wantLog      []string
+		wantExecutor bool
 	}{
-		{"job commit fails", &recorder{job: Job{ID: "job-1", Status: JobRunning}, failAt: core.PhaseAwaitingObservation}, []string{"start", "commit:awaiting_observation"}, ""},
-		{"unknown outcome commit fails", &recorder{jobErr: errExecutor, failAt: core.PhaseNeedsResolution}, []string{"start", "commit:needs_resolution"}, errExecutor.Error()},
+		{"job commit fails", &recorder{job: Job{ID: "job-1", Status: JobRunning}, failAt: core.PhaseAwaitingObservation}, []string{"start", "commit:awaiting_observation"}, false},
+		{"unknown outcome commit fails", &recorder{jobErr: errExecutor, failAt: core.PhaseNeedsResolution}, []string{"start", "commit:needs_resolution"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -321,8 +357,8 @@ func TestDispatchStopsAtStoreFailureAfterStart(t *testing.T) {
 			if !errors.Is(err, errInjected) {
 				t.Fatalf("error = %v, want injected store failure", err)
 			}
-			if !strings.Contains(err.Error(), tt.wantText) {
-				t.Fatalf("error %q does not mention %q", err, tt.wantText)
+			if errors.Is(err, errExecutor) != tt.wantExecutor {
+				t.Fatalf("error = %v, want executor failure in chain: %v", err, tt.wantExecutor)
 			}
 			if got != from || len(tt.rec.commits) != 0 {
 				t.Fatalf("Dispatch() = %#v with commits %v; want unchanged state and nothing committed", got, tt.rec.commits)

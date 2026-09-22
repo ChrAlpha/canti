@@ -9,7 +9,7 @@ import "context"
 // job; Cancel must be idempotent. An unknown outcome must never trigger a
 // retry without inspection; an effect ID does not make commands idempotent.
 type Executor interface {
-	StartOrResume(context.Context, Effect) (Job, error)
+	StartOrResume(ctx context.Context, effect Effect) (Job, error)
 	Inspect(ctx context.Context, effectID string) (job Job, found bool, err error)
 	Cancel(ctx context.Context, effectID string) error
 }

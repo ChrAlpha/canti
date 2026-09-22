@@ -60,7 +60,8 @@ var (
 	// ErrIllegalTransition reports a valid event that the current phase does
 	// not accept.
 	ErrIllegalTransition = errors.New("core: illegal transition")
-	// ErrInvalidEvent reports an event whose content is unusable in any phase.
+	// ErrInvalidEvent reports an event whose content the current state cannot
+	// accept in any phase.
 	ErrInvalidEvent = errors.New("core: invalid event")
 )
 
@@ -97,7 +98,8 @@ func (s State) Intent() Intent {
 }
 
 // Next applies one event. It returns the unchanged state with an error for
-// events that are invalid or not legal in the current phase.
+// events that are invalid or not legal in the current phase. A legal event
+// may leave the state equal to its input; the harness still records it.
 func (s State) Next(event Event) (State, error) {
 	if err := s.validate(event); err != nil {
 		return s, err
@@ -163,7 +165,7 @@ func (s State) Next(event Event) (State, error) {
 			s.Phase = PhaseCancelling
 			s.Reason = e.Reason
 			return s, nil
-		case PhaseNeedsResolution:
+		case PhaseCancelling, PhaseNeedsResolution:
 			if s.Reason == "" {
 				s.Reason = e.Reason
 			}
@@ -197,10 +199,14 @@ func (s State) validate(event Event) error {
 			return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, e.JobID, s.JobID)
 		}
 	case Observed:
-		if s.Phase == PhaseEffectSaved && e.Execution != ExecutionFailedToStart {
-			return fmt.Errorf("%w: only failed_to_start can be observed without a job", ErrInvalidEvent)
+		if err := knownExecution(e.Execution); err != nil {
+			return err
 		}
-		return knownExecution(e.Execution)
+		if s.JobID == "" {
+			if want, ok := joblessObservation[s.Phase]; ok && e.Execution != want {
+				return fmt.Errorf("%w: only %s can be observed without a job in phase %q", ErrInvalidEvent, want, s.Phase)
+			}
+		}
 	case Resolved:
 		return knownExecution(e.Execution)
 	case StopRequested:
@@ -211,6 +217,11 @@ func (s State) validate(event Event) error {
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
 	}
 	return nil
+}
+
+var joblessObservation = map[Phase]ExecutionState{
+	PhaseEffectSaved: ExecutionFailedToStart,
+	PhaseCancelling:  ExecutionCancelled,
 }
 
 func knownExecution(execution ExecutionState) error {

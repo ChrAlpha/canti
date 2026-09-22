@@ -14,7 +14,7 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
-const legalPairs = 22
+const legalPairs = 23
 
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
@@ -112,8 +112,10 @@ func legalTransitions() []transition {
 		{"awaiting observation cancels", at(core.PhaseAwaitingObservation, withExec, withJob), core.StopRequested{Reason: core.StopBudgetExhausted}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopBudgetExhausted))},
 
 		{"cancelling finds job", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.JobStarted{JobID: "job-1"}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled))},
+		{"cancelling records missing job as cancelled", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionCancelled}, at(core.PhaseStopped, withExec, withReason(core.StopCancelled))},
 		{"cancelling records true result", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionExited}, at(core.PhaseStopped, withExec, withJob, withReason(core.StopCancelled))},
 		{"cancelling keeps unknown outcome", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.OutcomeUnknown{}, at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled))},
+		{"cancelling keeps first stop reason", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled))},
 
 		{"resolution continues", at(core.PhaseNeedsResolution, withExec, withJob), core.Resolved{Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
 		{"resolution completes pending stop", at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled)), core.Resolved{Execution: core.ExecutionExited}, at(core.PhaseStopped, withExec, withJob, withReason(core.StopCancelled))},
@@ -256,6 +258,10 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"empty job", at(core.PhaseEffectSaved, withExec), core.JobStarted{}},
 		{"different job while cancelling", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.JobStarted{JobID: "job-2"}},
 		{"exit observed without job", at(core.PhaseEffectSaved, withExec), core.Observed{Execution: core.ExecutionExited}},
+		{"cancel observed without job before dispatch", at(core.PhaseEffectSaved, withExec), core.Observed{Execution: core.ExecutionCancelled}},
+		{"exit observed without job while cancelling", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionExited}},
+		{"failed start observed without job while cancelling", at(core.PhaseCancelling, withExec, withReason(core.StopCancelled)), core.Observed{Execution: core.ExecutionFailedToStart}},
+		{"unsupported execution observed without job", at(core.PhaseEffectSaved, withExec), core.Observed{Execution: "bogus"}},
 		{"unknown execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{Execution: core.ExecutionUnknown}},
 		{"unsupported execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{Execution: "bogus"}},
 		{"empty execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{}},
