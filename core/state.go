@@ -195,11 +195,14 @@ func (s State) Validate() error {
 	return nil
 }
 
-// Next applies one event. It returns the unchanged state with an error for
-// events that are invalid or not legal in the current phase. A legal event
-// may leave the state equal to its input; the harness still records it.
+// Next applies one event. It returns the unchanged state with
+// ErrInvalidEvent for malformed content, ErrIllegalTransition for a pair the
+// current phase does not accept whatever the payload, and ErrInvalidEvent
+// for an identity claim that contradicts the current position of a legal
+// pair. A legal event may leave the state equal to its input; the harness
+// still records it.
 func (s State) Next(event Event) (State, error) {
-	if err := s.validate(event); err != nil {
+	if err := validateEvent(event); err != nil {
 		return s, err
 	}
 	switch e := event.(type) {
@@ -212,12 +215,18 @@ func (s State) Next(event Event) (State, error) {
 	case AttemptStarted:
 		switch s.Phase {
 		case PhaseRequestFrozen:
+			if err := s.claimStep(e.Step); err != nil {
+				return s, err
+			}
 			if e.Attempt != s.Attempt {
 				return s, fmt.Errorf("%w: attempt %d does not match current attempt %d", ErrInvalidEvent, e.Attempt, s.Attempt)
 			}
 			s.Phase = PhaseRequestSent
 			return s, nil
 		case PhaseRequestSent:
+			if err := s.claimStep(e.Step); err != nil {
+				return s, err
+			}
 			if e.Attempt != s.Attempt+1 {
 				return s, fmt.Errorf("%w: attempt %d does not follow lost attempt %d", ErrInvalidEvent, e.Attempt, s.Attempt)
 			}
@@ -225,51 +234,74 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case ResponseSaved:
 		if s.Phase == PhaseRequestSent {
+			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
+				return s, err
+			}
 			s.Phase = PhaseResponseSaved
 			return s, nil
 		}
 	case ResponseIncomplete:
 		if s.Phase == PhaseRequestSent {
+			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
+				return s, err
+			}
 			return s.retry(StopAttemptsExhausted, PhaseRequestFrozen), nil
 		}
 	case ResponseLoaded:
 		if s.Phase == PhaseResponseSaved {
+			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
+				return s, err
+			}
 			return s.decide(e.Body), nil
 		}
 	case JobBound:
 		switch s.Phase {
-		case PhaseEffectSaved:
-			s.Phase = PhaseJobBound
-			s.JobID = e.JobID
-			return s, nil
-		case PhaseCancelling:
-			s.JobID = e.JobID
-			return s, nil
-		case PhaseNeedsResolution:
-			s.JobID = e.JobID
-			if s.Reason != "" {
-				s.Phase = PhaseCancelling
-				return s, nil
+		case PhaseEffectSaved, PhaseCancelling, PhaseNeedsResolution:
+			if err := s.claimJob(e.EffectID, e.JobID); err != nil {
+				return s, err
 			}
-			s.Phase = PhaseJobBound
+			s.JobID = e.JobID
+			switch s.Phase {
+			case PhaseEffectSaved:
+				s.Phase = PhaseJobBound
+			case PhaseNeedsResolution:
+				if s.Reason != "" {
+					s.Phase = PhaseCancelling
+				} else {
+					s.Phase = PhaseJobBound
+				}
+			}
 			return s, nil
 		}
 	case JobStarted:
 		if s.Phase == PhaseJobBound {
+			if err := s.claimEffect(e.EffectID); err != nil {
+				return s, err
+			}
+			if e.JobID != s.JobID {
+				return s, fmt.Errorf("%w: job %q is not the bound job %q", ErrInvalidEvent, e.JobID, s.JobID)
+			}
 			s.Phase = PhaseAwaitingObservation
 			return s, nil
 		}
 	case Observed:
 		switch s.Phase {
-		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation:
+		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
+			if err := s.claimObservation(e.EffectID, e.Execution); err != nil {
+				return s, err
+			}
+			if s.Phase == PhaseCancelling {
+				s.Phase = PhaseStopped
+				return s, nil
+			}
 			return s.advance(), nil
-		case PhaseCancelling:
-			s.Phase = PhaseStopped
-			return s, nil
 		}
 	case OutcomeUnknown:
 		switch s.Phase {
 		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
+			if err := s.claimEffect(e.EffectID); err != nil {
+				return s, err
+			}
 			s.Phase = PhaseNeedsResolution
 			return s, nil
 		}
@@ -291,12 +323,18 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case Resolved:
 		if s.Phase == PhaseNeedsResolution {
+			if err := s.claimEffect(e.EffectID); err != nil {
+				return s, err
+			}
 			if e.Execution == ExecutionUnknown {
 				s.Phase = PhaseStopped
 				if s.Reason == "" {
 					s.Reason = StopUnresolved
 				}
 				return s, nil
+			}
+			if s.JobID == "" && (e.Execution == ExecutionExited || e.Execution == ExecutionTimedOut) {
+				return s, fmt.Errorf("%w: %s cannot be resolved without a started job", ErrInvalidEvent, e.Execution)
 			}
 			if s.Reason != "" {
 				s.Phase = PhaseStopped
@@ -308,79 +346,56 @@ func (s State) Next(event Event) (State, error) {
 	return s, fmt.Errorf("%w: %T in phase %q", ErrIllegalTransition, event, s.Phase)
 }
 
-func (s State) validate(event Event) error {
+func validateEvent(event Event) error {
 	switch e := event.(type) {
 	case RequestFrozen:
-		return nil
 	case AttemptStarted:
 		if e.Attempt < 1 {
 			return fmt.Errorf("%w: attempt number is required", ErrInvalidEvent)
 		}
-		return s.claimStep(e.Step)
 	case ResponseSaved:
-		return s.claimAttempt(e.Step, e.Attempt)
 	case ResponseIncomplete:
-		return s.claimAttempt(e.Step, e.Attempt)
 	case ResponseLoaded:
-		if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
-			return err
-		}
 		if len(e.Body) == 0 {
 			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
 		}
 	case JobBound:
-		if err := s.claimEffect(e.EffectID); err != nil {
-			return err
-		}
-		if e.JobID == "" {
-			return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
-		}
-		if s.JobID != "" && s.JobID != e.JobID {
-			return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, e.JobID, s.JobID)
-		}
+		return requireJobIdentity(e.EffectID, e.JobID)
 	case JobStarted:
-		if err := s.claimEffect(e.EffectID); err != nil {
-			return err
-		}
-		if e.JobID == "" {
-			return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
-		}
-		if s.JobID != e.JobID {
-			return fmt.Errorf("%w: job %q is not the bound job %q", ErrInvalidEvent, e.JobID, s.JobID)
-		}
+		return requireJobIdentity(e.EffectID, e.JobID)
 	case Observed:
-		if err := s.claimEffect(e.EffectID); err != nil {
-			return err
+		if e.EffectID == "" {
+			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
 		}
-		if err := knownExecution(e.Execution); err != nil {
-			return err
-		}
-		if s.JobID == "" {
-			if want, ok := joblessObservation[s.Phase]; ok && e.Execution != want {
-				return fmt.Errorf("%w: only %s can be observed without a job in phase %q", ErrInvalidEvent, want, s.Phase)
-			}
-		}
+		return knownExecution(e.Execution)
 	case OutcomeUnknown:
-		return s.claimEffect(e.EffectID)
+		if e.EffectID == "" {
+			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
+		}
 	case Resolved:
-		if err := s.claimEffect(e.EffectID); err != nil {
-			return err
+		if e.EffectID == "" {
+			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
 		}
 		if e.Execution == ExecutionUnknown {
 			return nil
 		}
-		if err := knownExecution(e.Execution); err != nil {
-			return err
-		}
-		if s.JobID == "" && (e.Execution == ExecutionExited || e.Execution == ExecutionTimedOut) {
-			return fmt.Errorf("%w: %s cannot be resolved without a started job", ErrInvalidEvent, e.Execution)
-		}
+		return knownExecution(e.Execution)
 	case StopRequested:
 		if e.Reason == "" {
 			return fmt.Errorf("%w: stop reason is required", ErrInvalidEvent)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
+	}
+	return nil
+}
+
+func requireJobIdentity(effectID, jobID string) error {
+	if effectID == "" {
+		return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
+	}
+	if jobID == "" {
+		return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
 	}
 	return nil
 }
@@ -403,11 +418,30 @@ func (s State) claimAttempt(step, attempt int) error {
 }
 
 func (s State) claimEffect(effectID string) error {
-	if effectID == "" {
-		return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
-	}
 	if s.EffectID != "" && s.EffectID != effectID {
 		return fmt.Errorf("%w: effect %q does not match current effect %q", ErrInvalidEvent, effectID, s.EffectID)
+	}
+	return nil
+}
+
+func (s State) claimJob(effectID, jobID string) error {
+	if err := s.claimEffect(effectID); err != nil {
+		return err
+	}
+	if s.JobID != "" && s.JobID != jobID {
+		return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, jobID, s.JobID)
+	}
+	return nil
+}
+
+func (s State) claimObservation(effectID string, execution ExecutionState) error {
+	if err := s.claimEffect(effectID); err != nil {
+		return err
+	}
+	if s.JobID == "" {
+		if want, ok := joblessObservation[s.Phase]; ok && execution != want {
+			return fmt.Errorf("%w: only %s can be observed without a job in phase %q", ErrInvalidEvent, want, s.Phase)
+		}
 	}
 	return nil
 }

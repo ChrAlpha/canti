@@ -359,6 +359,7 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"empty stop reason", at(core.PhaseIdle), core.StopRequested{}},
 		{"zero attempt started", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{}},
 		{"stale attempt started", at(core.PhaseRequestFrozen, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 1}},
+		{"attempt started ahead", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 2}},
 		{"redelivered attempt start after send", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 1}},
 		{"skipped attempt start", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 3}},
 		{"stale response saved", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseSaved{Step: 1, Attempt: 1}},
@@ -448,10 +449,8 @@ func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
 	if effect1 == effect2 {
 		t.Fatal("steps share an effect identity")
 	}
-	awaiting2 := walk(t, effectSaved2,
-		core.JobBound{EffectID: effect2, JobID: "job-2"},
-		core.JobStarted{EffectID: effect2, JobID: "job-2"},
-	)
+	bound2 := walk(t, effectSaved2, core.JobBound{EffectID: effect2, JobID: "job-2"})
+	awaiting2 := walk(t, bound2, core.JobStarted{EffectID: effect2, JobID: "job-2"})
 
 	echoes := []struct {
 		name  string
@@ -465,7 +464,7 @@ func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
 		{"bind of step 1", effectSaved2, core.JobBound{EffectID: effect1, JobID: "job-1"}},
 		{"failed start of step 1", effectSaved2, core.Observed{EffectID: effect1, Execution: core.ExecutionFailedToStart}},
 		{"unknown outcome of step 1", effectSaved2, core.OutcomeUnknown{EffectID: effect1}},
-		{"start of step 1", awaiting2, core.JobStarted{EffectID: effect1, JobID: "job-1"}},
+		{"start of step 1", bound2, core.JobStarted{EffectID: effect1, JobID: "job-1"}},
 		{"observation of step 1", awaiting2, core.Observed{EffectID: effect1, Execution: core.ExecutionExited}},
 	}
 	for _, tt := range echoes {
@@ -506,6 +505,39 @@ func TestTrajectoryRepairsProtocolFailureWithNewRequest(t *testing.T) {
 	)
 	if decided.Phase != core.PhaseEffectSaved || decided.RequestRev != 2 || decided.Step != 1 {
 		t.Fatalf("decided = %#v, want an effect from the second revision of step 1", decided)
+	}
+}
+
+func TestIllegalPairsReportIllegalWhateverThePayload(t *testing.T) {
+	t.Parallel()
+
+	start, err := core.NewState("run-1", core.Limits{MaxSteps: 3, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := walk(t, start, core.StopRequested{Reason: core.StopCancelled})
+	tests := []struct {
+		name  string
+		from  core.State
+		event core.Event
+	}{
+		{"mismatched bind in awaiting observation", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob), core.JobBound{EffectID: "effect-1", JobID: "job-2"}},
+		{"job bound for a stopped run", stopped, core.JobBound{EffectID: "effect-1", JobID: "job-1"}},
+		{"job started for a stopped run", stopped, core.JobStarted{EffectID: "effect-1", JobID: "job-1"}},
+		{"observation for a stopped run", stopped, core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
+		{"response for a stopped run", stopped, core.ResponseSaved{Step: 1, Attempt: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.from.Next(tt.event)
+			if !errors.Is(err, core.ErrIllegalTransition) {
+				t.Fatalf("error = %v, want illegal transition", err)
+			}
+			if got != tt.from {
+				t.Fatalf("illegal event changed state to %#v", got)
+			}
+		})
 	}
 }
 
