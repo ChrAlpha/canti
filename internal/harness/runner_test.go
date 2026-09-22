@@ -20,7 +20,11 @@ var (
 type recorder struct {
 	log        []string
 	commits    []Transition
+	bySeq      map[int64]Transition
+	seeded     bool
+	lastSeq    int64
 	failAt     core.Phase
+	loseAckAt  core.Phase
 	job        Job
 	jobErr     error
 	startJob   Job
@@ -35,7 +39,25 @@ func (r *recorder) Commit(_ context.Context, transition Transition) error {
 	if transition.To.Phase == r.failAt {
 		return errInjected
 	}
+	if existing, ok := r.bySeq[transition.Seq]; ok {
+		if existing.EventID == transition.EventID && reflect.DeepEqual(existing, transition) {
+			return nil
+		}
+		return ErrStaleSnapshot
+	}
+	if r.seeded && transition.Seq != r.lastSeq+1 {
+		return ErrStaleSnapshot
+	}
+	if r.bySeq == nil {
+		r.bySeq = make(map[int64]Transition)
+	}
+	r.bySeq[transition.Seq] = transition
 	r.commits = append(r.commits, transition)
+	r.seeded = true
+	r.lastSeq = transition.Seq
+	if transition.To.Phase == r.loseAckAt {
+		return errInjected
+	}
 	return nil
 }
 
@@ -75,54 +97,55 @@ func newRunner(t *testing.T, rec *recorder) Runner {
 	return runner
 }
 
-func stateAt(t *testing.T, phase core.Phase) core.State {
+func advance(t *testing.T, snap Snapshot, events ...core.Event) Snapshot {
+	t.Helper()
+	for _, event := range events {
+		next, err := snap.State.Next(event)
+		if err != nil {
+			t.Fatalf("Next(%T) error = %v", event, err)
+		}
+		snap = Snapshot{Seq: snap.Seq + 1, State: next}
+	}
+	return snap
+}
+
+func snapAt(t *testing.T, phase core.Phase) Snapshot {
 	t.Helper()
 	state, err := core.NewState("run-1", core.Limits{MaxSteps: 3, MaxAttempts: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	snap := Snapshot{State: state}
 	switch phase {
 	case core.PhaseIdle:
-		return state
+		return snap
 	case core.PhaseRequestFrozen:
-		return advance(t, state, core.RequestFrozen{})
+		return advance(t, snap, core.RequestFrozen{})
 	case core.PhaseRequestSent:
-		return advance(t, state, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1})
+		return advance(t, snap, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1})
 	case core.PhaseResponseSaved:
-		return advance(t, state, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1})
+		return advance(t, snap, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1})
 	case core.PhaseStopped:
-		return advance(t, state, core.StopRequested{Reason: core.StopCancelled})
+		return advance(t, snap, core.StopRequested{Reason: core.StopCancelled})
 	}
-	t.Fatalf("stateAt(%q) is not supported", phase)
-	return core.State{}
+	t.Fatalf("snapAt(%q) is not supported", phase)
+	return Snapshot{}
 }
 
-func advance(t *testing.T, state core.State, events ...core.Event) core.State {
+func effectSaved(t *testing.T) Snapshot {
 	t.Helper()
-	for _, event := range events {
-		next, err := state.Next(event)
-		if err != nil {
-			t.Fatalf("Next(%T) error = %v", event, err)
-		}
-		state = next
-	}
-	return state
+	return advance(t, snapAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Attempt: 1, Body: execBody})
 }
 
-func effectSaved(t *testing.T) core.State {
+func jobBound(t *testing.T, snap Snapshot, jobID string) Snapshot {
 	t.Helper()
-	return advance(t, stateAt(t, core.PhaseIdle), core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1}, core.ResponseLoaded{Attempt: 1, Body: execBody})
+	return advance(t, snap, core.JobBound{EffectID: snap.State.EffectID, JobID: jobID})
 }
 
-func jobBound(t *testing.T, state core.State, jobID string) core.State {
+func jobStarted(t *testing.T, snap Snapshot, jobID string) Snapshot {
 	t.Helper()
-	return advance(t, state, core.JobBound{EffectID: state.EffectID, JobID: jobID})
-}
-
-func jobStarted(t *testing.T, state core.State, jobID string) core.State {
-	t.Helper()
-	bound := jobBound(t, state, jobID)
-	return advance(t, bound, core.JobStarted{EffectID: bound.EffectID, JobID: jobID})
+	bound := jobBound(t, snap, jobID)
+	return advance(t, bound, core.JobStarted{EffectID: bound.State.EffectID, JobID: jobID})
 }
 
 func TestNewRunnerRequiresDependencies(t *testing.T) {
@@ -131,70 +154,148 @@ func TestNewRunnerRequiresDependencies(t *testing.T) {
 		t.Error("NewRunner(nil store) succeeded, want error")
 	}
 	if _, err := NewRunner(rec, nil); err == nil {
-		t.Error("NewRunner(nil executor) succeeded, want error")
+		t.Error("NewRunner(rec, nil) succeeded, want error")
 	}
 }
 
 func TestCommitRecordsTransitionWithFacts(t *testing.T) {
 	rec := &recorder{}
 	runner := newRunner(t, rec)
-	from := stateAt(t, core.PhaseIdle)
+	from := snapAt(t, core.PhaseIdle)
 	request := Request{Body: []byte("frozen"), Model: "m", Protocol: "p", Adapter: "a"}
 
 	got, err := runner.Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &request})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
-	if got.Phase != core.PhaseRequestFrozen {
-		t.Fatalf("Commit() phase = %q, want request_frozen", got.Phase)
+	if got.State.Phase != core.PhaseRequestFrozen || got.Seq != from.Seq+1 {
+		t.Fatalf("Commit() = %#v, want request_frozen at seq %d", got, from.Seq+1)
 	}
-	want := Transition{From: from, Event: core.RequestFrozen{}, To: got, Facts: Facts{Request: &request}}
-	if len(rec.commits) != 1 || !reflect.DeepEqual(rec.commits[0], want) {
-		t.Fatalf("commits = %#v, want [%#v]", rec.commits, want)
+	if len(rec.commits) != 1 {
+		t.Fatalf("commits = %#v, want one", rec.commits)
+	}
+	c := rec.commits[0]
+	if c.Seq != got.Seq || c.EventID == "" {
+		t.Fatalf("commit identity = seq %d, event %q; want seq %d and a derived event ID", c.Seq, c.EventID, got.Seq)
+	}
+	if c.From != from.State || c.Event != (core.RequestFrozen{}) || c.To != got.State || c.Facts != (Facts{Request: &request}) {
+		t.Fatalf("commit = %#v", c)
 	}
 }
 
-func TestCommitWritesSelfLoopTransition(t *testing.T) {
+func TestCommitWritesSelfLoopTransitionWithNewSeq(t *testing.T) {
 	rec := &recorder{}
 	saved := effectSaved(t)
-	from := advance(t, saved, core.StopRequested{Reason: core.StopCancelled}, core.OutcomeUnknown{EffectID: saved.EffectID})
+	from := advance(t, saved, core.StopRequested{Reason: core.StopCancelled}, core.OutcomeUnknown{EffectID: saved.State.EffectID})
 
 	got, err := newRunner(t, rec).Commit(context.Background(), from, core.StopRequested{Reason: core.StopTimedOut}, Facts{})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
-	if got != from || len(rec.commits) != 1 || rec.commits[0].From != rec.commits[0].To {
-		t.Fatalf("Commit() = %#v, commits %#v; want the unchanged state recorded once", got, rec.commits)
+	if got.State != from.State || got.Seq != from.Seq+1 {
+		t.Fatalf("Commit() = %#v, want the unchanged state at seq %d", got, from.Seq+1)
+	}
+	if len(rec.commits) != 1 || rec.commits[0].From != rec.commits[0].To {
+		t.Fatalf("commits = %#v; want the unchanged state recorded once", rec.commits)
+	}
+}
+
+func TestCommitDerivesDeterministicEventIDs(t *testing.T) {
+	ctx := context.Background()
+	from := snapAt(t, core.PhaseIdle)
+	facts := Facts{Request: &Request{Body: []byte("x")}}
+
+	recA, recB := &recorder{}, &recorder{}
+	a, err := newRunner(t, recA).Commit(ctx, from, core.RequestFrozen{}, facts)
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if _, err := newRunner(t, recB).Commit(ctx, from, core.RequestFrozen{}, facts); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if recA.commits[0].EventID != recB.commits[0].EventID {
+		t.Fatalf("event IDs differ for the same commit: %q != %q", recA.commits[0].EventID, recB.commits[0].EventID)
+	}
+	if _, err := newRunner(t, recA).Commit(ctx, a, core.AttemptStarted{Attempt: 1}, Facts{}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if recA.commits[0].EventID == recA.commits[1].EventID {
+		t.Fatal("distinct commits share an event ID")
+	}
+}
+
+func TestCommitRetryAfterLostAckIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	rec := &recorder{loseAckAt: core.PhaseRequestFrozen}
+	runner := newRunner(t, rec)
+	from := snapAt(t, core.PhaseIdle)
+	facts := Facts{Request: &Request{Body: []byte("x")}}
+
+	if _, err := runner.Commit(ctx, from, core.RequestFrozen{}, facts); !errors.Is(err, errInjected) {
+		t.Fatalf("error = %v, want the lost acknowledgement", err)
+	}
+	rec.loseAckAt = ""
+	got, err := runner.Commit(ctx, from, core.RequestFrozen{}, facts)
+	if err != nil {
+		t.Fatalf("retry error = %v", err)
+	}
+	if got.Seq != from.Seq+1 || got.State.Phase != core.PhaseRequestFrozen {
+		t.Fatalf("retry = %#v, want the original commit confirmed", got)
+	}
+	if len(rec.commits) != 1 {
+		t.Fatalf("commits = %#v, want the transition recorded once", rec.commits)
+	}
+}
+
+func TestStaleSnapshotCannotCommitAfterSelfLoop(t *testing.T) {
+	ctx := context.Background()
+	rec := &recorder{}
+	runner := newRunner(t, rec)
+	cancelling := advance(t, effectSaved(t), core.StopRequested{Reason: core.StopCancelled})
+
+	first, err := runner.Commit(ctx, cancelling, core.StopRequested{Reason: core.StopTimedOut}, Facts{})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if first.State != cancelling.State {
+		t.Fatalf("self-loop changed state to %#v", first.State)
+	}
+	got, err := runner.Commit(ctx, cancelling, core.StopRequested{Reason: core.StopBudgetExhausted}, Facts{})
+	if !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("error = %v, want stale snapshot", err)
+	}
+	if got != cancelling || len(rec.commits) != 1 {
+		t.Fatalf("stale commit advanced to %#v with commits %#v", got, rec.commits)
 	}
 }
 
 func TestCommitRequiresFactsForEvent(t *testing.T) {
 	saved := effectSaved(t)
 	awaiting := jobStarted(t, saved, "job-1")
-	if awaiting.Phase != core.PhaseAwaitingObservation {
-		t.Fatalf("fixture phase = %q, want awaiting_observation", awaiting.Phase)
+	if awaiting.State.Phase != core.PhaseAwaitingObservation {
+		t.Fatalf("fixture phase = %q, want awaiting_observation", awaiting.State.Phase)
 	}
 	observation := Observation{Execution: core.ExecutionExited}
 	tests := []struct {
 		name  string
-		from  core.State
+		from  Snapshot
 		event core.Event
 		facts Facts
 	}{
-		{"frozen request without bytes", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{}},
-		{"frozen request with empty body", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{}}},
-		{"frozen request with a response", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}, Response: &Response{}}},
-		{"attempt with facts", stateAt(t, core.PhaseRequestFrozen), core.AttemptStarted{Attempt: 1}, Facts{Failure: "x"}},
-		{"saved response without record", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{}},
-		{"saved response incomplete", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Body: execBody}}},
-		{"saved response without body", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
-		{"incomplete response marked complete", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
-		{"job bound with facts", saved, core.JobBound{EffectID: saved.EffectID, JobID: "job-1"}, Facts{Failure: "x"}},
-		{"job started with facts", jobBound(t, saved, "job-1"), core.JobStarted{EffectID: saved.EffectID, JobID: "job-1"}, Facts{Failure: "x"}},
-		{"observation without record", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{}},
-		{"observation mismatch", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
-		{"observation with failure text", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
-		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{EffectID: awaiting.EffectID}), core.Resolved{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{}},
+		{"frozen request without bytes", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{}},
+		{"frozen request with empty body", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{}}},
+		{"frozen request with a response", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}, Response: &Response{}}},
+		{"attempt with facts", snapAt(t, core.PhaseRequestFrozen), core.AttemptStarted{Attempt: 1}, Facts{Failure: "x"}},
+		{"saved response without record", snapAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{}},
+		{"saved response incomplete", snapAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Body: execBody}}},
+		{"saved response without body", snapAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
+		{"incomplete response marked complete", snapAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
+		{"job bound with facts", saved, core.JobBound{EffectID: saved.State.EffectID, JobID: "job-1"}, Facts{Failure: "x"}},
+		{"job started with facts", jobBound(t, saved, "job-1"), core.JobStarted{EffectID: saved.State.EffectID, JobID: "job-1"}, Facts{Failure: "x"}},
+		{"observation without record", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{}},
+		{"observation mismatch", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
+		{"observation with failure text", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
+		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{EffectID: awaiting.State.EffectID}), core.Resolved{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,7 +305,7 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 				t.Fatalf("error = %v, want facts error", err)
 			}
 			if got != tt.from || len(rec.log) != 0 {
-				t.Fatalf("rejected commit changed state to %#v or wrote %v", got, rec.log)
+				t.Fatalf("rejected commit changed snapshot to %#v or wrote %v", got, rec.log)
 			}
 		})
 	}
@@ -213,13 +314,13 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
 	tests := []struct {
 		name  string
-		from  core.State
+		from  Snapshot
 		event core.Event
 		facts Facts
 		want  error
 	}{
-		{"invalid event with permitted facts", stateAt(t, core.PhaseIdle), &core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}}, core.ErrInvalidEvent},
-		{"illegal transition with wrong facts", stateAt(t, core.PhaseStopped), core.RequestFrozen{}, Facts{}, core.ErrIllegalTransition},
+		{"invalid event with permitted facts", snapAt(t, core.PhaseIdle), &core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}}, core.ErrInvalidEvent},
+		{"illegal transition with wrong facts", snapAt(t, core.PhaseStopped), core.RequestFrozen{}, Facts{}, core.ErrIllegalTransition},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,7 +330,7 @@ func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
 			if got != tt.from || len(rec.log) != 0 {
-				t.Fatalf("rejected commit changed state to %#v or wrote %v", got, rec.log)
+				t.Fatalf("rejected commit changed snapshot to %#v or wrote %v", got, rec.log)
 			}
 		})
 	}
@@ -237,17 +338,18 @@ func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
 
 func TestCommitAcceptsPermittedFacts(t *testing.T) {
 	saved := effectSaved(t)
-	unresolved := advance(t, jobStarted(t, saved, "job-1"), core.OutcomeUnknown{EffectID: saved.EffectID})
+	unresolved := advance(t, jobStarted(t, saved, "job-1"), core.OutcomeUnknown{EffectID: saved.State.EffectID})
 	tests := []struct {
 		name  string
-		from  core.State
+		from  Snapshot
 		event core.Event
 		facts Facts
 	}{
-		{"incomplete response with record and failure", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Body: []byte("partial")}, Failure: "timeout"}},
-		{"incomplete response without facts", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{}},
-		{"unknown outcome with failure", saved, core.OutcomeUnknown{EffectID: saved.EffectID}, Facts{Failure: "lost"}},
-		{"resolution with record", unresolved, core.Resolved{EffectID: unresolved.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionExited}}},
+		{"incomplete response with record and failure", snapAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Body: []byte("partial")}, Failure: "timeout"}},
+		{"incomplete response without facts", snapAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{}},
+		{"unknown outcome with failure", saved, core.OutcomeUnknown{EffectID: saved.State.EffectID}, Facts{Failure: "lost"}},
+		{"resolution with record", unresolved, core.Resolved{EffectID: unresolved.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionExited}}},
+		{"abandonment with unknown record", unresolved, core.Resolved{EffectID: unresolved.State.EffectID, Execution: core.ExecutionUnknown}, Facts{Observation: &Observation{Execution: core.ExecutionUnknown}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -265,18 +367,18 @@ func TestCommitAcceptsPermittedFacts(t *testing.T) {
 func TestRunnerRefusesInvalidStates(t *testing.T) {
 	tests := []struct {
 		name string
-		call func(Runner, core.State) (core.State, error)
-		from core.State
+		call func(Runner, Snapshot) (Snapshot, error)
+		from Snapshot
 	}{
-		{"commit", func(r Runner, s core.State) (core.State, error) {
+		{"commit", func(r Runner, s Snapshot) (Snapshot, error) {
 			return r.Commit(context.Background(), s, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
-		}, core.State{Phase: core.PhaseIdle}},
-		{"bind", func(r Runner, s core.State) (core.State, error) {
+		}, Snapshot{State: core.State{Phase: core.PhaseIdle}}},
+		{"bind", func(r Runner, s Snapshot) (Snapshot, error) {
 			return r.Bind(context.Background(), s)
-		}, core.State{Phase: core.PhaseEffectSaved}},
-		{"start", func(r Runner, s core.State) (core.State, error) {
+		}, Snapshot{State: core.State{Phase: core.PhaseEffectSaved}}},
+		{"start", func(r Runner, s Snapshot) (Snapshot, error) {
 			return r.Start(context.Background(), s)
-		}, core.State{Phase: core.PhaseJobBound}},
+		}, Snapshot{State: core.State{Phase: core.PhaseJobBound}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,21 +388,31 @@ func TestRunnerRefusesInvalidStates(t *testing.T) {
 				t.Fatalf("error = %v, want invalid state", err)
 			}
 			if got != tt.from || len(rec.log) != 0 {
-				t.Fatalf("invalid state reached I/O: state %#v, log %v", got, rec.log)
+				t.Fatalf("invalid state reached I/O: snapshot %#v, log %v", got, rec.log)
 			}
 		})
 	}
+
+	t.Run("negative sequence", func(t *testing.T) {
+		rec := &recorder{}
+		from := snapAt(t, core.PhaseIdle)
+		from.Seq = -1
+		got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+		if err == nil || len(rec.log) != 0 || got != from {
+			t.Fatalf("negative sequence reached I/O: %#v, %v, log %v", got, err, rec.log)
+		}
+	})
 }
 
 func TestCommitStopsAtStoreFailure(t *testing.T) {
 	rec := &recorder{failAt: core.PhaseRequestFrozen}
-	from := stateAt(t, core.PhaseIdle)
+	from := snapAt(t, core.PhaseIdle)
 	got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
 	if !errors.Is(err, errInjected) {
 		t.Fatalf("error = %v, want injected failure", err)
 	}
 	if got != from {
-		t.Fatalf("failed commit changed state to %#v", got)
+		t.Fatalf("failed commit changed snapshot to %#v", got)
 	}
 }
 
@@ -308,13 +420,13 @@ func TestCommitHonoursCancellationBeforeWriting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	rec := &recorder{}
-	from := stateAt(t, core.PhaseIdle)
+	from := snapAt(t, core.PhaseIdle)
 	got, err := newRunner(t, rec).Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want cancellation", err)
 	}
 	if got != from || len(rec.log) != 0 {
-		t.Fatalf("cancelled commit changed state to %#v or wrote %v", got, rec.log)
+		t.Fatalf("cancelled commit changed snapshot to %#v or wrote %v", got, rec.log)
 	}
 }
 
@@ -323,7 +435,7 @@ func TestBindCommitsEffectBeforeBindingJob(t *testing.T) {
 	runner := newRunner(t, rec)
 	ctx := context.Background()
 
-	saved, err := runner.Commit(ctx, stateAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Attempt: 1, Body: execBody}, Facts{})
+	saved, err := runner.Commit(ctx, snapAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Attempt: 1, Body: execBody}, Facts{})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
@@ -332,17 +444,17 @@ func TestBindCommitsEffectBeforeBindingJob(t *testing.T) {
 		t.Fatalf("Bind() error = %v", err)
 	}
 
-	if got.Phase != core.PhaseJobBound || got.JobID != "job-1" {
+	if got.State.Phase != core.PhaseJobBound || got.State.JobID != "job-1" {
 		t.Fatalf("Bind() = %#v, want job_bound job-1", got)
 	}
 	wantLog := []string{"commit:effect_saved", "bind", "commit:job_bound"}
 	if !reflect.DeepEqual(rec.log, wantLog) {
 		t.Fatalf("log = %v, want %v", rec.log, wantLog)
 	}
-	if want := (Effect{ID: saved.EffectID, Command: "printf ok"}); rec.lastEffect != want {
+	if want := (Effect{ID: saved.State.EffectID, Command: "printf ok"}); rec.lastEffect != want {
 		t.Fatalf("executor received %#v, want %#v", rec.lastEffect, want)
 	}
-	if last := rec.commits[len(rec.commits)-1]; last.Event != (core.JobBound{EffectID: saved.EffectID, JobID: "job-1"}) || last.From != saved || last.To != got {
+	if last := rec.commits[len(rec.commits)-1]; last.Event != (core.JobBound{EffectID: saved.State.EffectID, JobID: "job-1"}) || last.From != saved.State || last.To != got.State {
 		t.Fatalf("bind commit = %#v", last)
 	}
 }
@@ -366,7 +478,7 @@ func TestBindKeepsJobIdentityWhateverItsStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Bind() error = %v", err)
 			}
-			if got.Phase != core.PhaseJobBound || got.JobID != "job-1" {
+			if got.State.Phase != core.PhaseJobBound || got.State.JobID != "job-1" {
 				t.Fatalf("Bind() = %#v, want job_bound job-1", got)
 			}
 		})
@@ -375,13 +487,13 @@ func TestBindKeepsJobIdentityWhateverItsStatus(t *testing.T) {
 
 func TestBindRequiresBindIntent(t *testing.T) {
 	rec := &recorder{}
-	from := stateAt(t, core.PhaseIdle)
+	from := snapAt(t, core.PhaseIdle)
 	got, err := newRunner(t, rec).Bind(context.Background(), from)
 	if err == nil {
 		t.Fatal("Bind() succeeded outside effect_saved, want error")
 	}
 	if got != from || len(rec.log) != 0 {
-		t.Fatalf("misdirected bind changed state to %#v or wrote %v", got, rec.log)
+		t.Fatalf("misdirected bind changed snapshot to %#v or wrote %v", got, rec.log)
 	}
 }
 
@@ -401,12 +513,12 @@ func TestBindKeepsUnknownOutcome(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Bind() error = %v", err)
 			}
-			if got.Phase != core.PhaseNeedsResolution || got.JobID != "" {
+			if got.State.Phase != core.PhaseNeedsResolution || got.State.JobID != "" {
 				t.Fatalf("Bind() = %#v, want needs_resolution without job", got)
 			}
-			want := Transition{From: from, Event: core.OutcomeUnknown{EffectID: from.EffectID}, To: got, Facts: Facts{Failure: tt.wantFailure}}
-			if len(tt.rec.commits) != 1 || !reflect.DeepEqual(tt.rec.commits[0], want) {
-				t.Fatalf("commits = %#v, want [%#v]", tt.rec.commits, want)
+			c := tt.rec.commits
+			if len(c) != 1 || c[0].Event != (core.OutcomeUnknown{EffectID: from.State.EffectID}) || c[0].Facts != (Facts{Failure: tt.wantFailure}) {
+				t.Fatalf("commits = %#v", c)
 			}
 		})
 	}
@@ -438,7 +550,7 @@ func TestBindStopsAtStoreFailureAfterBind(t *testing.T) {
 				t.Fatalf("error %q does not mention %q", err, tt.wantText)
 			}
 			if got != from || len(tt.rec.commits) != 0 {
-				t.Fatalf("Bind() = %#v with commits %v; want unchanged state and nothing committed", got, tt.rec.commits)
+				t.Fatalf("Bind() = %#v with commits %v; want unchanged snapshot and nothing committed", got, tt.rec.commits)
 			}
 			if !reflect.DeepEqual(tt.rec.log, tt.wantLog) {
 				t.Fatalf("log = %v, want %v", tt.rec.log, tt.wantLog)
@@ -476,7 +588,7 @@ func TestBindHonoursCancellation(t *testing.T) {
 				t.Fatalf("error = %v, want cancellation", err)
 			}
 			if got != from || !reflect.DeepEqual(tt.rec.log, []string{"bind"}) {
-				t.Fatalf("Bind() = %#v, log %v; want unchanged state and no commit", got, tt.rec.log)
+				t.Fatalf("Bind() = %#v, log %v; want unchanged snapshot and no commit", got, tt.rec.log)
 			}
 		})
 	}
@@ -489,16 +601,16 @@ func TestStartCommitsIssuedStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if got.Phase != core.PhaseAwaitingObservation || got.JobID != "job-1" {
+	if got.State.Phase != core.PhaseAwaitingObservation || got.State.JobID != "job-1" {
 		t.Fatalf("Start() = %#v, want awaiting_observation job-1", got)
 	}
 	wantLog := []string{"start", "commit:awaiting_observation"}
 	if !reflect.DeepEqual(rec.log, wantLog) {
 		t.Fatalf("log = %v, want %v", rec.log, wantLog)
 	}
-	want := Transition{From: from, Event: core.JobStarted{EffectID: from.EffectID, JobID: "job-1"}, To: got, Facts: Facts{}}
-	if len(rec.commits) != 1 || !reflect.DeepEqual(rec.commits[0], want) {
-		t.Fatalf("commits = %#v, want [%#v]", rec.commits, want)
+	c := rec.commits
+	if len(c) != 1 || c[0].Event != (core.JobStarted{EffectID: from.State.EffectID, JobID: "job-1"}) || c[0].From != from.State || c[0].To != got.State {
+		t.Fatalf("commits = %#v", c)
 	}
 }
 
@@ -510,7 +622,7 @@ func TestStartRequiresStartIntent(t *testing.T) {
 		t.Fatal("Start() succeeded outside job_bound, want error")
 	}
 	if got != from || len(rec.log) != 0 {
-		t.Fatalf("misdirected start changed state to %#v or wrote %v", got, rec.log)
+		t.Fatalf("misdirected start changed snapshot to %#v or wrote %v", got, rec.log)
 	}
 }
 
@@ -530,12 +642,12 @@ func TestStartKeepsUnknownOutcome(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Start() error = %v", err)
 			}
-			if got.Phase != core.PhaseNeedsResolution || got.JobID != "job-1" {
+			if got.State.Phase != core.PhaseNeedsResolution || got.State.JobID != "job-1" {
 				t.Fatalf("Start() = %#v, want needs_resolution with the bound job", got)
 			}
-			want := Transition{From: from, Event: core.OutcomeUnknown{EffectID: from.EffectID}, To: got, Facts: Facts{Failure: tt.wantFailure}}
-			if len(tt.rec.commits) != 1 || !reflect.DeepEqual(tt.rec.commits[0], want) {
-				t.Fatalf("commits = %#v, want [%#v]", tt.rec.commits, want)
+			c := tt.rec.commits
+			if len(c) != 1 || c[0].Event != (core.OutcomeUnknown{EffectID: from.State.EffectID}) || c[0].Facts != (Facts{Failure: tt.wantFailure}) {
+				t.Fatalf("commits = %#v", c)
 			}
 		})
 	}
@@ -570,7 +682,7 @@ func TestStartHonoursCancellation(t *testing.T) {
 				t.Fatalf("error = %v, want cancellation", err)
 			}
 			if got != from || !reflect.DeepEqual(tt.rec.log, []string{"start"}) {
-				t.Fatalf("Start() = %#v, log %v; want unchanged state and no commit", got, tt.rec.log)
+				t.Fatalf("Start() = %#v, log %v; want unchanged snapshot and no commit", got, tt.rec.log)
 			}
 		})
 	}
@@ -584,7 +696,7 @@ func TestStartStopsAtStoreFailure(t *testing.T) {
 		t.Fatalf("error = %v, want injected store failure", err)
 	}
 	if got != from || len(rec.commits) != 0 {
-		t.Fatalf("Start() = %#v with commits %v; want unchanged state and nothing committed", got, rec.commits)
+		t.Fatalf("Start() = %#v with commits %v; want unchanged snapshot and nothing committed", got, rec.commits)
 	}
 }
 
@@ -595,8 +707,8 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 	request := Request{Body: []byte("frozen")}
 	observation := Observation{Execution: core.ExecutionExited}
 
-	commit := func(event func(core.State) core.Event, facts Facts) func(core.State) (core.State, error) {
-		return func(s core.State) (core.State, error) { return runner.Commit(ctx, s, event(s), facts) }
+	commit := func(event func(core.State) core.Event, facts Facts) func(Snapshot) (Snapshot, error) {
+		return func(s Snapshot) (Snapshot, error) { return runner.Commit(ctx, s, event(s.State), facts) }
 	}
 	frozen := func(core.State) core.Event { return core.RequestFrozen{} }
 	attempt := func(s core.State) core.Event { return core.AttemptStarted{Attempt: s.Attempt} }
@@ -607,14 +719,14 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 	observed := func(s core.State) core.Event {
 		return core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited}
 	}
-	state := stateAt(t, core.PhaseIdle)
-	steps := []func(core.State) (core.State, error){
+	snap := snapAt(t, core.PhaseIdle)
+	steps := []func(Snapshot) (Snapshot, error){
 		commit(frozen, Facts{Request: &request}),
 		commit(attempt, Facts{}),
 		commit(saved, Facts{Response: &Response{Body: execBody, Complete: true}}),
 		commit(loaded(execBody), Facts{}),
-		func(s core.State) (core.State, error) { return runner.Bind(ctx, s) },
-		func(s core.State) (core.State, error) { return runner.Start(ctx, s) },
+		func(s Snapshot) (Snapshot, error) { return runner.Bind(ctx, s) },
+		func(s Snapshot) (Snapshot, error) { return runner.Start(ctx, s) },
 		commit(observed, Facts{Observation: &observation}),
 		commit(frozen, Facts{Request: &request}),
 		commit(attempt, Facts{}),
@@ -622,15 +734,18 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 		commit(loaded(returnBody), Facts{}),
 	}
 	for i, step := range steps {
-		next, err := step(state)
+		next, err := step(snap)
 		if err != nil {
 			t.Fatalf("step %d error = %v", i, err)
 		}
-		state = next
+		snap = next
 	}
 
 	var phases []core.Phase
-	for _, commit := range rec.commits {
+	for i, commit := range rec.commits {
+		if commit.Seq != int64(i)+1 {
+			t.Fatalf("commit %d has seq %d, want %d", i, commit.Seq, i+1)
+		}
 		phases = append(phases, commit.To.Phase)
 	}
 	want := []core.Phase{
@@ -641,7 +756,7 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 	if !reflect.DeepEqual(phases, want) {
 		t.Fatalf("committed phases = %v, want %v", phases, want)
 	}
-	if state.Intent() != core.IntentHalt || state.Step != 2 || state.Decision.Payload != "done" {
-		t.Fatalf("final state = %#v, want halted return at step 2", state)
+	if snap.State.Intent() != core.IntentHalt || snap.State.Step != 2 || snap.State.Decision.Payload != "done" {
+		t.Fatalf("final state = %#v, want halted return at step 2", snap.State)
 	}
 }

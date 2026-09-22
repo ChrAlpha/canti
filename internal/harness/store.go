@@ -2,30 +2,58 @@ package harness
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/ChrAlpha/canti/core"
 )
 
+// ErrStaleSnapshot reports a commit whose sequence is not the next one for
+// the run and whose event ID does not match the record already committed at
+// that sequence.
+var ErrStaleSnapshot = errors.New("harness: stale snapshot")
+
 // Store commits one transition and its attached facts atomically. Inside the
-// same transaction Commit must verify that the durable state equals From and
-// reject the transition otherwise, so a stale or competing harness cannot
-// advance from a state that is no longer current. To may equal From: a legal
-// event can leave the state unchanged and is still recorded, so enforce this
-// as a compare-and-set on the current state, not as a uniqueness rule on
-// From. Records are immutable: identical retries may succeed, but conflicting
-// content for an existing identity must fail. A concrete store also owns
-// crash safety and workspace ownership.
+// same transaction Commit must verify that Seq is exactly one past the last
+// committed sequence for the run and reject the transition with
+// ErrStaleSnapshot otherwise. State values cannot carry this check: a legal
+// event may leave the state unchanged and is still recorded, so only the
+// sequence detects a competing commit. If a record already exists at Seq, a
+// transition with the same event ID and content must succeed without
+// recording again — this is how a caller resolves a commit whose
+// acknowledgement was lost — while conflicting content must fail and never
+// overwrite. A concrete store also owns crash safety and workspace ownership,
+// and must provide recovery reads for the latest Snapshot, the frozen request
+// of the current revision, and the saved response of the current attempt.
 type Store interface {
 	Commit(context.Context, Transition) error
 }
 
-// Transition is the durable unit of run progress: the committed state before
-// and after one event, plus the facts the harness learned by acting.
+// Snapshot is the committed position of a run: the state and the sequence of
+// the last committed transition. NewState starts at sequence zero.
+type Snapshot struct {
+	Seq   int64
+	State core.State
+}
+
+// Validate checks that the snapshot can act as a commit position.
+func (s Snapshot) Validate() error {
+	if s.Seq < 0 {
+		return fmt.Errorf("harness: snapshot sequence %d is negative", s.Seq)
+	}
+	return s.State.Validate()
+}
+
+// Transition is the durable unit of run progress. Seq is the sequence this
+// commit writes; EventID identifies the logical event occurrence, so an
+// identical retry can be recognized after a lost acknowledgement.
 type Transition struct {
-	From  core.State
-	Event core.Event
-	To    core.State
-	Facts Facts
+	Seq     int64
+	EventID string
+	From    core.State
+	Event   core.Event
+	To      core.State
+	Facts   Facts
 }
 
 // Facts are the records attached to a transition. Identity comes from the
