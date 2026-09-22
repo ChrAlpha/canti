@@ -26,8 +26,12 @@ const (
 )
 
 // Event is one fact the harness reports after acting on an Intent. Only the
-// value types in this package are accepted.
-type Event interface{ event() }
+// value types in this package are accepted. Kind is the stable protocol name
+// for persisted records; Go type names are not part of the protocol.
+type Event interface {
+	event()
+	Kind() string
+}
 
 // RequestFrozen reports that the request bytes and provenance are recorded
 // under the next request revision of the current step.
@@ -99,3 +103,15 @@ func (Observed) event()           {}
 func (OutcomeUnknown) event()     {}
 func (StopRequested) event()      {}
 func (Resolved) event()           {}
+
+func (RequestFrozen) Kind() string      { return "request_frozen" }
+func (AttemptStarted) Kind() string     { return "attempt_started" }
+func (ResponseSaved) Kind() string      { return "response_saved" }
+func (ResponseIncomplete) Kind() string { return "response_incomplete" }
+func (ResponseLoaded) Kind() string     { return "response_loaded" }
+func (JobBound) Kind() string           { return "job_bound" }
+func (JobStarted) Kind() string         { return "job_started" }
+func (Observed) Kind() string           { return "observed" }
+func (OutcomeUnknown) Kind() string     { return "outcome_unknown" }
+func (StopRequested) Kind() string      { return "stop_requested" }
+func (Resolved) Kind() string           { return "resolved" }

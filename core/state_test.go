@@ -145,6 +145,9 @@ func TestNextLegalTransitions(t *testing.T) {
 	for _, tt := range legalTransitions() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if err := tt.from.Validate(); err != nil {
+				t.Fatalf("from.Validate() error = %v", err)
+			}
 			got, err := tt.from.Next(tt.event)
 			if err != nil {
 				t.Fatalf("Next() error = %v", err)
@@ -152,7 +155,89 @@ func TestNextLegalTransitions(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("Next() = %#v, want %#v", got, tt.want)
 			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("next.Validate() error = %v", err)
+			}
 		})
+	}
+}
+
+func TestValidateRejectsIncoherentStates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		from core.State
+	}{
+		{"zero state", core.State{}},
+		{"bare effect phase", core.State{Phase: core.PhaseEffectSaved}},
+		{"missing run", at(core.PhaseIdle, func(s *core.State) { s.RunID = "" })},
+		{"unknown phase", at("future_phase")},
+		{"zero step", at(core.PhaseIdle, withStep(0))},
+		{"step beyond budget", at(core.PhaseIdle, withStep(4))},
+		{"attempt beyond budget", at(core.PhaseIdle, withAttempt(3))},
+		{"negative request revision", at(core.PhaseIdle, withRev(-1))},
+		{"idle with decision", at(core.PhaseIdle, func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
+		{"idle with effect", at(core.PhaseIdle, func(s *core.State) { s.EffectID = "effect-1" })},
+		{"idle with job", at(core.PhaseIdle, withJob)},
+		{"idle with reason", at(core.PhaseIdle, withReason(core.StopCancelled))},
+		{"frozen request without revision", at(core.PhaseRequestFrozen)},
+		{"sent request with effect", at(core.PhaseRequestSent, withRev(1), withExec)},
+		{"saved effect without decision", at(core.PhaseEffectSaved, withRev(1), func(s *core.State) { s.EffectID = "effect-1" })},
+		{"saved effect with return decision", at(core.PhaseEffectSaved, withRev(1), withExec, func(s *core.State) { s.Decision.Kind = core.Return })},
+		{"saved effect without effect", at(core.PhaseEffectSaved, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
+		{"saved effect with job", at(core.PhaseEffectSaved, withRev(1), withExec, withJob)},
+		{"saved effect with reason", at(core.PhaseEffectSaved, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"bound job without job", at(core.PhaseJobBound, withRev(1), withExec)},
+		{"awaiting observation without job", at(core.PhaseAwaitingObservation, withRev(1), withExec)},
+		{"cancelling without reason", at(core.PhaseCancelling, withRev(1), withExec, withJob)},
+		{"resolution without effect", at(core.PhaseNeedsResolution, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
+		{"returned with exec decision", at(core.PhaseReturned, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
+		{"returned with effect", at(core.PhaseReturned, withRev(1), withExec, func(s *core.State) { s.Decision.Kind = core.Return })},
+		{"returned with reason", at(core.PhaseReturned, withRev(1), withReason(core.StopCancelled), func(s *core.State) { s.Decision = core.Decision{Kind: core.Return} })},
+		{"stopped without reason", at(core.PhaseStopped)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tt.from.Validate(); !errors.Is(err, core.ErrInvalidState) {
+				t.Fatalf("Validate() = %v, want invalid state", err)
+			}
+		})
+	}
+}
+
+func TestEventKindsAreStableAndUnique(t *testing.T) {
+	t.Parallel()
+
+	want := []struct {
+		event core.Event
+		kind  string
+	}{
+		{core.RequestFrozen{}, "request_frozen"},
+		{core.AttemptStarted{}, "attempt_started"},
+		{core.ResponseSaved{}, "response_saved"},
+		{core.ResponseIncomplete{}, "response_incomplete"},
+		{core.ResponseLoaded{}, "response_loaded"},
+		{core.JobBound{}, "job_bound"},
+		{core.JobStarted{}, "job_started"},
+		{core.Observed{}, "observed"},
+		{core.OutcomeUnknown{}, "outcome_unknown"},
+		{core.StopRequested{}, "stop_requested"},
+		{core.Resolved{}, "resolved"},
+	}
+	seen := make(map[string]bool, len(want))
+	for _, tt := range want {
+		if got := tt.event.Kind(); got != tt.kind {
+			t.Errorf("%T.Kind() = %q, want %q", tt.event, got, tt.kind)
+		}
+		if seen[tt.kind] {
+			t.Errorf("kind %q is not unique", tt.kind)
+		}
+		seen[tt.kind] = true
+	}
+	if core.SemanticsVersion != 1 {
+		t.Errorf("SemanticsVersion = %d, want 1", core.SemanticsVersion)
 	}
 }
 

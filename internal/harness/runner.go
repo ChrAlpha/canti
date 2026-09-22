@@ -39,6 +39,9 @@ func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, 
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
+	if err := state.Validate(); err != nil {
+		return state, err
+	}
 	next, err := state.Next(event)
 	if err != nil {
 		return state, err
@@ -61,6 +64,9 @@ func (r Runner) Bind(ctx context.Context, state core.State) (core.State, error) 
 	if state.Intent() != core.IntentBind {
 		return state, fmt.Errorf("harness: phase %q does not bind", state.Phase)
 	}
+	if err := state.Validate(); err != nil {
+		return state, err
+	}
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
@@ -81,6 +87,9 @@ func (r Runner) Bind(ctx context.Context, state core.State) (core.State, error) 
 func (r Runner) Start(ctx context.Context, state core.State) (core.State, error) {
 	if state.Intent() != core.IntentStart {
 		return state, fmt.Errorf("harness: phase %q does not start", state.Phase)
+	}
+	if err := state.Validate(); err != nil {
+		return state, err
 	}
 	if err := ctx.Err(); err != nil {
 		return state, err

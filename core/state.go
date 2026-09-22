@@ -59,6 +59,12 @@ type State struct {
 	Reason     StopReason
 }
 
+// SemanticsVersion identifies the transition rules of this package. It must
+// be bumped whenever a legal transition, an intent, or the meaning of an
+// event changes, so a stored run can refuse to continue under semantics it
+// was not committed with.
+const SemanticsVersion = 1
+
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
 	// not accept.
@@ -66,6 +72,9 @@ var (
 	// ErrInvalidEvent reports an event whose content is malformed or
 	// contradicts the identities the state has recorded.
 	ErrInvalidEvent = errors.New("core: invalid event")
+	// ErrInvalidState reports a state projection that no legal run reaches.
+	// Hosts must validate at load boundaries and refuse I/O on failure.
+	ErrInvalidState = errors.New("core: invalid state")
 )
 
 // NewState starts a run at its first step.
@@ -100,6 +109,90 @@ func (s State) Intent() Intent {
 	default:
 		return IntentHalt
 	}
+}
+
+// Validate checks the invariants every reachable state satisfies. States
+// loaded from storage or built by another host must pass before any intent
+// is acted on; Next itself stays total over state values.
+func (s State) Validate() error {
+	fail := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrInvalidState, fmt.Sprintf(format, args...))
+	}
+	if s.RunID == "" {
+		return fail("run ID is required")
+	}
+	if s.Limits.MaxSteps < 1 || s.Limits.MaxAttempts < 1 {
+		return fail("limits must be positive")
+	}
+	if s.Step < 1 || s.Step > s.Limits.MaxSteps {
+		return fail("step %d is outside the budget", s.Step)
+	}
+	if s.Attempt < 1 || s.Attempt > s.Limits.MaxAttempts {
+		return fail("attempt %d is outside the budget", s.Attempt)
+	}
+	if s.RequestRev < 0 {
+		return fail("request revision %d is negative", s.RequestRev)
+	}
+	hasDecision := s.Decision != Decision{}
+	switch s.Phase {
+	case PhaseIdle, PhaseRequestFrozen, PhaseRequestSent, PhaseResponseSaved:
+		if s.Phase != PhaseIdle && s.RequestRev < 1 {
+			return fail("a frozen request is required in phase %q", s.Phase)
+		}
+		if hasDecision || s.EffectID != "" || s.JobID != "" || s.Reason != "" {
+			return fail("no decision, effect, job, or reason is allowed in phase %q", s.Phase)
+		}
+	case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling, PhaseNeedsResolution:
+		if s.RequestRev < 1 {
+			return fail("a frozen request is required in phase %q", s.Phase)
+		}
+		if s.Decision.Kind != Exec {
+			return fail("an exec decision is required in phase %q", s.Phase)
+		}
+		if s.EffectID == "" {
+			return fail("an effect ID is required in phase %q", s.Phase)
+		}
+		switch s.Phase {
+		case PhaseEffectSaved:
+			if s.JobID != "" {
+				return fail("no job is allowed before binding")
+			}
+			if s.Reason != "" {
+				return fail("no stop reason is allowed in phase %q", s.Phase)
+			}
+		case PhaseJobBound, PhaseAwaitingObservation:
+			if s.JobID == "" {
+				return fail("a bound job is required in phase %q", s.Phase)
+			}
+			if s.Reason != "" {
+				return fail("no stop reason is allowed in phase %q", s.Phase)
+			}
+		case PhaseCancelling:
+			if s.Reason == "" {
+				return fail("a stop reason is required in phase %q", s.Phase)
+			}
+		}
+	case PhaseReturned:
+		if s.RequestRev < 1 {
+			return fail("a frozen request is required in phase %q", s.Phase)
+		}
+		if s.Decision.Kind != Return {
+			return fail("a return decision is required in phase %q", s.Phase)
+		}
+		if s.EffectID != "" || s.JobID != "" || s.Reason != "" {
+			return fail("no effect, job, or reason is allowed in phase %q", s.Phase)
+		}
+	case PhaseStopped:
+		if s.Reason == "" {
+			return fail("a stop reason is required in phase %q", s.Phase)
+		}
+		if s.Decision.Kind == Return {
+			return fail("a return decision contradicts a stop")
+		}
+	default:
+		return fail("unknown phase %q", s.Phase)
+	}
+	return nil
 }
 
 // Next applies one event. It returns the unchanged state with an error for

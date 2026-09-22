@@ -81,8 +81,20 @@ func stateAt(t *testing.T, phase core.Phase) core.State {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.Phase = phase
-	return state
+	switch phase {
+	case core.PhaseIdle:
+		return state
+	case core.PhaseRequestFrozen:
+		return advance(t, state, core.RequestFrozen{})
+	case core.PhaseRequestSent:
+		return advance(t, state, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1})
+	case core.PhaseResponseSaved:
+		return advance(t, state, core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1})
+	case core.PhaseStopped:
+		return advance(t, state, core.StopRequested{Reason: core.StopCancelled})
+	}
+	t.Fatalf("stateAt(%q) is not supported", phase)
+	return core.State{}
 }
 
 func advance(t *testing.T, state core.State, events ...core.Event) core.State {
@@ -245,6 +257,36 @@ func TestCommitAcceptsPermittedFacts(t *testing.T) {
 			}
 			if len(rec.commits) != 1 || rec.commits[0].Facts != tt.facts {
 				t.Fatalf("commits = %#v, want facts %#v", rec.commits, tt.facts)
+			}
+		})
+	}
+}
+
+func TestRunnerRefusesInvalidStates(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(Runner, core.State) (core.State, error)
+		from core.State
+	}{
+		{"commit", func(r Runner, s core.State) (core.State, error) {
+			return r.Commit(context.Background(), s, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+		}, core.State{Phase: core.PhaseIdle}},
+		{"bind", func(r Runner, s core.State) (core.State, error) {
+			return r.Bind(context.Background(), s)
+		}, core.State{Phase: core.PhaseEffectSaved}},
+		{"start", func(r Runner, s core.State) (core.State, error) {
+			return r.Start(context.Background(), s)
+		}, core.State{Phase: core.PhaseJobBound}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{}
+			got, err := tt.call(newRunner(t, rec), tt.from)
+			if !errors.Is(err, core.ErrInvalidState) {
+				t.Fatalf("error = %v, want invalid state", err)
+			}
+			if got != tt.from || len(rec.log) != 0 {
+				t.Fatalf("invalid state reached I/O: state %#v, log %v", got, rec.log)
 			}
 		})
 	}
