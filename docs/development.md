@@ -29,8 +29,8 @@ Cloning requires repository access while the repository is private.
 | `make test` | Run `go test ./...` |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
-| `go test ./core -run 'TestNext|TestIntent' -v` | Transition table, budgets, and rejected events |
-| `go test ./internal/harness -run 'TestCommit|TestDispatch' -v` | Commit, dispatch, failure, and cancellation cases |
+| `go test ./core -run 'TestNext|TestIntent|TestValidate|TestTrajectory|TestIllegal' -v` | Transition table, budgets, invariants, trajectories, and rejected events |
+| `go test ./internal/harness -run 'TestCommit|TestBind|TestStart|TestRunner|TestStale|TestOffline' -v` | Commit protocol, bind/start, failure, and cancellation cases |
 | `git diff --check` | Check pending patches for whitespace errors |
 
 Use `gofmt -w path/to/changed.go` on changed files to resolve a formatting

@@ -89,7 +89,10 @@ never reset within a step, so a late response from an earlier attempt or an
 earlier step is invalid. Observations, unknown outcomes, resolutions, and job
 events name their effect; an event for a foreign effect is invalid. Delivery
 identity (deduplicating one commit) is separate from causal identity and is
-carried by the commit protocol below, not by core events.
+carried by the commit protocol below, not by core events. `RunID` must be
+unique across every run that shares a store or executor namespace: effect and
+event identities inherit their uniqueness from it, and a reused run ID would
+let a new run adopt a previous run's job and records.
 
 ## Run state and transitions
 
@@ -163,7 +166,9 @@ Rules the table enforces:
   backend job owns the effect and never implies execution; only from a
   committed `job_bound` phase may a start be issued, recorded as
   `JobStarted`. From then on side effects may exist. `job_bound` also accepts
-  a direct `Observed` for a resumed start that finds the job already finished.
+  a direct `Observed` so a host that inspects a bound job — one whose start
+  was issued but whose commit was lost — can record an already-finished
+  result; the current runner instead always re-issues the idempotent start.
 - Outside `cancelling`, `Observed` completes the step: the run continues in
   `idle` at the next step with identities cleared, or stops with
   `steps_exhausted`. That stop is deliberate: the final observation is
@@ -173,11 +178,15 @@ Rules the table enforces:
   `cancelling` only `cancelled`; any other outcome must first record its job
   with `JobBound`.
 - `OutcomeUnknown` enters `needs_resolution`. It accepts a later `JobBound`
-  to resume verification (continuing to `awaiting_observation`, or to
-  `cancelling` when a stop is pending), or an explicit `Resolved`: a known
-  outcome continues the run or completes a pending stop; resolving to
-  `unknown` abandons the run as `stopped` with reason `unresolved`,
-  preserving the uncertainty instead of fabricating an outcome.
+  to resume behind the start boundary at `job_bound` (or at `cancelling` when
+  a stop is pending): without a committed start the found job cannot have
+  run, and `Start` stays idempotent for one that did. It also accepts an
+  explicit `Resolved`: a known outcome continues the run or completes a
+  pending stop, except that a jobless resolution cannot claim `exited` or
+  `timed_out`, which are impossible without a started job; resolving to
+  `unknown` abandons the run as `stopped`, keeping the first stop reason or
+  recording `unresolved`, preserving the uncertainty instead of fabricating
+  an outcome.
 - `StopRequested` stops immediately while no effect exists and enters
   `cancelling` once one may exist. `cancelling` records the true result before
   the run becomes `stopped`. In `cancelling` and `needs_resolution` a stop
@@ -283,8 +292,8 @@ execution backend.
 | `effect_saved` | `bind` | `Bind` by effect ID; find the existing job before creating one; binding must not execute anything |
 | `job_bound` | `start` | `Start` the bound job; idempotent for an already-started job |
 | `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
-| `cancelling` | `cancel` | `Inspect` by effect ID. With no job recorded, a missing job is observed as `cancelled` — sound because an unstarted bind can never execute and `Cancel` fences late binds. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
-| `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` or `Resolved`; never redispatch |
+| `cancelling` | `cancel` | With no job recorded, call the fencing `Cancel` by effect ID first, then `Inspect`: a positively missing job is observed as `cancelled` — sound because an unstarted bind can never execute and the fence stops a bind that lands late. An indeterminate lookup is an executor error, never a missing job. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
+| `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`) or `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
 

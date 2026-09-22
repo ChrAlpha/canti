@@ -7,11 +7,13 @@ import "context"
 // only Start may cause execution, and it must be idempotent for an
 // already-started job and start nothing but the bound job. Bind must honor
 // cancellation before creating a job and reject a changed command under an
-// existing identity. Inspect and Cancel must never create or start a job;
-// Cancel must be idempotent and must prevent any later start of an unstarted
-// bind, including one that lands after Cancel. An unknown outcome must never
-// trigger a retry without inspection; an effect ID does not make commands
-// idempotent.
+// existing identity. Inspect and Cancel must never create or start a job.
+// Inspect may report found == false only when the backend positively
+// determined that no job owns the effect; an indeterminate lookup must return
+// an error instead. Cancel must be idempotent and must prevent any later
+// start of an unstarted bind, including one that lands after Cancel. An
+// unknown outcome must never trigger a retry without inspection; an effect ID
+// does not make commands idempotent.
 type Executor interface {
 	Bind(ctx context.Context, effect Effect) (Job, error)
 	Start(ctx context.Context, effectID string) (Job, error)
