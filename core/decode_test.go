@@ -18,6 +18,9 @@ func TestDecodeValidDecisions(t *testing.T) {
 	}{
 		{name: "exec", raw: `{"kind":"exec","payload":"go test ./..."}`, wantKind: core.Exec, wantBody: "go test ./..."},
 		{name: "return", raw: `{"kind":"return","payload":"done"}`, wantKind: core.Return, wantBody: "done"},
+		{name: "empty return", raw: `{"kind":"return","payload":""}`, wantKind: core.Return},
+		{name: "reordered fields", raw: ` { "payload": "one\ntwo", "kind": "exec" } `, wantKind: core.Exec, wantBody: "one\ntwo"},
+		{name: "unicode escapes", raw: `{"kind":"return","payload":"\u4f60\u597d"}`, wantKind: core.Return, wantBody: "\u4f60\u597d"},
 	}
 
 	for _, tt := range tests {
@@ -48,10 +51,20 @@ func TestDecodeRejectsInvalidProtocol(t *testing.T) {
 		{name: "unknown field", raw: `{"kind":"exec","payload":"x","extra":true}`},
 		{name: "wrong kind type", raw: `{"kind":1,"payload":"x"}`},
 		{name: "wrong payload type", raw: `{"kind":"exec","payload":1}`},
+		{name: "null kind", raw: `{"kind":null,"payload":"x"}`},
+		{name: "null payload", raw: `{"kind":"exec","payload":null}`},
+		{name: "object payload", raw: `{"kind":"exec","payload":{}}`},
+		{name: "array payload", raw: `{"kind":"exec","payload":[]}`},
+		{name: "boolean payload", raw: `{"kind":"exec","payload":true}`},
+		{name: "case sensitive fields", raw: `{"Kind":"exec","payload":"x"}`},
 		{name: "unsupported kind", raw: `{"kind":"wait","payload":"x"}`},
 		{name: "duplicate field", raw: `{"kind":"exec","kind":"return","payload":"x"}`},
+		{name: "escaped duplicate field", raw: `{"kind":"exec","payload":"x","\u0070ayload":"y"}`},
 		{name: "trailing value", raw: `{"kind":"exec","payload":"x"} {}`},
+		{name: "trailing garbage", raw: `{"kind":"exec","payload":"x"} !`},
 		{name: "truncated", raw: `{"kind":"exec","payload":"x"`},
+		{name: "markdown wrapper", raw: "```json\n{\"kind\":\"exec\",\"payload\":\"x\"}\n```"},
+		{name: "invalid UTF-8", raw: "{\"kind\":\"exec\",\"payload\":\"\xff\"}"},
 	}
 
 	for _, tt := range tests {

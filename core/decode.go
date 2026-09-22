@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 var errInvalidDecision = errors.New("invalid decision")
@@ -16,6 +17,9 @@ var errInvalidDecision = errors.New("invalid decision")
 // values, duplicate fields, unknown fields, missing fields, and invalid field
 // types. It performs no I/O and keeps no state between calls.
 func Decode(raw []byte) (Decision, error) {
+	if !utf8.Valid(raw) {
+		return Decision{}, fmt.Errorf("core: %w: invalid UTF-8", errInvalidDecision)
+	}
 	fields, err := decodeObject(raw)
 	if err != nil {
 		return Decision{}, fmt.Errorf("core: %w: %v", errInvalidDecision, err)
@@ -31,18 +35,18 @@ func Decode(raw []byte) (Decision, error) {
 		}
 	}
 
-	var kind string
-	if err := json.Unmarshal(fields["kind"], &kind); err != nil {
+	var kind *string
+	if err := json.Unmarshal(fields["kind"], &kind); err != nil || kind == nil {
 		return Decision{}, fmt.Errorf("core: %w: kind must be a string", errInvalidDecision)
 	}
-	var payload string
-	if err := json.Unmarshal(fields["payload"], &payload); err != nil {
+	var payload *string
+	if err := json.Unmarshal(fields["payload"], &payload); err != nil || payload == nil {
 		return Decision{}, fmt.Errorf("core: %w: payload must be a string", errInvalidDecision)
 	}
 
-	decision := Decision{Kind: Kind(kind), Payload: payload}
+	decision := Decision{Kind: Kind(*kind), Payload: *payload}
 	if decision.Kind != Exec && decision.Kind != Return {
-		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, kind)
+		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, *kind)
 	}
 	return decision, nil
 }
