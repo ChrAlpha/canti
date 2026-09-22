@@ -17,7 +17,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Fprintln(flag.CommandLine.Output(), version)
+		fmt.Fprintln(os.Stdout, version)
 		return
 	}
 
