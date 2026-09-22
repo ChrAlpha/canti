@@ -22,6 +22,7 @@ const (
 	StopStepsExhausted    StopReason = "steps_exhausted"
 	StopAttemptsExhausted StopReason = "attempts_exhausted"
 	StopProtocolFailure   StopReason = "protocol_failure"
+	StopUnresolved        StopReason = "unresolved"
 )
 
 // Event is one fact the harness reports after acting on an Intent. Only the
@@ -80,7 +81,8 @@ type OutcomeUnknown struct{ EffectID string }
 type StopRequested struct{ Reason StopReason }
 
 // Resolved records an explicit human resolution of the named effect's unknown
-// outcome.
+// outcome. Resolving to ExecutionUnknown abandons the run and preserves the
+// uncertainty instead of fabricating an outcome.
 type Resolved struct {
 	EffectID  string
 	Execution ExecutionState

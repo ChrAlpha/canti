@@ -198,6 +198,13 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case Resolved:
 		if s.Phase == PhaseNeedsResolution {
+			if e.Execution == ExecutionUnknown {
+				s.Phase = PhaseStopped
+				if s.Reason == "" {
+					s.Reason = StopUnresolved
+				}
+				return s, nil
+			}
 			if s.Reason != "" {
 				s.Phase = PhaseStopped
 				return s, nil
@@ -264,6 +271,9 @@ func (s State) validate(event Event) error {
 	case Resolved:
 		if err := s.claimEffect(e.EffectID); err != nil {
 			return err
+		}
+		if e.Execution == ExecutionUnknown {
+			return nil
 		}
 		return knownExecution(e.Execution)
 	case StopRequested:
