@@ -10,10 +10,13 @@ V1 durability is **not complete**.
 | --- | --- | --- |
 | Strict decision protocol | Valid/invalid input tests in `core/decode_test.go` | Offline parsing only |
 | Stateless calls | Concurrent decode tests and race checks | Does not test model or runtime behavior |
-| Decision before dispatch | Shared event log and injected write/dispatch failures in `runner_test.go` | Recording store/executor, no durable backend |
-| Cancellation checkpoints | Pre-call, post-decision, and post-effect cancellation tests, including return | No process-tree cleanup or persistent cancellation |
+| Complete transition table | Every legal phase/event pair asserts the full resulting state and every other pair is rejected unchanged in `core/state_test.go` | Offline values only |
+| Budgets and stop reasons | Attempt, protocol, and step exhaustion tests | No wall-time, token, or storage measurement |
+| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume` in `runner_test.go` | Recording store/executor, no durable backend |
+| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing | No process-tree cleanup or persistent cancellation |
+| Unknown outcomes | Executor error or unknown status commits `OutcomeUnknown`; `Observed` rejects `unknown` | No real backend inspection |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
-| Recovery phase classification | Known-active and terminal/unknown phase tests | No saved-state loading or restart loop |
+| Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through eight committed phases | No model, inspect, or restart |
 | Input requirements | Missing goal/environment tests | No size or token budget |
 | CLI entry point | Build and version/help smoke check | No runnable agent workflow |
 
@@ -70,8 +73,9 @@ sample or hide failed samples from the result set.
 
 ## Implementation order
 
-1. Define transaction and recovery-read operations, implement SQLite facts and
-   workspace ownership, and test crash recovery of persisted records.
+1. Implement `Store.Commit` and recovery reads for `core.State`, the frozen
+   request, and the saved response in SQLite with workspace ownership, and
+   test crash recovery of persisted transitions.
 2. Add a queryable executor with stable job identity, retained output, explicit
    uncertainty, and bounded cancellation/cleanup.
 3. Add one model adapter and bounded input builder with frozen request replay

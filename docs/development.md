@@ -29,7 +29,8 @@ Cloning requires repository access while the repository is private.
 | `make test` | Run `go test ./...` |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
-| `go test ./internal/harness -run TestApplyDecision -v` | Ordering, failure, and cancellation cases |
+| `go test ./core -run 'TestNext|TestIntent' -v` | Transition table, budgets, and rejected events |
+| `go test ./internal/harness -run 'TestCommit|TestDispatch' -v` | Commit, dispatch, failure, and cancellation cases |
 | `git diff --check` | Check pending patches for whitespace errors |
 
 Use `gofmt -w path/to/changed.go` on changed files to resolve a formatting
@@ -61,7 +62,10 @@ Read [architecture](architecture.md) for interfaces and ownership. Read
 beside the package they verify. Add integration fixtures only with the backend
 they exercise, not empty placeholder directories or skipped acceptance tests.
 
-Protocol tests should stay deterministic and require no credentials. Backend
+Protocol and transition tests should stay deterministic and require no
+credentials. A new run rule belongs in `core.State.Next` with a row in the
+transition table test; the illegal-pair sweep must keep rejecting everything
+else. Backend
 tests must use temporary, isolated workspaces and report leftover processes or
 artifacts. Live model checks must be explicit opt-ins with finite budgets;
 do not make paid provider calls part of default unit tests.

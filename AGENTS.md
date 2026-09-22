@@ -30,11 +30,12 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 
 ## Runtime invariants
 
-Before changing a harness boundary, specify state ownership, durable commit
-points, retry and termination rules, cancellation, and behavior after restart.
-Model request bytes and provenance must be recorded before sending; decisions
-and effects must be committed before dispatch. Observations and run progress
-must eventually be committed together by the concrete store.
+Retry, termination, and cancellation rules live in `core.State.Next`; change
+them there with a transition-table test. Before changing a harness boundary,
+specify its durable commit point, attached facts, and behavior after restart.
+Model request bytes and provenance must be committed before sending; decisions
+and effects before dispatch; observations together with run progress in one
+`Transition`.
 
 `return` hands control back; it does not assert success. An unknown execution
 result must remain uncertain until inspected or explicitly resolved. A stable

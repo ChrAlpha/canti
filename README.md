@@ -17,42 +17,46 @@ The project keeps the smallest possible decision semantics separate from the
 long-running work required to make an agent useful and recoverable.
 
 ```text
-model adapter -> harness input / facts -> core.Decode -> harness effect manager
+committed state -> core.State.Intent -> harness I/O -> core.State.Next -> commit
 ```
 
-The core interprets one complete model response. The harness owns model I/O,
-history, persistence, execution, cancellation, recovery, and the boundaries
-where external side effects become observable.
+The core decides, from committed facts alone, what the harness may do next and
+how each reported fact changes the run. The harness owns model I/O, history,
+persistence, execution, and the boundaries where external side effects become
+observable.
 
 ## Current repository
 
-The `core` package is a pure protocol kernel:
+The `core` package is a stateless semantic kernel:
 
-- `core.Decode` accepts exactly one complete JSON decision.
-- The only decisions are `exec` and `return`.
-- It owns no model client, history, session, filesystem, clock, or executor.
-- It rejects unknown fields, duplicate fields, trailing values, and invalid
-  decision kinds.
+- `core.Decode` accepts exactly one complete JSON decision; the only decisions
+  are `exec` and `return`.
+- `core.State` is the complete projection needed to continue a run: run, step,
+  attempt, phase, limits, last decision, effect and job identity, stop reason.
+- `State.Intent` names the single action the harness may take next; closed and
+  unknown phases halt.
+- `State.Next` applies one reported fact and returns the new state, or the
+  unchanged state with an error for invalid or illegal events.
+- It owns no model client, history, session, filesystem, clock, or executor,
+  and imports only the standard library.
 
-The `internal/harness` package defines the long-running boundaries around that
-kernel:
+The `internal/harness` package interprets those intents:
 
-- independent model requests and raw response provenance;
-- fact record types and an input frame shape;
-- stable effect identities and a queryable job backend interface;
-- recovery phase types, output references, and decision ordering.
+- `Runner.Commit` derives the next state and hands one `Transition` with its
+  attached facts to the `Store`, which must persist it atomically.
+- `Runner.Dispatch` runs after the effect is committed, hands it to the
+  `Executor` by stable effect ID, and commits the started job or an unknown
+  outcome.
+- `Model`, `Executor`, `Frame`, and `Observation` define the remaining
+  boundaries as interfaces and record types.
 
-`Runner.ApplyDecision` demonstrates the essential ordering. It decodes and
-persists a decision first. A `return` decision is then persisted as a handoff.
-An `exec` decision is persisted as an effect before the executor receives it.
-The same effect ID can therefore be used by a concrete executor to look up an
-existing job after a harness restart.
+Every I/O follows the committed phase that authorizes it, so a restart resumes
+from the last committed state by asking the core for its intent again. The
+recovery and fresh-step paths share the same transition code.
 
 SQLite storage, a concrete model adapter, a queryable execution backend, and
-recovery reads are not implemented. The store methods do not provide cross-record
-transactions, and input frame validation does not enforce resource budgets.
-`return` means control was handed back; it does not claim that the task
-succeeded.
+the loop that drives intents are not implemented. `return` means control was
+handed back; it does not claim that the task succeeded.
 
 ## Development
 
@@ -93,6 +97,8 @@ for build, race-check, and CLI smoke commands.
 5. A `return` decision is a control-flow result, not a business-success flag.
 6. The execution state of a process is kept separate from the business effect
    that process may have caused.
+7. Run rules live in `core.State.Next`. The harness executes intents and
+   never restates a transition; adding a capability adds no event kind.
 
 ## Initial scope
 
