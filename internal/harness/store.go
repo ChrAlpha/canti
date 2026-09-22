@@ -16,11 +16,13 @@ var ErrStaleSnapshot = errors.New("harness: stale snapshot")
 // Store commits one transition and its attached facts atomically. Inside the
 // same transaction Commit must verify that Seq is exactly one past the last
 // committed sequence for the run and reject the transition with
-// ErrStaleSnapshot otherwise. State values cannot carry this check: a legal
-// event may leave the state unchanged and is still recorded, so only the
-// sequence detects a competing commit. If a record already exists at Seq, a
-// transition with the same event ID and content must succeed without
-// recording again — this is how a caller resolves a commit whose
+// ErrStaleSnapshot otherwise; the sequence, not the state value, is the
+// compare-and-set, because a legal event may leave the state unchanged and is
+// still recorded. It must also verify that From equals the state committed at
+// the previous sequence and reject a transition that would break the chain —
+// an integrity assertion the sequence alone cannot make. If a record already
+// exists at Seq, a transition with the same event ID and content must succeed
+// without recording again — this is how a caller resolves a commit whose
 // acknowledgement was lost — while conflicting content must fail and never
 // overwrite. A concrete store also owns crash safety and workspace ownership,
 // and must provide recovery reads for the latest Snapshot, the frozen request

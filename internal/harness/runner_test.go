@@ -11,10 +11,11 @@ import (
 )
 
 var (
-	errInjected = errors.New("injected boundary failure")
-	errExecutor = errors.New("executor failure")
-	execBody    = []byte(`{"kind":"exec","payload":"printf ok"}`)
-	returnBody  = []byte(`{"kind":"return","payload":"done"}`)
+	errInjected    = errors.New("injected boundary failure")
+	errExecutor    = errors.New("executor failure")
+	errBrokenChain = errors.New("from does not extend the committed chain")
+	execBody       = []byte(`{"kind":"exec","payload":"printf ok"}`)
+	returnBody     = []byte(`{"kind":"return","payload":"done"}`)
 )
 
 type recorder struct {
@@ -47,6 +48,9 @@ func (r *recorder) Commit(_ context.Context, transition Transition) error {
 	}
 	if r.seeded && transition.Seq != r.lastSeq+1 {
 		return ErrStaleSnapshot
+	}
+	if previous, ok := r.bySeq[transition.Seq-1]; ok && transition.From != previous.To {
+		return errBrokenChain
 	}
 	if r.bySeq == nil {
 		r.bySeq = make(map[int64]Transition)
@@ -266,6 +270,68 @@ func TestStaleSnapshotCannotCommitAfterSelfLoop(t *testing.T) {
 	}
 	if got != cancelling || len(rec.commits) != 1 {
 		t.Fatalf("stale commit advanced to %#v with commits %#v", got, rec.commits)
+	}
+}
+
+func TestCommitDistinguishesRepeatedEventsBySequence(t *testing.T) {
+	ctx := context.Background()
+	rec := &recorder{}
+	runner := newRunner(t, rec)
+	cancelling := advance(t, effectSaved(t), core.StopRequested{Reason: core.StopCancelled})
+
+	first, err := runner.Commit(ctx, cancelling, core.StopRequested{Reason: core.StopTimedOut}, Facts{})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if _, err := runner.Commit(ctx, first, core.StopRequested{Reason: core.StopTimedOut}, Facts{}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if len(rec.commits) != 2 {
+		t.Fatalf("commits = %#v, want two records", rec.commits)
+	}
+	if rec.commits[0].EventID == rec.commits[1].EventID {
+		t.Fatal("the same event at consecutive sequences shares an event ID")
+	}
+}
+
+func TestCommitRejectsSequenceGap(t *testing.T) {
+	ctx := context.Background()
+	rec := &recorder{}
+	runner := newRunner(t, rec)
+	from := snapAt(t, core.PhaseIdle)
+
+	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	ahead := Snapshot{Seq: mid.Seq + 5, State: mid.State}
+	got, err := runner.Commit(ctx, ahead, core.AttemptStarted{Step: 1, Attempt: 1}, Facts{})
+	if !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("error = %v, want stale snapshot", err)
+	}
+	if got != ahead || len(rec.commits) != 1 {
+		t.Fatalf("gapped commit advanced to %#v with commits %#v", got, rec.commits)
+	}
+}
+
+func TestCommitRejectsFromOutsideTheChain(t *testing.T) {
+	ctx := context.Background()
+	rec := &recorder{}
+	runner := newRunner(t, rec)
+	from := snapAt(t, core.PhaseIdle)
+
+	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	foreign := mid
+	foreign.State.Attempt = 2
+	got, err := runner.Commit(ctx, foreign, core.AttemptStarted{Step: 1, Attempt: 2}, Facts{})
+	if !errors.Is(err, errBrokenChain) {
+		t.Fatalf("error = %v, want the broken chain rejected", err)
+	}
+	if got != foreign || len(rec.commits) != 1 {
+		t.Fatalf("foreign From advanced to %#v with commits %#v", got, rec.commits)
 	}
 }
 
