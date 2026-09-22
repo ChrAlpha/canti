@@ -251,7 +251,7 @@ func (s State) Next(event Event) (State, error) {
 				s.Phase = PhaseCancelling
 				return s, nil
 			}
-			s.Phase = PhaseAwaitingObservation
+			s.Phase = PhaseJobBound
 			return s, nil
 		}
 	case JobStarted:
@@ -369,7 +369,12 @@ func (s State) validate(event Event) error {
 		if e.Execution == ExecutionUnknown {
 			return nil
 		}
-		return knownExecution(e.Execution)
+		if err := knownExecution(e.Execution); err != nil {
+			return err
+		}
+		if s.JobID == "" && (e.Execution == ExecutionExited || e.Execution == ExecutionTimedOut) {
+			return fmt.Errorf("%w: %s cannot be resolved without a started job", ErrInvalidEvent, e.Execution)
+		}
 	case StopRequested:
 		if e.Reason == "" {
 			return fmt.Errorf("%w: stop reason is required", ErrInvalidEvent)

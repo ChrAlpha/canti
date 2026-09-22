@@ -128,9 +128,11 @@ func legalTransitions() []transition {
 		{"cancelling keeps unknown outcome", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
 		{"cancelling keeps first stop reason", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
 
-		{"resolution records found job", at(core.PhaseNeedsResolution, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob)},
+		{"resolution records found job for starting", at(core.PhaseNeedsResolution, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
+		{"resolution reconfirms known job for starting", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
 		{"resolution with pending stop records found job", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
 		{"resolution continues", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
+		{"jobless resolution records a failed start", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
 		{"resolution completes pending stop", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
 		{"resolution abandons with the outcome unknown", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopUnresolved))},
 		{"resolution abandons keeping the pending stop reason", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
@@ -391,6 +393,8 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"empty execution observed", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob), core.Observed{EffectID: "effect-1"}},
 		{"empty execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1"}},
 		{"unsupported execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: "bogus"}},
+		{"exit resolved without job", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}},
+		{"timeout resolved without job", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionTimedOut}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
