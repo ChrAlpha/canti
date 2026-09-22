@@ -198,6 +198,8 @@ func TestValidateRejectsIncoherentStates(t *testing.T) {
 		{"returned with effect", at(core.PhaseReturned, withRev(1), withExec, func(s *core.State) { s.Decision.Kind = core.Return })},
 		{"returned with reason", at(core.PhaseReturned, withRev(1), withReason(core.StopCancelled), func(s *core.State) { s.Decision = core.Decision{Kind: core.Return} })},
 		{"stopped without reason", at(core.PhaseStopped)},
+		{"stopped with unknown reason", at(core.PhaseStopped, withReason("lol"))},
+		{"stopped with unknown decision kind", at(core.PhaseStopped, withReason(core.StopCancelled), func(s *core.State) { s.Decision.Kind = "bogus" })},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -357,6 +359,9 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"nil event", at(core.PhaseIdle), nil},
 		{"pointer event", at(core.PhaseIdle), &core.RequestFrozen{}},
 		{"empty stop reason", at(core.PhaseIdle), core.StopRequested{}},
+		{"unsupported stop reason", at(core.PhaseIdle), core.StopRequested{Reason: "lol"}},
+		{"core-owned stop reason", at(core.PhaseIdle), core.StopRequested{Reason: core.StopStepsExhausted}},
+		{"unresolved as a requested stop", at(core.PhaseIdle), core.StopRequested{Reason: core.StopUnresolved}},
 		{"zero attempt started", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{}},
 		{"stale attempt started", at(core.PhaseRequestFrozen, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 1}},
 		{"attempt started ahead", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 2}},

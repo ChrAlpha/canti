@@ -133,6 +133,16 @@ func (s State) Validate() error {
 	if s.RequestRev < 0 {
 		return fail("request revision %d is negative", s.RequestRev)
 	}
+	switch s.Reason {
+	case "", StopCancelled, StopTimedOut, StopBudgetExhausted, StopStepsExhausted, StopAttemptsExhausted, StopProtocolFailure, StopUnresolved:
+	default:
+		return fail("unknown stop reason %q", s.Reason)
+	}
+	switch s.Decision.Kind {
+	case "", Exec, Return:
+	default:
+		return fail("unknown decision kind %q", s.Decision.Kind)
+	}
 	hasDecision := s.Decision != Decision{}
 	switch s.Phase {
 	case PhaseIdle, PhaseRequestFrozen, PhaseRequestSent, PhaseResponseSaved:
@@ -383,6 +393,11 @@ func validateEvent(event Event) error {
 	case StopRequested:
 		if e.Reason == "" {
 			return fmt.Errorf("%w: stop reason is required", ErrInvalidEvent)
+		}
+		switch e.Reason {
+		case StopCancelled, StopTimedOut, StopBudgetExhausted:
+		default:
+			return fmt.Errorf("%w: %q is not a reportable stop reason", ErrInvalidEvent, e.Reason)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
