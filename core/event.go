@@ -13,7 +13,7 @@ const (
 )
 
 // StopReason records why a run stopped without a return decision. The first
-// three are reportable through StopRequested; the rest only the core's own
+// four are reportable through StopRequested; the rest only the core's own
 // rules may set.
 type StopReason string
 
@@ -21,6 +21,7 @@ const (
 	StopCancelled         StopReason = "cancelled"
 	StopTimedOut          StopReason = "timed_out"
 	StopBudgetExhausted   StopReason = "budget_exhausted"
+	StopUnrecoverable     StopReason = "unrecoverable"
 	StopStepsExhausted    StopReason = "steps_exhausted"
 	StopAttemptsExhausted StopReason = "attempts_exhausted"
 	StopProtocolFailure   StopReason = "protocol_failure"

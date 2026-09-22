@@ -94,6 +94,7 @@ func legalTransitions() []transition {
 		{"idle freezes request", at(core.PhaseIdle), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(1))},
 		{"repair freezes a new request", at(core.PhaseIdle, withRev(1), withAttempt(2)), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(2), withAttempt(2))},
 		{"idle stops", at(core.PhaseIdle), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withReason(core.StopCancelled))},
+		{"idle stops as unrecoverable", at(core.PhaseIdle), core.StopRequested{Reason: core.StopUnrecoverable}, at(core.PhaseStopped, withReason(core.StopUnrecoverable))},
 
 		{"frozen request starts attempt", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 1}, at(core.PhaseRequestSent, withRev(1))},
 		{"frozen request stops", at(core.PhaseRequestFrozen, withRev(1)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withRev(1), withReason(core.StopTimedOut))},

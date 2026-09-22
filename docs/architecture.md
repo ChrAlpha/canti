@@ -158,9 +158,9 @@ Rules the table enforces:
   reproduce the decode error by calling `core.Decode` on the saved body).
   Both consume attempts from the same per-step budget until `MaxAttempts`,
   stopping with `attempts_exhausted` or `protocol_failure`. An adapter must
-  map conditions a retry cannot fix — authentication, configuration,
-  exhausted quota — to `StopRequested` with a reason, not to
-  `ResponseIncomplete`.
+  map conditions a retry cannot fix to `StopRequested`, not to
+  `ResponseIncomplete`: authentication and configuration failures are
+  `unrecoverable`, an exhausted quota is `budget_exhausted`.
 - An `exec` decision commits `effect_saved` with an effect ID derived from
   the run ID and step. A `return` decision closes the run as `returned`.
 - Binding and starting are separate boundaries. `JobBound` records which
@@ -196,7 +196,10 @@ Rules the table enforces:
 - `StopRequested` stops immediately while no effect exists and enters
   `cancelling` once one may exist. `cancelling` records the true result before
   the run becomes `stopped`. In `cancelling` and `needs_resolution` a stop
-  request is recorded without changing phase; the first reason is kept.
+  request is recorded without changing phase; the first reason is kept. Only
+  `cancelled`, `timed_out`, `budget_exhausted`, and `unrecoverable` may be
+  reported; the remaining stop reasons are set by the core's own rules and
+  cannot be claimed from outside.
 - `JobBound` requires effect and job IDs and must match a job already known;
   `JobStarted` must name the bound job.
 - Adding a capability must not add an event kind; capabilities are payloads.

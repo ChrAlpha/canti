@@ -135,7 +135,7 @@ func (s State) Validate() error {
 		return fail("request revision %d is negative", s.RequestRev)
 	}
 	switch s.Reason {
-	case "", StopCancelled, StopTimedOut, StopBudgetExhausted, StopStepsExhausted, StopAttemptsExhausted, StopProtocolFailure, StopUnresolved:
+	case "", StopCancelled, StopTimedOut, StopBudgetExhausted, StopUnrecoverable, StopStepsExhausted, StopAttemptsExhausted, StopProtocolFailure, StopUnresolved:
 	default:
 		return fail("unknown stop reason %q", s.Reason)
 	}
@@ -406,7 +406,7 @@ func validateEvent(event Event) error {
 			return fmt.Errorf("%w: stop reason is required", ErrInvalidEvent)
 		}
 		switch e.Reason {
-		case StopCancelled, StopTimedOut, StopBudgetExhausted:
+		case StopCancelled, StopTimedOut, StopBudgetExhausted, StopUnrecoverable:
 		default:
 			return fmt.Errorf("%w: %q is not a reportable stop reason", ErrInvalidEvent, e.Reason)
 		}
