@@ -214,10 +214,10 @@ func (s State) Validate() error {
 
 // Next applies one event. It returns the unchanged state with
 // ErrInvalidEvent for malformed content, ErrIllegalTransition for a pair the
-// current phase does not accept whatever the payload, and ErrInvalidEvent
-// for an identity claim that contradicts the current position of a legal
-// pair. A legal event may leave the state equal to its input; the harness
-// still records it.
+// current phase does not accept whatever its identity claims, and
+// ErrInvalidEvent for a claim that contradicts the current position of a
+// legal pair. A legal event may leave the state equal to its input; the
+// harness still records it.
 func (s State) Next(event Event) (State, error) {
 	if err := validateEvent(event); err != nil {
 		return s, err

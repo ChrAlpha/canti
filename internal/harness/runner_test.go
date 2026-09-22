@@ -11,11 +11,10 @@ import (
 )
 
 var (
-	errInjected    = errors.New("injected boundary failure")
-	errExecutor    = errors.New("executor failure")
-	errBrokenChain = errors.New("from does not extend the committed chain")
-	execBody       = []byte(`{"kind":"exec","payload":"printf ok"}`)
-	returnBody     = []byte(`{"kind":"return","payload":"done"}`)
+	errInjected = errors.New("injected boundary failure")
+	errExecutor = errors.New("executor failure")
+	execBody    = []byte(`{"kind":"exec","payload":"printf ok"}`)
+	returnBody  = []byte(`{"kind":"return","payload":"done"}`)
 )
 
 type recorder struct {
@@ -50,7 +49,7 @@ func (r *recorder) Commit(_ context.Context, transition Transition) error {
 		return ErrStaleSnapshot
 	}
 	if previous, ok := r.bySeq[transition.Seq-1]; ok && transition.From != previous.To {
-		return errBrokenChain
+		return ErrBrokenChain
 	}
 	if r.bySeq == nil {
 		r.bySeq = make(map[int64]Transition)
@@ -327,7 +326,7 @@ func TestCommitRejectsFromOutsideTheChain(t *testing.T) {
 	foreign := mid
 	foreign.State.Attempt = 2
 	got, err := runner.Commit(ctx, foreign, core.AttemptStarted{Step: 1, Attempt: 2}, Facts{})
-	if !errors.Is(err, errBrokenChain) {
+	if !errors.Is(err, ErrBrokenChain) {
 		t.Fatalf("error = %v, want the broken chain rejected", err)
 	}
 	if got != foreign || len(rec.commits) != 1 {

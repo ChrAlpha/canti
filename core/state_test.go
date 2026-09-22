@@ -89,6 +89,28 @@ type transition struct {
 	want  core.State
 }
 
+func eventSamples() []struct {
+	event core.Event
+	kind  string
+} {
+	return []struct {
+		event core.Event
+		kind  string
+	}{
+		{core.RequestFrozen{}, "request_frozen"},
+		{core.AttemptStarted{Step: 1, Attempt: 1}, "attempt_started"},
+		{core.ResponseSaved{Step: 1, Attempt: 1}, "response_saved"},
+		{core.ResponseIncomplete{Step: 1, Attempt: 1}, "response_incomplete"},
+		{core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, "response_loaded"},
+		{core.JobBound{EffectID: "effect-1", JobID: "job-1"}, "job_bound"},
+		{core.JobStarted{EffectID: "effect-1", JobID: "job-1"}, "job_started"},
+		{core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, "observed"},
+		{core.OutcomeUnknown{EffectID: "effect-1"}, "outcome_unknown"},
+		{core.StopRequested{Reason: core.StopCancelled}, "stop_requested"},
+		{core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, "resolved"},
+	}
+}
+
 func legalTransitions() []transition {
 	return []transition{
 		{"idle freezes request", at(core.PhaseIdle), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(1))},
@@ -222,24 +244,8 @@ func TestValidateRejectsIncoherentStates(t *testing.T) {
 func TestEventKindsAreStableAndUnique(t *testing.T) {
 	t.Parallel()
 
-	want := []struct {
-		event core.Event
-		kind  string
-	}{
-		{core.RequestFrozen{}, "request_frozen"},
-		{core.AttemptStarted{}, "attempt_started"},
-		{core.ResponseSaved{}, "response_saved"},
-		{core.ResponseIncomplete{}, "response_incomplete"},
-		{core.ResponseLoaded{}, "response_loaded"},
-		{core.JobBound{}, "job_bound"},
-		{core.JobStarted{}, "job_started"},
-		{core.Observed{}, "observed"},
-		{core.OutcomeUnknown{}, "outcome_unknown"},
-		{core.StopRequested{}, "stop_requested"},
-		{core.Resolved{}, "resolved"},
-	}
-	seen := make(map[string]bool, len(want))
-	for _, tt := range want {
+	seen := make(map[string]bool)
+	for _, tt := range eventSamples() {
 		if got := tt.event.Kind(); got != tt.kind {
 			t.Errorf("%T.Kind() = %q, want %q", tt.event, got, tt.kind)
 		}
@@ -326,12 +332,9 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 		core.PhaseEffectSaved, core.PhaseJobBound, core.PhaseAwaitingObservation, core.PhaseCancelling,
 		core.PhaseReturned, core.PhaseNeedsResolution, core.PhaseStopped, "", "future_phase",
 	}
-	events := []core.Event{
-		core.RequestFrozen{}, core.AttemptStarted{Step: 1, Attempt: 1}, core.ResponseSaved{Step: 1, Attempt: 1}, core.ResponseIncomplete{Step: 1, Attempt: 1},
-		core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, core.JobBound{EffectID: "effect-1", JobID: "job-1"},
-		core.JobStarted{EffectID: "effect-1", JobID: "job-1"},
-		core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, core.OutcomeUnknown{EffectID: "effect-1"},
-		core.StopRequested{Reason: core.StopCancelled}, core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited},
+	var events []core.Event
+	for _, sample := range eventSamples() {
+		events = append(events, sample.event)
 	}
 
 	checked := 0
@@ -521,7 +524,7 @@ func TestTrajectoryRepairsProtocolFailureWithNewRequest(t *testing.T) {
 	}
 }
 
-func TestIllegalPairsReportIllegalWhateverThePayload(t *testing.T) {
+func TestIllegalPairsReportIllegalWhateverTheClaims(t *testing.T) {
 	t.Parallel()
 
 	start, err := core.NewState("run-1", core.Limits{MaxSteps: 3, MaxAttempts: 2})

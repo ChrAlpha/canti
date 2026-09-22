@@ -10,8 +10,13 @@ import (
 
 // ErrStaleSnapshot reports a commit whose sequence is not the next one for
 // the run and whose event ID does not match the record already committed at
-// that sequence.
+// that sequence. Reloading the latest snapshot and re-deciding is the remedy.
 var ErrStaleSnapshot = errors.New("harness: stale snapshot")
+
+// ErrBrokenChain reports a commit whose From does not equal the state
+// committed at the previous sequence. The caller's snapshot is corrupt, not
+// merely behind; the commit must not be retried.
+var ErrBrokenChain = errors.New("harness: transition does not extend the committed chain")
 
 // Store commits one transition and its attached facts atomically. Inside the
 // same transaction Commit must verify that Seq is exactly one past the last
@@ -19,8 +24,9 @@ var ErrStaleSnapshot = errors.New("harness: stale snapshot")
 // ErrStaleSnapshot otherwise; the sequence, not the state value, is the
 // compare-and-set, because a legal event may leave the state unchanged and is
 // still recorded. It must also verify that From equals the state committed at
-// the previous sequence and reject a transition that would break the chain —
-// an integrity assertion the sequence alone cannot make. If a record already
+// the previous sequence and reject a transition that would break the chain
+// with ErrBrokenChain — an integrity assertion the sequence alone cannot
+// make. If a record already
 // exists at Seq, a transition with the same event ID and content must succeed
 // without recording again — this is how a caller resolves a commit whose
 // acknowledgement was lost — while conflicting content must fail and never
