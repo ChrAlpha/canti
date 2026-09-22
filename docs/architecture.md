@@ -109,6 +109,7 @@ type State struct {
 	Decision   Decision
 	EffectID   string
 	JobID      string
+	Started    bool
 	Reason     StopReason
 }
 ```
@@ -165,10 +166,14 @@ Rules the table enforces:
 - Binding and starting are separate boundaries. `JobBound` records which
   backend job owns the effect and never implies execution; only from a
   committed `job_bound` phase may a start be issued, recorded as
-  `JobStarted`. From then on side effects may exist. `job_bound` also accepts
-  a direct `Observed` so a host that inspects a bound job — one whose start
-  was issued but whose commit was lost — can record an already-finished
-  result; the current runner instead always re-issues the idempotent start.
+  `JobStarted`, which sets `Started`. From then on side effects may exist.
+  `job_bound` always means no start was committed — `Validate` enforces it —
+  though a crashed controller may have issued one without committing, which
+  is why `Start` must be a no-op for a job that ever started. `job_bound`
+  also accepts a direct `Observed` so a host that inspects a bound job — one
+  whose start was issued but whose commit was lost — can record an
+  already-finished result; the current runner instead always re-issues the
+  idempotent start.
 - Outside `cancelling`, `Observed` completes the step: the run continues in
   `idle` at the next step with identities cleared, or stops with
   `steps_exhausted`. That stop is deliberate: the final observation is
@@ -178,10 +183,11 @@ Rules the table enforces:
   `cancelling` only `cancelled`; any other outcome must first record its job
   with `JobBound`.
 - `OutcomeUnknown` enters `needs_resolution`. It accepts a later `JobBound`
-  to resume behind the start boundary at `job_bound` (or at `cancelling` when
-  a stop is pending): without a committed start the found job cannot have
-  run, and `Start` stays idempotent for one that did. It also accepts an
-  explicit `Resolved`: a known outcome continues the run or completes a
+  to resume behind the start boundary at `job_bound` when no start was
+  committed, at `awaiting_observation` when one was, or at `cancelling` when
+  a stop is pending — so an unknown outcome after a committed start goes back
+  to inspection and never re-issues the start. It also accepts an explicit
+  `Resolved`: a known outcome continues the run or completes a
   pending stop, except that a jobless resolution cannot claim `exited` or
   `timed_out`, which are impossible without a started job; resolving to
   `unknown` abandons the run as `stopped`, keeping the first stop reason or
@@ -290,10 +296,10 @@ execution backend.
 | `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop. In-process, this phase also covers an attempt that is still in flight; only a restart interprets it as lost |
 | `response_saved` | `decode` | Load the saved bytes; never call the model again for this attempt |
 | `effect_saved` | `bind` | `Bind` by effect ID; find the existing job before creating one; binding must not execute anything |
-| `job_bound` | `start` | `Start` the bound job; idempotent for an already-started job |
+| `job_bound` | `start` | `Start` the bound job. A crashed controller may have issued an uncommitted start, so `Start` must be a no-op for a job that ever started, even a finished one |
 | `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
 | `cancelling` | `cancel` | With no job recorded, call the fencing `Cancel` by effect ID first, then `Inspect`: a positively missing job is observed as `cancelled` — sound because an unstarted bind can never execute and the fence stops a bind that lands late. An indeterminate lookup is an executor error, never a missing job. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
-| `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`) or `Resolved`; never redispatch |
+| `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`, or at `awaiting_observation` after a committed start) or `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
 
@@ -340,8 +346,10 @@ The execution backend is keyed by the stable effect ID. `Bind` finds or
 creates the job that owns the effect and must not execute anything; a
 deterministic per-effect identity (for Docker, a create with a name derived
 from the effect ID) makes late duplicates collide instead of running twice.
-`Start` may only start the bound job and is idempotent for an already-started
-one. `Inspect` and `Cancel` never create or start a job; `Cancel` is
+`Start` may only start the bound job and must be a no-op for a job that has
+ever been started, even one that already finished — a naive `docker start`
+restarts an exited container and does not satisfy this, so the executor gates
+on its own record. `Inspect` and `Cancel` never create or start a job; `Cancel` is
 idempotent and must fence the effect so an unstarted bind — including one that
 lands after the cancel — can never start. A concrete executor must bind the
 effect ID to the full execution specification it runs under (backend,

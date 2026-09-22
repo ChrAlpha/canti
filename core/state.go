@@ -56,6 +56,7 @@ type State struct {
 	Decision   Decision
 	EffectID   string
 	JobID      string
+	Started    bool
 	Reason     StopReason
 }
 
@@ -149,8 +150,8 @@ func (s State) Validate() error {
 		if s.Phase != PhaseIdle && s.RequestRev < 1 {
 			return fail("a frozen request is required in phase %q", s.Phase)
 		}
-		if hasDecision || s.EffectID != "" || s.JobID != "" || s.Reason != "" {
-			return fail("no decision, effect, job, or reason is allowed in phase %q", s.Phase)
+		if hasDecision || s.EffectID != "" || s.JobID != "" || s.Started || s.Reason != "" {
+			return fail("no decision, effect, job, start, or reason is allowed in phase %q", s.Phase)
 		}
 	case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling, PhaseNeedsResolution:
 		if s.RequestRev < 1 {
@@ -167,12 +168,18 @@ func (s State) Validate() error {
 			if s.JobID != "" {
 				return fail("no job is allowed before binding")
 			}
+			if s.Started {
+				return fail("no start is allowed before binding")
+			}
 			if s.Reason != "" {
 				return fail("no stop reason is allowed in phase %q", s.Phase)
 			}
 		case PhaseJobBound, PhaseAwaitingObservation:
 			if s.JobID == "" {
 				return fail("a bound job is required in phase %q", s.Phase)
+			}
+			if s.Started != (s.Phase == PhaseAwaitingObservation) {
+				return fail("phase %q contradicts the committed start", s.Phase)
 			}
 			if s.Reason != "" {
 				return fail("no stop reason is allowed in phase %q", s.Phase)
@@ -189,8 +196,8 @@ func (s State) Validate() error {
 		if s.Decision.Kind != Return {
 			return fail("a return decision is required in phase %q", s.Phase)
 		}
-		if s.EffectID != "" || s.JobID != "" || s.Reason != "" {
-			return fail("no effect, job, or reason is allowed in phase %q", s.Phase)
+		if s.EffectID != "" || s.JobID != "" || s.Started || s.Reason != "" {
+			return fail("no effect, job, start, or reason is allowed in phase %q", s.Phase)
 		}
 	case PhaseStopped:
 		if s.Reason == "" {
@@ -275,9 +282,12 @@ func (s State) Next(event Event) (State, error) {
 			case PhaseEffectSaved:
 				s.Phase = PhaseJobBound
 			case PhaseNeedsResolution:
-				if s.Reason != "" {
+				switch {
+				case s.Reason != "":
 					s.Phase = PhaseCancelling
-				} else {
+				case s.Started:
+					s.Phase = PhaseAwaitingObservation
+				default:
 					s.Phase = PhaseJobBound
 				}
 			}
@@ -292,6 +302,7 @@ func (s State) Next(event Event) (State, error) {
 				return s, fmt.Errorf("%w: job %q is not the bound job %q", ErrInvalidEvent, e.JobID, s.JobID)
 			}
 			s.Phase = PhaseAwaitingObservation
+			s.Started = true
 			return s, nil
 		}
 	case Observed:
@@ -513,6 +524,7 @@ func (s State) advance() State {
 	s.Decision = Decision{}
 	s.EffectID = ""
 	s.JobID = ""
+	s.Started = false
 	return s
 }
 

@@ -4,10 +4,13 @@ import "context"
 
 // Executor owns external effects, keyed by the stable effect ID. Bind must
 // create or return the job that owns an effect without executing anything;
-// only Start may cause execution, and it must be idempotent for an
-// already-started job and start nothing but the bound job. Bind must honor
-// cancellation before creating a job and reject a changed command under an
-// existing identity. Inspect and Cancel must never create or start a job.
+// only Start may cause execution, and it must start nothing but the bound
+// job. Start must be a no-op for a job that has ever been started — including
+// one that already finished — reporting it as-is and never running it again;
+// a naive backend restart, such as docker start on an exited container, does
+// not satisfy this, so the executor must gate on its own record of the
+// start. Bind must honor cancellation before creating a job and reject a
+// changed command under an existing identity. Inspect and Cancel must never create or start a job.
 // Inspect may report found == false only when the backend positively
 // determined that no job owns the effect; an indeterminate lookup must return
 // an error instead. Cancel must be idempotent and must prevent any later

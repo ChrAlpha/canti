@@ -33,8 +33,8 @@ The `core` package is a stateless semantic kernel:
   are `exec` and `return`.
 - `core.State` is the complete projection needed to continue a run: run, step,
   attempt, request revision, phase, limits, last decision, effect and job
-  identity, stop reason. `State.Validate` rejects projections no legal run
-  reaches.
+  identity, committed start, stop reason. `State.Validate` rejects projections
+  no legal run reaches.
 - `State.Intent` names the single action the harness may take next; closed and
   unknown phases halt.
 - `State.Next` applies one reported fact and returns the new state, or the
