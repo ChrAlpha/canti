@@ -93,18 +93,18 @@ func legalTransitions() []transition {
 		{"repair freezes a new request", at(core.PhaseIdle, withRev(1), withAttempt(2)), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(2), withAttempt(2))},
 		{"idle stops", at(core.PhaseIdle), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withReason(core.StopCancelled))},
 
-		{"frozen request starts attempt", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Attempt: 1}, at(core.PhaseRequestSent, withRev(1))},
+		{"frozen request starts attempt", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 1}, at(core.PhaseRequestSent, withRev(1))},
 		{"frozen request stops", at(core.PhaseRequestFrozen, withRev(1)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withRev(1), withReason(core.StopTimedOut))},
 
-		{"sent request counts lost attempt", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Attempt: 2}, at(core.PhaseRequestSent, withRev(1), withAttempt(2))},
-		{"sent request saves response", at(core.PhaseRequestSent, withRev(1)), core.ResponseSaved{Attempt: 1}, at(core.PhaseResponseSaved, withRev(1))},
-		{"sent request retries incomplete response", at(core.PhaseRequestSent, withRev(1)), core.ResponseIncomplete{Attempt: 1}, at(core.PhaseRequestFrozen, withRev(1), withAttempt(2))},
+		{"sent request counts lost attempt", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 2}, at(core.PhaseRequestSent, withRev(1), withAttempt(2))},
+		{"sent request saves response", at(core.PhaseRequestSent, withRev(1)), core.ResponseSaved{Step: 1, Attempt: 1}, at(core.PhaseResponseSaved, withRev(1))},
+		{"sent request retries incomplete response", at(core.PhaseRequestSent, withRev(1)), core.ResponseIncomplete{Step: 1, Attempt: 1}, at(core.PhaseRequestFrozen, withRev(1), withAttempt(2))},
 		{"sent request stops", at(core.PhaseRequestSent, withRev(1)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withRev(1), withReason(core.StopTimedOut))},
 
-		{"saved response decodes return", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Attempt: 1, Body: returnBody}, at(core.PhaseReturned, withRev(1), func(s *core.State) {
+		{"saved response decodes return", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: returnBody}, at(core.PhaseReturned, withRev(1), func(s *core.State) {
 			s.Decision = core.Decision{Kind: core.Return, Payload: "done"}
 		})},
-		{"saved response repairs invalid decision with a new request", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Attempt: 1, Body: invalidBody}, at(core.PhaseIdle, withRev(1), withAttempt(2))},
+		{"saved response repairs invalid decision with a new request", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: invalidBody}, at(core.PhaseIdle, withRev(1), withAttempt(2))},
 		{"saved response stops", at(core.PhaseResponseSaved, withRev(1)), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withRev(1), withReason(core.StopCancelled))},
 
 		{"saved effect binds job", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
@@ -245,7 +245,7 @@ func TestNextDerivesEffectFromExecDecision(t *testing.T) {
 	t.Parallel()
 
 	from := at(core.PhaseResponseSaved, withRev(1))
-	got, err := from.Next(core.ResponseLoaded{Attempt: 1, Body: execBody})
+	got, err := from.Next(core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody})
 	if err != nil {
 		t.Fatalf("Next() error = %v", err)
 	}
@@ -267,7 +267,7 @@ func TestEffectIDIsStableAndDistinct(t *testing.T) {
 		from := at(core.PhaseResponseSaved, withRev(1), withStep(step))
 		from.RunID = runID
 		from.Limits.MaxSteps = step
-		got, err := from.Next(core.ResponseLoaded{Attempt: 1, Body: execBody})
+		got, err := from.Next(core.ResponseLoaded{Step: step, Attempt: 1, Body: execBody})
 		if err != nil {
 			t.Fatalf("Next() error = %v", err)
 		}
@@ -315,8 +315,8 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 		core.PhaseReturned, core.PhaseNeedsResolution, core.PhaseStopped, "", "future_phase",
 	}
 	events := []core.Event{
-		core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1}, core.ResponseIncomplete{Attempt: 1},
-		core.ResponseLoaded{Attempt: 1, Body: execBody}, core.JobBound{EffectID: "effect-1", JobID: "job-1"},
+		core.RequestFrozen{}, core.AttemptStarted{Step: 1, Attempt: 1}, core.ResponseSaved{Step: 1, Attempt: 1}, core.ResponseIncomplete{Step: 1, Attempt: 1},
+		core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, core.JobBound{EffectID: "effect-1", JobID: "job-1"},
 		core.JobStarted{EffectID: "effect-1", JobID: "job-1"},
 		core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, core.OutcomeUnknown{EffectID: "effect-1"},
 		core.StopRequested{Reason: core.StopCancelled}, core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited},
@@ -356,13 +356,17 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"pointer event", at(core.PhaseIdle), &core.RequestFrozen{}},
 		{"empty stop reason", at(core.PhaseIdle), core.StopRequested{}},
 		{"zero attempt started", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{}},
-		{"stale attempt started", at(core.PhaseRequestFrozen, withRev(1), withAttempt(2)), core.AttemptStarted{Attempt: 1}},
-		{"redelivered attempt start after send", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Attempt: 1}},
-		{"skipped attempt start", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Attempt: 3}},
-		{"stale response saved", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseSaved{Attempt: 1}},
-		{"stale incomplete response", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Attempt: 1}},
-		{"empty response body", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Attempt: 1}},
-		{"stale response loaded", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Attempt: 1, Body: execBody}},
+		{"stale attempt started", at(core.PhaseRequestFrozen, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 1}},
+		{"redelivered attempt start after send", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 1}},
+		{"skipped attempt start", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 3}},
+		{"stale response saved", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseSaved{Step: 1, Attempt: 1}},
+		{"attempt started for an earlier step", at(core.PhaseRequestSent, withRev(1), withStep(2)), core.AttemptStarted{Step: 1, Attempt: 2}},
+		{"response saved for an earlier step", at(core.PhaseRequestSent, withRev(1), withStep(2)), core.ResponseSaved{Step: 1, Attempt: 1}},
+		{"incomplete response for an earlier step", at(core.PhaseRequestSent, withRev(1), withStep(2)), core.ResponseIncomplete{Step: 1, Attempt: 1}},
+		{"response loaded for an earlier step", at(core.PhaseResponseSaved, withRev(1), withStep(2)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
+		{"stale incomplete response", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Step: 1, Attempt: 1}},
+		{"empty response body", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1}},
+		{"stale response loaded", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
 		{"empty job bound", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-1"}},
 		{"bound job without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{JobID: "job-1"}},
 		{"bound job for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-2", JobID: "job-1"}},
@@ -402,13 +406,112 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 	}
 }
 
+func walk(t *testing.T, state core.State, events ...core.Event) core.State {
+	t.Helper()
+	for _, event := range events {
+		next, err := state.Next(event)
+		if err != nil {
+			t.Fatalf("Next(%T) error = %v", event, err)
+		}
+		state = next
+	}
+	return state
+}
+
+func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
+	t.Parallel()
+
+	start, err := core.NewState("run-1", core.Limits{MaxSteps: 3, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effectSaved1 := walk(t, start,
+		core.RequestFrozen{},
+		core.AttemptStarted{Step: 1, Attempt: 1},
+		core.ResponseSaved{Step: 1, Attempt: 1},
+		core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody},
+	)
+	effect1 := effectSaved1.EffectID
+	idle2 := walk(t, effectSaved1,
+		core.JobBound{EffectID: effect1, JobID: "job-1"},
+		core.JobStarted{EffectID: effect1, JobID: "job-1"},
+		core.Observed{EffectID: effect1, Execution: core.ExecutionExited},
+	)
+	sent2 := walk(t, idle2, core.RequestFrozen{}, core.AttemptStarted{Step: 2, Attempt: 1})
+	saved2 := walk(t, sent2, core.ResponseSaved{Step: 2, Attempt: 1})
+	effectSaved2 := walk(t, saved2, core.ResponseLoaded{Step: 2, Attempt: 1, Body: execBody})
+	effect2 := effectSaved2.EffectID
+	if effect1 == effect2 {
+		t.Fatal("steps share an effect identity")
+	}
+	awaiting2 := walk(t, effectSaved2,
+		core.JobBound{EffectID: effect2, JobID: "job-2"},
+		core.JobStarted{EffectID: effect2, JobID: "job-2"},
+	)
+
+	echoes := []struct {
+		name  string
+		from  core.State
+		event core.Event
+	}{
+		{"lost attempt of step 1", sent2, core.AttemptStarted{Step: 1, Attempt: 2}},
+		{"response of step 1", sent2, core.ResponseSaved{Step: 1, Attempt: 1}},
+		{"incomplete response of step 1", sent2, core.ResponseIncomplete{Step: 1, Attempt: 1}},
+		{"loaded response of step 1", saved2, core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
+		{"bind of step 1", effectSaved2, core.JobBound{EffectID: effect1, JobID: "job-1"}},
+		{"failed start of step 1", effectSaved2, core.Observed{EffectID: effect1, Execution: core.ExecutionFailedToStart}},
+		{"unknown outcome of step 1", effectSaved2, core.OutcomeUnknown{EffectID: effect1}},
+		{"start of step 1", awaiting2, core.JobStarted{EffectID: effect1, JobID: "job-1"}},
+		{"observation of step 1", awaiting2, core.Observed{EffectID: effect1, Execution: core.ExecutionExited}},
+	}
+	for _, tt := range echoes {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.from.Next(tt.event)
+			if !errors.Is(err, core.ErrInvalidEvent) {
+				t.Fatalf("error = %v, want invalid event", err)
+			}
+			if got != tt.from {
+				t.Fatalf("echo changed state to %#v", got)
+			}
+		})
+	}
+}
+
+func TestTrajectoryRepairsProtocolFailureWithNewRequest(t *testing.T) {
+	t.Parallel()
+
+	start, err := core.NewState("run-1", core.Limits{MaxSteps: 3, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired := walk(t, start,
+		core.RequestFrozen{},
+		core.AttemptStarted{Step: 1, Attempt: 1},
+		core.ResponseSaved{Step: 1, Attempt: 1},
+		core.ResponseLoaded{Step: 1, Attempt: 1, Body: invalidBody},
+	)
+	if repaired.Phase != core.PhaseIdle || repaired.RequestRev != 1 || repaired.Attempt != 2 {
+		t.Fatalf("repair position = %#v, want idle at revision 1, attempt 2", repaired)
+	}
+	decided := walk(t, repaired,
+		core.RequestFrozen{},
+		core.AttemptStarted{Step: 1, Attempt: 2},
+		core.ResponseSaved{Step: 1, Attempt: 2},
+		core.ResponseLoaded{Step: 1, Attempt: 2, Body: execBody},
+	)
+	if decided.Phase != core.PhaseEffectSaved || decided.RequestRev != 2 || decided.Step != 1 {
+		t.Fatalf("decided = %#v, want an effect from the second revision of step 1", decided)
+	}
+}
+
 func TestNextEnforcesBudgets(t *testing.T) {
 	t.Parallel()
 
 	tests := []transition{
-		{"transport attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Attempt: 2}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
-		{"lost attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.AttemptStarted{Attempt: 3}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
-		{"protocol attempts exhausted", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Attempt: 2, Body: invalidBody}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopProtocolFailure))},
+		{"transport attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Step: 1, Attempt: 2}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
+		{"lost attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 3}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
+		{"protocol attempts exhausted", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 2, Body: invalidBody}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopProtocolFailure))},
 		{"steps exhausted after observation", at(core.PhaseAwaitingObservation, withRev(1), withStep(3), withExec, withJob), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after failed start", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after resolution", at(core.PhaseNeedsResolution, withRev(1), withStep(3), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withReason(core.StopStepsExhausted))},

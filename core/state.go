@@ -316,12 +316,13 @@ func (s State) validate(event Event) error {
 		if e.Attempt < 1 {
 			return fmt.Errorf("%w: attempt number is required", ErrInvalidEvent)
 		}
+		return s.claimStep(e.Step)
 	case ResponseSaved:
-		return s.claimAttempt(e.Attempt)
+		return s.claimAttempt(e.Step, e.Attempt)
 	case ResponseIncomplete:
-		return s.claimAttempt(e.Attempt)
+		return s.claimAttempt(e.Step, e.Attempt)
 	case ResponseLoaded:
-		if err := s.claimAttempt(e.Attempt); err != nil {
+		if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
 			return err
 		}
 		if len(e.Body) == 0 {
@@ -379,7 +380,17 @@ func (s State) validate(event Event) error {
 	return nil
 }
 
-func (s State) claimAttempt(attempt int) error {
+func (s State) claimStep(step int) error {
+	if step != s.Step {
+		return fmt.Errorf("%w: step %d does not match current step %d", ErrInvalidEvent, step, s.Step)
+	}
+	return nil
+}
+
+func (s State) claimAttempt(step, attempt int) error {
+	if err := s.claimStep(step); err != nil {
+		return err
+	}
 	if attempt != s.Attempt {
 		return fmt.Errorf("%w: attempt %d does not match current attempt %d", ErrInvalidEvent, attempt, s.Attempt)
 	}

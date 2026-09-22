@@ -37,21 +37,32 @@ type Event interface {
 // under the next request revision of the current step.
 type RequestFrozen struct{}
 
-// AttemptStarted reports that the named attempt is about to be sent. In
-// request_frozen it names the current attempt; in request_sent it names the
-// next attempt and reports that the previous send was lost.
-type AttemptStarted struct{ Attempt int }
+// AttemptStarted reports that the named attempt of the named step is about to
+// be sent. In request_frozen it names the current attempt; in request_sent it
+// names the next attempt and reports that the previous send was lost.
+type AttemptStarted struct {
+	Step    int
+	Attempt int
+}
 
-// ResponseSaved reports that a complete raw response to the named attempt is
-// recorded. A response from an earlier attempt is invalid, not late.
-type ResponseSaved struct{ Attempt int }
+// ResponseSaved reports that a complete raw response to the named attempt of
+// the named step is recorded. A response from an earlier position is invalid,
+// not late.
+type ResponseSaved struct {
+	Step    int
+	Attempt int
+}
 
 // ResponseIncomplete reports a failed or truncated send of the named attempt.
-type ResponseIncomplete struct{ Attempt int }
+type ResponseIncomplete struct {
+	Step    int
+	Attempt int
+}
 
 // ResponseLoaded carries the saved response body of the named attempt for
 // decoding.
 type ResponseLoaded struct {
+	Step    int
 	Attempt int
 	Body    []byte
 }
