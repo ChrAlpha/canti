@@ -1,0 +1,9 @@
+# Build and test outputs
+/bin/
+/coverage/
+*.test
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
