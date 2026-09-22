@@ -2,22 +2,19 @@ package harness
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/ChrAlpha/canti/core"
 )
 
-// Runner owns the explicit decision commit boundary. Model requests and
-// observation collection are separate steps so they can be recovered by phase.
+// Runner interprets core intents against the durable store and the effect
+// executor. Every I/O happens after the phase that authorizes it is committed.
 type Runner struct {
 	store    Store
 	executor Executor
 }
 
-// NewRunner wires the durable fact store and external effect backend.
 func NewRunner(store Store, executor Executor) (Runner, error) {
 	if store == nil {
 		return Runner{}, errors.New("harness: store is required")
@@ -28,69 +25,76 @@ func NewRunner(store Store, executor Executor) (Runner, error) {
 	return Runner{store: store, executor: executor}, nil
 }
 
-type OutcomeKind string
-
-const (
-	OutcomeReturned   OutcomeKind = "returned"
-	OutcomeDispatched OutcomeKind = "dispatched"
-)
-
-// Outcome reports what ApplyDecision committed and whether an effect was
-// handed to the executor. Return is a control-flow outcome, not task success.
-type Outcome struct {
-	Kind     OutcomeKind
-	Decision core.Decision
-	Effect   *Effect
-	Job      *Job
+// Commit derives the next state for event and records it together with the
+// facts the event requires. On any error the returned state is unchanged.
+func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, facts Facts) (core.State, error) {
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	if err := facts.check(event); err != nil {
+		return state, err
+	}
+	next, err := state.Next(event)
+	if err != nil {
+		return state, err
+	}
+	if err := r.store.Commit(ctx, Transition{From: state, Event: event, To: next, Facts: facts}); err != nil {
+		return state, fmt.Errorf("harness: commit %T: %w", event, err)
+	}
+	return next, nil
 }
 
-// ApplyDecision decodes one complete model response, persists the decision,
-// then either returns control or persists and dispatches one stable effect.
-// The caller must have persisted the response before calling ApplyDecision.
-func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, response Response) (Outcome, error) {
+// Dispatch hands the committed effect to the executor and commits what it
+// learned. Executor failure or an unknown status becomes an unknown outcome;
+// cancellation leaves the effect committed so a resume can find its job.
+func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, error) {
+	if state.Intent() != core.IntentDispatch {
+		return state, fmt.Errorf("harness: phase %q does not dispatch", state.Phase)
+	}
 	if err := ctx.Err(); err != nil {
-		return Outcome{}, err
+		return state, err
 	}
-	if !response.Complete {
-		return Outcome{}, errors.New("harness: complete model response is required")
-	}
-	decision, err := core.Decode(response.Body)
+	job, err := r.executor.StartOrResume(ctx, Effect{ID: state.EffectID, Command: state.Decision.Payload})
 	if err != nil {
-		return Outcome{}, err
-	}
-	if runID == "" || stepID == "" {
-		return Outcome{}, errors.New("harness: run and step identifiers are required")
-	}
-	if err := r.store.SaveDecision(ctx, DecisionRecord{RunID: runID, StepID: stepID, Decision: decision}); err != nil {
-		return Outcome{}, fmt.Errorf("harness: save decision: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return Outcome{}, err
-	}
-
-	if decision.Kind == core.Return {
-		if err := r.store.SaveReturn(ctx, ReturnRecord{RunID: runID, StepID: stepID, Decision: decision}); err != nil {
-			return Outcome{}, fmt.Errorf("harness: save return: %w", err)
+		if ctx.Err() != nil {
+			return state, ctx.Err()
 		}
-		return Outcome{Kind: OutcomeReturned, Decision: decision}, nil
+		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: err.Error()})
 	}
-
-	effect := Effect{ID: stableEffectID(runID, stepID), Command: decision.Payload}
-	if err := r.store.SaveEffect(ctx, EffectRecord{RunID: runID, StepID: stepID, Effect: effect}); err != nil {
-		return Outcome{}, fmt.Errorf("harness: save effect: %w", err)
+	if job.Status == JobUnknown {
+		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{})
 	}
-	if err := ctx.Err(); err != nil {
-		return Outcome{}, err
-	}
-	job, err := r.executor.StartOrResume(ctx, effect)
-	if err != nil {
-		return Outcome{}, fmt.Errorf("harness: start or resume effect: %w", err)
-	}
-	return Outcome{Kind: OutcomeDispatched, Decision: decision, Effect: &effect, Job: &job}, nil
+	return r.Commit(ctx, state, core.JobStarted{JobID: job.ID}, Facts{})
 }
 
-func stableEffectID(runID, stepID string) string {
-	// A length prefix keeps arbitrary identifiers unambiguous before hashing.
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(runID), runID, stepID)))
-	return "effect_" + hex.EncodeToString(sum[:])
+func (f Facts) check(event core.Event) error {
+	switch e := event.(type) {
+	case core.RequestFrozen:
+		if f.Request == nil || len(f.Request.Body) == 0 {
+			return errors.New("harness: frozen request bytes are required")
+		}
+	case core.ResponseSaved:
+		if f.Response == nil || !f.Response.Complete {
+			return errors.New("harness: complete response is required")
+		}
+	case core.ResponseIncomplete:
+		if f.Response != nil && f.Response.Complete {
+			return errors.New("harness: incomplete response cannot be marked complete")
+		}
+	case core.Observed:
+		return f.checkObservation(e.Execution)
+	case core.Resolved:
+		return f.checkObservation(e.Execution)
+	}
+	return nil
+}
+
+func (f Facts) checkObservation(execution core.ExecutionState) error {
+	if f.Observation == nil {
+		return errors.New("harness: observation record is required")
+	}
+	if f.Observation.Execution != execution {
+		return fmt.Errorf("harness: observation %q does not match event %q", f.Observation.Execution, execution)
+	}
+	return nil
 }

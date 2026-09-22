@@ -1,16 +1,6 @@
 package harness
 
-// ExecutionState describes process-level execution, not business success or
-// the absence of side effects.
-type ExecutionState string
-
-const (
-	ExecutionExited        ExecutionState = "exited"
-	ExecutionTimedOut      ExecutionState = "timed_out"
-	ExecutionCancelled     ExecutionState = "cancelled"
-	ExecutionFailedToStart ExecutionState = "failed_to_start"
-	ExecutionUnknown       ExecutionState = "unknown"
-)
+import "github.com/ChrAlpha/canti/core"
 
 // ArtifactRef points to output stored outside the bounded observation preview.
 type ArtifactRef struct {
@@ -20,9 +10,9 @@ type ArtifactRef struct {
 	Available bool
 }
 
-// Observation is the durable result submitted after an effect is inspected.
+// Observation is the durable result recorded after an effect is inspected.
 type Observation struct {
-	Execution ExecutionState
+	Execution core.ExecutionState
 	ExitCode  *int
 	Preview   string
 	Output    ArtifactRef
