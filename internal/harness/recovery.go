@@ -27,7 +27,17 @@ type RunState struct {
 	NeedsInput bool
 }
 
-// Resumable reports whether the state has an unambiguous automatic path.
+// Resumable reports whether a known, active phase permits recovery. It does
+// not validate persisted facts or authorize dispatch without job inspection.
 func (s RunState) Resumable() bool {
-	return s.Phase != PhaseNeedsResolution && !s.NeedsInput
+	if s.NeedsInput {
+		return false
+	}
+	switch s.Phase {
+	case PhaseIdle, PhaseRequestFrozen, PhaseResponseSaved, PhaseDecisionSaved,
+		PhaseEffectSaved, PhaseDispatching, PhaseAwaitingObservation, PhaseObservationSaved:
+		return true
+	default:
+		return false
+	}
 }

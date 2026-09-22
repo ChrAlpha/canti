@@ -46,8 +46,15 @@ type Outcome struct {
 
 // ApplyDecision decodes one complete model response, persists the decision,
 // then either returns control or persists and dispatches one stable effect.
-func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, raw []byte) (Outcome, error) {
-	decision, err := core.Decode(raw)
+// The caller must have persisted the response before calling ApplyDecision.
+func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, response Response) (Outcome, error) {
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
+	if !response.Complete {
+		return Outcome{}, errors.New("harness: complete model response is required")
+	}
+	decision, err := core.Decode(response.Body)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -69,6 +76,9 @@ func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, raw []b
 	if err := r.store.SaveEffect(ctx, EffectRecord{RunID: runID, StepID: stepID, Effect: effect}); err != nil {
 		return Outcome{}, fmt.Errorf("harness: save effect: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 	job, err := r.executor.StartOrResume(ctx, effect)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("harness: start or resume effect: %w", err)
@@ -77,6 +87,7 @@ func (r Runner) ApplyDecision(ctx context.Context, runID, stepID string, raw []b
 }
 
 func stableEffectID(runID, stepID string) string {
-	sum := sha256.Sum256([]byte(runID + "\x00" + stepID))
+	// A length prefix keeps arbitrary identifiers unambiguous before hashing.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(runID), runID, stepID)))
 	return "effect_" + hex.EncodeToString(sum[:])
 }

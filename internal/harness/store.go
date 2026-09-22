@@ -8,6 +8,10 @@ import (
 
 // Store is the durable fact boundary. A SQLite implementation can provide
 // short transactions for each method; memory must not be required for recovery.
+// Records must be immutable: identical retries may succeed, but conflicting
+// content for an existing identity must fail before any effect is dispatched.
+// These writes alone do not implement transactions across records, recovery,
+// workspace ownership, or advancing run progress; the concrete store must.
 type Store interface {
 	SaveRequest(context.Context, RequestRecord) error
 	SaveResponse(context.Context, ResponseRecord) error

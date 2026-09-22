@@ -4,6 +4,9 @@ import "context"
 
 // Executor owns external effects. StartOrResume must use Effect.ID to find an
 // existing job after a harness restart instead of blindly starting a duplicate.
+// It must honor cancellation before creating a job and reject changed commands
+// under an existing identity. An unknown outcome must never trigger a retry
+// without inspection; an effect ID does not make arbitrary commands idempotent.
 type Executor interface {
 	StartOrResume(context.Context, Effect) (Job, error)
 	Inspect(context.Context, string) (Job, error)
