@@ -24,11 +24,16 @@ const (
 	StopProtocolFailure   StopReason = "protocol_failure"
 )
 
-// Event is one fact the harness reports after acting on an Intent.
+// Event is one fact the harness reports after acting on an Intent. Only the
+// value types in this package are accepted.
 type Event interface{ event() }
 
 // RequestFrozen reports that the request bytes and provenance are recorded.
 type RequestFrozen struct{}
+
+// AttemptStarted reports that one model attempt is about to be sent. In
+// request_sent it also reports that the previous attempt was lost.
+type AttemptStarted struct{}
 
 // ResponseSaved reports that a complete raw response is recorded.
 type ResponseSaved struct{}
@@ -56,6 +61,7 @@ type StopRequested struct{ Reason StopReason }
 type Resolved struct{ Execution ExecutionState }
 
 func (RequestFrozen) event()      {}
+func (AttemptStarted) event()     {}
 func (ResponseSaved) event()      {}
 func (ResponseIncomplete) event() {}
 func (ResponseLoaded) event()     {}

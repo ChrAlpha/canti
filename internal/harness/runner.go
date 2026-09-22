@@ -15,6 +15,7 @@ type Runner struct {
 	executor Executor
 }
 
+// NewRunner wires the durable store and the effect executor.
 func NewRunner(store Store, executor Executor) (Runner, error) {
 	if store == nil {
 		return Runner{}, errors.New("harness: store is required")
@@ -26,7 +27,9 @@ func NewRunner(store Store, executor Executor) (Runner, error) {
 }
 
 // Commit derives the next state for event and records it together with the
-// facts the event requires. On any error the returned state is unchanged.
+// facts the event permits. On any error the returned state is unchanged and
+// nothing is written. Commit writes nothing once ctx is done, so facts learned
+// after the harness's own context was cancelled need a separate context.
 func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, facts Facts) (core.State, error) {
 	if err := ctx.Err(); err != nil {
 		return state, err
@@ -45,8 +48,10 @@ func (r Runner) Commit(ctx context.Context, state core.State, event core.Event, 
 }
 
 // Dispatch hands the committed effect to the executor and commits what it
-// learned. Executor failure or an unknown status becomes an unknown outcome;
-// cancellation leaves the effect committed so a resume can find its job.
+// learned. A returned job ID becomes JobStarted whatever its status snapshot;
+// an executor error or a job without an ID becomes OutcomeUnknown with the
+// failure text. Cancellation observed around the call returns without
+// committing, so a resume finds the job by effect ID.
 func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, error) {
 	if state.Intent() != core.IntentDispatch {
 		return state, fmt.Errorf("harness: phase %q does not dispatch", state.Phase)
@@ -59,32 +64,52 @@ func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, err
 		if ctx.Err() != nil {
 			return state, ctx.Err()
 		}
-		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: err.Error()})
+		next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: err.Error()})
+		if commitErr != nil {
+			return state, fmt.Errorf("%w; executor: %v", commitErr, err)
+		}
+		return next, nil
 	}
-	if job.Status == JobUnknown {
-		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{})
+	if job.ID == "" {
+		failure := fmt.Sprintf("executor returned no job ID with status %q", job.Status)
+		return r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: failure})
 	}
 	return r.Commit(ctx, state, core.JobStarted{JobID: job.ID}, Facts{})
 }
 
 func (f Facts) check(event core.Event) error {
+	var allowed Facts
 	switch e := event.(type) {
 	case core.RequestFrozen:
 		if f.Request == nil || len(f.Request.Body) == 0 {
 			return errors.New("harness: frozen request bytes are required")
 		}
+		allowed.Request = f.Request
 	case core.ResponseSaved:
-		if f.Response == nil || !f.Response.Complete {
-			return errors.New("harness: complete response is required")
+		if f.Response == nil || !f.Response.Complete || len(f.Response.Body) == 0 {
+			return errors.New("harness: complete response with a body is required")
 		}
+		allowed.Response = f.Response
 	case core.ResponseIncomplete:
 		if f.Response != nil && f.Response.Complete {
 			return errors.New("harness: incomplete response cannot be marked complete")
 		}
+		allowed.Response, allowed.Failure = f.Response, f.Failure
 	case core.Observed:
-		return f.checkObservation(e.Execution)
+		if err := f.checkObservation(e.Execution); err != nil {
+			return err
+		}
+		allowed.Observation = f.Observation
 	case core.Resolved:
-		return f.checkObservation(e.Execution)
+		if err := f.checkObservation(e.Execution); err != nil {
+			return err
+		}
+		allowed.Observation = f.Observation
+	case core.OutcomeUnknown:
+		allowed.Failure = f.Failure
+	}
+	if f != allowed {
+		return fmt.Errorf("harness: facts do not belong to %T", event)
 	}
 	return nil
 }

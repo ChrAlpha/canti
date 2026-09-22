@@ -13,6 +13,7 @@ type Phase string
 const (
 	PhaseIdle                Phase = "idle"
 	PhaseRequestFrozen       Phase = "request_frozen"
+	PhaseRequestSent         Phase = "request_sent"
 	PhaseResponseSaved       Phase = "response_saved"
 	PhaseEffectSaved         Phase = "effect_saved"
 	PhaseAwaitingObservation Phase = "awaiting_observation"
@@ -56,8 +57,11 @@ type State struct {
 }
 
 var (
+	// ErrIllegalTransition reports a valid event that the current phase does
+	// not accept.
 	ErrIllegalTransition = errors.New("core: illegal transition")
-	ErrInvalidEvent      = errors.New("core: invalid event")
+	// ErrInvalidEvent reports an event whose content is unusable in any phase.
+	ErrInvalidEvent = errors.New("core: invalid event")
 )
 
 // NewState starts a run at its first step.
@@ -77,7 +81,7 @@ func (s State) Intent() Intent {
 	switch s.Phase {
 	case PhaseIdle:
 		return IntentPrepareRequest
-	case PhaseRequestFrozen:
+	case PhaseRequestFrozen, PhaseRequestSent:
 		return IntentSendRequest
 	case PhaseResponseSaved:
 		return IntentDecode
@@ -104,14 +108,22 @@ func (s State) Next(event Event) (State, error) {
 			s.Phase = PhaseRequestFrozen
 			return s, nil
 		}
+	case AttemptStarted:
+		switch s.Phase {
+		case PhaseRequestFrozen:
+			s.Phase = PhaseRequestSent
+			return s, nil
+		case PhaseRequestSent:
+			return s.retry(StopAttemptsExhausted, PhaseRequestSent), nil
+		}
 	case ResponseSaved:
-		if s.Phase == PhaseRequestFrozen {
+		if s.Phase == PhaseRequestSent {
 			s.Phase = PhaseResponseSaved
 			return s, nil
 		}
 	case ResponseIncomplete:
-		if s.Phase == PhaseRequestFrozen {
-			return s.retry(StopAttemptsExhausted), nil
+		if s.Phase == PhaseRequestSent {
+			return s.retry(StopAttemptsExhausted, PhaseRequestFrozen), nil
 		}
 	case ResponseLoaded:
 		if s.Phase == PhaseResponseSaved {
@@ -143,13 +155,18 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case StopRequested:
 		switch s.Phase {
-		case PhaseIdle, PhaseRequestFrozen, PhaseResponseSaved:
+		case PhaseIdle, PhaseRequestFrozen, PhaseRequestSent, PhaseResponseSaved:
 			s.Phase = PhaseStopped
 			s.Reason = e.Reason
 			return s, nil
 		case PhaseEffectSaved, PhaseAwaitingObservation:
 			s.Phase = PhaseCancelling
 			s.Reason = e.Reason
+			return s, nil
+		case PhaseNeedsResolution:
+			if s.Reason == "" {
+				s.Reason = e.Reason
+			}
 			return s, nil
 		}
 	case Resolved:
@@ -166,8 +183,12 @@ func (s State) Next(event Event) (State, error) {
 
 func (s State) validate(event Event) error {
 	switch e := event.(type) {
-	case nil:
-		return fmt.Errorf("%w: nil", ErrInvalidEvent)
+	case RequestFrozen, AttemptStarted, ResponseSaved, ResponseIncomplete, OutcomeUnknown:
+		return nil
+	case ResponseLoaded:
+		if len(e.Body) == 0 {
+			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
+		}
 	case JobStarted:
 		if e.JobID == "" {
 			return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
@@ -176,6 +197,9 @@ func (s State) validate(event Event) error {
 			return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, e.JobID, s.JobID)
 		}
 	case Observed:
+		if s.Phase == PhaseEffectSaved && e.Execution != ExecutionFailedToStart {
+			return fmt.Errorf("%w: only failed_to_start can be observed without a job", ErrInvalidEvent)
+		}
 		return knownExecution(e.Execution)
 	case Resolved:
 		return knownExecution(e.Execution)
@@ -183,6 +207,8 @@ func (s State) validate(event Event) error {
 		if e.Reason == "" {
 			return fmt.Errorf("%w: stop reason is required", ErrInvalidEvent)
 		}
+	default:
+		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
 	}
 	return nil
 }
@@ -195,10 +221,10 @@ func knownExecution(execution ExecutionState) error {
 	return fmt.Errorf("%w: execution state %q is not a known outcome", ErrInvalidEvent, execution)
 }
 
-func (s State) retry(exhausted StopReason) State {
+func (s State) retry(exhausted StopReason, resume Phase) State {
 	if s.Attempt < s.Limits.MaxAttempts {
 		s.Attempt++
-		s.Phase = PhaseRequestFrozen
+		s.Phase = resume
 		return s
 	}
 	s.Phase = PhaseStopped
@@ -209,7 +235,7 @@ func (s State) retry(exhausted StopReason) State {
 func (s State) decide(body []byte) State {
 	decision, err := Decode(body)
 	if err != nil {
-		return s.retry(StopProtocolFailure)
+		return s.retry(StopProtocolFailure, PhaseRequestFrozen)
 	}
 	s.Decision = decision
 	if decision.Kind == Return {

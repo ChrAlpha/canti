@@ -2,15 +2,16 @@ package harness
 
 import "context"
 
-// Executor owns external effects. StartOrResume must use Effect.ID to find an
-// existing job after a harness restart instead of blindly starting a duplicate.
-// It must honor cancellation before creating a job and reject changed commands
-// under an existing identity. An unknown outcome must never trigger a retry
-// without inspection; an effect ID does not make arbitrary commands idempotent.
+// Executor owns external effects, keyed by the stable effect ID. StartOrResume
+// must return the job that already owns an effect instead of starting another,
+// must honor cancellation before creating a job, and must reject a changed
+// command under an existing identity. Inspect and Cancel must never create a
+// job; Cancel must be idempotent. An unknown outcome must never trigger a
+// retry without inspection; an effect ID does not make commands idempotent.
 type Executor interface {
 	StartOrResume(context.Context, Effect) (Job, error)
-	Inspect(context.Context, string) (Job, error)
-	Cancel(context.Context, string) error
+	Inspect(ctx context.Context, effectID string) (job Job, found bool, err error)
+	Cancel(ctx context.Context, effectID string) error
 }
 
 // Effect is the durable intent to perform one external action.
@@ -30,7 +31,8 @@ const (
 	JobUnknown   JobStatus = "unknown"
 )
 
-// Job identifies a backend task whose result can be queried after restart.
+// Job is the backend's handle for an effect. Its ID is recorded as a fact;
+// its status is a snapshot that Inspect must confirm before an observation.
 type Job struct {
 	ID       string
 	Status   JobStatus

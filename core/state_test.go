@@ -14,6 +14,8 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
+const legalPairs = 22
+
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
 		RunID:   "run-1",
@@ -86,9 +88,13 @@ func legalTransitions() []transition {
 		{"idle freezes request", at(core.PhaseIdle), core.RequestFrozen{}, at(core.PhaseRequestFrozen)},
 		{"idle stops", at(core.PhaseIdle), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withReason(core.StopCancelled))},
 
-		{"frozen request saves response", at(core.PhaseRequestFrozen), core.ResponseSaved{}, at(core.PhaseResponseSaved)},
-		{"frozen request retries incomplete response", at(core.PhaseRequestFrozen), core.ResponseIncomplete{}, at(core.PhaseRequestFrozen, withAttempt(2))},
+		{"frozen request starts attempt", at(core.PhaseRequestFrozen), core.AttemptStarted{}, at(core.PhaseRequestSent)},
 		{"frozen request stops", at(core.PhaseRequestFrozen), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withReason(core.StopTimedOut))},
+
+		{"sent request counts lost attempt", at(core.PhaseRequestSent), core.AttemptStarted{}, at(core.PhaseRequestSent, withAttempt(2))},
+		{"sent request saves response", at(core.PhaseRequestSent), core.ResponseSaved{}, at(core.PhaseResponseSaved)},
+		{"sent request retries incomplete response", at(core.PhaseRequestSent), core.ResponseIncomplete{}, at(core.PhaseRequestFrozen, withAttempt(2))},
+		{"sent request stops", at(core.PhaseRequestSent), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withReason(core.StopTimedOut))},
 
 		{"saved response decodes return", at(core.PhaseResponseSaved), core.ResponseLoaded{Body: returnBody}, at(core.PhaseReturned, func(s *core.State) {
 			s.Decision = core.Decision{Kind: core.Return, Payload: "done"}
@@ -111,6 +117,8 @@ func legalTransitions() []transition {
 
 		{"resolution continues", at(core.PhaseNeedsResolution, withExec, withJob), core.Resolved{Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
 		{"resolution completes pending stop", at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled)), core.Resolved{Execution: core.ExecutionExited}, at(core.PhaseStopped, withExec, withJob, withReason(core.StopCancelled))},
+		{"unresolved run records stop", at(core.PhaseNeedsResolution, withExec, withJob), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled))},
+		{"unresolved run keeps first stop reason", at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseNeedsResolution, withExec, withJob, withReason(core.StopCancelled))},
 	}
 }
 
@@ -191,16 +199,23 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 		}
 		legal[tt.from.Phase][reflect.TypeOf(tt.event)] = true
 	}
+	distinct := 0
+	for _, events := range legal {
+		distinct += len(events)
+	}
+	if distinct != legalPairs {
+		t.Fatalf("legalTransitions() covers %d distinct pairs, want %d", distinct, legalPairs)
+	}
 
 	phases := []core.Phase{
-		core.PhaseIdle, core.PhaseRequestFrozen, core.PhaseResponseSaved, core.PhaseEffectSaved,
-		core.PhaseAwaitingObservation, core.PhaseCancelling, core.PhaseReturned,
+		core.PhaseIdle, core.PhaseRequestFrozen, core.PhaseRequestSent, core.PhaseResponseSaved,
+		core.PhaseEffectSaved, core.PhaseAwaitingObservation, core.PhaseCancelling, core.PhaseReturned,
 		core.PhaseNeedsResolution, core.PhaseStopped, "", "future_phase",
 	}
 	events := []core.Event{
-		core.RequestFrozen{}, core.ResponseSaved{}, core.ResponseIncomplete{},
+		core.RequestFrozen{}, core.AttemptStarted{}, core.ResponseSaved{}, core.ResponseIncomplete{},
 		core.ResponseLoaded{Body: execBody}, core.JobStarted{JobID: "job-1"},
-		core.Observed{Execution: core.ExecutionExited}, core.OutcomeUnknown{},
+		core.Observed{Execution: core.ExecutionFailedToStart}, core.OutcomeUnknown{},
 		core.StopRequested{Reason: core.StopCancelled}, core.Resolved{Execution: core.ExecutionExited},
 	}
 
@@ -221,7 +236,7 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 			}
 		}
 	}
-	if want := len(phases)*len(events) - 18; checked != want {
+	if want := len(phases)*len(events) - legalPairs; checked != want {
 		t.Fatalf("checked %d illegal pairs, want %d", checked, want)
 	}
 }
@@ -235,9 +250,12 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		event core.Event
 	}{
 		{"nil event", at(core.PhaseIdle), nil},
+		{"pointer event", at(core.PhaseIdle), &core.RequestFrozen{}},
 		{"empty stop reason", at(core.PhaseIdle), core.StopRequested{}},
+		{"empty response body", at(core.PhaseResponseSaved), core.ResponseLoaded{}},
 		{"empty job", at(core.PhaseEffectSaved, withExec), core.JobStarted{}},
 		{"different job while cancelling", at(core.PhaseCancelling, withExec, withJob, withReason(core.StopCancelled)), core.JobStarted{JobID: "job-2"}},
+		{"exit observed without job", at(core.PhaseEffectSaved, withExec), core.Observed{Execution: core.ExecutionExited}},
 		{"unknown execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{Execution: core.ExecutionUnknown}},
 		{"unsupported execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{Execution: "bogus"}},
 		{"empty execution observed", at(core.PhaseAwaitingObservation, withExec, withJob), core.Observed{}},
@@ -261,7 +279,8 @@ func TestNextEnforcesBudgets(t *testing.T) {
 	t.Parallel()
 
 	tests := []transition{
-		{"transport attempts exhausted", at(core.PhaseRequestFrozen, withAttempt(2)), core.ResponseIncomplete{}, at(core.PhaseStopped, withAttempt(2), withReason(core.StopAttemptsExhausted))},
+		{"transport attempts exhausted", at(core.PhaseRequestSent, withAttempt(2)), core.ResponseIncomplete{}, at(core.PhaseStopped, withAttempt(2), withReason(core.StopAttemptsExhausted))},
+		{"lost attempts exhausted", at(core.PhaseRequestSent, withAttempt(2)), core.AttemptStarted{}, at(core.PhaseStopped, withAttempt(2), withReason(core.StopAttemptsExhausted))},
 		{"protocol attempts exhausted", at(core.PhaseResponseSaved, withAttempt(2)), core.ResponseLoaded{Body: invalidBody}, at(core.PhaseStopped, withAttempt(2), withReason(core.StopProtocolFailure))},
 		{"steps exhausted after observation", at(core.PhaseAwaitingObservation, withStep(3), withExec, withJob), core.Observed{Execution: core.ExecutionExited}, at(core.PhaseStopped, withStep(3), withExec, withJob, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after failed start", at(core.PhaseEffectSaved, withStep(3), withExec), core.Observed{Execution: core.ExecutionFailedToStart}, at(core.PhaseStopped, withStep(3), withExec, withReason(core.StopStepsExhausted))},
@@ -287,6 +306,7 @@ func TestIntent(t *testing.T) {
 	tests := map[core.Phase]core.Intent{
 		core.PhaseIdle:                core.IntentPrepareRequest,
 		core.PhaseRequestFrozen:       core.IntentSendRequest,
+		core.PhaseRequestSent:         core.IntentSendRequest,
 		core.PhaseResponseSaved:       core.IntentDecode,
 		core.PhaseEffectSaved:         core.IntentDispatch,
 		core.PhaseAwaitingObservation: core.IntentInspect,
