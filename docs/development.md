@@ -65,10 +65,10 @@ they exercise, not empty placeholder directories or skipped acceptance tests.
 Protocol and transition tests should stay deterministic and require no
 credentials. A new run rule belongs in `core.State.Next` with a row in the
 transition table test; the illegal-pair sweep must keep rejecting everything
-else. Backend
-tests must use temporary, isolated workspaces and report leftover processes or
-artifacts. Live model checks must be explicit opt-ins with finite budgets;
-do not make paid provider calls part of default unit tests.
+else. Backend tests must use temporary, isolated workspaces and report
+leftover processes or artifacts. Live model checks must be explicit opt-ins
+with finite budgets; do not make paid provider calls part of default unit
+tests.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

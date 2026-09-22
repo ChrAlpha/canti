@@ -11,7 +11,7 @@ model access, database, container runtime, or Memoh checkout.
 
 ```sh
 make check
-go test -race ./...
+go test -count=1 -race ./...
 go run ./cmd/canti -version
 ```
 
@@ -30,7 +30,7 @@ dependencies should have a concrete purpose and a compatible license.
    tests must be deterministic. Harness tests should exercise affected commit,
    cancellation, unknown-result, and restart boundaries.
 3. Format changed Go files with `gofmt -w`. Run relevant tests during iteration,
-   then `make check`, `go test -race ./...`, and `git diff --check` for delivery.
+   then `make check`, `go test -count=1 -race ./...`, and `git diff --check` for delivery.
 4. Inspect the diff and use a Conventional Commit subject such as
    `fix(core): reject duplicate decision fields`.
 5. Fill in the PR template with the problem, resulting behavior, commands and

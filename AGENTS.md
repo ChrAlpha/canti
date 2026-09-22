@@ -51,7 +51,7 @@ Use focused tests while iterating. Before delivery, run:
 
 ```sh
 make check
-go test -race ./...
+go test -count=1 -race ./...
 git diff --check
 ```
 

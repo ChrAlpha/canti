@@ -22,7 +22,7 @@ that target from the current skeleton.
 | `internal/harness/model.go` | Independent requests and raw responses | Interface and provenance fields only |
 | `internal/harness/store.go` | Atomic transition commits | Interface and record types only |
 | `internal/harness/runner.go` | Intent interpretation: commit and dispatch | Implemented against store/executor interfaces |
-| `internal/harness/executor.go` | Queryable external jobs | Interface and status types only |
+| `internal/harness/executor.go` | External jobs keyed by effect ID | Interface and status types only |
 | `internal/harness/artifacts.go` | Observations and output references | Types only |
 | `cmd/canti` | User-facing entry point | Help and development version only |
 
@@ -90,38 +90,44 @@ Both are pure functions of their inputs.
 | Phase | Intent | Legal events |
 | --- | --- | --- |
 | `idle` | `prepare_request` | `RequestFrozen`, `StopRequested` |
-| `request_frozen` | `send_request` | `ResponseSaved`, `ResponseIncomplete`, `StopRequested` |
+| `request_frozen` | `send_request` | `AttemptStarted`, `StopRequested` |
+| `request_sent` | `send_request` | `AttemptStarted`, `ResponseSaved`, `ResponseIncomplete`, `StopRequested` |
 | `response_saved` | `decode` | `ResponseLoaded`, `StopRequested` |
 | `effect_saved` | `dispatch` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `awaiting_observation` | `inspect` | `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `cancelling` | `cancel` | `JobStarted`, `Observed`, `OutcomeUnknown` |
-| `needs_resolution` | `halt` | `Resolved` |
+| `needs_resolution` | `halt` | `Resolved`, `StopRequested` |
 | `returned`, `stopped`, unknown | `halt` | none |
 
 Rules the table enforces:
 
 - Every I/O is preceded by a committed phase that authorizes it. A restart
   resumes by asking `Intent` again, so recovery and fresh steps share one path.
-- `ResponseIncomplete` and an undecodable response retry the frozen request as
-  a new attempt until `MaxAttempts`, then stop with `attempts_exhausted` or
-  `protocol_failure`.
+- `AttemptStarted` is committed before each model send. In `request_sent` it
+  means the previous send never reported a result, so it consumes an attempt;
+  sends are therefore counted even when a crash loses their outcome.
+- `ResponseIncomplete` and an undecodable response return to `request_frozen`
+  as a new attempt until `MaxAttempts`, then stop with `attempts_exhausted` or
+  `protocol_failure`. An empty response body is an invalid event, not a retry.
 - An `exec` decision commits `effect_saved` with an effect ID derived from the
   run ID and step. A `return` decision closes the run as `returned`.
 - `Observed` completes the step: the run continues in `idle` at the next step
   with identities cleared, or stops with `steps_exhausted`. `Observed` rejects
   the `unknown` execution state, which must be reported as `OutcomeUnknown`.
-- `OutcomeUnknown` enters `needs_resolution`, which accepts only an explicit
-  `Resolved` event. A resolution continues the run or completes a pending stop.
+  Without a job, only `failed_to_start` may be observed.
+- `OutcomeUnknown` enters `needs_resolution`. A `StopRequested` there records
+  the reason and keeps waiting; only an explicit `Resolved` leaves the phase,
+  continuing the run or completing the pending stop.
 - `StopRequested` stops immediately while no effect exists and enters
   `cancelling` once one may exist. `cancelling` records the true result before
-  the run becomes `stopped`; the reason is kept.
+  the run becomes `stopped`; the first reason is kept.
 - `JobStarted` requires a job ID and must match a job already known.
 - Adding a capability must not add an event kind; capabilities are payloads.
 
 ## Implemented interpreter
 
 `Runner.Commit` takes the committed state, one event, and the facts that event
-requires. It checks cancellation once, validates the facts, derives the next
+permits. It checks cancellation once, validates the facts, derives the next
 state with `core.State.Next`, and hands a single `Transition` to the store. Any
 error returns the unchanged state; nothing is written.
 
@@ -131,18 +137,23 @@ Dispatch: require dispatch intent -> check cancellation -> Executor.StartOrResum
           -> Commit(JobStarted) | Commit(OutcomeUnknown) | return cancellation
 ```
 
-Facts are enforced per event: `RequestFrozen` requires frozen request bytes,
-`ResponseSaved` requires a complete response, `ResponseIncomplete` rejects a
-response marked complete, and `Observed`/`Resolved` require an observation
-whose execution state matches the event.
+Each event permits a fixed set of facts and anything else is rejected:
+`RequestFrozen` requires request bytes; `ResponseSaved` a complete response
+with a body; `ResponseIncomplete` may carry the partial response and failure
+text; `Observed` and `Resolved` an observation whose execution state matches
+the event; `OutcomeUnknown` failure text. Facts learned after the harness's
+own context was cancelled must be committed with a separate context, because
+`Commit` writes nothing once its context is done.
 
-`Runner.Dispatch` runs only from `effect_saved`. The effect handed to the
-executor is the committed effect ID and decision payload. A job with a known
-status commits `JobStarted`; an executor error or `unknown` status commits
-`OutcomeUnknown` with the failure text; a cancellation observed around the
-call returns without committing, so a resume finds the job by effect ID. The
-executor must still honor cancellation before creating a job; a check in the
-runner cannot close that race.
+`Runner.Dispatch` runs only from `effect_saved` and hands the committed effect
+ID and decision payload to the executor. A returned job ID commits
+`JobStarted` whatever its status snapshot, because `Inspect` is the authority
+on the outcome. An executor error or a job without an ID commits
+`OutcomeUnknown` with the failure text; if that commit fails, the returned
+error carries both causes and the state stays `effect_saved`. A cancellation
+observed around the call returns without committing, so a resume finds the job
+by effect ID. The executor must still honor cancellation before creating a
+job; a check in the runner cannot close that race.
 
 An effect ID hashes a length-prefixed run ID followed by the step number. The
 same pair produces the same ID. A concrete store and executor must reject
@@ -158,15 +169,18 @@ SQLite should own authoritative run state and facts; files should hold large
 outputs. JSONL may expose a read-only history projection. Agent-editable notes
 must not become the authority for whether an action occurred.
 
-The store contract is one atomic `Commit(Transition)`. A concrete
-implementation must persist in one transaction the new state and the facts
-attached to the event: request bytes and provenance at `RequestFrozen`, the
-response at `ResponseSaved`, the observation at `Observed` or `Resolved`, and
-the failure text at `OutcomeUnknown`. It must also provide recovery reads for
-the last committed state, the frozen request, and the saved response. The
-current interface defines the commit but no recovery reads and no
-workspace-lock API. `core.State` is the recovery projection; loading it and
-re-deriving the intent is the resume path, but no loader or loop exists yet.
+The store contract is one atomic `Commit(Transition)`. Inside that transaction
+a concrete implementation must verify that the durable state equals `From` and
+reject the transition otherwise; this compare-and-set is what keeps one pending
+intent per run when a stale or competing harness commits. It must persist the
+new state and the facts attached to the event: request bytes and provenance at
+`RequestFrozen`, the response at `ResponseSaved`, the observation at `Observed`
+or `Resolved`, and failure text at `ResponseIncomplete` or `OutcomeUnknown`.
+It must also provide recovery reads for the last committed state, the frozen
+request, and the saved response. The current interface defines the commit but
+no recovery reads and no workspace-lock API. `core.State` is the recovery
+projection; loading it and re-deriving the intent is the resume path, but no
+loader or loop exists yet.
 
 Use short transactions, never one held across a model call or job wait. The
 concrete store must specify crash and power-loss assumptions; SQLite WAL with
@@ -177,11 +191,12 @@ harnesses from acting on the same pending intent.
 | Last committed phase | Intent on resume | Required behavior, not implemented yet |
 | --- | --- | --- |
 | `idle` | `prepare_request` | Build the bounded input from committed facts and freeze it |
-| `request_frozen` | `send_request` | Resend the identical frozen bytes as a new recorded attempt |
+| `request_frozen` | `send_request` | Commit `AttemptStarted`, then send the frozen bytes |
+| `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop |
 | `response_saved` | `decode` | Load the saved bytes; never call the model again for this attempt |
 | `effect_saved` | `dispatch` | `StartOrResume` by effect ID; find the existing job before creating one |
 | `awaiting_observation` | `inspect` | Collect the original job result and commit one observation |
-| `cancelling` | `cancel` | Cancel or inspect the job within a cleanup deadline; commit the true result |
+| `cancelling` | `cancel` | `Inspect` by effect ID; record a found job with `JobStarted` and cancel it, observe a missing job as `cancelled`; commit the true result within a cleanup deadline |
 | `needs_resolution` | `halt` | Wait for an explicitly recorded `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
@@ -206,10 +221,13 @@ immutability requires owned copies and durable storage. Credentials must remain
 outside those facts. Future attempt records must capture errors, completeness,
 usage, timeouts, and the configuration and code revision used for the run.
 
-The execution backend must provide stable job lookup, cancellation, retained
-results, bounded output previews, and explicit artifact availability. A PID
-alone is insufficient for recovery. Cancellation needs a bounded cleanup and
-result-recording phase independent of the already-cancelled execution context.
+The execution backend is keyed by the stable effect ID. `StartOrResume` finds
+or starts the job; `Inspect` and `Cancel` never create one, and `Cancel` is
+idempotent because the `cancelling` resume path may call it again. The backend
+must provide retained results, bounded output previews, and explicit artifact
+availability. A PID alone is insufficient for recovery. Cancellation needs a
+bounded cleanup and result-recording phase independent of the already-cancelled
+execution context.
 
 Step and attempt budgets are `core.Limits` and are enforced by `Next`.
 Wall-time, token, storage, and cost budgets are measured by the harness and

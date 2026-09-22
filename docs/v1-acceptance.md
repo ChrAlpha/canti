@@ -11,12 +11,14 @@ V1 durability is **not complete**.
 | Strict decision protocol | Valid/invalid input tests in `core/decode_test.go` | Offline parsing only |
 | Stateless calls | Concurrent decode tests and race checks | Does not test model or runtime behavior |
 | Complete transition table | Every legal phase/event pair asserts the full resulting state and every other pair is rejected unchanged in `core/state_test.go` | Offline values only |
-| Budgets and stop reasons | Attempt, protocol, and step exhaustion tests | No wall-time, token, or storage measurement |
-| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume` in `runner_test.go` | Recording store/executor, no durable backend |
-| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing | No process-tree cleanup or persistent cancellation |
-| Unknown outcomes | Executor error or unknown status commits `OutcomeUnknown`; `Observed` rejects `unknown` | No real backend inspection |
+| Budgets and stop reasons | Transport, lost-send, protocol, and step exhaustion tests | No wall-time, token, or storage measurement |
+| Counted attempts | `AttemptStarted` is committed before each send and consumes an attempt when it replaces a lost one | No adapter sends anything yet |
+| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume`; a store failure after the start leaves `effect_saved` and keeps both errors in `runner_test.go` | Recording store/executor, no durable backend |
+| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing; `StopRequested` in `needs_resolution` records the reason without leaving | No process-tree cleanup or persistent cancellation |
+| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` | No real backend inspection |
+| Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing | Recording store only |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
-| Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through eight committed phases | No model, inspect, or restart |
+| Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through ten committed phases | No model, inspect, or restart |
 | Input requirements | Missing goal/environment tests | No size or token budget |
 | CLI entry point | Build and version/help smoke check | No runnable agent workflow |
 
