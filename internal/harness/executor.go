@@ -10,7 +10,8 @@ import "context"
 // a naive backend restart, such as docker start on an exited container, does
 // not satisfy this, so the executor must gate on its own record of the
 // start. Bind must honor cancellation before creating a job and reject a
-// changed command under an existing identity. Inspect and Cancel must never create or start a job.
+// changed command under an existing identity. Inspect and Cancel must never
+// create or start a job.
 // Inspect may report found == false only when the backend positively
 // determined that no job owns the effect; an indeterminate lookup must return
 // an error instead. Cancel must be idempotent and must prevent any later

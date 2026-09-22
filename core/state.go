@@ -355,7 +355,7 @@ func (s State) Next(event Event) (State, error) {
 				return s, nil
 			}
 			if s.JobID == "" && (e.Execution == ExecutionExited || e.Execution == ExecutionTimedOut) {
-				return s, fmt.Errorf("%w: %s cannot be resolved without a started job", ErrInvalidEvent, e.Execution)
+				return s, fmt.Errorf("%w: %s cannot be resolved without a bound job", ErrInvalidEvent, e.Execution)
 			}
 			if s.Reason != "" {
 				s.Phase = PhaseStopped

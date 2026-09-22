@@ -26,8 +26,8 @@ var ErrBrokenChain = errors.New("harness: transition does not extend the committ
 // still recorded. It must also verify that From equals the state committed at
 // the previous sequence and reject a transition that would break the chain
 // with ErrBrokenChain — an integrity assertion the sequence alone cannot
-// make. If a record already
-// exists at Seq, a transition with the same event ID and content must succeed
+// make. If a record already exists at Seq, a transition with the same event
+// ID and content must succeed
 // without recording again — this is how a caller resolves a commit whose
 // acknowledgement was lost — while conflicting content must fail and never
 // overwrite. A concrete store also owns crash safety and workspace ownership,
