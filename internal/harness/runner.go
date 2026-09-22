@@ -72,13 +72,13 @@ func (r Runner) Dispatch(ctx context.Context, state core.State) (core.State, err
 		if ctx.Err() != nil {
 			return state, ctx.Err()
 		}
-		next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{}, Facts{Failure: err.Error()})
+		next, commitErr := r.Commit(ctx, state, core.OutcomeUnknown{EffectID: state.EffectID}, Facts{Failure: err.Error()})
 		if commitErr != nil {
 			return state, fmt.Errorf("%w; executor: %w", commitErr, err)
 		}
 		return next, nil
 	}
-	return r.Commit(ctx, state, core.JobStarted{JobID: job.ID}, Facts{})
+	return r.Commit(ctx, state, core.JobStarted{EffectID: state.EffectID, JobID: job.ID}, Facts{})
 }
 
 func (f Facts) check(event core.Event) error {

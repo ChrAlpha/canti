@@ -88,7 +88,12 @@ func advance(t *testing.T, state core.State, events ...core.Event) core.State {
 
 func effectSaved(t *testing.T) core.State {
 	t.Helper()
-	return advance(t, stateAt(t, core.PhaseIdle), core.RequestFrozen{}, core.AttemptStarted{}, core.ResponseSaved{}, core.ResponseLoaded{Body: execBody})
+	return advance(t, stateAt(t, core.PhaseIdle), core.RequestFrozen{}, core.AttemptStarted{Attempt: 1}, core.ResponseSaved{Attempt: 1}, core.ResponseLoaded{Attempt: 1, Body: execBody})
+}
+
+func jobStarted(t *testing.T, state core.State, jobID string) core.State {
+	t.Helper()
+	return advance(t, state, core.JobStarted{EffectID: state.EffectID, JobID: jobID})
 }
 
 func TestNewRunnerRequiresDependencies(t *testing.T) {
@@ -122,7 +127,8 @@ func TestCommitRecordsTransitionWithFacts(t *testing.T) {
 
 func TestCommitWritesSelfLoopTransition(t *testing.T) {
 	rec := &recorder{}
-	from := advance(t, effectSaved(t), core.StopRequested{Reason: core.StopCancelled}, core.OutcomeUnknown{})
+	saved := effectSaved(t)
+	from := advance(t, saved, core.StopRequested{Reason: core.StopCancelled}, core.OutcomeUnknown{EffectID: saved.EffectID})
 
 	got, err := newRunner(t, rec).Commit(context.Background(), from, core.StopRequested{Reason: core.StopTimedOut}, Facts{})
 	if err != nil {
@@ -134,7 +140,8 @@ func TestCommitWritesSelfLoopTransition(t *testing.T) {
 }
 
 func TestCommitRequiresFactsForEvent(t *testing.T) {
-	awaiting := advance(t, effectSaved(t), core.JobStarted{JobID: "job-1"})
+	saved := effectSaved(t)
+	awaiting := jobStarted(t, saved, "job-1")
 	observation := Observation{Execution: core.ExecutionExited}
 	tests := []struct {
 		name  string
@@ -145,16 +152,16 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 		{"frozen request without bytes", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{}},
 		{"frozen request with empty body", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{}}},
 		{"frozen request with a response", stateAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}, Response: &Response{}}},
-		{"attempt with facts", stateAt(t, core.PhaseRequestFrozen), core.AttemptStarted{}, Facts{Failure: "x"}},
-		{"saved response without record", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{}, Facts{}},
-		{"saved response incomplete", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{}, Facts{Response: &Response{Body: execBody}}},
-		{"saved response without body", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{}, Facts{Response: &Response{Complete: true}}},
-		{"incomplete response marked complete", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{}, Facts{Response: &Response{Complete: true}}},
-		{"job started with facts", effectSaved(t), core.JobStarted{JobID: "job-1"}, Facts{Failure: "x"}},
-		{"observation without record", awaiting, core.Observed{Execution: core.ExecutionExited}, Facts{}},
-		{"observation mismatch", awaiting, core.Observed{Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
-		{"observation with failure text", awaiting, core.Observed{Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
-		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{}), core.Resolved{Execution: core.ExecutionExited}, Facts{}},
+		{"attempt with facts", stateAt(t, core.PhaseRequestFrozen), core.AttemptStarted{Attempt: 1}, Facts{Failure: "x"}},
+		{"saved response without record", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{}},
+		{"saved response incomplete", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Body: execBody}}},
+		{"saved response without body", stateAt(t, core.PhaseRequestSent), core.ResponseSaved{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
+		{"incomplete response marked complete", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Complete: true}}},
+		{"job started with facts", saved, core.JobStarted{EffectID: saved.EffectID, JobID: "job-1"}, Facts{Failure: "x"}},
+		{"observation without record", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{}},
+		{"observation mismatch", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
+		{"observation with failure text", awaiting, core.Observed{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
+		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{EffectID: awaiting.EffectID}), core.Resolved{EffectID: awaiting.EffectID, Execution: core.ExecutionExited}, Facts{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -196,17 +203,18 @@ func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
 }
 
 func TestCommitAcceptsPermittedFacts(t *testing.T) {
-	unresolved := advance(t, effectSaved(t), core.JobStarted{JobID: "job-1"}, core.OutcomeUnknown{})
+	saved := effectSaved(t)
+	unresolved := advance(t, jobStarted(t, saved, "job-1"), core.OutcomeUnknown{EffectID: saved.EffectID})
 	tests := []struct {
 		name  string
 		from  core.State
 		event core.Event
 		facts Facts
 	}{
-		{"incomplete response with record and failure", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{}, Facts{Response: &Response{Body: []byte("partial")}, Failure: "timeout"}},
-		{"incomplete response without facts", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{}, Facts{}},
-		{"unknown outcome with failure", effectSaved(t), core.OutcomeUnknown{}, Facts{Failure: "lost"}},
-		{"resolution with record", unresolved, core.Resolved{Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionExited}}},
+		{"incomplete response with record and failure", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{Response: &Response{Body: []byte("partial")}, Failure: "timeout"}},
+		{"incomplete response without facts", stateAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Attempt: 1}, Facts{}},
+		{"unknown outcome with failure", saved, core.OutcomeUnknown{EffectID: saved.EffectID}, Facts{Failure: "lost"}},
+		{"resolution with record", unresolved, core.Resolved{EffectID: unresolved.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionExited}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -252,7 +260,7 @@ func TestDispatchCommitsEffectBeforeStartingJob(t *testing.T) {
 	runner := newRunner(t, rec)
 	ctx := context.Background()
 
-	saved, err := runner.Commit(ctx, stateAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Body: execBody}, Facts{})
+	saved, err := runner.Commit(ctx, stateAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Attempt: 1, Body: execBody}, Facts{})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
@@ -271,7 +279,7 @@ func TestDispatchCommitsEffectBeforeStartingJob(t *testing.T) {
 	if want := (Effect{ID: saved.EffectID, Command: "printf ok"}); rec.lastEffect != want {
 		t.Fatalf("executor received %#v, want %#v", rec.lastEffect, want)
 	}
-	if last := rec.commits[len(rec.commits)-1]; last.Event != (core.JobStarted{JobID: "job-1"}) || last.From != saved || last.To != got {
+	if last := rec.commits[len(rec.commits)-1]; last.Event != (core.JobStarted{EffectID: saved.EffectID, JobID: "job-1"}) || last.From != saved || last.To != got {
 		t.Fatalf("job commit = %#v", last)
 	}
 }
@@ -333,7 +341,7 @@ func TestDispatchKeepsUnknownOutcome(t *testing.T) {
 			if got.Phase != core.PhaseNeedsResolution || got.JobID != "" {
 				t.Fatalf("Dispatch() = %#v, want needs_resolution without job", got)
 			}
-			want := Transition{From: from, Event: core.OutcomeUnknown{}, To: got, Facts: Facts{Failure: tt.wantFailure}}
+			want := Transition{From: from, Event: core.OutcomeUnknown{EffectID: from.EffectID}, To: got, Facts: Facts{Failure: tt.wantFailure}}
 			if len(tt.rec.commits) != 1 || !reflect.DeepEqual(tt.rec.commits[0], want) {
 				t.Fatalf("commits = %#v, want [%#v]", tt.rec.commits, want)
 			}
@@ -418,21 +426,30 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 	request := Request{Body: []byte("frozen")}
 	observation := Observation{Execution: core.ExecutionExited}
 
-	commit := func(event core.Event, facts Facts) func(core.State) (core.State, error) {
-		return func(s core.State) (core.State, error) { return runner.Commit(ctx, s, event, facts) }
+	commit := func(event func(core.State) core.Event, facts Facts) func(core.State) (core.State, error) {
+		return func(s core.State) (core.State, error) { return runner.Commit(ctx, s, event(s), facts) }
+	}
+	frozen := func(core.State) core.Event { return core.RequestFrozen{} }
+	attempt := func(s core.State) core.Event { return core.AttemptStarted{Attempt: s.Attempt} }
+	saved := func(s core.State) core.Event { return core.ResponseSaved{Attempt: s.Attempt} }
+	loaded := func(body []byte) func(core.State) core.Event {
+		return func(s core.State) core.Event { return core.ResponseLoaded{Attempt: s.Attempt, Body: body} }
+	}
+	observed := func(s core.State) core.Event {
+		return core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited}
 	}
 	state := stateAt(t, core.PhaseIdle)
 	steps := []func(core.State) (core.State, error){
-		commit(core.RequestFrozen{}, Facts{Request: &request}),
-		commit(core.AttemptStarted{}, Facts{}),
-		commit(core.ResponseSaved{}, Facts{Response: &Response{Body: execBody, Complete: true}}),
-		commit(core.ResponseLoaded{Body: execBody}, Facts{}),
+		commit(frozen, Facts{Request: &request}),
+		commit(attempt, Facts{}),
+		commit(saved, Facts{Response: &Response{Body: execBody, Complete: true}}),
+		commit(loaded(execBody), Facts{}),
 		func(s core.State) (core.State, error) { return runner.Dispatch(ctx, s) },
-		commit(core.Observed{Execution: core.ExecutionExited}, Facts{Observation: &observation}),
-		commit(core.RequestFrozen{}, Facts{Request: &request}),
-		commit(core.AttemptStarted{}, Facts{}),
-		commit(core.ResponseSaved{}, Facts{Response: &Response{Body: returnBody, Complete: true}}),
-		commit(core.ResponseLoaded{Body: returnBody}, Facts{}),
+		commit(observed, Facts{Observation: &observation}),
+		commit(frozen, Facts{Request: &request}),
+		commit(attempt, Facts{}),
+		commit(saved, Facts{Response: &Response{Body: returnBody, Complete: true}}),
+		commit(loaded(returnBody), Facts{}),
 	}
 	for i, step := range steps {
 		next, err := step(state)

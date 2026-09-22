@@ -28,37 +28,55 @@ const (
 // value types in this package are accepted.
 type Event interface{ event() }
 
-// RequestFrozen reports that the request bytes and provenance are recorded.
+// RequestFrozen reports that the request bytes and provenance are recorded
+// under the next request revision of the current step.
 type RequestFrozen struct{}
 
-// AttemptStarted reports that one model attempt is about to be sent. In
-// request_sent it also reports that the previous attempt was lost.
-type AttemptStarted struct{}
+// AttemptStarted reports that the named attempt is about to be sent. In
+// request_frozen it names the current attempt; in request_sent it names the
+// next attempt and reports that the previous send was lost.
+type AttemptStarted struct{ Attempt int }
 
-// ResponseSaved reports that a complete raw response is recorded.
-type ResponseSaved struct{}
+// ResponseSaved reports that a complete raw response to the named attempt is
+// recorded. A response from an earlier attempt is invalid, not late.
+type ResponseSaved struct{ Attempt int }
 
-// ResponseIncomplete reports a failed or truncated model attempt.
-type ResponseIncomplete struct{}
+// ResponseIncomplete reports a failed or truncated send of the named attempt.
+type ResponseIncomplete struct{ Attempt int }
 
-// ResponseLoaded carries the saved response body for decoding.
-type ResponseLoaded struct{ Body []byte }
+// ResponseLoaded carries the saved response body of the named attempt for
+// decoding.
+type ResponseLoaded struct {
+	Attempt int
+	Body    []byte
+}
 
 // JobStarted reports the backend job that owns the committed effect.
-type JobStarted struct{ JobID string }
+type JobStarted struct {
+	EffectID string
+	JobID    string
+}
 
-// Observed reports a known execution outcome. Unknown outcomes must use
-// OutcomeUnknown so they cannot be mistaken for a completed step.
-type Observed struct{ Execution ExecutionState }
+// Observed reports a known execution outcome of the named effect. Unknown
+// outcomes must use OutcomeUnknown so they cannot be mistaken for a completed
+// step.
+type Observed struct {
+	EffectID  string
+	Execution ExecutionState
+}
 
-// OutcomeUnknown reports that the effect's fate could not be determined.
-type OutcomeUnknown struct{}
+// OutcomeUnknown reports that the named effect's fate could not be determined.
+type OutcomeUnknown struct{ EffectID string }
 
 // StopRequested asks the run to stop for a reason the harness observed.
 type StopRequested struct{ Reason StopReason }
 
-// Resolved records an explicit human resolution of an unknown outcome.
-type Resolved struct{ Execution ExecutionState }
+// Resolved records an explicit human resolution of the named effect's unknown
+// outcome.
+type Resolved struct {
+	EffectID  string
+	Execution ExecutionState
+}
 
 func (RequestFrozen) event()      {}
 func (AttemptStarted) event()     {}

@@ -45,15 +45,16 @@ type Limits struct {
 // State is the complete projection needed to continue a run. It holds no
 // history, bodies, or artifacts; those are facts the harness stores.
 type State struct {
-	RunID    string
-	Step     int
-	Attempt  int
-	Phase    Phase
-	Limits   Limits
-	Decision Decision
-	EffectID string
-	JobID    string
-	Reason   StopReason
+	RunID      string
+	Step       int
+	Attempt    int
+	RequestRev int
+	Phase      Phase
+	Limits     Limits
+	Decision   Decision
+	EffectID   string
+	JobID      string
+	Reason     StopReason
 }
 
 var (
@@ -108,14 +109,21 @@ func (s State) Next(event Event) (State, error) {
 	case RequestFrozen:
 		if s.Phase == PhaseIdle {
 			s.Phase = PhaseRequestFrozen
+			s.RequestRev++
 			return s, nil
 		}
 	case AttemptStarted:
 		switch s.Phase {
 		case PhaseRequestFrozen:
+			if e.Attempt != s.Attempt {
+				return s, fmt.Errorf("%w: attempt %d does not match current attempt %d", ErrInvalidEvent, e.Attempt, s.Attempt)
+			}
 			s.Phase = PhaseRequestSent
 			return s, nil
 		case PhaseRequestSent:
+			if e.Attempt != s.Attempt+1 {
+				return s, fmt.Errorf("%w: attempt %d does not follow lost attempt %d", ErrInvalidEvent, e.Attempt, s.Attempt)
+			}
 			return s.retry(StopAttemptsExhausted, PhaseRequestSent), nil
 		}
 	case ResponseSaved:
@@ -185,13 +193,27 @@ func (s State) Next(event Event) (State, error) {
 
 func (s State) validate(event Event) error {
 	switch e := event.(type) {
-	case RequestFrozen, AttemptStarted, ResponseSaved, ResponseIncomplete, OutcomeUnknown:
+	case RequestFrozen:
 		return nil
+	case AttemptStarted:
+		if e.Attempt < 1 {
+			return fmt.Errorf("%w: attempt number is required", ErrInvalidEvent)
+		}
+	case ResponseSaved:
+		return s.claimAttempt(e.Attempt)
+	case ResponseIncomplete:
+		return s.claimAttempt(e.Attempt)
 	case ResponseLoaded:
+		if err := s.claimAttempt(e.Attempt); err != nil {
+			return err
+		}
 		if len(e.Body) == 0 {
 			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
 		}
 	case JobStarted:
+		if err := s.claimEffect(e.EffectID); err != nil {
+			return err
+		}
 		if e.JobID == "" {
 			return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
 		}
@@ -199,6 +221,9 @@ func (s State) validate(event Event) error {
 			return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, e.JobID, s.JobID)
 		}
 	case Observed:
+		if err := s.claimEffect(e.EffectID); err != nil {
+			return err
+		}
 		if err := knownExecution(e.Execution); err != nil {
 			return err
 		}
@@ -207,7 +232,12 @@ func (s State) validate(event Event) error {
 				return fmt.Errorf("%w: only %s can be observed without a job in phase %q", ErrInvalidEvent, want, s.Phase)
 			}
 		}
+	case OutcomeUnknown:
+		return s.claimEffect(e.EffectID)
 	case Resolved:
+		if err := s.claimEffect(e.EffectID); err != nil {
+			return err
+		}
 		return knownExecution(e.Execution)
 	case StopRequested:
 		if e.Reason == "" {
@@ -215,6 +245,23 @@ func (s State) validate(event Event) error {
 		}
 	default:
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
+	}
+	return nil
+}
+
+func (s State) claimAttempt(attempt int) error {
+	if attempt != s.Attempt {
+		return fmt.Errorf("%w: attempt %d does not match current attempt %d", ErrInvalidEvent, attempt, s.Attempt)
+	}
+	return nil
+}
+
+func (s State) claimEffect(effectID string) error {
+	if effectID == "" {
+		return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
+	}
+	if s.EffectID != "" && s.EffectID != effectID {
+		return fmt.Errorf("%w: effect %q does not match current effect %q", ErrInvalidEvent, effectID, s.EffectID)
 	}
 	return nil
 }
@@ -246,7 +293,7 @@ func (s State) retry(exhausted StopReason, resume Phase) State {
 func (s State) decide(body []byte) State {
 	decision, err := Decode(body)
 	if err != nil {
-		return s.retry(StopProtocolFailure, PhaseRequestFrozen)
+		return s.retry(StopProtocolFailure, PhaseIdle)
 	}
 	s.Decision = decision
 	if decision.Kind == Return {
@@ -266,6 +313,7 @@ func (s State) advance() State {
 	}
 	s.Step++
 	s.Attempt = 1
+	s.RequestRev = 0
 	s.Phase = PhaseIdle
 	s.Decision = Decision{}
 	s.EffectID = ""
