@@ -85,7 +85,8 @@ type State struct {
 limits. `State.Intent` maps the committed phase to the single action the
 harness may take next. `State.Next` applies one event and returns the new
 state, or the unchanged state with `ErrInvalidEvent` or `ErrIllegalTransition`.
-Both are pure functions of their inputs.
+Both are pure functions of their inputs. A legal event may leave the state
+equal to its input; the harness still records it.
 
 | Phase | Intent | Legal events |
 | --- | --- | --- |
@@ -95,7 +96,7 @@ Both are pure functions of their inputs.
 | `response_saved` | `decode` | `ResponseLoaded`, `StopRequested` |
 | `effect_saved` | `dispatch` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `awaiting_observation` | `inspect` | `Observed`, `OutcomeUnknown`, `StopRequested` |
-| `cancelling` | `cancel` | `JobStarted`, `Observed`, `OutcomeUnknown` |
+| `cancelling` | `cancel` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `needs_resolution` | `halt` | `Resolved`, `StopRequested` |
 | `returned`, `stopped`, unknown | `halt` | none |
 
@@ -105,7 +106,9 @@ Rules the table enforces:
   resumes by asking `Intent` again, so recovery and fresh steps share one path.
 - `AttemptStarted` is committed before each model send. In `request_sent` it
   means the previous send never reported a result, so it consumes an attempt;
-  sends are therefore counted even when a crash loses their outcome.
+  sends are therefore counted even when a crash loses their outcome. The bound
+  is on authorized sends: a crash between the `AttemptStarted` commit and the
+  send consumes an attempt without sending.
 - `ResponseIncomplete` and an undecodable response return to `request_frozen`
   as a new attempt until `MaxAttempts`, then stop with `attempts_exhausted` or
   `protocol_failure`. An empty response body is an invalid event, not a retry.
@@ -114,25 +117,28 @@ Rules the table enforces:
 - `Observed` completes the step: the run continues in `idle` at the next step
   with identities cleared, or stops with `steps_exhausted`. `Observed` rejects
   the `unknown` execution state, which must be reported as `OutcomeUnknown`.
-  Without a job, only `failed_to_start` may be observed.
-- `OutcomeUnknown` enters `needs_resolution`. A `StopRequested` there records
-  the reason and keeps waiting; only an explicit `Resolved` leaves the phase,
-  continuing the run or completing the pending stop.
+  Without a recorded job, `effect_saved` accepts only `failed_to_start` and
+  `cancelling` only `cancelled`; any other outcome must first record its job
+  with `JobStarted`.
+- `OutcomeUnknown` enters `needs_resolution`; only an explicit `Resolved`
+  leaves it, continuing the run or completing a pending stop.
 - `StopRequested` stops immediately while no effect exists and enters
   `cancelling` once one may exist. `cancelling` records the true result before
-  the run becomes `stopped`; the first reason is kept.
+  the run becomes `stopped`. In `cancelling` and `needs_resolution` a stop
+  request is recorded without changing phase; the first reason is kept.
 - `JobStarted` requires a job ID and must match a job already known.
 - Adding a capability must not add an event kind; capabilities are payloads.
 
 ## Implemented interpreter
 
 `Runner.Commit` takes the committed state, one event, and the facts that event
-permits. It checks cancellation once, validates the facts, derives the next
-state with `core.State.Next`, and hands a single `Transition` to the store. Any
-error returns the unchanged state; nothing is written.
+permits. It checks cancellation once, derives the next state with
+`core.State.Next`, validates the facts, and hands a single `Transition` to the
+store. Any error returns the unchanged state; nothing is written. Core errors
+keep their sentinels; fact errors wrap `ErrFacts`.
 
 ```text
-Commit:   check cancellation -> check facts -> Next -> Store.Commit(Transition)
+Commit:   check cancellation -> Next -> check facts -> Store.Commit(Transition)
 Dispatch: require dispatch intent -> check cancellation -> Executor.StartOrResume
           -> Commit(JobStarted) | Commit(OutcomeUnknown) | return cancellation
 ```
@@ -150,7 +156,7 @@ ID and decision payload to the executor. A returned job ID commits
 `JobStarted` whatever its status snapshot, because `Inspect` is the authority
 on the outcome. An executor error or a job without an ID commits
 `OutcomeUnknown` with the failure text; if that commit fails, the returned
-error carries both causes and the state stays `effect_saved`. A cancellation
+error wraps both causes and the state stays `effect_saved`. A cancellation
 observed around the call returns without committing, so a resume finds the job
 by effect ID. The executor must still honor cancellation before creating a
 job; a check in the runner cannot close that race.
@@ -172,15 +178,17 @@ must not become the authority for whether an action occurred.
 The store contract is one atomic `Commit(Transition)`. Inside that transaction
 a concrete implementation must verify that the durable state equals `From` and
 reject the transition otherwise; this compare-and-set is what keeps one pending
-intent per run when a stale or competing harness commits. It must persist the
-new state and the facts attached to the event: request bytes and provenance at
-`RequestFrozen`, the response at `ResponseSaved`, the observation at `Observed`
-or `Resolved`, and failure text at `ResponseIncomplete` or `OutcomeUnknown`.
-It must also provide recovery reads for the last committed state, the frozen
-request, and the saved response. The current interface defines the commit but
-no recovery reads and no workspace-lock API. `core.State` is the recovery
-projection; loading it and re-deriving the intent is the resume path, but no
-loader or loop exists yet.
+intent per run when a stale or competing harness commits. `To` may equal
+`From`, because a legal event can leave the state unchanged and is still
+recorded, so enforce the check against the current state rather than as a
+uniqueness rule on `From`. The store must persist the new state and the facts
+attached to the event: request bytes and provenance at `RequestFrozen`, the
+response at `ResponseSaved`, the observation at `Observed` or `Resolved`, and
+failure text at `ResponseIncomplete` or `OutcomeUnknown`. It must also provide
+recovery reads for the last committed state, the frozen request, and the saved
+response. The current interface defines the commit but no recovery reads and
+no workspace-lock API. `core.State` is the recovery projection; loading it and
+re-deriving the intent is the resume path, but no loader or loop exists yet.
 
 Use short transactions, never one held across a model call or job wait. The
 concrete store must specify crash and power-loss assumptions; SQLite WAL with
@@ -195,8 +203,8 @@ harnesses from acting on the same pending intent.
 | `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop |
 | `response_saved` | `decode` | Load the saved bytes; never call the model again for this attempt |
 | `effect_saved` | `dispatch` | `StartOrResume` by effect ID; find the existing job before creating one |
-| `awaiting_observation` | `inspect` | Collect the original job result and commit one observation |
-| `cancelling` | `cancel` | `Inspect` by effect ID; record a found job with `JobStarted` and cancel it, observe a missing job as `cancelled`; commit the true result within a cleanup deadline |
+| `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
+| `cancelling` | `cancel` | `Inspect` by effect ID. With no job recorded, observe a missing job as `cancelled` and record a found job with `JobStarted`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
 | `needs_resolution` | `halt` | Wait for an explicitly recorded `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |

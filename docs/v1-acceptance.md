@@ -12,11 +12,11 @@ V1 durability is **not complete**.
 | Stateless calls | Concurrent decode tests and race checks | Does not test model or runtime behavior |
 | Complete transition table | Every legal phase/event pair asserts the full resulting state and every other pair is rejected unchanged in `core/state_test.go` | Offline values only |
 | Budgets and stop reasons | Transport, lost-send, protocol, and step exhaustion tests | No wall-time, token, or storage measurement |
-| Counted attempts | `AttemptStarted` is committed before each send and consumes an attempt when it replaces a lost one | No adapter sends anything yet |
-| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume`; a store failure after the start leaves `effect_saved` and keeps both errors in `runner_test.go` | Recording store/executor, no durable backend |
-| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing; `StopRequested` in `needs_resolution` records the reason without leaving | No process-tree cleanup or persistent cancellation |
-| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` | No real backend inspection |
-| Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing | Recording store only |
+| Counted attempts | `AttemptStarted` in `request_sent` consumes an attempt and stops at `MaxAttempts` in `core/state_test.go` | No adapter sends anything yet |
+| Commit before dispatch | Shared event log shows the effect commit before `StartOrResume`; a store failure after the start leaves `effect_saved` and wraps both errors in `runner_test.go` | Recording store/executor, no durable backend |
+| Cancellation | Cancel before commit, before dispatch, and around `StartOrResume` leaves state unchanged and writes nothing; repeated stop requests in `cancelling` and `needs_resolution` are recorded without changing phase | No process-tree cleanup or persistent cancellation |
+| Unknown outcomes | Executor error or a missing job ID commits `OutcomeUnknown` with failure text; a job ID with any status is kept for `inspect`; `Observed` rejects `unknown` and, without a recorded job, anything but `failed_to_start` or `cancelled` | No real backend inspection |
+| Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing and wrap `ErrFacts`; core sentinels survive `Commit` | Recording store only |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
 | Offline loop shape | Exec then return steps drive `Commit`/`Dispatch` through ten committed phases | No model, inspect, or restart |
 | Input requirements | Missing goal/environment tests | No size or token budget |

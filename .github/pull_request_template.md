@@ -25,7 +25,7 @@ checks do not count as human review. -->
 ## Verification
 
 - [ ] `make check`
-- [ ] `go test -race ./...`
+- [ ] `go test -count=1 -race ./...`
 - [ ] `git diff --check`
 - [ ] Additional checks are listed below
 
