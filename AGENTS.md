@@ -13,12 +13,16 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 
 ## Ownership and complexity
 
-- `core/` owns only deterministic decoding of an `exec` or `return` decision.
-  It must not acquire model I/O, history, storage, clocks, execution, lifecycle
-  state, or dependencies outside the standard library.
-- `internal/harness/` owns state, input construction, model calls, persistence,
-  execution, cancellation, and recovery. Its current types are a scaffold;
-  concrete storage and execution guarantees require integration evidence.
+- `core/` owns the stateless run semantics: decoding an `exec` or `return`
+  decision, the `State` projection, and the pure `Next`/`Intent` transition
+  rules. It holds no per-run state between calls and must not acquire model
+  I/O, history, storage, clocks, execution, or dependencies outside the
+  standard library. Adding a capability must not add an event kind.
+- `internal/harness/` owns durable facts, input construction, model calls,
+  persistence, execution, and the interpretation of intents. It must not
+  restate transition rules that `core.State.Next` defines. Its current types
+  are a scaffold; concrete storage and execution guarantees require
+  integration evidence.
 - `cmd/canti/` is thin CLI wiring. Keep reusable behavior in the Go packages.
 - Keep one module. Add interfaces at external boundaries; start other behavior
   with concrete types. No plugin registry, generic workflow engine, or Memoh
