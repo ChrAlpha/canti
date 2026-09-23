@@ -61,6 +61,9 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
+	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Notes, p.Rejected, p.Total) <= 0 {
+		return nil, fmt.Errorf("harness: prompt limits %+v must be positive", p)
+	}
 	cfg.Poll = cmp.Or(cfg.Poll, 500*time.Millisecond)
 	cfg.Backoff = cmp.Or(cfg.Backoff, time.Second)
 	cfg.InspectRetries = cmp.Or(cfg.InspectRetries, 5)
@@ -95,11 +98,11 @@ func (l *Loop) Run(ctx context.Context, runID string) (Snapshot, error) {
 // resumes from the journal.
 func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 	snap, err := l.load(ctx, runID)
-	if err != nil {
+	if err != nil || snap.State.Intent() == core.IntentHalt {
 		return snap, err
 	}
 	run, err := l.journal.Run(ctx, runID)
-	if err != nil || snap.State.Intent() == core.IntentHalt {
+	if err != nil {
 		return snap, err
 	}
 	if snap.State.Reason == "" {
@@ -233,7 +236,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		Earlier: s.Step - 1 - len(recent), Steps: recent, ArtifactDir: l.cfg.ArtifactDir, Notes: Notes{Path: l.cfg.NotesPath},
 	}
 	if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
-		l.cfg.Logger.WarnContext(ctx, "notes unreadable", "run_id", s.RunID, "seq", snap.Seq, "error", err)
+		l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
 		f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
 	}
 	if s.RequestRev > 0 {
@@ -241,7 +244,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		if err != nil {
 			return snap, err
 		}
-		body := l.model.Decision(resp)
+		body := l.decision(resp)
 		if _, err := core.Decode(body); err != nil {
 			f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
 		}
@@ -265,13 +268,16 @@ func (l *Loop) send(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	}
 	attempt := s.Attempt
 	if s.Phase == core.PhaseRequestSent {
-		l.cfg.Logger.WarnContext(ctx, "counting an interrupted attempt as lost", "run_id", s.RunID, "seq", snap.Seq, "step", s.Step, "attempt", attempt)
+		l.note(ctx, slog.LevelWarn, "counting an interrupted attempt as lost", snap, "attempt", attempt)
 		attempt++
 	}
 	if snap, err = l.runner.Commit(ctx, snap, core.AttemptStarted{Step: s.Step, Attempt: attempt}, Facts{}); err != nil || snap.State.Phase != core.PhaseRequestSent {
 		return snap, err
 	}
 	resp, err := l.model.Complete(ctx, req)
+	if err == nil && (!resp.Complete || len(resp.Body) == 0) {
+		err = errors.New("harness: model reported success without a complete response")
+	}
 	var stop *StopError
 	switch {
 	case err == nil:
@@ -288,7 +294,7 @@ func (l *Loop) send(ctx context.Context, snap Snapshot) (Snapshot, error) {
 		return snap, err
 	}
 	d := l.backoff(snap.State.Attempt)
-	l.cfg.Logger.InfoContext(ctx, "retrying an incomplete response", "run_id", s.RunID, "seq", snap.Seq, "attempt", snap.State.Attempt, "backoff", d)
+	l.note(ctx, slog.LevelInfo, "retrying an incomplete response", snap, "attempt", snap.State.Attempt, "backoff", d)
 	return snap, sleep(ctx, d)
 }
 
@@ -306,11 +312,20 @@ func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	if err != nil {
 		return snap, err
 	}
-	next, err := l.runner.Commit(ctx, snap, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.model.Decision(resp)}, Facts{})
+	next, err := l.runner.Commit(ctx, snap, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.decision(resp)}, Facts{})
 	if err == nil && next.State.Phase == core.PhaseIdle {
-		l.cfg.Logger.WarnContext(ctx, "retrying an undecodable response", "run_id", s.RunID, "seq", next.Seq, "attempt", next.State.Attempt)
+		l.note(ctx, slog.LevelWarn, "retrying an undecodable response", next, "attempt", next.State.Attempt)
 	}
 	return next, err
+}
+
+// decision is the model's decision text of resp, or its raw body when the
+// model extracts none, so that an empty extraction is rejected by decoding.
+func (l *Loop) decision(resp Response) []byte {
+	if b := l.model.Decision(resp); len(b) > 0 {
+		return b
+	}
+	return resp.Body
 }
 
 // cancel fences an effect without a recorded job and records what the
@@ -357,7 +372,7 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, err
 			if failures++; failures > l.cfg.InspectRetries {
 				why = fmt.Sprintf("inspect failed %d consecutive times: %v", failures, err)
 			} else {
-				l.cfg.Logger.WarnContext(ctx, "retrying a failed inspection", "run_id", s.RunID, "seq", snap.Seq, "failures", failures, "error", err)
+				l.note(ctx, slog.LevelWarn, "retrying a failed inspection", snap, "failures", failures, "error", err)
 			}
 		case !found:
 			why = fmt.Sprintf("no job owns effect %s", s.EffectID)
@@ -379,7 +394,7 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, err
 		case !stopping:
 			failures = 0
 			if !timedOut && limit > 0 && !job.StartedAt.IsZero() && l.cfg.Now().Sub(job.StartedAt) >= limit {
-				l.cfg.Logger.InfoContext(ctx, "cancelling a job past its timeout", "run_id", s.RunID, "seq", snap.Seq, "job_id", job.ID, "timeout", limit)
+				l.note(ctx, slog.LevelInfo, "cancelling a job past its timeout", snap, "job_id", job.ID, "timeout", limit)
 				if err := l.executor.Cancel(ctx, s.EffectID); err != nil {
 					return snap, err
 				}
@@ -407,6 +422,10 @@ func (l *Loop) observe(ctx context.Context, snap Snapshot, job Job, execution co
 
 func (l *Loop) unknown(ctx context.Context, snap Snapshot, why string) (Snapshot, error) {
 	return l.runner.Commit(ctx, snap, core.OutcomeUnknown{EffectID: snap.State.EffectID}, Facts{Failure: why})
+}
+
+func (l *Loop) note(ctx context.Context, level slog.Level, msg string, snap Snapshot, attrs ...any) {
+	l.cfg.Logger.Log(ctx, level, msg, append([]any{"run_id", snap.State.RunID, "seq", snap.Seq, "phase", snap.State.Phase}, attrs...)...)
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

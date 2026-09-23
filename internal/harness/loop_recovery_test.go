@@ -290,6 +290,26 @@ func TestLoopStop(t *testing.T) {
 			t.Fatalf("executor calls = %v", got)
 		}
 	})
+	t.Run("a job that exits after the cancel", func(t *testing.T) {
+		f := newFixture(t, limits, harness.Budget{}, execReply("make install"))
+		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		inspections := 0
+		f.exec.inspect = func(id string) (harness.Job, bool, error) {
+			if inspections++; inspections == 1 {
+				return harness.Job{ID: jobID(id), Status: harness.JobRunning}, true, nil
+			}
+			code := 0
+			return harness.Job{ID: jobID(id), Status: harness.JobSucceeded, ExitCode: &code}, true, nil
+		}
+		snap, err := f.fresh().Stop(ctx, runID, core.StopCancelled)
+		if err != nil {
+			t.Fatalf("Stop() error = %v", err)
+		}
+		wantState(t, snap, core.PhaseStopped, core.StopCancelled)
+		if obs := observation(t, f.last()); obs.Execution != core.ExecutionExited || inspections != 2 {
+			t.Fatalf("observation after %d inspections = %+v, want the true exit", inspections, obs)
+		}
+	})
 	t.Run("effect saved without a job", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{}, execReply("sleep 600"))
 		wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
@@ -382,26 +402,30 @@ func TestLoopStop(t *testing.T) {
 }
 
 func TestLoopResumesAfterControllerShutdown(t *testing.T) {
-	t.Run("during a request", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		f := newFixture(t, limits, harness.Budget{}, reply{hook: cancel}, returnReply("done"))
-		snap, err := f.loop().Run(ctx, runID)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run() error = %v, want cancellation", err)
-		}
-		wantState(t, snap, core.PhaseRequestSent, "")
-		f.wantKinds([]string{"request_frozen", "attempt_started"})
-		wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-		f.wantKinds([]string{"request_frozen", "attempt_started", "attempt_started"}, closing[2:])
-		if lost := f.transitions()[2]; lost.Event != (core.AttemptStarted{Step: 1, Attempt: 2}) || lost.To.Attempt != 2 {
-			t.Fatalf("resume committed %#v to %+v, want attempt 2 counted", lost.Event, lost.To)
-		}
-		frozen := f.frozen(1, 1)
-		if len(f.model.sent) != 2 || !bytes.Equal(f.model.sent[0], frozen) || !bytes.Equal(f.model.sent[1], frozen) {
-			t.Fatal("the resumed send did not reuse the frozen bytes")
-		}
-	})
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during a request answered late %v", late), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			lost := returnReply("lost")
+			lost.hook, lost.late = cancel, late
+			f := newFixture(t, limits, harness.Budget{}, lost, returnReply("done"))
+			snap, err := f.loop().Run(ctx, runID)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want cancellation", err)
+			}
+			wantState(t, snap, core.PhaseRequestSent, "")
+			f.wantKinds([]string{"request_frozen", "attempt_started"})
+			wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+			f.wantKinds([]string{"request_frozen", "attempt_started", "attempt_started"}, closing[2:])
+			if lost := f.transitions()[2]; lost.Event != (core.AttemptStarted{Step: 1, Attempt: 2}) || lost.To.Attempt != 2 {
+				t.Fatalf("resume committed %#v to %+v, want attempt 2 counted", lost.Event, lost.To)
+			}
+			frozen := f.frozen(1, 1)
+			if len(f.model.sent) != 2 || !bytes.Equal(f.model.sent[0], frozen) || !bytes.Equal(f.model.sent[1], frozen) {
+				t.Fatal("the resumed send did not reuse the frozen bytes")
+			}
+		})
+	}
 	t.Run("on the last attempt", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -433,9 +457,16 @@ func TestLoopResumesAfterControllerShutdown(t *testing.T) {
 
 func TestLoopColdRestartAfterEveryStepMatchesAnUninterruptedRun(t *testing.T) {
 	ctx := context.Background()
-	whole := newFixture(t, limits, harness.Budget{}, twoSteps()...)
-	whole.run(whole.loop())
-	cold := newFixture(t, limits, harness.Budget{}, twoSteps()...)
+	eventful := func() *fixture {
+		f := newFixture(t, limits, harness.Budget{JobTimeout: 10 * time.Second},
+			reply{body: `{"kind":`, usage: usage, err: errors.New("stream reset")}, reply{body: "Let me think.", usage: usage},
+			execReply("sleep 600"), execReply("ls -la /workspace"), returnReply("done"))
+		f.exec.hold, f.exec.tick = true, func() { f.clock.Advance(6 * time.Second) }
+		return f
+	}
+	whole := eventful()
+	wantState(t, whole.run(whole.loop()), core.PhaseReturned, "")
+	cold := eventful()
 	for i := 0; ; i++ {
 		s, err := sqlite.Open(ctx, cold.path)
 		if err != nil {
@@ -454,8 +485,8 @@ func TestLoopColdRestartAfterEveryStepMatchesAnUninterruptedRun(t *testing.T) {
 		}
 	}
 	want, got := whole.transitions(), cold.transitions()
-	if len(want) != 18 || len(got) != len(want) {
-		t.Fatalf("committed %d cold and %d uninterrupted transitions, want 18", len(got), len(want))
+	if len(want) != 24 || len(got) != len(want) {
+		t.Fatalf("committed %d cold and %d uninterrupted transitions, want 24", len(got), len(want))
 	}
 	for i := range want {
 		if !reflect.DeepEqual(got[i], want[i]) {

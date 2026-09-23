@@ -36,6 +36,7 @@ func TestNewLoopRequiresDependencies(t *testing.T) {
 		func(c *harness.LoopConfig) { c.History = -1 },
 		func(c *harness.LoopConfig) { c.Poll = -1 },
 		func(c *harness.LoopConfig) { c.InspectRetries = -1 },
+		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 64 << 10} },
 	} {
 		cfg := f.cfg
 		edit(&cfg)
@@ -89,6 +90,17 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	}
 }
 
+func TestLoopShowsOnlyRecentHistory(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, twoSteps()...)
+	f.cfg.History = 1
+	f.run(f.loop())
+	third := f.model.prompts[2].User
+	wantContains(t, third, "1 earlier step is not shown", "### Step 2")
+	if strings.Contains(third, "### Step 1") {
+		t.Fatalf("prompt shows more than the recent step:\n%s", third)
+	}
+}
+
 func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
 	h := &logs{}
 	f := newFixture(t, limits, harness.Budget{}, reply{err: errors.New("stream reset")}, reply{err: errors.New("stream reset")}, returnReply("done"))
@@ -130,7 +142,7 @@ func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
 
 func TestLoopResendsFrozenBytesAfterTransportFailure(t *testing.T) {
 	partial := harness.Usage{InputTokens: 40, OutputTokens: 2}
-	f := newFixture(t, limits, harness.Budget{}, reply{body: `{"kind":"ret`, usage: partial, err: errors.New("stream reset"), complete: true}, returnReply("done"))
+	f := newFixture(t, limits, harness.Budget{}, reply{body: `{"kind":"ret`, usage: partial, err: errors.New("stream reset"), flip: true}, returnReply("done"))
 	f.cfg.Backoff = 5 * time.Millisecond
 	begin := time.Now()
 	snap := f.run(f.loop())
@@ -160,6 +172,56 @@ func TestLoopResendsFrozenBytesAfterTransportFailure(t *testing.T) {
 	if elapsed < 5*time.Millisecond {
 		t.Fatalf("run took %v, want at least the 5ms backoff", elapsed)
 	}
+}
+
+func TestLoopCapsBackoff(t *testing.T) {
+	h := &logs{}
+	f := newFixture(t, limits, harness.Budget{}, reply{err: errors.New("reset")}, reply{err: errors.New("reset")})
+	f.cfg.Logger, f.cfg.Backoff = slog.New(h), 20*time.Second
+	cancel := func() {}
+	l := f.loopOn(hookJournal{Store: f.store, after: func(t harness.Transition) {
+		if t.Event.Kind() == "response_incomplete" {
+			cancel()
+		}
+	}})
+	f.steps(l, 1)
+	for range 2 {
+		ctx, stop := context.WithCancel(context.Background())
+		cancel = stop
+		_, err := l.Step(ctx, runID)
+		stop()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Step() error = %v, want the backoff cancelled", err)
+		}
+	}
+	var waits []string
+	for _, r := range h.find("retrying an incomplete response") {
+		waits = append(waits, r["backoff"])
+	}
+	if !slices.Equal(waits, []string{"20s", "30s"}) {
+		t.Fatalf("backoff waits = %v, want 20s then the 30s cap", waits)
+	}
+}
+
+func TestLoopRecordsAnUnconfirmedSuccessAsIncomplete(t *testing.T) {
+	unconfirmed := returnReply("done")
+	unconfirmed.flip = true
+	f := newFixture(t, limits, harness.Budget{}, unconfirmed, returnReply("done"))
+	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+	f.wantKinds([]string{"request_frozen", "attempt_started", "response_incomplete"}, closing[1:])
+	got := f.transitions()[2].Facts
+	wantContains(t, got.Failure, "without a complete response")
+	if got.Response == nil || got.Response.Complete || got.Response.Usage != usage {
+		t.Fatalf("incomplete response = %+v, want the unconfirmed body with its usage", got.Response)
+	}
+}
+
+func TestLoopRejectsAnEmptyDecision(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, reply{body: "<html>busy</html>", usage: usage}, returnReply("done"))
+	f.model.empty = true
+	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+	f.wantKinds(closing, closing)
+	wantContains(t, f.model.prompts[1].User, "## Rejected response", "<html>busy</html>")
 }
 
 func TestLoopBackoffIsCancellable(t *testing.T) {

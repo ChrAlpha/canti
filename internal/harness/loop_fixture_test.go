@@ -47,11 +47,12 @@ func (c *clock) Advance(d time.Duration) {
 }
 
 type reply struct {
-	body     string
-	usage    harness.Usage
-	err      error
-	complete bool // marks a failed response complete, as a faulty adapter might
-	hook     func()
+	body  string
+	usage harness.Usage
+	err   error
+	flip  bool // reports the opposite completeness, as a faulty adapter might
+	late  bool // completes even though ctx is done
+	hook  func()
 }
 
 func decision(kind core.Kind, payload string) reply {
@@ -69,6 +70,7 @@ type fakeModel struct {
 	prompts   []harness.Prompt
 	sent      [][]byte
 	freezeErr error
+	empty     bool // Decision extracts nothing
 }
 
 func (m *fakeModel) Freeze(p harness.Prompt) (harness.Request, error) {
@@ -89,13 +91,18 @@ func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.
 	if r.hook != nil {
 		r.hook()
 	}
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil && !r.late {
 		return harness.Response{}, err
 	}
-	return harness.Response{Body: []byte(r.body), Complete: r.err == nil || r.complete, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: r.usage}, r.err
+	return harness.Response{Body: []byte(r.body), Complete: (r.err == nil) != r.flip, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: r.usage}, r.err
 }
 
-func (m *fakeModel) Decision(resp harness.Response) []byte { return resp.Body }
+func (m *fakeModel) Decision(resp harness.Response) []byte {
+	if m.empty {
+		return nil
+	}
+	return resp.Body
+}
 
 func (m *fakeModel) calls() (prompts, sent int) {
 	m.mu.Lock()
