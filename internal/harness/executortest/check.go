@@ -238,6 +238,11 @@ func (c checker) inspect(ctx context.Context, e harness.Effect) (harness.Job, er
 func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, error) {
 	for {
 		job, err := c.inspect(ctx, e)
+		if err == nil && job.Status == harness.JobFailedToStart {
+			if err = c.ran(ctx, e, 0); err != nil {
+				err = fmt.Errorf("job failed to start, but %w", err)
+			}
+		}
 		if err != nil || terminal(job.Status) {
 			return job, err
 		}

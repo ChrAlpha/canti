@@ -59,6 +59,9 @@ func (b *backend) bind(effect harness.Effect) *memoryJob {
 func (b *backend) run(j *memoryJob) {
 	b.runs[j.effect.ID]++
 	j.job.Status, j.next = harness.JobRunning, harness.JobSucceeded
+	if b.mutant == "ran but failed to start" {
+		j.next = harness.JobFailedToStart
+	}
 }
 
 func (m *memory) Bind(_ context.Context, effect harness.Effect) (harness.Job, error) {
@@ -228,6 +231,7 @@ func TestCheckRejectsEachViolation(t *testing.T) {
 		{"fenced bind fails", "fence-unbound"},
 		{"late bind", "fence-unbound"},
 		{"fenced inspect fails", "fence-unbound"},
+		{"ran but failed to start", "start-once concurrent-start"},
 		{"unlocked gate", "concurrent-start"},
 		{"racy bind", "concurrent-start"},
 		{"busy start", "concurrent-start"},
