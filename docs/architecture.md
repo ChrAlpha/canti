@@ -23,6 +23,7 @@ that target from the current skeleton.
 | `internal/harness/store.go` | Sequenced atomic transition commits | Interface, snapshot, and record types only |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Implemented against store/executor interfaces |
 | `internal/harness/executor.go` | External jobs keyed by effect ID, bind/start split | Interface and status types only |
+| `internal/harness/executortest` | Executable start latch contract for executors | Checked against an offline reference and single-clause mutants |
 | `internal/harness/artifacts.go` | Observations and output references | Types only |
 | `cmd/canti` | User-facing entry point | Help and development version only |
 
@@ -349,12 +350,18 @@ The execution backend is keyed by the stable effect ID. `Bind` finds or
 creates the job that owns the effect and must not execute anything; a
 deterministic per-effect identity (for Docker, a create with a name derived
 from the effect ID) makes late duplicates collide instead of running twice.
-`Start` may only start the bound job and must be a no-op for a job that has
-ever been started, even one that already finished — a naive `docker start`
-restarts an exited container and does not satisfy this, so the executor gates
-on its own record. `Inspect` and `Cancel` never create or start a job; `Cancel` is
-idempotent and must fence the effect so an unstarted bind — including one that
-lands after the cancel — can never start. A concrete executor must bind the
+Each effect has one durable start latch, set at most once and never reset:
+by `Start`, which runs the bound job, or by `Cancel`, after which no job of
+the effect can run. `Start` fails for an unbound effect, may only start the
+bound job, and once the latch is set is a no-op that reports the job as-is,
+even one that already finished — a naive `docker start` restarts an exited
+container and does not satisfy this, so the executor gates on its own record.
+`Inspect` and `Cancel` never create or start a job; `Cancel` is idempotent,
+never rewrites a finished outcome, and an unstarted job it fences — including
+one bound after the cancel — reports `cancelled`, which is what lets a
+`cancelling` run commit a true result while a stale controller may still hold
+`job_bound`. `executortest.Check` exercises this contract against any
+executor that can count its executions. A concrete executor must bind the
 effect ID to the full execution specification it runs under (backend,
 workspace, working directory, interpretation of the command, resource
 limits), not only the command text, and must reject changed content under an

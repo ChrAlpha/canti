@@ -2,22 +2,23 @@ package harness
 
 import "context"
 
-// Executor owns external effects, keyed by the stable effect ID. Bind must
-// create or return the job that owns an effect without executing anything;
-// only Start may cause execution, and it must start nothing but the bound
-// job. Start must be a no-op for a job that has ever been started — including
-// one that already finished — reporting it as-is and never running it again;
-// a naive backend restart, such as docker start on an exited container, does
-// not satisfy this, so the executor must gate on its own record of the
-// start. Bind must honor cancellation before creating a job and reject a
-// changed command under an existing identity. Inspect and Cancel must never
-// create or start a job.
-// Inspect may report found == false only when the backend positively
-// determined that no job owns the effect; an indeterminate lookup must return
-// an error instead. Cancel must be idempotent and must prevent any later
-// start of an unstarted bind, including one that lands after Cancel. An
-// unknown outcome must never trigger a retry without inspection; an effect ID
-// does not make commands idempotent.
+// Executor owns external effects, keyed by the stable effect ID. Each effect
+// has one durable start latch, set at most once and never reset: by Start,
+// which runs the bound job, or by Cancel, after which no job of the effect
+// can run. Bind must create or return the job that owns an effect without
+// executing anything, honor cancellation before creating a job, and reject a
+// changed command under an existing identity. Start must fail for an unbound
+// effect and start nothing but the bound job; once the latch is set it is a
+// no-op reporting the job as-is, even for a finished job — a naive backend
+// restart, such as docker start on an exited container, does not satisfy
+// this, so the executor must gate on its own record. Cancel must be
+// idempotent and never rewrite a finished outcome; an unstarted job it fences,
+// including one bound after it, reports JobCancelled. Inspect and Cancel must
+// never create or start a job. Inspect may report found == false only when
+// the backend positively determined that no job owns the effect; an
+// indeterminate lookup must return an error instead. An unknown outcome must
+// never trigger a retry without inspection; an effect ID does not make
+// commands idempotent. executortest.Check exercises this contract.
 type Executor interface {
 	Bind(ctx context.Context, effect Effect) (Job, error)
 	Start(ctx context.Context, effectID string) (Job, error)
@@ -41,6 +42,7 @@ const (
 	JobRunning   JobStatus = "running"
 	JobSucceeded JobStatus = "succeeded"
 	JobFailed    JobStatus = "failed"
+	JobCancelled JobStatus = "cancelled"
 	JobUnknown   JobStatus = "unknown"
 )
 

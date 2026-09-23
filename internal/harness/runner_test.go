@@ -533,6 +533,7 @@ func TestBindKeepsJobIdentityWhateverItsStatus(t *testing.T) {
 		{"running", JobRunning},
 		{"succeeded", JobSucceeded},
 		{"failed", JobFailed},
+		{"cancelled", JobCancelled},
 		{"unknown", JobUnknown},
 		{"empty", ""},
 	}

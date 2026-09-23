@@ -57,6 +57,9 @@ The `internal/harness` package interprets those intents:
   that the start was issued; anything uncertain becomes an unknown outcome.
 - `Model`, `Executor`, `Frame`, and `Observation` define the remaining
   boundaries as interfaces and record types.
+- `executortest.Check` makes the executor's start latch executable: a job
+  starts at most once, even after it finished, and a cancel fences every
+  unstarted bind of the effect, including a late one.
 
 Every I/O follows the committed phase that authorizes it, so a restart resumes
 from the last committed state by asking the core for its intent again. The

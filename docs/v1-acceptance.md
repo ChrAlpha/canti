@@ -21,6 +21,7 @@ V1 durability is **not complete**.
 | Unknown outcomes | Executor error, missing job ID, or a foreign job commits `OutcomeUnknown` with failure text; `needs_resolution` accepts a found job, resuming behind the start boundary or at inspection after a committed start; a jobless resolution cannot claim `exited` or `timed_out`; resolving to `unknown` abandons the run, keeping the first stop reason or recording `unresolved` | No real backend inspection |
 | Permitted facts | Each event accepts only its own records; missing, mismatched, or extraneous facts write nothing and wrap `ErrFacts`; core sentinels survive `Commit` | Recording store only |
 | Stable effect identity | Repeatability and ambiguous-separator regression tests | No real backend deduplication |
+| Executor start latch | `executortest.Check` covers idempotent bind, changed commands, start-once after finish, concurrent starts, and the cancel fence before and after bind; an in-memory reference passes and each single-clause mutant is rejected by its case | Offline reference only; no concrete executor has run it |
 | Stable event kinds | Every event exposes a unique persisted kind and `SemanticsVersion` pins the transition rules | No encoder or migration exists yet |
 | Offline loop shape | Exec then return steps drive `Commit`/`Bind`/`Start` through eleven committed phases with strictly increasing sequences | No model, inspect, or restart |
 | Input requirements | Missing goal/environment tests | No size or token budget |
@@ -85,7 +86,7 @@ sample or hide failed samples from the result set.
    idempotent retries.
 2. Add a queryable executor with stable job identity, a bind that never
    executes, a fencing cancel, retained output, explicit uncertainty, and
-   bounded cancellation/cleanup.
+   bounded cancellation/cleanup; it must pass `executortest.Check`.
 3. Add one model adapter and bounded input builder with frozen request replay
    and attempt/usage accounting.
 4. Wire the loop and CLI, then exercise every integration gate above, including
