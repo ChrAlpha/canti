@@ -440,7 +440,7 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 func stop(ctx context.Context, l *harness.Loop, id string) (harness.Snapshot, error) {
 	snap, err := l.Stop(ctx, id, core.StopCancelled)
 	if err != nil {
-		err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\"", id, err)
+		err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\", with a longer -cleanup if the job wrote a large output", id, err)
 	}
 	return snap, err
 }

@@ -435,7 +435,7 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
 	noDocker := []string{"PATH=" + t.TempDir()}
-	if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
+	if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution || !strings.Contains(r.stderr, "leaves a job that may still run untouched") {
 		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
 	}
 	r := f.cli(noDocker, "stop")

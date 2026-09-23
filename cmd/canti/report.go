@@ -122,7 +122,8 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 		return exitStopped, nil
 	case s.Phase == core.PhaseNeedsResolution:
 		fmt.Fprintf(a.stderr, "canti: run %s needs resolution: the outcome of effect %s is unknown. Inspect it, then "+
-			"record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\".\n", s.RunID, s.EffectID)
+			"record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\"; "+
+			"-execution records the outcome only and leaves a job that may still run untouched.\n", s.RunID, s.EffectID)
 		if s.Reason != "" {
 			fmt.Fprintf(a.stderr, "canti: the stop is recorded (%s), but its job may still run until it is resolved; "+
 				"after \"canti resolve -run %s -job\", \"canti stop\" cancels it.\n", s.Reason, s.RunID)
