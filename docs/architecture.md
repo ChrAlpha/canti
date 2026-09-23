@@ -533,8 +533,9 @@ effect or state directory is an error, never adopted.
 - **Status.** A container in `created` is pending without a latch and
   cancelled under the `cancel` latch. Under the `start` latch it failed to
   start when Docker reports a start error and no start time, as for an
-  unknown user, and is otherwise unknown, because the launch may or may not
-  have happened; the loop observes a failed start as `failed_to_start`. An exited container is cancelled with
+  unknown user, with the daemon's error as its output detail, and is
+  otherwise unknown, because the launch may or may not have happened; the
+  loop observes a failed start as `failed_to_start`. An exited container is cancelled with
   the marker, otherwise succeeded for exit status 0 and failed for any other.
   A started effect whose container Docker reports missing, with no final
   record, is `ErrJobLost`, never "not found".
@@ -569,8 +570,9 @@ Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
 plus Docker's log of each job that is still running or awaiting capture,
 which only that job's run time bounds.
 
-Every docker CLI call has its own deadline: 1 min, plus the stop grace for
-`docker stop`, and 10 min to read a job's log. A call past only its own
+Every docker CLI call has its own deadline: 30 s, plus the stop grace for
+`docker stop`, and 10 min for a create, which may pull the image, and to read
+a job's log. A call past only its own
 deadline fails with an ordinary error, never taken for the caller's shutdown,
 so a hung daemon cannot hold an effect's lock forever: the loop retries a hung
 inspection and then records an unknown outcome.
