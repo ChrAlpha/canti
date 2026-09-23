@@ -44,6 +44,7 @@ func derive(latch string, c container, marked bool) harness.Job {
 			job.Status = harness.JobCancelled
 		case c.State.Error != "" && c.State.StartedAt.IsZero():
 			job.Status = harness.JobFailedToStart
+			job.Output.Detail = "job never started: " + c.State.Error
 		}
 	case "running", "paused", "restarting":
 		if latch == latchStart {

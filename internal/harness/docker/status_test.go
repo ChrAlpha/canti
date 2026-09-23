@@ -80,8 +80,12 @@ func TestDeriveFailedStart(t *testing.T) {
 			if tt.started {
 				c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			}
-			if job := derive(tt.latch, c, tt.marked); job.Status != tt.want || job.ExitCode != nil {
+			job := derive(tt.latch, c, tt.marked)
+			if job.Status != tt.want || job.ExitCode != nil {
 				t.Fatalf("derive() = %q with exit code %v, want %q without one", job.Status, job.ExitCode, tt.want)
+			}
+			if want := "job never started: " + tt.failure; (tt.want == harness.JobFailedToStart) != (job.Output.Detail == want) {
+				t.Fatalf("detail = %q, want %q only for a failed start", job.Output.Detail, want)
 			}
 		})
 	}

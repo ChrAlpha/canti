@@ -201,8 +201,9 @@ func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, err := x.Start(ctx, e.ID)
-	if err != nil || job.ID != bound.ID || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() {
-		t.Fatalf("Start(rejected) = %+v, %v; want the bound job failed to start", job, err)
+	if err != nil || job.ID != bound.ID || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() ||
+		!strings.HasPrefix(job.Output.Detail, "job never started: ") || !strings.Contains(job.Output.Detail, "nosuchuser") {
+		t.Fatalf("Start(rejected) = %+v, %v; want the bound job failed to start with the daemon's reason", job, err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.State, "jobs", e.ID, "output.json")); err != nil {
 		t.Fatalf("record of the failed start: %v", err)

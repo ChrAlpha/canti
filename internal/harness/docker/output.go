@@ -84,7 +84,9 @@ func omitted(n int64) string {
 	return fmt.Sprintf("\n... %d bytes omitted ...\n", n)
 }
 
-func describe(path string, t *tap, logsErr error, status harness.JobStatus) harness.ArtifactRef {
+// describe reports the artifact captured for job, keeping the detail job was
+// derived with, such as why it never started.
+func describe(path string, t *tap, logsErr error, job harness.Job) harness.ArtifactRef {
 	ref := harness.ArtifactRef{Path: path}
 	switch {
 	case logsErr != nil:
@@ -95,10 +97,13 @@ func describe(path string, t *tap, logsErr error, status harness.JobStatus) harn
 		return ref
 	}
 	var notes []string
+	if job.Output.Detail != "" {
+		notes = append(notes, job.Output.Detail)
+	}
 	if t.stored < t.total {
 		notes = append(notes, fmt.Sprintf("kept %d of %d bytes", t.stored, t.total))
 	}
-	if status == harness.JobCancelled {
+	if job.Status == harness.JobCancelled {
 		notes = append(notes, "job was cancelled; output is partial")
 	}
 	ref.Bytes, ref.Available, ref.Complete, ref.Detail = t.stored, true, len(notes) == 0, strings.Join(notes, "; ")
@@ -234,7 +239,7 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 	if err := ctx.Err(); err != nil {
 		return harness.Job{}, err
 	}
-	job.Output = describe(rel, t, logsErr, job.Status)
+	job.Output = describe(rel, t, logsErr, job)
 	job.Preview = t.preview()
 	return job, nil
 }

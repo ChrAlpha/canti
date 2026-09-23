@@ -108,7 +108,7 @@ func TestTapRecordsWriteFailureAndKeepsReading(t *testing.T) {
 		if p := c.preview(); !strings.HasPrefix(p, "HEAD") || !strings.HasSuffix(p, "TAIL") {
 			t.Fatalf("preview = %q", p)
 		}
-		ref := describe("e/output", c, nil, harness.JobSucceeded)
+		ref := describe("e/output", c, nil, harness.Job{Status: harness.JobSucceeded})
 		if ref.Available || ref.Complete || ref.Bytes != 0 || !strings.Contains(ref.Detail, want.Error()) {
 			t.Fatalf("describe() = %+v", ref)
 		}
@@ -132,7 +132,7 @@ func TestDescribe(t *testing.T) {
 		{"logs unavailable", 5, 5, errors.New("exit status 1"), harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Detail: "logs unavailable: exit status 1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if ref := describe("e/output", &tap{stored: tt.stored, total: tt.total}, tt.logs, tt.status); ref != tt.want {
+			if ref := describe("e/output", &tap{stored: tt.stored, total: tt.total}, tt.logs, harness.Job{Status: tt.status}); ref != tt.want {
 				t.Fatalf("describe() = %+v, want %+v", ref, tt.want)
 			}
 		})

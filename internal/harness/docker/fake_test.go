@@ -207,8 +207,9 @@ func TestRejectedStartFailsToStart(t *testing.T) {
 	f.set("start.err", "Error response from daemon: unable to find user nosuchuser\n")
 	f.set("start.exit", "1")
 	want, err := f.x.Start(t.Context(), "e")
-	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || !want.Output.Available {
-		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start", want, err)
+	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job never started: unable to find user nosuchuser"}
+	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || want.Output != out {
+		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start with output %+v", want, err, out)
 	}
 	if _, err := os.Stat(f.x.record("e")); err != nil {
 		t.Fatalf("the failed start was not recorded: %v", err)
