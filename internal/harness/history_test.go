@@ -282,6 +282,34 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 		t.Fatalf("records after the failure = %q", got)
 	}
 
+	stale := filepath.Join(dir, ".tmp-stale", "held")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Dir(stale), 0o755); os.Chmod(dir, 0o755) })
+	if err := os.Chmod(filepath.Dir(stale), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, runID); err == nil {
+		t.Fatal("PublishHistory() succeeded without removing a stale temporary")
+	}
+	if err := os.Chmod(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	publish(t, f, f.store, runID)
+	if _, err := os.Stat(filepath.Dir(stale)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale temporary after a publication = %v", err)
+	}
+	if err := os.Chmod(dir, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, runID); err == nil {
+		t.Fatal("PublishHistory() succeeded without listing the run directory")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, "run-missing"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("PublishHistory(run-missing) = %v, want %v", err, harness.ErrNotFound)
 	}

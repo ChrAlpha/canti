@@ -59,13 +59,15 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 	if _, err := exists(dir, true); err != nil {
 		return err
 	}
-	entries, _ := os.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".tmp-") {
-			os.RemoveAll(filepath.Join(dir, e.Name()))
+		if err == nil && strings.HasPrefix(e.Name(), ".tmp-") {
+			err = os.RemoveAll(filepath.Join(dir, e.Name()))
 		}
 	}
-	err := putFile(dir, "goal", run.Goal)
+	if err == nil {
+		err = putFile(dir, "goal", run.Goal)
+	}
 	if err == nil && run.Constraints != "" {
 		err = putFile(dir, "constraints", run.Constraints)
 	}

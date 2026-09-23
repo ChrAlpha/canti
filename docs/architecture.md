@@ -448,12 +448,14 @@ the workspace lock publish; concurrent publications of one run are not
 supported. A publication fails when an entry it looks at has another type:
 the goal, constraints, result, and files of the latest step must be regular
 files, and the run directory, `steps`, and the latest step's directory real
-directories, never symlinks. A process of the same user that deletes or
-edits files inside a run directory is outside the trust model, and a
-publication detects only what it would add: a step directory other than the
-latest that such a process removes inside an existing `steps` directory, or
-a file that it edits, stays so until the `steps` directory is removed and
-rebuilt.
+directories, never symlinks; a stale temporary that cannot be listed or
+removed fails it too. The history root and the directories above it are
+resolved like the state directory, so a symlink there is followed. A process
+of the same user that deletes or edits files inside a run directory is
+outside the trust model, and a publication detects only what it would add: a
+step directory other than the latest that such a process removes inside an
+existing `steps` directory, or a file that it edits or removes inside a step
+directory, stays so until the `steps` directory is removed and rebuilt.
 
 ## Lifecycle boundaries
 
