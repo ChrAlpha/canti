@@ -484,6 +484,9 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-old" {
 		t.Fatalf("rms = %q, want only the recorded job of another effect released", rms)
 	}
+	if ps := f.calls("ps"); len(ps) != 1 || strings.Contains(ps[0], " -q") || strings.Contains(ps[0], " -aq") {
+		t.Fatalf("ps calls = %q, want one listing whose --format is not overridden by --quiet", ps)
+	}
 }
 
 func TestFailedCaptureIsRecordedAndReleased(t *testing.T) {

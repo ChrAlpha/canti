@@ -222,6 +222,41 @@ func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
 	}
 }
 
+func TestBindReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
+	cfg, name := setup(t, docker.Config{})
+	real, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := filepath.Join(t.TempDir(), "fail-rm")
+	cfg.Docker = filepath.Join(t.TempDir(), "docker")
+	shim := fmt.Sprintf("#!/bin/sh\n[ \"$1\" = rm ] && [ -e %q ] && exit 1\nexec %q \"$@\"\n", failing, real)
+	if err := os.WriteFile(cfg.Docker, []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(failing, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	x := open(t, cfg)
+	ctx := testContext(t, time.Minute)
+	first := harness.Effect{ID: name("first"), Command: "echo first"}
+	if job := run(ctx, t, x, first); job.Status != harness.JobSucceeded {
+		t.Fatalf("first job = %+v", job)
+	}
+	if got := containers(t, first.ID); len(got) != 1 {
+		t.Fatalf("containers of the first effect = %q, want the one whose removal failed", got)
+	}
+	if err := os.Remove(failing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.Bind(ctx, harness.Effect{ID: name("second"), Command: "echo second"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := containers(t, first.ID); len(got) != 0 {
+		t.Fatalf("containers of the first effect = %q after the next bind, want none", got)
+	}
+}
+
 func TestForeignStateCannotAdoptJob(t *testing.T) {
 	cfg, id := setup(t, docker.Config{})
 	ctx := testContext(t, time.Minute)
