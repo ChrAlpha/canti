@@ -361,6 +361,8 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 		{"observation mismatch", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
 		{"observation with failure text", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
 		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{EffectID: awaiting.State.EffectID}), core.Resolved{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{}},
+		{"stop with a request", snapAt(t, core.PhaseIdle), core.StopRequested{Reason: core.StopTimedOut}, Facts{Request: &Request{Body: []byte("x")}, Failure: "x"}},
+		{"stop with an observation", awaiting, core.StopRequested{Reason: core.StopCancelled}, Facts{Observation: &observation}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -413,6 +415,8 @@ func TestCommitAcceptsPermittedFacts(t *testing.T) {
 		{"incomplete response with record and failure", snapAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Step: 1, Attempt: 1}, Facts{Response: &Response{Body: []byte("partial")}, Failure: "timeout"}},
 		{"incomplete response without facts", snapAt(t, core.PhaseRequestSent), core.ResponseIncomplete{Step: 1, Attempt: 1}, Facts{}},
 		{"unknown outcome with failure", saved, core.OutcomeUnknown{EffectID: saved.State.EffectID}, Facts{Failure: "lost"}},
+		{"stop with failure", snapAt(t, core.PhaseIdle), core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: "wall time spent"}},
+		{"stop without facts", saved, core.StopRequested{Reason: core.StopCancelled}, Facts{}},
 		{"resolution with record", unresolved, core.Resolved{EffectID: unresolved.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionExited}}},
 		{"abandonment with unknown record", unresolved, core.Resolved{EffectID: unresolved.State.EffectID, Execution: core.ExecutionUnknown}, Facts{Observation: &Observation{Execution: core.ExecutionUnknown}}},
 	}

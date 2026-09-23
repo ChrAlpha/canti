@@ -227,9 +227,9 @@ Each event permits a fixed set of facts and anything else is rejected:
 `RequestFrozen` requires request bytes; `ResponseSaved` a complete response
 with a body; `ResponseIncomplete` may carry the partial response and failure
 text; `Observed` and `Resolved` an observation whose execution state matches
-the event; `OutcomeUnknown` failure text. Facts learned after the harness's
-own context was cancelled must be committed with a separate context, because
-`Commit` writes nothing once its context is done.
+the event; `OutcomeUnknown` and `StopRequested` failure text. Facts learned
+after the harness's own context was cancelled must be committed with a
+separate context, because `Commit` writes nothing once its context is done.
 
 A rejected transition writes nothing, but a store error does not prove the
 commit failed: the transaction may have committed before the acknowledgement
@@ -271,12 +271,13 @@ record with an unknown kind or version must be refused, not reinterpreted.
 The store must persist the facts attached to the event: request bytes and
 provenance at `RequestFrozen` (keyed by step and revision), the response at
 `ResponseSaved` (keyed by step and attempt), the observation at `Observed` or
-`Resolved`, and failure text at `ResponseIncomplete` or `OutcomeUnknown`. It
-must provide recovery reads for the latest `Snapshot`, the frozen request of
-the current revision, and the saved response of the current attempt. Facts
-that arrive after a run is closed — the true result of a cancelled job, late
-usage numbers — are archived outside run transitions; `returned` and
-`stopped` accept no events and archival never reactivates a closed run.
+`Resolved`, and failure text at `ResponseIncomplete`, `OutcomeUnknown`, or
+`StopRequested`. It must provide recovery reads for the latest `Snapshot`, the
+frozen request of the current revision, and the saved response of the current
+attempt. Facts that arrive after a run is closed — the true result of a
+cancelled job, late usage numbers — are archived outside run transitions;
+`returned` and `stopped` accept no events and archival never reactivates a
+closed run.
 
 Three operations must never share a name. Event replay rebuilds or verifies a
 state from committed transitions and causes no external effect. Run resume

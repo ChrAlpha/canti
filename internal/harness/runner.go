@@ -172,7 +172,7 @@ func (f Facts) check(event core.Event) error {
 			return err
 		}
 		allowed.Observation = f.Observation
-	case core.OutcomeUnknown:
+	case core.OutcomeUnknown, core.StopRequested:
 		allowed.Failure = f.Failure
 	}
 	if f != allowed {
