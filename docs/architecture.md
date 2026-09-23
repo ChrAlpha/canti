@@ -470,9 +470,8 @@ than any inside them, with the extra fence length charged to the input's
 limit; single-line references have line breaks replaced; invalid UTF-8 is
 replaced and no cut splits a rune. Equal frames and limits give equal prompts.
 The CLI keeps these limits but sets the total from `-context-bytes`, 256 KiB
-by default and at least 16 KiB; a total too small for the goal and
-constraints stops the run as `unrecoverable` at the first request it cannot
-hold, which may be a later protocol repair.
+by default and at least 64 KiB, which holds every goal,
+constraints, and fixed section `canti run` accepts.
 
 `ReadNotes` reads at most the notes limit plus one byte of the notes file
 (`.canti/notes.md` in the CLI), the extra byte telling whether the file was

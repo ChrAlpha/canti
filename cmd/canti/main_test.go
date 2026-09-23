@@ -113,7 +113,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "0"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
-		{[]string{"run", "-goal", "g", "-context-bytes", "16383"}, exitUsage, "", "-context-bytes must be at least 16384"},
+		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "-context-bytes must be at least 65536"},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -484,25 +484,38 @@ func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
 }
 
 func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
+	const steps = 6
 	for _, tc := range []struct {
 		args  []string
 		shown bool
-	}{{[]string{"-context-bytes", "16384"}, false}, {nil, true}} {
+	}{{[]string{"-context-bytes", "65536"}, false}, {nil, true}} {
 		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
+			script := map[int]core.Decision{steps + 1: {Kind: core.Return, Payload: "done"}}
+			for i := 1; i <= steps; i++ {
+				script[i] = core.Decision{Kind: core.Exec, Payload: "true"}
+			}
+			f := newFixture(t, script)
 			noDocker := []string{"PATH=" + t.TempDir()}
-			if r := f.cli(noDocker, "run", append([]string{"-goal", strings.Repeat("g", 12<<10)}, tc.args...)...); r.code != exitResolution {
+			args := append([]string{"-goal", strings.Repeat("g", 32<<10), "-constraints", strings.Repeat("c", 16<<10)}, tc.args...)
+			if r := f.cli(noDocker, "run", args...); r.code != exitResolution {
 				t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
 			}
-			if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", strings.Repeat("n", 4000)); r.code != exitOK {
-				t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+			for i := 1; i <= steps; i++ {
+				if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", strings.Repeat("n", 4000)); r.code != exitOK {
+					t.Fatalf("resolve %d = %d\nstderr: %s", i, r.code, r.stderr)
+				}
+				if i < steps {
+					if r := f.cli(noDocker, "resume"); r.code != exitResolution {
+						t.Fatalf("resume %d without docker = %d\nstderr: %s", i, r.code, r.stderr)
+					}
+				}
 			}
 			if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
 				t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 			}
-			p := f.model.prompts(2)
-			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown || strings.Contains(p[0], "\n1 earlier step is not shown.\n") == tc.shown {
-				t.Fatalf("resumed prompts = %q, want step 1 shown %v", p, tc.shown)
+			p := f.model.prompts(steps + 1)
+			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown || strings.Contains(p[0], " not shown.\n") == tc.shown {
+				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "\n### Step 1\n"), tc.shown, p)
 			}
 		})
 	}
@@ -618,7 +631,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-model", "claude-test", "-max-tokens", "900", "-structured=false", "-fallbacks=false",
-		"-context-bytes", "20000", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-context-bytes", "70000", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.config.Workspace = "/work"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
@@ -645,7 +658,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096}) {
 		t.Errorf("executor config = %+v", x)
 	}
-	if l := promptLimits(c); l.Total != 20000 || l.Goal != harness.DefaultPromptLimits().Goal {
+	if l := promptLimits(c); l.Total != 70000 || l.Goal != harness.DefaultPromptLimits().Goal {
 		t.Errorf("prompt limits = %+v", l)
 	}
 	m := modelConfig(c, "http://model.test", credential{authToken: "token"})

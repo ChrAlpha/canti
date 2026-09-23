@@ -39,7 +39,7 @@ type config struct {
 	ContextBytes int    `json:"context_bytes"`
 }
 
-const minContextBytes = 16 << 10
+const minContextBytes = 64 << 10
 
 type spec struct {
 	config config
@@ -59,7 +59,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
 	fs.BoolVar(&c.Structured, "structured", true, "constrain responses to the decision schema")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
-	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, which bound the recent steps shown; at least 16384")
+	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, which bound the recent steps shown; at least 65536")
 	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")

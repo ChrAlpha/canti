@@ -278,8 +278,15 @@ func TestPromptKeepsTheGoalAndConstraintsWhole(t *testing.T) {
 		f := fullFrame()
 		f.Goal, f.Constraints = " \n"+goal+"\t\n", "\n "+constraints+" "
 		p := mustPrompt(t, f, l)
-		if want := "## Goal\n" + goal + "\n\n## Constraints\n" + constraints + "\n\n## Environment\n"; !strings.HasPrefix(p.User, want) || strings.Contains(p.User, "…[truncated ") {
+		want := "## Goal\n" + goal + "\n\n## Constraints\n" + constraints + "\n\n## Environment\n"
+		if !strings.HasPrefix(p.User, want) || strings.Contains(p.User, "…[truncated ") {
 			t.Fatalf("rune %q: User does not hold the whole goal and constraints", r)
+		}
+		full := f
+		full.Environment, full.Notes.Text = strings.Repeat("e", l.Environment), strings.Repeat("n", l.Notes)
+		full.Rejected = &Rejection{Error: strings.Repeat("x", l.Rejected), Response: strings.Repeat("r", l.Rejected)}
+		if p := mustPrompt(t, full, l); !strings.HasPrefix(p.User, want) {
+			t.Fatalf("rune %q: a %d-byte total does not hold the whole goal and constraints beside every fixed section at its limit", r, l.Total)
 		}
 		for _, over := range []struct {
 			name  string
