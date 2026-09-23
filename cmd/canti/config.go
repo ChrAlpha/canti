@@ -172,9 +172,9 @@ func environment(c config, b harness.Budget) string {
 		timeout = b.JobTimeout.String()
 	}
 	return fmt.Sprintf("Each command runs in a new Linux container from image %s with working directory %s, "+
-		"which is read-write and persists between steps. Earlier step outputs are under %s, read-only. "+
+		"which is read-write and persists between steps. "+
 		"Network: %s. Per-command limits: memory %s, CPUs %s, processes %s, run time %s.",
-		c.Image, docker.WorkDir, docker.ArtifactDir, c.Network,
+		c.Image, docker.WorkDir, c.Network,
 		cmp.Or(c.Memory, "unlimited"), cmp.Or(c.CPUs, "unlimited"), pids, timeout)
 }
 

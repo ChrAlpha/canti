@@ -558,6 +558,32 @@ func TestPromptDropsOldestStepsFirst(t *testing.T) {
 	}
 }
 
+func TestPromptShowsADroppedStepAgainWhenTheNotesShrink(t *testing.T) {
+	var steps []StepRecord
+	for n := 1; n <= 4; n++ {
+		steps = append(steps, exitedStep(n, "echo "+strconv.Itoa(n), strings.Repeat("o", 100)))
+	}
+	frame := func(done int, notes string) Frame {
+		f := promptFrame()
+		f.Steps, f.Step, f.Notes.Text = steps[:done], done+1, notes
+		return f
+	}
+	l := DefaultPromptLimits()
+	l.Notes = 512
+	long := frame(3, strings.Repeat("n", l.Notes))
+	l.Total = len(system) + len(mustPrompt(t, long, unlimited()).User()) - 1
+	before, after := mustPrompt(t, long, l), mustPrompt(t, frame(4, "short"), l)
+	if got := shownSteps(before.User()); !slices.Equal(got, []int{2, 3}) {
+		t.Fatalf("under %d bytes with long notes: steps %v shown, want 2 and 3", l.Total, got)
+	}
+	if got := shownSteps(after.User()); !slices.Equal(got, []int{1, 2, 3, 4}) {
+		t.Fatalf("after the notes shrank: steps %v shown, want 1 to 4", got)
+	}
+	if after.Blocks[0] != before.Blocks[0] || after.Blocks[1] == before.Blocks[1] || after.Stable <= before.Stable {
+		t.Fatalf("a dropped step shown again kept the stable blocks\n%q\nof the previous prompt\n%q", after.Blocks[:after.Stable], before.Blocks[:before.Stable])
+	}
+}
+
 func TestPromptIsDeterministic(t *testing.T) {
 	f := longFrame(3, 40)
 	f.Attempt, f.Rejected = 2, &Rejection{Error: "bad", Response: "{"}

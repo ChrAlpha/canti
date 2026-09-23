@@ -277,7 +277,8 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 // recent reads the latest completed steps backward in pages until the
 // blocks f renders for them exceed the prompt total, a page is short, or
 // step 1 is read, so that Frame.Prompt shows the steps it would show from
-// the whole history.
+// the whole history. It reads at most the completed steps whose blocks fit
+// the total, plus one page.
 func (l *Loop) recent(ctx context.Context, runID string, f Frame) ([]StepRecord, error) {
 	var steps []StepRecord
 	for size, before := 0, int64(0); ; {

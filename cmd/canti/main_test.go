@@ -776,10 +776,13 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		t.Errorf("model config = %+v", m)
 	}
 	env := environment(c, run.Budget)
-	for _, want := range []string{"alpine:3.23", docker.WorkDir, docker.ArtifactDir, "bridge", "512m", "1.5", "64", "1m30s"} {
+	for _, want := range []string{"alpine:3.23", docker.WorkDir, "bridge", "512m", "1.5", "64", "1m30s"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("environment %q lacks %q", env, want)
 		}
+	}
+	if strings.Contains(env, docker.ArtifactDir) {
+		t.Errorf("environment %q names the artifact directory, which the prompt states", env)
 	}
 	if _, _, err := newRun("goal", "", parseSpec(t, "-job-timeout", "-1s"), now); err == nil {
 		t.Error("a negative budget was accepted")

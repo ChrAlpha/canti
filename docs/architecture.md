@@ -504,7 +504,8 @@ backward by commit sequence, 64 per page, until the step blocks the prompt
 would render for them exceed the prompt's total, a page is short, or step 1
 is read. No step count caps them: the prompt's total is the only bound, the
 prompt drops the oldest of them that do not fit, and it shows what the whole
-history would show while at most the steps that fit plus one page are read.
+history would show while reading at most the completed steps whose blocks
+fit the total, plus one page.
 `Frame.Validate` requires the goal, the environment, the artifact and runs
 directories, the run ID, and the notes path, checks the positions, and checks
 that the shown and earlier steps account for exactly the steps before the
@@ -523,9 +524,10 @@ oldest first; a volatile tail holds the Progress section (the step and
 attempt positions and the count of earlier steps not shown), Notes, and
 Rejected response, after a `None.` line when no step is shown. No block is
 empty. Consecutive prompts of a run share their stable blocks byte for byte
-unless the later one drops a step: a completed step appends one block, and
-positions, notes, and rejections appear only in the tail, though their size
-can make a prompt drop a step. `PromptLimits` caps each input in
+unless the oldest shown step changes, as when a step is dropped or shorter
+notes let a dropped step be shown again: a completed step appends one block,
+and positions, notes, and rejections appear only in the tail, though their
+size decides which steps fit. `PromptLimits` caps each input in
 bytes and the system message and blocks together. The defaults are 32 KiB for
 the goal, 16 KiB for the
 constraints, 2 KiB for the environment, 2 KiB for each step's command and
