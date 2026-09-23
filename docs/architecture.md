@@ -414,7 +414,10 @@ calls `Loop.Stop` with `cancelled` under a new 30 s cleanup deadline, so an
 effect that may exist is cancelled and its true result recorded. A second signal abandons that
 cleanup, after which the CLI stops catching signals. `canti stop` performs the
 same persistent stop under `-cleanup` (30 s by default). A stop that is
-abandoned or misses its deadline leaves the run for a later `canti stop`.
+abandoned or misses its deadline leaves the run for a later `canti stop`. A
+stop of a run in `needs_resolution` records its reason and exits with status
+4: the job may still run until `canti resolve -job` records it, after which
+`canti stop` cancels it.
 `run` refuses to start a run while the latest run of its state directory is
 open or needs resolution.
 
@@ -523,7 +526,10 @@ effect or state directory is an error, never adopted.
 - **Cancel.** `Cancel` sets a `cancel` latch on an unstarted effect, so that a
   container bound later reports `cancelled` and never starts. For a running
   job it writes a cancel marker and runs `docker stop` with the stop grace
-  (5 s by default), after which Docker kills the container's processes.
+  (5 s by default), after which Docker kills the container's processes. The
+  marker labels the job cancelled even if it exited on its own between
+  `Cancel`'s inspection and the marker write, or after a `docker stop` cut
+  short by the caller's deadline.
 - **Status.** A container in `created` is pending without a latch, cancelled
   under the `cancel` latch, and unknown under the `start` latch, because the
   launch may or may not have happened. An exited container is cancelled with
@@ -540,12 +546,15 @@ effect or state directory is an error, never adopted.
   `... N bytes omitted ...` marker, and the true tail, cut at rune
   boundaries. A truncated or cancelled job's output is marked incomplete,
   with details such as `kept N of M bytes`; a failed capture is retried on
-  the next report.
+  the next report. The json-file log replaces invalid UTF-8 with U+FFFD, so
+  the artifact of binary output is not byte-exact and its byte count is that
+  of the replaced text.
 - **Release.** Once the artifact is stored, the job's final record — status,
   exit code, times, container ID, spec hash, preview, and artifact
   reference — is published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
-  Docker log; a failed removal is retried by the next report. From then on the record is the
+  Docker log; a failed removal is retried by the next report of the effect
+  and by every `Bind` in the state directory. From then on the record is the
   authority: `Inspect`, `Bind`, and `Start` report the recorded job, `Bind`
   still rejects a changed spec, and `Cancel` does nothing. Every report
   re-checks the artifact, and a missing or resized file makes it unavailable
@@ -586,7 +595,10 @@ The loop checks the wall time, tokens, and output bytes before each step
 except decoding a response already paid for, bounds each model request by the
 remaining wall time, and checks the wall time while it waits on a running
 job. It cancels a job once the host clock is `Budget.JobTimeout` past the
-start time the Docker daemon reports, and observes it as `timed_out`. Tokens
+start time the Docker daemon reports, and observes it as `timed_out`; a
+restarted controller that finds a cancelled job observes it as `timed_out`
+when the daemon's start and finish times span the timeout. Both assume the
+daemon shares the host clock. Tokens
 are the provider-reported usage of saved and incomplete responses, so a run
 can end up to one response over its token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between
