@@ -499,10 +499,11 @@ API version `2023-06-01`, as adapter `canti-anthropic/2`. `Freeze` builds a
 deterministic body — model, `max_tokens` (16,000 by default), the system
 prompt as a string, one user message with a text block per prompt block, and
 optionally a JSON-schema output format for the decision object and
-server-side fallbacks — that never contains credentials. The last stable block
-carries the only `cache_control` breakpoint, `ephemeral`, so that a provider
-that caches prompt prefixes can reuse the stable blocks of the previous
-request; no cache hit has been measured. The body
+server-side fallbacks — that never contains credentials. The first and the
+last stable block carry `ephemeral` `cache_control` breakpoints, so that a
+provider that caches prompt prefixes can reuse the stable blocks of the
+previous request, and still the system prompt and first block once a dropped
+step changes the blocks after it; no cache hit has been measured. The body
 and the model, protocol, and adapter identifiers are committed with
 `RequestFrozen` before any send. The base URL must use `https` unless it is a
 loopback address. `Complete` sends exactly the frozen body once over

@@ -108,7 +108,8 @@ type textBlock struct {
 }
 
 // Freeze builds the deterministic request body for p, one text block per
-// prompt block, with a cache breakpoint on the last stable block. It never
+// prompt block, with cache breakpoints on the first and the last stable
+// block, so the first block stays reusable after a step is dropped. It never
 // includes credentials.
 func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if len(p.Blocks) == 0 || slices.Contains(p.Blocks, "") {
@@ -122,7 +123,8 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 		content[i] = textBlock{Type: "text", Text: text}
 	}
 	if p.Stable > 0 {
-		content[p.Stable-1].CacheControl = json.RawMessage(`{"type":"ephemeral"}`)
+		content[0].CacheControl = json.RawMessage(`{"type":"ephemeral"}`)
+		content[p.Stable-1].CacheControl = content[0].CacheControl
 	}
 	body := struct {
 		Model        string          `json:"model"`

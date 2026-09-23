@@ -117,7 +117,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 
 func TestFreeze(t *testing.T) {
 	base := `{"model":"claude-opus-5","max_tokens":16000,"system":"sys","messages":[{"role":"user","content":[` +
-		`{"type":"text","text":"head"},{"type":"text","text":"step"` + cached + `},{"type":"text","text":"tail"}]}]`
+		`{"type":"text","text":"head"` + cached + `},{"type":"text","text":"step"` + cached + `},{"type":"text","text":"tail"}]}]`
 	for _, tc := range []struct {
 		name     string
 		edit     func(*anthropic.Config)
@@ -167,7 +167,7 @@ func TestFreezeOmitsEmptySystemAndRequiresUser(t *testing.T) {
 	}
 }
 
-func TestFreezeMarksOnlyTheLastStableBlock(t *testing.T) {
+func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 	m := newModel(t, "https://unused.test", nil)
 	for _, tc := range []struct {
 		blocks []string
@@ -176,7 +176,8 @@ func TestFreezeMarksOnlyTheLastStableBlock(t *testing.T) {
 	}{
 		{[]string{"head", "tail"}, 0, `{"type":"text","text":"head"},{"type":"text","text":"tail"}`},
 		{[]string{"head", "tail"}, 1, `{"type":"text","text":"head"` + cached + `},{"type":"text","text":"tail"}`},
-		{[]string{"head", "s1", "s2", "tail"}, 3, `{"type":"text","text":"head"},{"type":"text","text":"s1"},{"type":"text","text":"s2"` + cached + `},{"type":"text","text":"tail"}`},
+		{[]string{"head", "s1", "tail"}, 2, `{"type":"text","text":"head"` + cached + `},{"type":"text","text":"s1"` + cached + `},{"type":"text","text":"tail"}`},
+		{[]string{"head", "s1", "s2", "tail"}, 3, `{"type":"text","text":"head"` + cached + `},{"type":"text","text":"s1"},{"type":"text","text":"s2"` + cached + `},{"type":"text","text":"tail"}`},
 		{[]string{"only"}, 1, `{"type":"text","text":"only"` + cached + `}`},
 	} {
 		req, err := m.Freeze(harness.Prompt{Blocks: tc.blocks, Stable: tc.stable})
@@ -212,15 +213,15 @@ func TestFreezeMarksOnlyTheLastStableBlock(t *testing.T) {
 		}
 		for i, b := range body.Messages[0].Content {
 			mark := ""
-			if i == p.Stable-1 {
+			if i == 0 || i == p.Stable-1 {
 				mark = `{"type":"ephemeral"}`
 			}
 			if b.Type != "text" || b.Text != p.Blocks[i] || string(b.CacheControl) != mark {
 				t.Errorf("step %d block %d of %d (%d stable) = %+v", n, i, len(p.Blocks), p.Stable, b)
 			}
 		}
-		if c := bytes.Count(req.Body, []byte("cache_control")); c != 1 {
-			t.Errorf("step %d: %d cache breakpoints, want 1", n, c)
+		if c, want := bytes.Count(req.Body, []byte("cache_control")), min(2, p.Stable); c != want {
+			t.Errorf("step %d: %d cache breakpoints, want %d", n, c, want)
 		}
 		f.Steps = append(f.Steps, harness.StepRecord{Step: n, Command: "true", Observation: harness.Observation{Execution: core.ExecutionExited}})
 	}
