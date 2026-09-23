@@ -1,4 +1,4 @@
-.PHONY: check fmt test vet
+.PHONY: check fmt integration test vet
 
 check: fmt vet test
 
@@ -10,3 +10,6 @@ vet:
 
 test:
 	go test ./...
+
+integration:
+	go test -count=1 -race -tags integration ./...
