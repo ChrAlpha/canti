@@ -193,19 +193,25 @@ func TestFailedStartIsNeverReissued(t *testing.T) {
 	}
 }
 
-func TestRejectedStartFailsToStart(t *testing.T) {
-	f := newFake(t)
+// rejecting makes the fake's docker start fail as the daemon does for an
+// unknown user, running script first.
+func (f *fake) rejecting(script string) {
 	f.set("inspect.out", f.container("created", 0))
 	var c []container
 	if err := json.Unmarshal([]byte(f.container("created", 128)), &c); err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
 	c[0].State.Error, c[0].State.StartedAt, c[0].State.FinishedAt = "unable to find user nosuchuser", time.Time{}, time.Time{}
 	rejected, _ := json.Marshal(c)
 	f.set("rejected.json", string(rejected))
-	f.set("start.sh", `cp "$ctl/rejected.json" "$ctl/inspect.out"`+"\n")
+	f.set("start.sh", script+`cp "$ctl/rejected.json" "$ctl/inspect.out"`+"\n")
 	f.set("start.err", "Error response from daemon: unable to find user nosuchuser\n")
 	f.set("start.exit", "1")
+}
+
+func TestRejectedStartFailsToStart(t *testing.T) {
+	f := newFake(t)
+	f.rejecting("")
 	want, err := f.x.Start(t.Context(), "e")
 	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job never started: unable to find user nosuchuser"}
 	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || want.Output != out {
@@ -229,6 +235,21 @@ func TestRejectedStartFailsToStart(t *testing.T) {
 	}
 	if starts, stops := f.calls("start"), f.calls("stop"); len(starts) != 1 || len(stops) != 0 {
 		t.Fatalf("starts %q, stops %q", starts, stops)
+	}
+}
+
+func TestRejectedStartDuringShutdownIsRecordedLater(t *testing.T) {
+	f := newFake(t)
+	f.rejecting(`touch "$ctl/began"; sleep 0.3; `)
+	if _, err := f.x.Start(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start(rejected during shutdown) = %v, want cancellation", err)
+	}
+	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatalf("a report after shutdown was recorded: %v, rms %q", err, f.calls("rm"))
+	}
+	job, err := f.x.Start(t.Context(), "e")
+	if err != nil || job.Status != harness.JobFailedToStart || len(f.calls("start")) != 1 || len(f.calls("rm")) != 1 {
+		t.Fatalf("Start() again = %+v, %v, starts %q; want the failed start recorded and released", job, err, f.calls("start"))
 	}
 }
 

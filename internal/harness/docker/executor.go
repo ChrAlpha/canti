@@ -335,7 +335,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 // unless the latch was already set, in which case it only reports the job.
 // Once the latch is set the launch finishes even if ctx is done, each of its
 // calls within its own deadline. A start the daemon rejected before the job's
-// process began reports the job failed to start.
+// process began reports the job, failed to start, rather than the error.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
