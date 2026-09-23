@@ -2,8 +2,14 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrJobLost reports that the backend no longer holds the job of a started
+// effect. Its outcome is unknown and can only be resolved explicitly; a
+// repeated lookup cannot find it.
+var ErrJobLost = errors.New("harness: job of a started effect is lost")
 
 // Executor owns external effects, keyed by the stable effect ID. Each effect
 // has one durable start latch, set at most once and never reset: by Start,
@@ -28,7 +34,8 @@ import (
 // bound after it, reports JobCancelled. Inspect and Cancel must never create
 // or start a job. Inspect reports found == false exactly when the backend
 // positively determined that no job owns the effect; an indeterminate lookup
-// returns an error.
+// returns an error, and a lookup for a started effect whose job is gone
+// returns an error wrapping ErrJobLost.
 //
 // An unknown outcome must never trigger a retry without inspection; an effect
 // ID does not make commands idempotent. executortest.Check exercises the

@@ -182,10 +182,6 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 
 var errMissing = errors.New("no such container")
 
-// ErrJobLost reports that the container of a started effect no longer exists,
-// so its outcome can only be resolved explicitly.
-var ErrJobLost = errors.New("docker: the container of a started effect is gone")
-
 const launchTimeout = 30 * time.Second
 
 func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
@@ -237,7 +233,7 @@ func (x *Executor) find(ctx context.Context, id string) (container, bool, error)
 	if err == nil && !found {
 		var latch string
 		if latch, err = readLatch(x.dir(id)); err == nil && latch == latchStart {
-			err = fmt.Errorf("%w: effect %s", ErrJobLost, id)
+			err = fmt.Errorf("%w: container of effect %s is gone", harness.ErrJobLost, id)
 		}
 	}
 	return c, found, err

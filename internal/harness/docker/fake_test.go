@@ -199,13 +199,13 @@ func TestVanishedStartedJobIsNotReportedMissing(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
 	f.missing()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !errors.Is(err, ErrJobLost) {
+	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !errors.Is(err, harness.ErrJobLost) {
 		t.Fatalf("Inspect() = %v, %v; want ErrJobLost", found, err)
 	}
-	if _, err := f.x.Bind(t.Context(), effect); !errors.Is(err, ErrJobLost) || len(f.calls("create")) != 0 {
+	if _, err := f.x.Bind(t.Context(), effect); !errors.Is(err, harness.ErrJobLost) || len(f.calls("create")) != 0 {
 		t.Fatalf("Bind() = %v, creates %q; want ErrJobLost and no replacement", err, f.calls("create"))
 	}
-	if _, err := f.x.Start(t.Context(), "e"); !errors.Is(err, ErrJobLost) || len(f.calls("start")) != 0 {
+	if _, err := f.x.Start(t.Context(), "e"); !errors.Is(err, harness.ErrJobLost) || len(f.calls("start")) != 0 {
 		t.Fatalf("Start() = %v, starts %q; want ErrJobLost", err, f.calls("start"))
 	}
 	if err := f.x.Cancel(t.Context(), "e"); err != nil {
