@@ -29,12 +29,14 @@ func DefaultPromptLimits() PromptLimits {
 // directory, and notes path.
 const refLimit = 1 << 10
 
+var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
+
 const system = `You are an autonomous agent working in a shell workspace. Each request stands alone: the user message holds everything known about the task, and your reply chooses the next step.
 
 Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has exactly two string fields, "kind" and "payload", in one of these forms:
 
 {"kind":"exec","payload":"<one POSIX shell command>"}
-Runs the command with /bin/sh -c in /workspace. Every step starts a fresh process, so the working directory and environment variables do not persist; files in /workspace do. Standard output and standard error are captured and reported in the next request.
+Runs the command with /bin/sh -c in /workspace. Each step runs in a fresh process, and only files under /workspace persist between steps: the working directory, environment variables, and anything outside /workspace do not. Standard output and standard error are captured and reported in the next request.
 
 {"kind":"return","payload":"<final answer, question, or blocker for the user>"}
 Ends the run and hands the payload to the user. It does not claim success: use it to deliver a result, ask a question, or report a blocker.
@@ -47,8 +49,10 @@ Use the notes file named in the Notes section for your plan and findings. It per
 
 // Prompt renders the frame within l. System is the same for every frame.
 // When the prompt would exceed l.Total, Prompt drops the oldest shown steps,
-// counting them as earlier steps, then shrinks the notes, and fails if the
-// prompt still does not fit. Equal frames and limits give equal prompts.
+// counting them as earlier steps, down to the newest one; then it shrinks
+// the notes; then it drops the newest step as well and shrinks the notes
+// again, failing if the prompt still does not fit. Equal frames and limits
+// give equal prompts.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
@@ -63,29 +67,30 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 		b := f.step(f.Steps[i], l)
 		if len(blocks) > 0 {
 			b += "\n"
-		}
-		if fixed+len(f.progress(hidden-1))+used+len(b) > l.Total {
-			break
+			if fixed+len(f.progress(hidden-1))+used+len(b) > l.Total {
+				break
+			}
 		}
 		blocks, used, hidden = append(blocks, b), used+len(b), hidden-1
 	}
 	slices.Reverse(blocks)
-	steps := strings.Join(blocks, "")
-	if steps == "" {
-		steps = "None.\n"
-	}
-	progress := f.progress(hidden)
 	for {
-		user := f.user(l, progress, steps, notes)
-		over := len(system) + len(user) - l.Total
-		if over <= 0 {
-			return Prompt{System: system, User: user}, nil
+		steps := strings.Join(blocks, "")
+		if steps == "" {
+			steps = "None.\n"
 		}
-		kept, _ := cut(f.Notes.Text, notes)
-		if kept == "" {
+		user := f.user(l, f.progress(hidden), steps, notes)
+		over := len(system) + len(user) - l.Total
+		switch kept, _ := cut(f.Notes.Text, notes); {
+		case over <= 0:
+			return Prompt{System: system, User: user}, nil
+		case kept != "":
+			notes = max(0, len(kept)-over)
+		case len(blocks) > 0:
+			blocks, hidden, notes = nil, hidden+len(blocks), l.Notes
+		default:
 			return Prompt{}, fmt.Errorf("harness: prompt exceeds its %d-byte total by %d bytes", l.Total, over)
 		}
-		notes = max(0, len(kept)-over)
 	}
 }
 
@@ -106,9 +111,9 @@ func (f Frame) user(l PromptLimits, progress, steps string, notes int) string {
 	section("Recent steps", steps)
 	section("Notes", f.notes(notes))
 	if r := f.Rejected; r != nil {
-		section("Rejected response", "Your previous reply for this step could not be decoded: "+clip(r.Error, l.Rejected)+
-			"\nYour reply must be exactly one decision object, as the system message describes.\n"+
-			quote("Rejected reply", clip(r.Response, l.Rejected)))
+		section("Rejected response", "Your previous reply for this step could not be decoded. "+
+			"Your reply must be exactly one decision object, as the system message describes.\n"+
+			quote("Error", r.Error, l.Rejected)+quote("Rejected reply", r.Response, l.Rejected))
 	}
 	return b.String()
 }
@@ -121,13 +126,13 @@ func (f Frame) progress(hidden int) string {
 	case hidden > 1:
 		s += strconv.Itoa(hidden) + " earlier steps are not shown.\n"
 	}
-	return s + "Full step outputs are readable under " + clip(f.ArtifactDir, refLimit) + ".\n"
+	return s + "Full step outputs are readable under " + inline(f.ArtifactDir) + ".\n"
 }
 
 func (f Frame) step(s StepRecord, l PromptLimits) string {
 	o := s.Observation
 	var b strings.Builder
-	fmt.Fprintf(&b, "### Step %d\n%sExecution: %s", s.Step, quote("Command", clip(s.Command, l.Command)), clip(string(o.Execution), refLimit))
+	fmt.Fprintf(&b, "### Step %d\n%sExecution: %s", s.Step, quote("Command", s.Command, l.Command), inline(string(o.Execution)))
 	if o.ExitCode != nil {
 		fmt.Fprintf(&b, ", exit code %d", *o.ExitCode)
 	}
@@ -139,22 +144,21 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		complete = "complete"
 	}
 	if o.Output.Available {
-		where = "at " + path.Join(clip(f.ArtifactDir, refLimit), clip(o.Output.Path, refLimit))
+		where = "at " + path.Join(inline(f.ArtifactDir), inline(o.Output.Path))
 	}
 	fmt.Fprintf(&b, "\nOutput: %d bytes, %s, %s", o.Output.Bytes, complete, where)
 	if o.Output.Detail != "" {
-		b.WriteString(" (" + clip(o.Output.Detail, refLimit) + ")")
+		b.WriteString(" (" + inline(o.Output.Detail) + ")")
 	}
-	b.WriteString("\n" + quote("Preview", clip(o.Preview, l.Preview)))
+	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview))
 	return b.String()
 }
 
 func (f Frame) notes(limit int) string {
-	s := "Written by the agent in " + clip(f.Notes.Path, refLimit) + " and not verified by the harness.\n"
-	text := clip(f.Notes.Text, limit)
+	s := "Written by the agent in " + inline(f.Notes.Path) + " and not verified by the harness.\n"
 	switch {
-	case text != "":
-		s += fence(text)
+	case f.Notes.Text != "":
+		s += block(f.Notes.Text, limit)
 	case !f.Notes.Truncated:
 		return s + "The file is empty or missing.\n"
 	}
@@ -164,14 +168,29 @@ func (f Frame) notes(limit int) string {
 	return s
 }
 
-func quote(label, s string) string {
+func quote(label, s string, limit int) string {
 	if s == "" {
 		return label + ": empty\n"
 	}
-	return label + ":\n" + fence(s)
+	return label + ":\n" + block(s, limit)
 }
 
-func fence(s string) string {
+// block fences s cut to limit, charging fence marks beyond the usual three
+// to the limit, so a backtick-heavy input cannot inflate its block.
+func block(s string, limit int) string {
+	text := clip(s, limit)
+	if n := fence(text); n > 3 {
+		text = clip(s, max(0, limit-2*(n-3)))
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	marks := strings.Repeat("`", fence(text))
+	return marks + "\n" + text + marks + "\n"
+}
+
+// fence returns a backtick fence length that no line of s can close.
+func fence(s string) int {
 	longest, run := 2, 0
 	for i := range len(s) {
 		run++
@@ -180,12 +199,10 @@ func fence(s string) string {
 		}
 		longest = max(longest, run)
 	}
-	if !strings.HasSuffix(s, "\n") {
-		s += "\n"
-	}
-	marks := strings.Repeat("`", longest+1)
-	return marks + "\n" + s + marks + "\n"
+	return longest + 1
 }
+
+func inline(s string) string { return lineBreaks.Replace(clip(s, refLimit)) }
 
 func clip(s string, limit int) string {
 	kept, dropped := cut(s, limit)

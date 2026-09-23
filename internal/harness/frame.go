@@ -32,7 +32,9 @@ type Notes struct {
 // the decode error.
 type Rejection struct{ Error, Response string }
 
-// Validate checks the minimum information needed to construct a model input.
+// Validate checks the minimum information needed to construct a model input
+// and that Earlier and Steps account for exactly the steps before Step,
+// oldest first, as every completed step is observed or resolved.
 func (f Frame) Validate() error {
 	switch {
 	case strings.TrimSpace(f.Goal) == "":
@@ -47,8 +49,15 @@ func (f Frame) Validate() error {
 		return fmt.Errorf("harness: frame step %d is outside 1..%d", f.Step, f.MaxSteps)
 	case f.Attempt < 1 || f.Attempt > f.MaxAttempts:
 		return fmt.Errorf("harness: frame attempt %d is outside 1..%d", f.Attempt, f.MaxAttempts)
-	case f.Earlier < 0:
-		return fmt.Errorf("harness: frame earlier step count %d is negative", f.Earlier)
+	case f.Rejected != nil && f.Attempt < 2:
+		return errors.New("harness: frame rejects a response before any attempt")
+	case f.Earlier < 0 || f.Earlier+len(f.Steps) != f.Step-1:
+		return fmt.Errorf("harness: frame has %d earlier and %d recent steps before step %d", f.Earlier, len(f.Steps), f.Step)
+	}
+	for i, s := range f.Steps {
+		if want := f.Earlier + 1 + i; s.Step != want {
+			return fmt.Errorf("harness: frame recent step %d is step %d, want %d", i, s.Step, want)
+		}
 	}
 	return nil
 }
