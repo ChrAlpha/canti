@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -123,6 +124,9 @@ func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
 	}
 	var waits []string
 	for _, r := range h.find("retrying an incomplete response") {
+		if r["run_id"] != runID || r["phase"] != string(core.PhaseRequestFrozen) || r["step"] != "1" {
+			t.Errorf("retry log = %v, want the run, phase, and step", r)
+		}
 		waits = append(waits, r["backoff"])
 	}
 	if !slices.Equal(waits, []string{"2ms", "4ms"}) {
@@ -206,13 +210,24 @@ func TestLoopCapsBackoff(t *testing.T) {
 func TestLoopRecordsAnUnconfirmedSuccessAsIncomplete(t *testing.T) {
 	unconfirmed := returnReply("done")
 	unconfirmed.flip = true
-	f := newFixture(t, limits, harness.Budget{}, unconfirmed, returnReply("done"))
-	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
-	f.wantKinds([]string{"request_frozen", "attempt_started", "response_incomplete"}, closing[1:])
-	got := f.transitions()[2].Facts
-	wantContains(t, got.Failure, "without a complete response")
-	if got.Response == nil || got.Response.Complete || got.Response.Usage != usage {
-		t.Fatalf("incomplete response = %+v, want the unconfirmed body with its usage", got.Response)
+	for _, tt := range []struct {
+		name  string
+		reply reply
+		want  *harness.Response
+	}{
+		{"incomplete", unconfirmed, &harness.Response{Body: []byte(unconfirmed.body), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: usage}},
+		{"empty", reply{usage: usage}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, limits, harness.Budget{}, tt.reply, returnReply("done"))
+			wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+			f.wantKinds([]string{"request_frozen", "attempt_started", "response_incomplete"}, closing[1:])
+			got := f.transitions()[2].Facts
+			wantContains(t, got.Failure, "without a complete response")
+			if !reflect.DeepEqual(got.Response, tt.want) {
+				t.Fatalf("incomplete response = %+v, want %+v", got.Response, tt.want)
+			}
+		})
 	}
 }
 

@@ -425,7 +425,7 @@ func (l *Loop) unknown(ctx context.Context, snap Snapshot, why string) (Snapshot
 }
 
 func (l *Loop) note(ctx context.Context, level slog.Level, msg string, snap Snapshot, attrs ...any) {
-	l.cfg.Logger.Log(ctx, level, msg, append([]any{"run_id", snap.State.RunID, "seq", snap.Seq, "phase", snap.State.Phase}, attrs...)...)
+	l.cfg.Logger.Log(ctx, level, msg, append([]any{"run_id", snap.State.RunID, "seq", snap.Seq, "phase", snap.State.Phase, "step", snap.State.Step}, attrs...)...)
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
