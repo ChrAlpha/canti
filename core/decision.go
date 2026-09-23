@@ -1,4 +1,5 @@
-// Package core contains the stateless decision protocol used by the harness.
+// Package core defines the stateless run semantics the harness interprets:
+// decision decoding and the pure transitions of a run State.
 package core
 
 // Kind identifies the only two decisions understood by the core protocol.
@@ -12,9 +13,6 @@ const (
 )
 
 // Decision is the complete result of decoding one model response.
-//
-// The core deliberately does not model sessions, tools, execution state, or
-// success. Those concerns belong to the harness and its execution environment.
 type Decision struct {
 	Kind    Kind   `json:"kind"`
 	Payload string `json:"payload"`
