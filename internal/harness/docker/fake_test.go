@@ -66,6 +66,8 @@ func (f *fake) container(status string, exit int) string {
 	c.ID = "c-e"
 	c.Config.Labels = map[string]string{"canti.effect": "e", "canti.state": f.x.cfg.State, "canti.spec": specHash(f.x.runArgs("true"))}
 	c.State.Status, c.State.ExitCode = status, exit
+	c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
 	b, err := json.Marshal([]container{c})
 	if err != nil {
 		f.t.Fatal(err)
@@ -228,6 +230,92 @@ func TestBindAfterFenceCreatesCancelledJob(t *testing.T) {
 	if creates := f.calls("create"); len(creates) != 1 || !strings.Contains(creates[0], "--name canti-e") {
 		t.Fatalf("creates = %q", creates)
 	}
+	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+		t.Fatalf("rms = %q, want the fenced container released", rms)
+	}
+	f.missing()
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.Status != harness.JobCancelled || job.ID != "c-e" || len(f.calls("create")) != 1 {
+		t.Fatalf("Bind(released) = %+v, %v, creates %q; want the recorded job", job, err, f.calls("create"))
+	}
+}
+
+func same(a, b harness.Job) bool {
+	x, errx := json.Marshal(a)
+	y, erry := json.Marshal(b)
+	return errx == nil && erry == nil && string(x) == string(y)
+}
+
+func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.set("inspect.out", f.container("exited", 3))
+	f.set("logs.out", "hello\n")
+	f.set("rm.sh", fmt.Sprintf("test -s %q || touch \"$ctl/early\"\n", filepath.Join(f.x.dir("e"), "output.json")))
+	want, found, err := f.x.Inspect(t.Context(), "e")
+	if err != nil || !found || want.ID != "c-e" || want.Status != harness.JobFailed || want.ExitCode == nil || *want.ExitCode != 3 ||
+		want.Preview != "hello\n" || !want.Output.Complete || want.StartedAt.IsZero() || !want.FinishedAt.After(want.StartedAt) {
+		t.Fatalf("Inspect() = %+v, %v, %v", want, found, err)
+	}
+	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+		t.Fatalf("rms = %q, want the finished container released", rms)
+	}
+	if _, err := os.Stat(filepath.Join(f.ctl, "early")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("the container was removed before its record was durable")
+	}
+	foreign := strings.ReplaceAll(strings.ReplaceAll(f.container("created", 0), `"c-e"`, `"c-other"`), f.x.cfg.State, "/other")
+	for name, gone := range map[string]func(){
+		"removed": f.missing,
+		"renamed": func() { f.unset("inspect.err", "inspect.exit"); f.set("inspect.out", foreign) },
+	} {
+		gone()
+		if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
+			t.Fatalf("%s: Inspect() = %+v, %v, %v; want %+v", name, job, found, err, want)
+		}
+		if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
+			t.Fatalf("%s: Bind() = %+v, %v; want %+v", name, job, err, want)
+		}
+		if _, err := f.x.Bind(t.Context(), harness.Effect{ID: "e", Command: "false"}); err == nil {
+			t.Fatalf("%s: Bind(changed) succeeded", name)
+		}
+		if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
+			t.Fatalf("%s: Start() = %+v, %v; want %+v", name, job, err, want)
+		}
+		if err := f.x.Cancel(t.Context(), "e"); err != nil {
+			t.Fatalf("%s: Cancel() = %v", name, err)
+		}
+	}
+	for _, cmd := range []string{"create", "start", "stop"} {
+		if calls := f.calls(cmd); len(calls) != 0 {
+			t.Fatalf("%s calls = %q", cmd, calls)
+		}
+	}
+	if logs := f.calls("logs"); len(logs) != 1 {
+		t.Fatalf("logs = %q, want one capture", logs)
+	}
+}
+
+func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.set("inspect.out", f.container("exited", 0))
+	f.set("logs.out", "hello\n")
+	f.set("rm.err", "Error response from daemon: boom\n")
+	f.set("rm.exit", "1")
+	want, _, err := f.x.Inspect(t.Context(), "e")
+	if err != nil || want.Status != harness.JobSucceeded || want.Preview != "hello\n" {
+		t.Fatalf("Inspect(rm fails) = %+v, %v", want, err)
+	}
+	for i := range 2 {
+		if i == 1 {
+			f.unset("rm.err", "rm.exit")
+		}
+		if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || !same(job, want) {
+			t.Fatalf("Inspect() again = %+v, %v; want %+v", job, err, want)
+		}
+	}
+	if rms, logs := f.calls("rm"), f.calls("logs"); len(rms) != 3 || rms[2] != "rm rm -v c-e" || len(logs) != 1 {
+		t.Fatalf("rms %q, logs %q; want the removal retried on every report and one capture", rms, logs)
+	}
 }
 
 func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
@@ -240,8 +328,8 @@ func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
 	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || !strings.HasPrefix(job.Output.Detail, "logs unavailable") {
 		t.Fatalf("Inspect(logs fail) = %+v, %v", job, err)
 	}
-	if _, err := os.Stat(filepath.Join(f.x.dir("e"), "output.json")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("a failed capture was recorded: %v", err)
+	if _, err := os.Stat(filepath.Join(f.x.dir("e"), "output.json")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatalf("a failed capture was recorded: %v, rms %q", err, f.calls("rm"))
 	}
 	f.unset("logs.err", "logs.exit")
 	f.set("logs.out", "hello\n")

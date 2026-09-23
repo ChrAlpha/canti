@@ -1,5 +1,10 @@
 // Package docker runs harness effects as Docker containers through the docker
 // CLI.
+//
+// A finished job's container, with its Docker log, is removed once its output
+// is captured and its result recorded, so host disk holds at most
+// Config.OutputLimit bytes of retained output per job, plus the Docker log of
+// each job still running or awaiting capture, bounded only by its runtime.
 package docker
 
 import (
@@ -61,9 +66,10 @@ type Config struct {
 
 // Executor runs each effect as one container named canti-<effect ID>,
 // labelled with the hash of its full execution spec. The start latch, cancel
-// marker, and output metadata live under Config.State and every operation
-// holds the effect's file lock, so callers in any goroutine or process never
-// observe a half-done start. Host environment variables never reach a job.
+// marker, and final record live under Config.State and every operation holds
+// the effect's file lock, so callers in any goroutine or process never
+// observe a half-done start. Once recorded, a finished job is reported from
+// its record alone. Host environment variables never reach a job.
 type Executor struct {
 	cfg Config
 }
@@ -229,7 +235,7 @@ func (x *Executor) inspect(ctx context.Context, id string) (container, bool, err
 }
 
 // find is inspect, except that the container of a started effect is never
-// reported missing: its removal leaves the outcome unknown.
+// reported missing: its removal before a record leaves the outcome unknown.
 func (x *Executor) find(ctx context.Context, id string) (container, bool, error) {
 	c, found, err := x.inspect(ctx, id)
 	if err == nil && !found {
@@ -260,15 +266,13 @@ func (x *Executor) report(ctx context.Context, id string, c container) (harness.
 	}
 	job := derive(latch, c, marked)
 	if terminal(job.Status) {
-		if job.Preview, job.Output, err = x.output(ctx, id, c.ID, job.Status); err != nil {
-			return harness.Job{}, err
-		}
+		return x.finish(ctx, id, job, c.Config.Labels["canti.spec"])
 	}
 	return job, nil
 }
 
 // Bind creates the effect's container without starting it, or reports the
-// existing one if it was created for the same execution spec.
+// existing job if it was created for the same execution spec.
 func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effect.ID)
 	if err != nil {
@@ -276,17 +280,25 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	}
 	defer unlock()
 	run := x.runArgs(effect.Command)
-	c, found, err := x.find(ctx, effect.ID)
-	if err == nil && !found {
-		if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
-			c, err = x.bound(ctx, effect.ID)
+	rec, done, err := x.recorded(ctx, effect.ID)
+	c, spec := container{}, rec.Spec
+	if err == nil && !done {
+		var found bool
+		if c, found, err = x.find(ctx, effect.ID); err == nil && !found {
+			if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
+				c, err = x.bound(ctx, effect.ID)
+			}
 		}
+		spec = c.Config.Labels["canti.spec"]
 	}
 	if err != nil {
 		return harness.Job{}, err
 	}
-	if c.Config.Labels["canti.spec"] != specHash(run) {
+	if spec != specHash(run) {
 		return harness.Job{}, fmt.Errorf("docker: effect %s is bound to a different execution spec", effect.ID)
+	}
+	if done {
+		return rec.Job, nil
 	}
 	return x.report(ctx, effect.ID, c)
 }
@@ -301,6 +313,9 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 		return harness.Job{}, err
 	}
 	defer unlock()
+	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
+		return rec.Job, err
+	}
 	c, err := x.bound(ctx, effectID)
 	if err != nil {
 		return harness.Job{}, err
@@ -339,6 +354,9 @@ func (x *Executor) Inspect(ctx context.Context, effectID string) (harness.Job, b
 		return harness.Job{}, false, err
 	}
 	defer unlock()
+	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
+		return rec.Job, done, err
+	}
 	c, found, err := x.find(ctx, effectID)
 	if err != nil || !found {
 		return harness.Job{}, false, err
@@ -362,6 +380,9 @@ func (x *Executor) Cancel(ctx context.Context, effectID string) error {
 	}
 	if latch == "" {
 		return setLatch(dir, latchCancel)
+	}
+	if done, err := exists(x.record(effectID)); err != nil || done {
+		return err
 	}
 	c, found, err := x.inspect(ctx, effectID)
 	if err != nil || !found || derive(latch, c, false).Status != harness.JobRunning {

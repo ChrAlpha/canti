@@ -15,9 +15,11 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
+// record is the final report of a finished job and the hash of the spec it
+// ran under. Once published it is the authority for the effect.
 type record struct {
-	Preview string              `json:"preview"`
-	Output  harness.ArtifactRef `json:"output"`
+	harness.Job
+	Spec string
 }
 
 // tap keeps the first limit bytes of a stream in w, counts every byte, and
@@ -119,30 +121,54 @@ func verify(root string, ref harness.ArtifactRef) harness.ArtifactRef {
 	return ref
 }
 
-// output returns the retained output of a finished job, capturing it on the
-// first report. Only a stored artifact is recorded; a failed capture is
-// retried on the next report.
-func (x *Executor) output(ctx context.Context, id, containerID string, status harness.JobStatus) (string, harness.ArtifactRef, error) {
-	meta := filepath.Join(x.dir(id), "output.json")
-	var rec record
-	data, err := os.ReadFile(meta)
-	switch {
-	case err == nil:
-		err = json.Unmarshal(data, &rec)
-	case errors.Is(err, fs.ErrNotExist):
-		var persist bool
-		if rec, persist, err = x.collect(ctx, id, containerID, status); err == nil && persist {
-			data, _ = json.Marshal(rec)
-			err = publish(meta, data, false)
+// finish captures the output of a finished job. Only once its artifact is
+// stored is the job recorded, and only once it is recorded is its container
+// removed; a failed capture keeps the container and is retried on the next
+// report.
+func (x *Executor) finish(ctx context.Context, id string, job harness.Job, spec string) (harness.Job, error) {
+	job, persist, err := x.collect(ctx, id, job)
+	if err == nil && persist {
+		data, _ := json.Marshal(record{job, spec})
+		if err = publish(x.record(id), data, false); err == nil {
+			x.release(ctx, job.ID)
 		}
 	}
 	if err != nil {
-		return "", harness.ArtifactRef{}, err
+		return harness.Job{}, err
 	}
-	return rec.Preview, verify(x.artifacts(), rec.Output), nil
+	job.Output = verify(x.artifacts(), job.Output)
+	return job, nil
 }
 
-func (x *Executor) collect(ctx context.Context, id, containerID string, status harness.JobStatus) (record, bool, error) {
+// recorded returns the effect's final record, if any, retrying the removal
+// of its container.
+func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error) {
+	data, err := os.ReadFile(x.record(id))
+	if errors.Is(err, fs.ErrNotExist) {
+		return record{}, false, nil
+	}
+	var rec record
+	if err == nil {
+		err = json.Unmarshal(data, &rec)
+	}
+	if err != nil {
+		return record{}, false, err
+	}
+	x.release(ctx, rec.ID)
+	rec.Output = verify(x.artifacts(), rec.Output)
+	return rec, true, nil
+}
+
+// release removes a recorded job's container by the ID it was inspected
+// under, never a container that later took its name. A failure leaves it to
+// the next report.
+func (x *Executor) release(ctx context.Context, containerID string) {
+	_, _ = x.docker(ctx, "rm", "-v", containerID)
+}
+
+func (x *Executor) record(id string) string { return filepath.Join(x.dir(id), "output.json") }
+
+func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (harness.Job, bool, error) {
 	rel := id + "/output"
 	path := filepath.Join(x.artifacts(), rel)
 	t := &tap{w: io.Discard, limit: x.cfg.OutputLimit, previewLimit: x.cfg.PreviewLimit}
@@ -152,7 +178,7 @@ func (x *Executor) collect(ctx context.Context, id, containerID string, status h
 	} else {
 		t.w = f
 	}
-	cmd := x.command(ctx, "logs", containerID)
+	cmd := x.command(ctx, "logs", job.ID)
 	cmd.Stdout, cmd.Stderr = t, t
 	logsErr := cmd.Run()
 	if f != nil {
@@ -161,10 +187,12 @@ func (x *Executor) collect(ctx context.Context, id, containerID string, status h
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return record{}, false, err
+		return harness.Job{}, false, err
 	}
-	ref, persist := describe(rel, t, logsErr, status)
-	return record{Preview: t.preview(), Output: ref}, persist, nil
+	var persist bool
+	job.Output, persist = describe(rel, t, logsErr, job.Status)
+	job.Preview = t.preview()
+	return job, persist, nil
 }
 
 func (x *Executor) artifactFile(path string) (*os.File, error) {

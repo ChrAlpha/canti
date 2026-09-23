@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,15 @@ func dockerInspect(t *testing.T, id string, v any) {
 	}
 }
 
+func containers(t *testing.T, effectID string) []string {
+	t.Helper()
+	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=canti.effect="+effectID).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(out))
+}
+
 func TestExecutorPassesStartLatchCheck(t *testing.T) {
 	cfg, id := setup(t, docker.Config{})
 	f := executortest.Fixture{
@@ -127,6 +137,10 @@ func TestExecutorPassesStartLatchCheck(t *testing.T) {
 	}
 	if err := executortest.Check(testContext(t, 3*time.Minute), f); err != nil {
 		t.Fatal(err)
+	}
+	out, err := exec.Command("docker", "ps", "-a", "--filter", "name=canti-"+id(""), "--format", "{{.Names}}").Output()
+	if names := strings.Fields(string(out)); err != nil || !slices.Equal(slices.Sorted(slices.Values(names)), []string{"canti-" + id("bind"), "canti-" + id("changed-command")}) {
+		t.Fatalf("containers after the check = %q, %v; want only the unstarted ones", names, err)
 	}
 }
 
@@ -160,6 +174,17 @@ func TestRestartedExecutorCollectsOriginalJob(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(cfg.State, "artifacts", job.Output.Path)); err != nil || string(b) != "late\n" {
 		t.Fatalf("artifact = %q, %v", b, err)
 	}
+	if ids := containers(t, e.ID); len(ids) != 0 {
+		t.Fatalf("containers of the finished job = %q, want none", ids)
+	}
+	rebound, err := open(t, cfg).Bind(ctx, e)
+	if err != nil || rebound.ID != job.ID || rebound.Status != job.Status || rebound.Preview != job.Preview || rebound.Output != want || len(containers(t, e.ID)) != 0 {
+		t.Fatalf("Bind() after release = %+v, %v; want the recorded job and no container", rebound, err)
+	}
+	if got := inspect(ctx, t, open(t, cfg), e.ID); got.ID != job.ID || got.Status != job.Status || got.ExitCode == nil || *got.ExitCode != 0 ||
+		got.Preview != job.Preview || got.Output != want || !got.StartedAt.Equal(job.StartedAt) || !got.FinishedAt.Equal(job.FinishedAt) {
+		t.Fatalf("Inspect() after release = %+v, want %+v", got, job)
+	}
 	again, err := open(t, cfg).Start(ctx, e.ID)
 	if err != nil || again.Status != harness.JobSucceeded || !again.StartedAt.Equal(job.StartedAt) {
 		t.Fatalf("Start() after finish = %+v, %v; want the finished job unchanged", again, err)
@@ -169,8 +194,14 @@ func TestRestartedExecutorCollectsOriginalJob(t *testing.T) {
 func TestForeignStateCannotAdoptJob(t *testing.T) {
 	cfg, id := setup(t, docker.Config{})
 	ctx := testContext(t, time.Minute)
-	e := harness.Effect{ID: id("foreign"), Command: "echo run >> /workspace/foreign.runs"}
-	run(ctx, t, open(t, cfg), e)
+	e := harness.Effect{ID: id("foreign"), Command: "echo run >> /workspace/foreign.runs; until [ -e /workspace/release ]; do sleep 0.05; done"}
+	x := open(t, cfg)
+	if _, err := x.Bind(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.Start(ctx, e.ID); err != nil {
+		t.Fatal(err)
+	}
 	other := cfg
 	other.State = t.TempDir()
 	y := open(t, other)
@@ -186,7 +217,10 @@ func TestForeignStateCannotAdoptJob(t *testing.T) {
 	if err := y.Cancel(ctx, e.ID); err != nil {
 		t.Fatalf("Cancel() under another state = %v, want a fence", err)
 	}
-	if job := inspect(ctx, t, open(t, cfg), e.ID); job.Status != harness.JobSucceeded {
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "release"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if job := await(ctx, t, open(t, cfg), e.ID, finished); job.Status != harness.JobSucceeded {
 		t.Fatalf("original job = %+v, want it unchanged", job)
 	}
 	if b, err := os.ReadFile(filepath.Join(cfg.Workspace, "foreign.runs")); err != nil || string(b) != "run\n" {
@@ -217,7 +251,10 @@ func TestOutputIsBoundedAndVerified(t *testing.T) {
 	x := open(t, cfg)
 	big := harness.Effect{ID: id("big"), Command: "echo START; yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c 20971520; echo; echo END-TAIL"}
 	total := len("START\n") + 20971520 + len("\n") + len("END-TAIL\n")
-	job := run(ctx, t, x, big)
+	bound, err := x.Bind(ctx, big)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var info struct {
 		HostConfig struct {
 			LogConfig struct {
@@ -226,9 +263,16 @@ func TestOutputIsBoundedAndVerified(t *testing.T) {
 			}
 		}
 	}
-	dockerInspect(t, job.ID, &info)
+	dockerInspect(t, bound.ID, &info)
 	if lc := info.HostConfig.LogConfig; lc.Type != "json-file" || !maps.Equal(lc.Config, map[string]string{"max-size": "1p", "mode": "blocking"}) {
 		t.Fatalf("log config = %+v", lc)
+	}
+	job := run(ctx, t, x, big)
+	if ids := containers(t, big.ID); len(ids) != 0 {
+		t.Fatalf("containers of the flood job = %q, want its log released", ids)
+	}
+	if again := inspect(ctx, t, open(t, cfg), big.ID); again.ID != job.ID || again.Output != job.Output || again.Preview != job.Preview {
+		t.Fatalf("Inspect() after release = %+v, want %+v", again, job)
 	}
 	out := job.Output
 	if job.Status != harness.JobSucceeded || !out.Available || out.Complete || out.Bytes != 1<<20 || out.Detail != fmt.Sprintf("kept %d of %d bytes", 1<<20, total) {
@@ -294,10 +338,8 @@ func TestCancelStopsProcessTree(t *testing.T) {
 				t.Fatalf("Cancel() took %v", took)
 			}
 			job := inspect(ctx, t, open(t, cfg), e.ID)
-			var info struct{ State struct{ Running bool } }
-			dockerInspect(t, job.ID, &info)
-			if info.State.Running || job.Status != harness.JobCancelled || job.Output.Complete || !strings.Contains(job.Output.Detail, "cancelled") {
-				t.Fatalf("cancelled job = %+v, running %v", job, info.State.Running)
+			if ids := containers(t, e.ID); len(ids) != 0 || job.Status != harness.JobCancelled || job.Output.Complete || !strings.Contains(job.Output.Detail, "cancelled") {
+				t.Fatalf("cancelled job = %+v, containers %q", job, ids)
 			}
 			if err := open(t, cfg).Cancel(ctx, e.ID); err != nil {
 				t.Fatalf("second Cancel() = %v", err)
