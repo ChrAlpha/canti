@@ -247,35 +247,41 @@ func TestLaunchOutlivesShutdown(t *testing.T) {
 
 func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
 	f := newFake(t)
-	f.x.timeouts = timeouts{call: 50 * time.Millisecond, capture: 100 * time.Millisecond}
-	f.x.cfg.StopGrace = 200 * time.Millisecond
-	f.latch(latchStart)
-	ordinary := func(err error) bool {
-		return err != nil && strings.Contains(err.Error(), "no response within") &&
-			!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)
+	f.x.timeouts = timeouts{call: 50 * time.Millisecond, transfer: 150 * time.Millisecond}
+	f.x.cfg.StopGrace = 100 * time.Millisecond
+	for _, cmd := range []string{"inspect", "create", "start", "stop", "rm", "ps", "logs"} {
+		f.set(cmd+".sh", "exec sleep 30\n")
 	}
-	f.set("inspect.sh", "exec sleep 5\n")
-	began := time.Now()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !ordinary(err) || time.Since(began) > time.Second {
-		t.Fatalf("Inspect(hung) = %v, %v after %v; want an ordinary error at the call's deadline", found, err, time.Since(began))
+	for _, tt := range []struct {
+		args  []string
+		limit time.Duration
+	}{
+		{[]string{"container", "inspect", "canti-e"}, 50 * time.Millisecond},
+		{[]string{"create", "--name", "canti-e"}, 150 * time.Millisecond},
+		{[]string{"start", "c-e"}, 50 * time.Millisecond},
+		{[]string{"stop", "-t", "1", "c-e"}, 150 * time.Millisecond},
+		{[]string{"rm", "-v", "c-e"}, 50 * time.Millisecond},
+		{[]string{"ps", "-aq"}, 50 * time.Millisecond},
+	} {
+		began := time.Now()
+		_, err := f.x.docker(t.Context(), tt.args...)
+		took := time.Since(began)
+		if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+			!strings.Contains(err.Error(), fmt.Sprintf("no response within %v", tt.limit)) || took < tt.limit || took > tt.limit+5*time.Second {
+			t.Fatalf("docker %s (hung) = %v after %v; want an ordinary error at %v", tt.args[0], err, took, tt.limit)
+		}
 	}
+	f.x.timeouts.call = time.Minute
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	if _, _, err := f.x.Inspect(ctx, "e"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Inspect(hung, caller's deadline first) = %v, want the caller's error", err)
+	if _, err := f.x.docker(ctx, "ps", "-aq"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("docker ps (hung, caller's deadline first) = %v, want the caller's error", err)
 	}
-	f.unset("inspect.sh")
-	f.set("inspect.out", f.container("running", 0))
-	f.set("stop.sh", "exec sleep 5\n")
-	began = time.Now()
-	if err := f.x.Cancel(t.Context(), "e"); !ordinary(err) || time.Since(began) < 250*time.Millisecond {
-		t.Fatalf("Cancel(hung) = %v after %v; want an ordinary error after the stop grace", err, time.Since(began))
-	}
-	f.unset("stop.sh")
-	f.set("inspect.out", f.container("exited", 143))
-	f.set("logs.sh", "exec sleep 5\n")
+	f.latch(latchStart)
+	f.unset("inspect.sh", "rm.sh")
+	f.set("inspect.out", f.container("exited", 0))
 	job, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || job.Status != harness.JobCancelled || job.Output.Available || !strings.HasPrefix(job.Output.Detail, "logs unavailable: no response within") {
+	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || job.Output.Detail != "logs unavailable: no response within 150ms" {
 		t.Fatalf("Inspect(capture hung) = %+v, %v; want the job recorded without output", job, err)
 	}
 }

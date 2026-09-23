@@ -78,14 +78,15 @@ type Executor struct {
 
 // Every docker CLI call has its own deadline, so a hung daemon cannot hold an
 // effect's lock forever: callTimeout, extended by Config.StopGrace for a
-// stop, or captureTimeout to read a job's whole Docker log.
+// stop, or transferTimeout for a create, which may pull the image, and to
+// read a job's whole Docker log.
 const (
-	callTimeout    = time.Minute
-	captureTimeout = 10 * time.Minute
+	callTimeout     = 30 * time.Second
+	transferTimeout = 10 * time.Minute
 )
 
 // timeouts are the deadlines of docker CLI calls; tests shorten them.
-type timeouts struct{ call, capture time.Duration }
+type timeouts struct{ call, transfer time.Duration }
 
 var _ harness.Executor = (*Executor)(nil)
 
@@ -127,7 +128,7 @@ func New(cfg Config) (*Executor, error) {
 		return nil, err
 	}
 	cfg.Workspace, cfg.State = ws, state
-	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, captureTimeout}}, nil
+	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}}, nil
 }
 
 func resolve(path string) (string, error) {
@@ -214,7 +215,10 @@ func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
 // ordinary error, never mistaken for the caller's shutdown.
 func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
 	limit := x.timeouts.call
-	if args[0] == "stop" {
+	switch args[0] {
+	case "create":
+		limit = x.timeouts.transfer
+	case "stop":
 		limit += x.cfg.StopGrace
 	}
 	call, cancel := context.WithTimeout(ctx, limit)

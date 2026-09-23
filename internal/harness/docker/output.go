@@ -223,13 +223,13 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 	} else {
 		t.w = f
 	}
-	call, cancel := context.WithTimeout(ctx, x.timeouts.capture)
+	call, cancel := context.WithTimeout(ctx, x.timeouts.transfer)
 	defer cancel()
 	cmd := x.command(call, "logs", job.ID)
 	cmd.Stdout, cmd.Stderr = t, t
 	logsErr := cmd.Run()
 	if logsErr != nil && call.Err() != nil {
-		logsErr = fmt.Errorf("no response within %v", x.timeouts.capture)
+		logsErr = fmt.Errorf("no response within %v", x.timeouts.transfer)
 	}
 	if f != nil {
 		if err := install(f, path, false, errors.Join(t.werr, logsErr)); logsErr == nil {
