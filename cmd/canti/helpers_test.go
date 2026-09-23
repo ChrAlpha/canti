@@ -30,6 +30,7 @@ type scriptedModel struct {
 	*httptest.Server
 	key    string
 	script map[int]core.Decision
+	hold   chan struct{}
 	mu     sync.Mutex
 	bodies [][]byte
 }
@@ -64,7 +65,16 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	m.mu.Lock()
 	m.bodies = append(m.bodies, body)
+	hold := m.hold
 	m.mu.Unlock()
+	if hold != nil {
+		select {
+		case hold <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+		return
+	}
 	w.Header().Set("content-type", "application/json")
 	if r.Header.Get("x-api-key") != m.key || r.Header.Get("authorization") != "" {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -84,6 +94,15 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"content": []map[string]string{{"type": "text", "text": string(text)}},
 		"usage":   map[string]int{"input_tokens": 100, "output_tokens": 10},
 	})
+}
+
+// holdRequests makes the model answer no request until its client goes
+// away and report each one on the returned channel.
+func (m *scriptedModel) holdRequests() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hold = make(chan struct{}, 1)
+	return m.hold
 }
 
 func (m *scriptedModel) requests() [][]byte {
@@ -113,12 +132,19 @@ type result struct {
 // killed by a signal reports code -1.
 func runCLI(t *testing.T, env []string, args ...string) result {
 	t.Helper()
+	_, wait := startCLI(t, env, args...)
+	return wait()
+}
+
+// startCLI starts the CLI process of runCLI and returns it with the wait
+// for its result.
+func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() result) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
@@ -131,11 +157,19 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	var exit *exec.ExitError
-	if err := cmd.Run(); err != nil && !errors.As(err, &exit) {
+	if err := cmd.Start(); err != nil {
+		cancel()
 		t.Fatalf("canti %q: %v", args, err)
 	}
-	return result{cmd.ProcessState.ExitCode(), stdout.String(), stderr.String()}
+	return cmd, func() result {
+		t.Helper()
+		defer cancel()
+		var exit *exec.ExitError
+		if err := cmd.Wait(); err != nil && !errors.As(err, &exit) {
+			t.Fatalf("canti %q: %v", args, err)
+		}
+		return result{cmd.ProcessState.ExitCode(), stdout.String(), stderr.String()}
+	}
 }
 
 // fixture is one workspace and state directory driven against a scripted
@@ -162,11 +196,18 @@ func newFixture(t *testing.T, script map[int]core.Decision) *fixture {
 // model URL, plus env and args.
 func (f *fixture) cli(env []string, command string, args ...string) result {
 	f.t.Helper()
+	_, wait := f.start(env, command, args...)
+	return wait()
+}
+
+// start starts what cli runs.
+func (f *fixture) start(env []string, command string, args ...string) (*exec.Cmd, func() result) {
+	f.t.Helper()
 	all := []string{command, "-workspace", f.workspace, "-state", f.state}
 	if command == "run" || command == "resume" {
 		all = append(all, "-model-url", f.model.URL)
 	}
-	return runCLI(f.t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
+	return startCLI(f.t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 }
 
 // status is the object the status command prints.

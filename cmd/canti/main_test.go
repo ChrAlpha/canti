@@ -271,6 +271,26 @@ func TestACrashAtACommitResumesFromTheJournal(t *testing.T) {
 	}
 }
 
+func TestASignalStopsTheRunPersistently(t *testing.T) {
+	f := newFixture(t, nil)
+	held := f.model.holdRequests()
+	cmd, wait := f.start(nil, "run", "-goal", "g")
+	select {
+	case <-held:
+	case <-time.After(time.Minute):
+		t.Fatal("the model was never called")
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(); r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") {
+		t.Fatalf("interrupted run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started", "stop_requested"}) || h[2].To != core.PhaseStopped {
+		t.Errorf("history = %q", kinds(h))
+	}
+}
+
 func TestDefaultStateDirectory(t *testing.T) {
 	ws := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
