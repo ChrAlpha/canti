@@ -166,6 +166,27 @@ func (x *Executor) release(ctx context.Context, containerID string) {
 	_, _ = x.docker(ctx, "rm", "-v", containerID)
 }
 
+// sweep releases every container of this state whose effect already has a
+// record naming it, so a removal that failed is retried by the next Bind even
+// though the finished effect is never reported again.
+func (x *Executor) sweep(ctx context.Context) {
+	out, err := x.docker(ctx, "ps", "-aq", "--no-trunc", "--filter", "label=canti.state="+x.cfg.State,
+		"--format", `{{.ID}} {{.Label "canti.effect"}}`)
+	if err != nil {
+		return
+	}
+	for line := range strings.Lines(string(out)) {
+		id, effect, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if checkID(effect) != nil {
+			continue
+		}
+		var rec record
+		if data, err := os.ReadFile(x.record(effect)); err == nil && json.Unmarshal(data, &rec) == nil && rec.ID == id {
+			x.release(ctx, id)
+		}
+	}
+}
+
 func (x *Executor) record(id string) string { return filepath.Join(x.dir(id), "output.json") }
 
 func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (harness.Job, bool, error) {

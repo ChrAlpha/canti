@@ -279,6 +279,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 		return harness.Job{}, err
 	}
 	defer unlock()
+	x.sweep(ctx)
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
 	c, spec := container{}, rec.Spec

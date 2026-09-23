@@ -318,6 +318,29 @@ func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
 	}
 }
 
+func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
+	f := newFake(t)
+	for id, job := range map[string]string{"old": "c-old", "moved": "c-moved"} {
+		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}})
+		if err := publish(f.x.record(id), data, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.set("ps.out", "c-old old\nc-live live\nc-other moved\n")
+	f.missing()
+	f.set("create.sh", "rm -f \"$ctl/inspect.err\" \"$ctl/inspect.exit\"\n")
+	f.set("inspect.sh", fmt.Sprintf("[ -f \"$ctl/inspect.exit\" ] || printf '%%s' %q > \"$ctl/inspect.out\"\n", f.container("created", 0)))
+	if _, err := f.x.Bind(t.Context(), effect); err != nil {
+		t.Fatal(err)
+	}
+	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-old" {
+		t.Fatalf("rms = %q, want only the recorded job of another effect released", rms)
+	}
+}
+
 func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
