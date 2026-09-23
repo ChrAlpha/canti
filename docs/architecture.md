@@ -449,11 +449,7 @@ supported. A process of the same user that deletes or edits files inside a
 run directory is outside the trust model: a step other than the latest that
 it deletes, or a file that it edits, stays so until the `steps` directory is
 removed and rebuilt. A `canti run` killed before it creates its run can leave
-an empty run directory. A state directory used by an earlier version has no
-step records: `canti run` publishes only its latest run, so earlier runs
-stay unpublished, and because the mounts are part of the spec hash, a
-container that version created but did not record as bound is refused by
-`Bind` and recorded as an unknown outcome.
+an empty run directory.
 
 ## Lifecycle boundaries
 
@@ -574,8 +570,6 @@ loopback address. `Complete` sends exactly the frozen body once over
 `net/http`, with no SDK, no hidden retries, and no followed redirects, under a
 per-attempt timeout (10 min by default) and an 8 MiB response limit, and
 replaces the credential with `[redacted]` wherever a response body echoes it.
-It still sends a request frozen by `canti-anthropic/1`, whose user message is
-one string, so an upgrade does not strand a frozen request.
 A 2xx response is complete only with `stop_reason` `end_turn`,
 `stop_sequence`, or `refusal`. Another stop reason, a malformed, truncated, or
 oversized body, and statuses 408, 409, 429, and 5xx are incomplete and
@@ -589,7 +583,10 @@ A resend reuses the frozen bytes; reading the notes again or changing input
 selection requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code
-revision is not.
+revision is not. A state directory written by an earlier revision is not
+supported: the stored configuration of its runs holds the removed `history`
+field, so every command refuses them with an unreadable-config error; use a
+fresh `-state`.
 
 ## Execution
 

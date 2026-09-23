@@ -29,7 +29,6 @@ const (
 	protocol       = "anthropic-messages/" + version
 	fallbackBeta   = "server-side-fallback-2026-07-01"
 	adapter        = "canti-anthropic/2"
-	adapterV1      = "canti-anthropic/1"
 	decisionFormat = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{` +
 		`"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},` +
 		`"required":["kind","payload"],"additionalProperties":false}}}`
@@ -163,17 +162,16 @@ type message struct {
 	} `json:"usage"`
 }
 
-// Complete sends exactly req.Body once, including a body frozen by
-// canti-anthropic/1. It returns a nil error exactly when the response is
-// complete, a *harness.StopError when resending cannot help, and ctx's error
-// once ctx is done.
+// Complete sends exactly req.Body once. It returns a nil error exactly when
+// the response is complete, a *harness.StopError when resending cannot help,
+// and ctx's error once ctx is done.
 func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return harness.Response{}, err
 	}
 	var beta string
 	switch {
-	case req.Adapter != adapter && req.Adapter != adapterV1:
+	case req.Adapter != adapter:
 		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
 		beta = fallbackBeta

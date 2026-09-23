@@ -26,7 +26,6 @@ const (
 	protocol     = "anthropic-messages/2023-06-01"
 	fallbackBeta = "server-side-fallback-2026-07-01"
 	adapter      = "canti-anthropic/2"
-	adapterV1    = "canti-anthropic/1"
 	cached       = `,"cache_control":{"type":"ephemeral"}`
 	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}}}`
 	decision     = `[{"type":"text","text":"{\"kind\":\"return\",\"payload\":\"done\"}"}]`
@@ -296,23 +295,16 @@ func TestCompleteSendsFrozenBytesAndHeaders(t *testing.T) {
 }
 
 func TestCompleteSendsRequestBodyVerbatim(t *testing.T) {
-	for _, tc := range []struct{ adapter, content string }{
-		{adapterV1, `"<&>"`},
-		{adapter, `[{"type":"text","text":"<&>"` + cached + `},{"type":"text","text":"x"}]`},
-	} {
-		t.Run(tc.adapter, func(t *testing.T) {
-			srv, got := recorder(t, http.StatusOK, message(`"end_turn"`, decision))
-			body := []byte("{ \"messages\" : [{\"role\":\"user\",\"content\":" + tc.content + "}],\n\"model\":\"claude-opus-5\", \"max_tokens\":1 }\n")
-			req := harness.Request{Body: body, Model: "claude-opus-5", Protocol: protocol, Adapter: tc.adapter}
-			resp, err := newModel(t, srv.URL+"/", nil).Complete(context.Background(), req)
-			if err != nil || !resp.Complete || resp.Adapter != tc.adapter {
-				t.Fatalf("Complete = %+v, %v", resp, err)
-			}
-			c := <-got
-			if c.path != "/v1/messages" || !bytes.Equal(c.body, body) {
-				t.Fatalf("sent %s %q, want /v1/messages %q", c.path, c.body, body)
-			}
-		})
+	srv, got := recorder(t, http.StatusOK, message(`"end_turn"`, decision))
+	body := []byte("{ \"messages\" : [{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<&>\"" + cached + "},{\"type\":\"text\",\"text\":\"x\"}]}],\n\"model\":\"claude-opus-5\", \"max_tokens\":1 }\n")
+	req := harness.Request{Body: body, Model: "claude-opus-5", Protocol: protocol, Adapter: adapter}
+	resp, err := newModel(t, srv.URL+"/", nil).Complete(context.Background(), req)
+	if err != nil || !resp.Complete || resp.Adapter != adapter {
+		t.Fatalf("Complete = %+v, %v", resp, err)
+	}
+	c := <-got
+	if c.path != "/v1/messages" || !bytes.Equal(c.body, body) {
+		t.Fatalf("sent %s %q, want /v1/messages %q", c.path, c.body, body)
 	}
 }
 
@@ -332,6 +324,7 @@ func TestCompleteHonorsFrozenProtocol(t *testing.T) {
 	for name, req := range map[string]harness.Request{
 		"unknown protocol": {Body: req.Body, Model: req.Model, Protocol: "anthropic-messages/2099-01-01", Adapter: adapter},
 		"unknown adapter":  {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "other/1"},
+		"earlier adapter":  {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/1"},
 		"future adapter":   {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/3"},
 		"no adapter":       {Body: req.Body, Model: req.Model, Protocol: protocol},
 	} {

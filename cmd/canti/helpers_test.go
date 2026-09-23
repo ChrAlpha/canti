@@ -80,17 +80,15 @@ func promptOf(body []byte) (step int, prompt string, err error) {
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 {
 		return 0, "", errors.New("request is not one user message")
 	}
-	if json.Unmarshal(req.Messages[0].Content, &prompt) != nil {
-		var blocks []struct{ Type, Text string }
-		if err := json.Unmarshal(req.Messages[0].Content, &blocks); err != nil {
-			return 0, "", errors.New("user message content is neither text nor content blocks")
+	var blocks []struct{ Type, Text string }
+	if err := json.Unmarshal(req.Messages[0].Content, &blocks); err != nil {
+		return 0, "", errors.New("user message content is not content blocks")
+	}
+	for _, b := range blocks {
+		if b.Type != "text" || b.Text == "" {
+			return 0, "", errors.New("user message has an empty or non-text block")
 		}
-		for _, b := range blocks {
-			if b.Type != "text" || b.Text == "" {
-				return 0, "", errors.New("user message has an empty or non-text block")
-			}
-			prompt += b.Text
-		}
+		prompt += b.Text
 	}
 	m := progressLine.FindStringSubmatch(prompt)
 	if m == nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 // TestMain runs the binary as the CLI when CANTI_TEST_MAIN=1. There
@@ -202,6 +204,45 @@ func TestReadersReportMissingRuns(t *testing.T) {
 		if r := f.cli(nil, c, args...); r.code != exitError || !strings.Contains(r.stderr, `run "run_missing" not found`) {
 			t.Errorf("%s -run run_missing = %d\nstderr: %s", c, r.code, r.stderr)
 		}
+	}
+}
+
+func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if err := os.MkdirAll(f.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, path := t.Context(), filepath.Join(f.state, "canti.db")
+	store, err := sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := json.Marshal(f.workspace)
+	legacy := harness.Run{ID: "run_legacy", Goal: "g", Created: time.Now(), Config: []byte(`{"workspace":` + string(ws) + `,"image":"debian:bookworm-slim",` +
+		`"network":"none","memory":"2g","cpus":"","pids":512,"output_limit":8388608,"model":"claude-opus-5","max_tokens":16000,` +
+		`"structured":true,"fallbacks":true,"history":8}`)}
+	initial, err := core.NewState(legacy.ID, core.Limits{MaxSteps: 20, MaxAttempts: 3})
+	if err == nil {
+		err = store.CreateRun(ctx, legacy, initial)
+	}
+	store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"status"}, {"history"}, {"resume"}, {"stop"}, {"resolve", "-job"}, {"run", "-goal", "g"}} {
+		if r := f.cli(nil, args[0], args[1:]...); r.code != exitError || !strings.Contains(r.stderr, "run run_legacy has an unreadable config") {
+			t.Errorf("%q = %d\nstderr: %s", args, r.code, r.stderr)
+		}
+	}
+	if store, err = sqlite.Open(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if last, err := store.LastRun(ctx); err != nil || last.ID != legacy.ID || len(f.model.requests()) != 0 {
+		t.Errorf("latest run %s, %v after %d requests; want %s and none", last.ID, err, len(f.model.requests()), legacy.ID)
+	}
+	if snap, err := store.Latest(ctx, legacy.ID); err != nil || snap.Seq != 0 {
+		t.Errorf("the refused run has %d transitions, %v", snap.Seq, err)
 	}
 }
 
