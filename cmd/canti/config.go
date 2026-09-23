@@ -1,0 +1,167 @@
+package main
+
+import (
+	"bytes"
+	"cmp"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/anthropic"
+	"github.com/ChrAlpha/canti/internal/harness/docker"
+)
+
+// config is the host wiring stored with a run; every later command rebuilds
+// the executor and model from it.
+type config struct {
+	Workspace   string `json:"workspace"`
+	Image       string `json:"image"`
+	Network     string `json:"network"`
+	Memory      string `json:"memory"`
+	CPUs        string `json:"cpus"`
+	Pids        int    `json:"pids"`
+	OutputLimit int64  `json:"output_limit"`
+	Model       string `json:"model"`
+	MaxTokens   int    `json:"max_tokens"`
+	Structured  bool   `json:"structured"`
+	Fallbacks   bool   `json:"fallbacks"`
+	History     int    `json:"history"`
+}
+
+type spec struct {
+	config config
+	budget harness.Budget
+	limits core.Limits
+}
+
+func (s *spec) register(fs *flag.FlagSet) {
+	c, b, l := &s.config, &s.budget, &s.limits
+	fs.StringVar(&c.Image, "image", "debian:bookworm-slim", "container `image` of every job")
+	fs.StringVar(&c.Network, "network", "none", "container `network` of every job")
+	fs.StringVar(&c.Memory, "memory", "2g", "memory `limit` of every job; unlimited if empty")
+	fs.StringVar(&c.CPUs, "cpus", "", "CPU `limit` of every job; unlimited if empty")
+	fs.IntVar(&c.Pids, "pids", 512, "process `limit` of every job; 0 is unlimited")
+	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "output `bytes` retained per job")
+	fs.StringVar(&c.Model, "model", "claude-opus-5", "Anthropic `model`")
+	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
+	fs.BoolVar(&c.Structured, "structured", true, "constrain responses to the decision schema")
+	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
+	fs.IntVar(&c.History, "history", 8, "recent `steps` shown in each prompt")
+	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
+	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
+	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")
+	fs.Int64Var(&b.Tokens, "token-budget", 0, "model `tokens` per run; 0 is unlimited")
+	fs.Int64Var(&b.OutputBytes, "output-budget", 256<<20, "job output `bytes` per run; 0 is unlimited")
+	fs.DurationVar(&b.JobTimeout, "job-timeout", 10*time.Minute, "run `time` of one job; 0 is unlimited")
+}
+
+func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
+	c, b := s.config, s.budget
+	if min(int64(c.Pids), c.OutputLimit, int64(c.MaxTokens), int64(c.History), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0 {
+		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
+	}
+	var id [16]byte
+	rand.Read(id[:])
+	run := harness.Run{ID: "run_" + hex.EncodeToString(id[:]), Goal: goal, Constraints: constraints, Budget: b, Created: now}
+	initial, err := core.NewState(run.ID, s.limits)
+	if err != nil {
+		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps and -max-attempts must be positive")
+	}
+	run.Config, err = json.Marshal(c)
+	return run, initial, err
+}
+
+func decodeConfig(run harness.Run) (config, error) {
+	var c config
+	d := json.NewDecoder(bytes.NewReader(run.Config))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&c); err != nil {
+		return c, fmt.Errorf("run %s has an unreadable config: %w", run.ID, err)
+	}
+	return c, nil
+}
+
+func executorConfig(c config, state string) docker.Config {
+	return docker.Config{
+		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
+		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit,
+	}
+}
+
+type credential struct{ apiKey, authToken string }
+
+func credentials() (credential, error) {
+	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+		return credential{apiKey: k}, nil
+	}
+	if t := os.Getenv("ANTHROPIC_AUTH_TOKEN"); t != "" {
+		return credential{authToken: t}, nil
+	}
+	return credential{}, errors.New("set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call the model")
+}
+
+func newModel(c config, url string) (harness.Model, error) {
+	cred, err := credentials()
+	if err != nil {
+		return nil, err
+	}
+	return anthropic.New(modelConfig(c, url, cred))
+}
+
+func modelConfig(c config, url string, cred credential) anthropic.Config {
+	return anthropic.Config{
+		BaseURL: url, APIKey: cred.apiKey, AuthToken: cred.authToken, Model: c.Model,
+		MaxTokens: c.MaxTokens, StructuredOutput: c.Structured, Fallbacks: c.Fallbacks,
+	}
+}
+
+func environment(c config, b harness.Budget) string {
+	pids, timeout := "unlimited", "unlimited"
+	if c.Pids > 0 {
+		pids = strconv.Itoa(c.Pids)
+	}
+	if b.JobTimeout > 0 {
+		timeout = b.JobTimeout.String()
+	}
+	return fmt.Sprintf("Each command runs in a new Linux container from image %s with working directory %s, "+
+		"which is read-write and persists between steps. Earlier step outputs are under %s, read-only. "+
+		"Network: %s. Per-command limits: memory %s, CPUs %s, processes %s, run time %s.",
+		c.Image, docker.WorkDir, docker.ArtifactDir, c.Network,
+		cmp.Or(c.Memory, "unlimited"), cmp.Or(c.CPUs, "unlimited"), pids, timeout)
+}
+
+func defaultState(workspace string) (string, error) {
+	base := os.Getenv("XDG_STATE_HOME")
+	if !filepath.IsAbs(base) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("no state directory: %w", err)
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	sum := sha256.Sum256([]byte(workspace))
+	return filepath.Join(base, "canti", hex.EncodeToString(sum[:8])), nil
+}
+
+var errNoModel = errors.New("this command does not call the model")
+
+func withoutModel(config) (harness.Model, error) { return noModel{}, nil }
+
+type noModel struct{}
+
+func (noModel) Freeze(harness.Prompt) (harness.Request, error) { return harness.Request{}, errNoModel }
+func (noModel) Decision(harness.Response) []byte               { return nil }
+func (noModel) Complete(context.Context, harness.Request) (harness.Response, error) {
+	return harness.Response{}, errNoModel
+}
