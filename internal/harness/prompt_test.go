@@ -241,19 +241,24 @@ func TestPromptSectionLimits(t *testing.T) {
 		{"artifact directory", func(f *Frame, s string) { f.ArtifactDir = s }, nil},
 		{"notes path", func(f *Frame, s string) { f.Notes.Path = s }, nil},
 	}
+	inputs := []struct{ name, huge string }{
+		{"plain", strings.Repeat("q", 1<<20)},
+		{"backticks", strings.Repeat("`", 1<<20)},
+		{"leading backticks", strings.Repeat("`", 40) + strings.Repeat("q", 1<<20)},
+	}
 	for _, tt := range tests {
-		for _, c := range []string{"q", "`"} {
-			t.Run(tt.name+" "+c, func(t *testing.T) {
+		for i, in := range inputs {
+			t.Run(tt.name+" "+in.name, func(t *testing.T) {
 				f, l, limit := promptFrame(), unlimited(), refLimit
 				if tt.limit != nil {
 					limit = 100
 					*tt.limit(&l) = limit
 				}
-				short, huge := f, strings.Repeat(c, 1<<20)
+				short, huge := f, in.huge
 				tt.set(&f, huge)
-				tt.set(&short, c)
+				tt.set(&short, huge[:1])
 				p := mustPrompt(t, f, l)
-				if c == "q" && (!strings.Contains(p.User, huge[:limit]+"…[truncated ") || strings.Contains(p.User, huge[:limit+1])) {
+				if i == 0 && (!strings.Contains(p.User, huge[:limit]+"…[truncated ") || strings.Contains(p.User, huge[:limit+1])) {
 					t.Fatalf("User does not cut the input at %d bytes with a marker", limit)
 				}
 				if grown := len(p.User) - len(mustPrompt(t, short, l).User); grown > limit+32 {
