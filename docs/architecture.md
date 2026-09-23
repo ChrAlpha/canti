@@ -521,8 +521,8 @@ effect or state directory is an error, never adopted.
   directory is fsynced. Every operation on an effect holds that directory's
   `flock`, so no caller observes a half-done start.
 - **Start.** `Start` sets the `start` latch and then runs `docker start` on a
-  container still in `created`, finishing the launch within 30 s even if its
-  context ends. Once the latch is set, `Start` only reports the job.
+  container still in `created`, finishing the launch even if its context
+  ends. Once the latch is set, `Start` only reports the job.
 - **Cancel.** `Cancel` sets a `cancel` latch on an unstarted effect, so that a
   container bound later reports `cancelled` and never starts. For a running
   job it writes a cancel marker and runs `docker stop` with the stop grace
@@ -530,9 +530,11 @@ effect or state directory is an error, never adopted.
   marker labels the job cancelled even if it exited on its own between
   `Cancel`'s inspection and the marker write, or after a `docker stop` cut
   short by the caller's deadline.
-- **Status.** A container in `created` is pending without a latch, cancelled
-  under the `cancel` latch, and unknown under the `start` latch, because the
-  launch may or may not have happened. An exited container is cancelled with
+- **Status.** A container in `created` is pending without a latch and
+  cancelled under the `cancel` latch. Under the `start` latch it failed to
+  start when Docker reports a start error and no start time, as for an
+  unknown user, and is otherwise unknown, because the launch may or may not
+  have happened; the loop observes a failed start as `failed_to_start`. An exited container is cancelled with
   the marker, otherwise succeeded for exit status 0 and failed for any other.
   A started effect whose container Docker reports missing, with no final
   record, is `ErrJobLost`, never "not found".
@@ -565,6 +567,12 @@ effect or state directory is an error, never adopted.
 Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
 plus Docker's log of each job that is still running or awaiting capture,
 which only that job's run time bounds.
+
+Every docker CLI call has its own deadline: 1 min, plus the stop grace for
+`docker stop`, and 10 min to read a job's log. A call past only its own
+deadline fails with an ordinary error, never taken for the caller's shutdown,
+so a hung daemon cannot hold an effect's lock forever: the loop retries a hung
+inspection and then records an unknown outcome.
 
 The trust boundary is Docker's. A job sees the workspace, mounted read-write
 at `/workspace`, and the artifact root, mounted read-only at
