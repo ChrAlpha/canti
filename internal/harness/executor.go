@@ -18,7 +18,8 @@ import "context"
 // once the latch is set it is a no-op reporting the job as-is, even for a
 // finished job — a naive backend restart, such as docker start on an exited
 // container, does not satisfy this, so the executor must gate on its own
-// record. Cancel is idempotent in every job state and safe to retry after an
+// record. A Start whose launch a concurrent Cancel stops also reports the job
+// rather than an error. Cancel is idempotent in every job state and safe to retry after an
 // error. It stops a running job, replaces JobUnknown only with a result it
 // established, and from its return an unstarted job it fences, including one
 // bound after it, reports JobCancelled. Inspect and Cancel must never create

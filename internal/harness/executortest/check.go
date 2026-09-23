@@ -27,9 +27,10 @@ type Fixture struct {
 
 // Check runs every contract case against f and returns the violations
 // joined, or nil. After the cases it counts every run again, so an execution
-// that lands before Check returns still fails its case. ctx bounds the whole check, including
-// waits for started jobs to finish. Check cannot inject crashes, and it
-// detects a start racing a cancel only when the two calls overlap.
+// that lands before Check returns still fails its case. ctx bounds the whole
+// check, including waits for started jobs to finish. Check cannot inject
+// crashes, and it detects a start racing a cancel only when the two calls
+// overlap.
 func Check(ctx context.Context, f Fixture) error {
 	c := checker{Fixture: f, x: fresh(f.Open)}
 	type passed struct {
