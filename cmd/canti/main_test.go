@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,7 +25,9 @@ import (
 // CANTI_TEST_CRASH=before:KIND or after:KIND kills the process with SIGKILL
 // right before, or right after, it commits the first transition of KIND;
 // block:KIND holds that commit until its context is done, after creating the
-// file CANTI_TEST_BLOCKED names.
+// file CANTI_TEST_BLOCKED names. CANTI_TEST_SETUP=signal holds the setup of
+// the loop, after creating that file, until the process receives SIGINT or
+// SIGTERM.
 func TestMain(m *testing.M) {
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
@@ -34,6 +37,13 @@ func TestMain(m *testing.M) {
 			}
 			wrapJournal = func(j harness.Journal) harness.Journal {
 				return crashing{j, when, kind, os.Getenv("CANTI_TEST_BLOCKED")}
+			}
+		}
+		if os.Getenv("CANTI_TEST_SETUP") == "signal" {
+			wrap := wrapJournal
+			wrapJournal = func(j harness.Journal) harness.Journal {
+				awaitSignal(os.Getenv("CANTI_TEST_BLOCKED"))
+				return wrap(j)
 			}
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
@@ -62,6 +72,16 @@ func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
 		kill()
 	}
 	return err
+}
+
+// awaitSignal creates marker and returns once SIGINT or SIGTERM has been
+// delivered to every channel notified of it.
+func awaitSignal(marker string) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	os.WriteFile(marker, nil, 0o600)
+	<-sig
+	signal.Stop(sig)
 }
 
 func kill() {
@@ -291,6 +311,42 @@ func TestASignalStopsTheRunPersistently(t *testing.T) {
 	}
 	if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started", "stop_requested"}) || h[2].To != core.PhaseStopped {
 		t.Errorf("history = %q", kinds(h))
+	}
+}
+
+func TestASignalDuringSetupStopsTheRunPersistently(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		args    []string
+		signal  os.Signal
+		kinds   []string
+	}{
+		{"run", []string{"-goal", "g"}, os.Interrupt, []string{"stop_requested"}},
+		{"resume", nil, syscall.SIGTERM, []string{"request_frozen", "stop_requested"}},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			f := newFixture(t, nil)
+			if tc.command == "resume" {
+				if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
+					t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+				}
+			}
+			blocked := filepath.Join(t.TempDir(), "blocked")
+			cmd, wait := f.start([]string{"CANTI_TEST_SETUP=signal", "CANTI_TEST_BLOCKED=" + blocked}, tc.command, tc.args...)
+			waitFor(t, func() bool { _, err := os.Stat(blocked); return err == nil })
+			if err := cmd.Process.Signal(tc.signal); err != nil {
+				t.Fatal(err)
+			}
+			if r := wait(); r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") {
+				t.Fatalf("%s interrupted during setup = %d\nstderr: %s", tc.command, r.code, r.stderr)
+			}
+			if h := f.history(); !slices.Equal(kinds(h), tc.kinds) || h[len(h)-1].To != core.PhaseStopped {
+				t.Errorf("history = %q", kinds(h))
+			}
+			if len(f.model.requests()) != 0 {
+				t.Error("the model was called")
+			}
+		})
 	}
 }
 

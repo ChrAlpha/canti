@@ -192,6 +192,8 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if a.credErr != nil {
 			return exitError, a.credErr
 		}
+		drive, release := a.drive(ctx, *once)
+		defer release()
 		m, err := newModel(s.config, *url, a.cred)
 		if err != nil {
 			return exitError, err
@@ -219,7 +221,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 			return exitError, err
 		}
 		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
-		snap, err := a.drive(ctx, l, run.ID, *once)
+		snap, err := drive(l, run.ID)
 		return a.report(snap, err, exitActive)
 	}
 }
@@ -232,10 +234,10 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 		if a.credErr != nil {
 			return exitError, a.credErr
 		}
+		drive, release := a.drive(ctx, *once)
+		defer release()
 		model := func(c config) (harness.Model, error) { return newModel(c, *url, a.cred) }
-		return a.with(ctx, model, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
-			return a.drive(ctx, l, id, *once)
-		})
+		return a.with(ctx, model, exitActive, drive)
 	}
 }
 
@@ -394,40 +396,44 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 	return a.report(snap, err, active)
 }
 
-// drive runs the loop, or one step of it with once. The first SIGINT or
-// SIGTERM shuts the controller down and then stops the run persistently
+// drive catches SIGINT and SIGTERM until release and returns op, which runs
+// the loop, or one step of it with once. The first signal, also one caught
+// before op, shuts the controller down and then stops the run persistently
 // within the cleanup deadline; the second abandons the cleanup.
-func (a *app) drive(ctx context.Context, l *harness.Loop, id string, once bool) (harness.Snapshot, error) {
+func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sig)
 	loopCtx, shutdown := context.WithCancel(ctx)
-	defer shutdown()
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
-	defer abandon()
-	go func() {
-		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
-			select {
-			case <-sig:
-				cancel()
-			case <-cleanupCtx.Done():
-				return
-			}
+	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
+		if len(sig) > 0 {
+			shutdown()
 		}
-		signal.Stop(sig)
-	}()
-	step := l.Run
-	if once {
-		step = l.Step
+		go func() {
+			for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+				select {
+				case <-sig:
+					cancel()
+				case <-cleanupCtx.Done():
+					return
+				}
+			}
+			signal.Stop(sig)
+		}()
+		step := l.Run
+		if once {
+			step = l.Step
+		}
+		snap, err := step(loopCtx, id)
+		if loopCtx.Err() == nil || ctx.Err() != nil {
+			return snap, err
+		}
+		a.log.Warn("stopping the run after a signal", "run_id", id)
+		cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
+		defer cancel()
+		return stop(cleanup, l, id)
 	}
-	snap, err := step(loopCtx, id)
-	if loopCtx.Err() == nil || ctx.Err() != nil {
-		return snap, err
-	}
-	a.log.Warn("stopping the run after a signal", "run_id", id)
-	cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
-	defer cancel()
-	return stop(cleanup, l, id)
+	return op, func() { abandon(); shutdown(); signal.Stop(sig) }
 }
 
 func stop(ctx context.Context, l *harness.Loop, id string) (harness.Snapshot, error) {
