@@ -432,6 +432,25 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 	}
 }
 
+func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
+	noDocker := []string{"PATH=" + t.TempDir()}
+	if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
+		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+	}
+	r := f.cli(noDocker, "stop")
+	if r.code != exitResolution || !strings.Contains(r.stderr, "the stop is recorded") || !strings.Contains(r.stderr, "may still run") {
+		t.Fatalf("stop of an unresolved run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if s := f.status(); s.Phase != core.PhaseNeedsResolution || s.Reason != core.StopCancelled {
+		t.Fatalf("status = %+v", s)
+	}
+	f.cli(noDocker, "resolve", "-execution", "failed_to_start")
+	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
+		t.Fatalf("status after the resolution = %+v", s)
+	}
+}
+
 func TestHistoryPrintsEveryPageInOrder(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
 	noDocker := []string{"PATH=" + t.TempDir()}
