@@ -74,6 +74,7 @@ func checkGreeting(t *testing.T, f *fixture, r result) {
 	if data, err := os.ReadFile(filepath.Join(f.workspace, "greeting.txt")); err != nil || string(data) != "hello\n" {
 		t.Errorf("greeting.txt = %q, %v", data, err)
 	}
+	checkReleased(t, f, h)
 }
 
 func TestRunDrivesExecAndReturn(t *testing.T) {

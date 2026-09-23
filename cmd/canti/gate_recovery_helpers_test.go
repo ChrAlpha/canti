@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 // recoveryFixture is a dockerFixture whose test also fails if a container of
@@ -78,20 +80,90 @@ func boundJobs(t *testing.T, h []entry) map[string]string {
 	return jobs
 }
 
-// checkContainers checks that every effect bound in h owns exactly one
-// container, the bound job, which has exited, and that no other exists.
-func checkContainers(t *testing.T, f *fixture, h []entry) {
+// jobRecord is the final record the executor publishes for the finished job
+// of an effect before it releases the job's container.
+type jobRecord struct {
+	harness.Job
+	Spec string
+}
+
+// readRecord returns the final record of effect, if it has one.
+func readRecord(t *testing.T, f *fixture, effect string) (jobRecord, bool) {
 	t.Helper()
-	got, want := map[string][]string{}, map[string][]string{}
-	for _, c := range effectContainers(t, f.state) {
-		got[c.effect] = append(got[c.effect], c.id+" "+c.state)
+	data, err := os.ReadFile(filepath.Join(f.state, "jobs", effect, "output.json"))
+	if os.IsNotExist(err) {
+		return jobRecord{}, false
 	}
-	for effect, job := range boundJobs(t, h) {
-		want[effect] = []string{job + " exited"}
+	var rec jobRecord
+	if err == nil {
+		err = strict(string(data), &rec)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("containers by effect = %v\nwant %v", got, want)
+	if err != nil {
+		t.Fatalf("record of effect %s: %v", effect, err)
 	}
+	return rec, true
+}
+
+// records lists the effects of f that have a final record.
+func records(t *testing.T, f *fixture) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(f.state, "jobs", "*", "output.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, p := range paths {
+		out = append(out, filepath.Base(filepath.Dir(p)))
+	}
+	return out
+}
+
+// checkReleased checks that the host holds no container of f and that every
+// effect bound in h, and no other, has a final record, which names the job
+// committed for it and reports its committed observation. It returns the
+// records by job ID.
+func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
+	t.Helper()
+	if cs := effectContainers(t, f.state); len(cs) != 0 {
+		t.Errorf("containers left = %+v, want every finished job released", cs)
+	}
+	jobs, observed := boundJobs(t, h), map[string]*harness.Observation{}
+	for _, e := range h {
+		switch e.Kind {
+		case "job_started":
+			if s := evEvent[core.JobStarted](t, e); s.JobID != jobs[s.EffectID] {
+				t.Errorf("effect %s started job %s, bound %s", s.EffectID, s.JobID, jobs[s.EffectID])
+			}
+		case "observed":
+			observed[evEvent[core.Observed](t, e).EffectID] = e.Facts.Observation
+		}
+	}
+	if got, want := records(t, f), slices.Sorted(maps.Keys(jobs)); !slices.Equal(got, want) {
+		t.Errorf("effects with a final record = %q, want the bound %q", got, want)
+	}
+	out := map[string]jobRecord{}
+	for effect, job := range jobs {
+		rec, ok := readRecord(t, f, effect)
+		obs := observed[effect]
+		if !ok || obs == nil {
+			t.Errorf("effect %s: record found %v, observation %+v", effect, ok, obs)
+			continue
+		}
+		status := harness.JobCancelled
+		if obs.Execution == core.ExecutionExited {
+			status = harness.JobFailed
+			if rec.ExitCode != nil && *rec.ExitCode == 0 {
+				status = harness.JobSucceeded
+			}
+		}
+		want := harness.Observation{Execution: obs.Execution, ExitCode: rec.ExitCode, Preview: rec.Preview, Output: rec.Output}
+		if rec.ID != job || rec.Status != status || rec.ExitCode == nil || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt) ||
+			!reflect.DeepEqual(*obs, want) {
+			t.Errorf("record of effect %s = %+v\nwant the finished job %s as observed: %+v", effect, rec, job, *obs)
+		}
+		out[job] = rec
+	}
+	return out
 }
 
 func decodeEvent[E core.Event](raw string) (core.Event, error) {
@@ -153,6 +225,25 @@ func crashRun(t *testing.T, f *fixture, crash, command string, args ...string) {
 func killed(cmd *exec.Cmd) bool {
 	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
 	return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
+}
+
+// dockerShim returns the PATH setting of a docker CLI that runs the shell
+// script with the CLI's arguments before it runs the real one.
+func dockerShim(t *testing.T, script string) []string {
+	t.Helper()
+	bin, err := exec.LookPath("docker")
+	if err == nil {
+		bin, err = filepath.Abs(bin)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	shim := fmt.Sprintf("#!/bin/sh\n%s\nexec '%s' \"$@\"\n", script, bin)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
 // awaitPhase waits until the latest run of f reports phase.

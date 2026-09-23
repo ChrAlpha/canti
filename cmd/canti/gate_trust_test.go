@@ -63,7 +63,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	f, image := evFixture(t, map[int]core.Decision{2: {Kind: core.Return, Payload: "done"}})
 	probe := "probe-" + rand.Text()
 	command := strings.Join([]string{
-		"echo '== env'", "env",
+		released + "echo '== env'", "env",
 		"echo '== uid'", "id -u",
 		"echo '== caps'", "grep CapEff /proc/self/status",
 		"echo '== mountinfo'", "cat /proc/self/mountinfo",
@@ -77,7 +77,10 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	}, "\n")
 	d, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: command})
 	f.model.answer(1, 1, reply{text: string(d)})
-	r := f.cli([]string{"CANTI_TRUST_PROBE=" + probe}, "run", "-goal", "g", "-image", image)
+	_, wait := f.start([]string{"CANTI_TRUST_PROBE=" + probe}, "run", "-goal", "g", "-image", image)
+	c := evInspect(t, evJob(t, evAwait(t, f, "job_started")))
+	writeFile(t, filepath.Join(f.workspace, "release"))
+	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
@@ -158,8 +161,8 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 			t.Errorf("request %d is not the step %d prompt: %v", i, i+1, err)
 		}
 	}
-	c := evInspect(t, evJob(t, h))
-	if c.HostConfig.NetworkMode != "none" || !slices.Equal(c.HostConfig.CapDrop, []string{"ALL"}) || c.Config.User != fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) {
+	checkReleased(t, f, h)
+	if !c.State.Running || c.HostConfig.NetworkMode != "none" || !slices.Equal(c.HostConfig.CapDrop, []string{"ALL"}) || c.Config.User != fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) {
 		t.Errorf("container config = %+v", c)
 	}
 	evLog(t, image, "trust boundary", "fixture key and CANTI_TRUST_PROBE in the CLI environment; job probes env, uid, caps, mounts, state, journal, network",
@@ -307,6 +310,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	if s := f.status(); s.Phase != core.PhaseReturned || s.Totals.Steps != 2 {
 		t.Errorf("status = %+v", s)
 	}
+	checkReleased(t, f, h)
 	evLog(t, image, "trust boundary (facts)", "step 2 runs rm -rf /canti/artifacts/*, writes into /canti/artifacts, and forges canti.db and artifacts/output in /workspace",
 		"removal and write fail read-only; committed history is an unchanged prefix; step 1 artifact intact; forgeries stay in the workspace",
 		fmt.Sprintf("history %d bytes before, %d after; artifact %d bytes", len(before.stdout), len(after.stdout), fact.Output.Bytes))

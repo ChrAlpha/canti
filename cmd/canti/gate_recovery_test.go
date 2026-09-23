@@ -110,7 +110,7 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 	}
 	for _, f := range []*fixture{cold, warm} {
 		checkFile(t, filepath.Join(f.workspace, "count"), "x\nx\n")
-		checkContainers(t, f, f.history())
+		checkReleased(t, f, f.history())
 	}
 	evidence(t, "cold restart after every step", fmt.Sprintf("process exit after each of %d intents", processes), image, cold, h)
 }
@@ -120,6 +120,31 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 		1: {Kind: core.Exec, Payload: "echo x >> count-1; echo one"},
 		2: {Kind: core.Exec, Payload: "echo x >> count-2; sleep 1; echo two"},
 		3: {Kind: core.Return, Payload: "done"},
+	}
+	// recovered resumes the crashed run of f and checks that it returns along
+	// want without changing pre, sending the step 1 request sends times and
+	// every other request once, and running and releasing each job once.
+	recovered := func(t *testing.T, f *fixture, pre []entry, want []string, sends int) []entry {
+		t.Helper()
+		if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+			t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+		}
+		h := f.history()
+		if !extends(h, pre) {
+			t.Errorf("confirmed transitions changed\nbefore: %+v\nafter: %+v", pre, h[:min(len(pre), len(h))])
+		}
+		if !slices.Equal(kinds(h), want) {
+			t.Fatalf("history = %q\nwant %q", kinds(h), want)
+		}
+		requests := f.model.requests()
+		if len(f.model.prompts(1)) != sends || len(requests) != sends+2 || !bytes.Equal(requests[0], requests[sends-1]) {
+			t.Errorf("%d model requests, %d for step 1, want %d resending the frozen bytes", len(requests), len(f.model.prompts(1)), sends)
+		}
+		checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
+		checkFile(t, filepath.Join(f.workspace, "count-2"), "x\n")
+		checkReleased(t, f, h)
+		checkReplay(t, f.status().Run.ID, h)
+		return h
 	}
 	for k, kind := range stepKinds {
 		for _, when := range []string{"before", "after"} {
@@ -143,16 +168,12 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 				if !slices.Equal(kinds(pre), want[:cut]) {
 					t.Fatalf("history after the crash = %q, want %q", kinds(pre), want[:cut])
 				}
-				if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
-					t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+				// The process killed before saving a response was answered.
+				sends := 1
+				if crash == "before:response_saved" {
+					sends = 2
 				}
-				h := f.history()
-				if !extends(h, pre) {
-					t.Errorf("confirmed transitions changed\nbefore: %+v\nafter: %+v", pre, h[:min(len(pre), len(h))])
-				}
-				if !slices.Equal(kinds(h), want) {
-					t.Fatalf("history = %q\nwant %q", kinds(h), want)
-				}
+				h := recovered(t, f, pre, want, sends)
 				if when == "before" {
 					at := cut
 					if recounted {
@@ -169,27 +190,41 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 						t.Errorf("step 1 commits %s %d times, want once at seq %d: %q", kind, n, at+1, step1)
 					}
 				}
-				// The process killed before saving a response was answered.
-				requests, sends := f.model.requests(), 1
-				if crash == "before:response_saved" {
-					sends = 2
-				}
-				if len(f.model.prompts(1)) != sends || len(requests) != sends+2 || !bytes.Equal(requests[0], requests[sends-1]) {
-					t.Errorf("%d model requests, %d for step 1, want %d resending the frozen bytes", len(requests), len(f.model.prompts(1)), sends)
-				}
-				checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
-				checkFile(t, filepath.Join(f.workspace, "count-2"), "x\n")
-				checkContainers(t, f, h)
-				checkReplay(t, f.status().Run.ID, h)
 				evidence(t, "crash at commit boundaries", crash, image, f, h)
 			})
 		}
 	}
+	// The executor records a finished job before it releases the job's
+	// container; a crash in between leaves both for the next report.
+	t.Run("before:release", func(t *testing.T) {
+		t.Parallel()
+		f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: released + script[1].Payload}, 2: script[2], 3: script[3]})
+		shim := dockerShim(t, "if [ \"$1\" = rm ]; then\n\tkill -KILL \"$PPID\"\n\twhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.05; done\n\texit 1\nfi")
+		cmd, wait := f.start(shim, "run", "-goal", "count", "-image", image)
+		awaitPhase(t, f, core.PhaseAwaitingObservation)
+		writeFile(t, filepath.Join(f.workspace, "release"))
+		if r := wait(); !killed(cmd) {
+			t.Fatalf("run = %d, not killed\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+		}
+		pre := f.history()
+		s := pre[len(pre)-1].State
+		if !slices.Equal(kinds(pre), stepKinds[:6]) {
+			t.Fatalf("history after the crash = %q", kinds(pre))
+		}
+		if rec, ok := readRecord(t, f, s.EffectID); !ok || rec.ID != s.JobID || rec.Status != harness.JobSucceeded || rec.Preview != "one\n" {
+			t.Fatalf("record after the crash = %+v, %v; want job %s succeeded", rec, ok, s.JobID)
+		}
+		if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "exited" {
+			t.Fatalf("containers after the crash = %+v, want the recorded job %s exited", cs, s.JobID)
+		}
+		h := recovered(t, f, pre, slices.Concat(stepKinds, stepKinds, stepKinds[:4]), 1)
+		evidence(t, "crash at commit boundaries", "SIGKILL in docker rm of the recorded step 1 job "+s.JobID, image, f, h)
+	})
 }
 
 func TestGateInFlightJobRecovery(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: released + "echo late-output"},
+		1: {Kind: core.Exec, Payload: released + "echo x >> count-1; echo late-output"},
 		2: {Kind: core.Return, Payload: "done"},
 	})
 	crashRun(t, f, "after:job_started", "run", "-goal", "wait", "-image", image)
@@ -221,7 +256,8 @@ func TestGateInFlightJobRecovery(t *testing.T) {
 	if n := len(f.model.prompts(1)); n != 1 || len(f.model.requests()) != 2 {
 		t.Errorf("%d model requests, %d for step 1", len(f.model.requests()), n)
 	}
-	checkContainers(t, f, h)
+	checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
+	checkReleased(t, f, h)
 	checkReplay(t, s.RunID, h)
 	evidence(t, "in-flight job recovery", "after:job_started while the job runs", image, f, h)
 }
@@ -251,8 +287,8 @@ func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
 		if now := f.history(); !extends(now, h) || len(now) != len(h) {
 			t.Errorf("%s changed the history: %q", what, kinds(now))
 		}
-		if cs := effectContainers(t, f.state); len(cs) != 0 {
-			t.Errorf("%s left containers %+v", what, cs)
+		if cs, recs := effectContainers(t, f.state), records(t, f); len(cs) != 0 || len(recs) != 0 {
+			t.Errorf("%s left containers %+v, records %q", what, cs, recs)
 		}
 		if n := len(f.model.requests()); n != 1 {
 			t.Errorf("%s: %d model requests", what, n)
@@ -289,8 +325,8 @@ func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
 	if n := len(f.model.requests()); n != 2 {
 		t.Errorf("%d model requests", n)
 	}
-	if cs := effectContainers(t, f.state); len(cs) != 0 {
-		t.Errorf("containers = %+v", cs)
+	if cs, recs := effectContainers(t, f.state), records(t, f); len(cs) != 0 || len(recs) != 0 {
+		t.Errorf("containers = %+v, records %q", cs, recs)
 	}
 	checkReplay(t, s.RunID, final)
 	evidence(t, "unknown outcomes", "after:job_started, then docker rm -f of job "+s.JobID, image, f, final)
@@ -301,20 +337,8 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 		1: {Kind: core.Exec, Payload: released + "echo x >> count-1; echo original"},
 		2: {Kind: core.Return, Payload: "done"},
 	})
-	dockerPath, err := exec.LookPath("docker")
-	if err == nil {
-		dockerPath, err = filepath.Abs(dockerPath)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	unavailable := filepath.Join(dir, "unavailable")
-	wrapper := fmt.Sprintf("#!/bin/sh\nif [ \"$1 $2\" = 'container inspect' ] && [ -e '%s' ]; then\n\techo 'job status unavailable' >&2\n\texit 1\nfi\nexec '%s' \"$@\"\n", unavailable, dockerPath)
-	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	unavailable := filepath.Join(t.TempDir(), "unavailable")
+	path := dockerShim(t, fmt.Sprintf("if [ \"$1 $2\" = 'container inspect' ] && [ -e '%s' ]; then\n\techo 'job status unavailable' >&2\n\texit 1\nfi", unavailable))
 
 	_, wait := f.start(path, "run", "-goal", "wait", "-image", image)
 	awaitPhase(t, f, core.PhaseAwaitingObservation)
@@ -359,7 +383,7 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 	if n := len(f.model.requests()); n != 2 {
 		t.Errorf("%d model requests", n)
 	}
-	checkContainers(t, f, final)
+	checkReleased(t, f, final)
 	checkReplay(t, s.RunID, final)
 	evidence(t, "unknown outcomes", "container inspect unavailable in awaiting_observation", image, f, final)
 }
@@ -412,7 +436,7 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 		t.Errorf("%d model requests, %d for step 1", len(f.model.requests()), n)
 	}
 	checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
-	checkContainers(t, f, final)
+	checkReleased(t, f, final)
 	checkReplay(t, h[0].State.RunID, final)
 	evidence(t, "single workspace writer", "concurrent resume and stop, then SIGKILL of the writer in awaiting_observation", image, f, final)
 }

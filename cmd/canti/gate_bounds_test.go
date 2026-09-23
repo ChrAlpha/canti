@@ -31,25 +31,20 @@ func evFixture(t *testing.T, script map[int]core.Decision) (*fixture, string) {
 	t.Helper()
 	f, image := dockerFixture(t, script)
 	t.Cleanup(func() {
-		if ids := evContainers(t, f.state, false); len(ids) > 0 {
+		if ids := evContainers(t, f.state); len(ids) > 0 {
 			t.Errorf("containers of %s still running: %q", f.state, ids)
 		}
 	})
 	return f, image
 }
 
-// evContainers lists the running containers labelled with state, or all of
-// them with all.
-func evContainers(t *testing.T, state string, all bool) []string {
+// evContainers lists the running containers labelled with state.
+func evContainers(t *testing.T, state string) []string {
 	t.Helper()
 	if s, err := filepath.EvalSymlinks(state); err == nil {
 		state = s
 	}
-	args := []string{"ps", "-q", "--filter", "label=canti.state=" + state}
-	if all {
-		args = append(args, "-a")
-	}
-	out, err := exec.Command("docker", args...).Output()
+	out, err := exec.Command("docker", "ps", "-q", "--filter", "label=canti.state="+state).Output()
 	if err != nil {
 		t.Errorf("docker ps: %v", err)
 	}
@@ -57,12 +52,7 @@ func evContainers(t *testing.T, state string, all bool) []string {
 }
 
 type evContainer struct {
-	State struct {
-		Status                string
-		Running               bool
-		Pid, ExitCode         int
-		StartedAt, FinishedAt time.Time
-	}
+	State      struct{ Running bool }
 	Config     struct{ User string }
 	HostConfig struct {
 		NetworkMode string
@@ -70,8 +60,7 @@ type evContainer struct {
 	}
 }
 
-// evInspect inspects the container id and checks that it has stopped and
-// holds no processes.
+// evInspect inspects the container id.
 func evInspect(t *testing.T, id string) evContainer {
 	t.Helper()
 	out, err := exec.Command("docker", "container", "inspect", id).Output()
@@ -82,14 +71,7 @@ func evInspect(t *testing.T, id string) evContainer {
 	if err != nil || len(cs) != 1 {
 		t.Fatalf("docker inspect %s: %v", id, err)
 	}
-	c := cs[0]
-	if c.State.Running || c.State.Status != "exited" || c.State.Pid != 0 {
-		t.Errorf("container %s is %+v, want exited", id, c.State)
-	}
-	if out, err := exec.Command("docker", "top", id).CombinedOutput(); err == nil || !strings.Contains(string(out), "not running") {
-		t.Errorf("docker top %s = %v: %s", id, err, out)
-	}
-	return c
+	return cs[0]
 }
 
 func evEvent[T any](t *testing.T, e entry) T {
@@ -220,13 +202,12 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 			if data, err := os.ReadFile(filepath.Join(f.workspace, "ok.txt")); err != nil || string(data) != "ok\n" {
 				t.Errorf("ok.txt = %q, %v; want one run", data, err)
 			}
-			if ids := evContainers(t, f.state, true); len(ids) != 1 {
-				t.Errorf("containers %q, want the one job of attempt 2", ids)
+			if recs := checkReleased(t, f, h); len(recs) != 1 {
+				t.Errorf("records %+v, want the one job of attempt 2", recs)
 			}
 			if s := f.status(); s.Totals.InputTokens != 100*tc.paid || s.Totals.OutputTokens != 10*tc.paid {
 				t.Errorf("totals = %+v, want the usage of %d responses", s.Totals, tc.paid)
 			}
-			evInspect(t, evJob(t, h))
 			evLog(t, image, "frozen request replay", "step 1 attempt 1: "+tc.name,
 				fmt.Sprintf("response_incomplete %q, attempt 2 saved and dispatched once, returned", lost.Facts.Failure),
 				fmt.Sprintf("request sha256/8 %s, %d bytes sent twice byte-identical, partial %d bytes kept, run %v",
@@ -303,11 +284,11 @@ func TestGateLargeOutput(t *testing.T) {
 		if s := f.status(); s.Totals.OutputBytes != limit+h[13].Facts.Observation.Output.Bytes {
 			t.Errorf("status totals = %+v", s.Totals)
 		}
-		c := evInspect(t, evJob(t, h))
+		rec := checkReleased(t, f, h)[evJob(t, h)]
 		evLog(t, image, "large output", fmt.Sprintf("step 1 writes %d bytes, -output-limit %d", total, limit),
-			fmt.Sprintf("exited 0, %q, artifact %s readable by the step 2 job, returned", obs.Output.Detail, where),
+			fmt.Sprintf("exited 0, %q, artifact %s readable by the step 2 job, container and its log released, returned", obs.Output.Detail, where),
 			fmt.Sprintf("artifact %d bytes, preview %d bytes, step 2 request %d bytes, job %v, run %v",
-				limit, len(obs.Preview), len(sent[1]), c.State.FinishedAt.Sub(c.State.StartedAt).Round(time.Millisecond), elapsed.Round(time.Millisecond)))
+				limit, len(obs.Preview), len(sent[1]), rec.FinishedAt.Sub(rec.StartedAt).Round(time.Millisecond), elapsed.Round(time.Millisecond)))
 	})
 	t.Run("disk_budget", func(t *testing.T) {
 		const lines = 2000
@@ -334,7 +315,7 @@ func TestGateLargeOutput(t *testing.T) {
 		if n := len(f.model.requests()); n != 1 {
 			t.Errorf("%d requests after the budget was spent", n)
 		}
-		evInspect(t, evJob(t, h))
+		checkReleased(t, f, h)
 		evLog(t, image, "large output / finite runs (disk)", fmt.Sprintf("step 1 writes %d bytes, -output-limit %d -output-budget %d", total, limit, limit),
 			fmt.Sprintf("stopped %s: %q, step 1 observation retained", core.StopBudgetExhausted, stop.Facts.Failure),
 			fmt.Sprintf("retained %d bytes, exit %d, 1 model request", limit, r.code))
@@ -360,8 +341,8 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 		if obs == nil || obs.Execution != core.ExecutionTimedOut || obs.ExitCode == nil || obs.Output.Complete || !strings.Contains(obs.Output.Detail, "cancelled") {
 			t.Fatalf("observation = %+v", obs)
 		}
-		c := evInspect(t, evJob(t, h))
-		ran := c.State.FinishedAt.Sub(c.State.StartedAt)
+		rec := checkReleased(t, f, h)[evJob(t, h)]
+		ran := rec.FinishedAt.Sub(rec.StartedAt)
 		if ran < timeout || ran > timeout+grace+slack {
 			t.Errorf("job ran %v, want %v to %v", ran, timeout, timeout+grace+slack)
 		}
@@ -369,7 +350,7 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 			t.Errorf("step 2 prompt = %q", p)
 		}
 		evLog(t, image, "cancellation and timeout", "-job-timeout 2s on sleep 300 & sleep 300 & wait",
-			fmt.Sprintf("observed %s exit %d, container exited without processes, step 2 returned", obs.Execution, *obs.ExitCode),
+			fmt.Sprintf("observed %s exit %d, recorded cancelled, container stopped and released, step 2 returned", obs.Execution, *obs.ExitCode),
 			fmt.Sprintf("job ran %v (bound %v), run %v", ran.Round(time.Millisecond), timeout+grace+slack, elapsed.Round(time.Millisecond)))
 	})
 	t.Run("stop_without_controller", func(t *testing.T) {
@@ -383,7 +364,7 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 			t.Fatalf("history after the crash = %q", kinds(h))
 		}
 		job := evJob(t, h)
-		if ids := evContainers(t, f.state, false); len(ids) != 1 || !strings.HasPrefix(job, ids[0]) {
+		if ids := evContainers(t, f.state); len(ids) != 1 || !strings.HasPrefix(job, ids[0]) {
 			t.Fatalf("running containers %q, want job %s", ids, job)
 		}
 		begin := time.Now()
@@ -396,10 +377,10 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 		if elapsed > cleanup {
 			t.Errorf("stop took %v, beyond its %v cleanup", elapsed, cleanup)
 		}
-		c := evInspect(t, job)
+		rec := checkReleased(t, f, f.history())[job]
 		evLog(t, image, "cancellation and timeout", "SIGKILL after job_started commit, then stop -cleanup 20s",
-			fmt.Sprintf("stop_requested cancelled -> observed %s exit %d -> stopped cancelled, container exited", obs.Execution, *obs.ExitCode),
-			fmt.Sprintf("stop took %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), cleanup, c.State.FinishedAt.Sub(c.State.StartedAt).Round(time.Millisecond)))
+			fmt.Sprintf("stop_requested cancelled -> observed %s exit %d -> stopped cancelled, container stopped and released", obs.Execution, *obs.ExitCode),
+			fmt.Sprintf("stop took %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), cleanup, rec.FinishedAt.Sub(rec.StartedAt).Round(time.Millisecond)))
 	})
 	t.Run("signal", func(t *testing.T) {
 		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 300"}})
@@ -418,9 +399,9 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 		if elapsed > stopCleanup {
 			t.Errorf("the interrupted run took %v to exit, beyond its %v cleanup", elapsed, stopCleanup)
 		}
-		evInspect(t, job)
+		rec := checkReleased(t, f, f.history())[job]
 		evLog(t, image, "cancellation and timeout", "SIGINT to run while job sleep 300 runs",
-			fmt.Sprintf("exit %d, stopped cancelled, observed %s exit %d, container exited", r.code, obs.Execution, *obs.ExitCode),
+			fmt.Sprintf("exit %d, stopped cancelled, observed %s exit %d, recorded %s, container released", r.code, obs.Execution, *obs.ExitCode, rec.Status),
 			fmt.Sprintf("signal to exit %v (bound %v)", elapsed.Round(time.Millisecond), stopCleanup))
 	})
 }
@@ -473,6 +454,7 @@ func TestGateFiniteRuns(t *testing.T) {
 		if n := len(f.model.requests()); n != 2 {
 			t.Errorf("%d requests", n)
 		}
+		checkReleased(t, f, h)
 		evLog(t, image, "finite runs (steps)", "-max-steps 2 with exec at steps 1 and 2",
 			"stopped steps_exhausted after the step 2 observation", fmt.Sprintf("2 observations retained, 2 model requests, exit %d", r.code))
 	})
@@ -502,9 +484,10 @@ func TestGateFiniteRuns(t *testing.T) {
 		if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopAttemptsExhausted || s.Attempt != 2 {
 			t.Errorf("status = %+v", s)
 		}
-		if _, err := os.Stat(filepath.Join(f.workspace, "never.txt")); !os.IsNotExist(err) || len(evContainers(t, f.state, true)) != 0 {
+		if _, err := os.Stat(filepath.Join(f.workspace, "never.txt")); !os.IsNotExist(err) {
 			t.Errorf("something ran: %v", err)
 		}
+		checkReleased(t, f, h)
 		evLog(t, image, "finite runs (attempts)", "HTTP 500 on every attempt, -max-attempts 2",
 			"stopped attempts_exhausted with both failures recorded, nothing dispatched", fmt.Sprintf("2 byte-identical requests, exit %d", r.code))
 	})
@@ -524,10 +507,11 @@ func TestGateFiniteRuns(t *testing.T) {
 		if elapsed > wall+grace+slack {
 			t.Errorf("run took %v, want at most %v", elapsed, wall+grace+slack)
 		}
-		c := evInspect(t, evJob(t, f.history()))
+		h := f.history()
+		rec := checkReleased(t, f, h)[evJob(t, h)]
 		evLog(t, image, "finite runs (wall time)", "-wall-time 5s on sleep 60",
-			fmt.Sprintf("stopped timed_out, job observed %s exit %d, container exited", obs.Execution, *obs.ExitCode),
-			fmt.Sprintf("run %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), wall+grace+slack, c.State.FinishedAt.Sub(c.State.StartedAt).Round(time.Millisecond)))
+			fmt.Sprintf("stopped timed_out, job observed %s exit %d, container stopped and released", obs.Execution, *obs.ExitCode),
+			fmt.Sprintf("run %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), wall+grace+slack, rec.FinishedAt.Sub(rec.StartedAt).Round(time.Millisecond)))
 	})
 	t.Run("tokens", func(t *testing.T) {
 		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo spent > spent.txt"}})
@@ -551,9 +535,10 @@ func TestGateFiniteRuns(t *testing.T) {
 		if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopBudgetExhausted || s.Totals.InputTokens != 100 || s.Totals.OutputTokens != 10 {
 			t.Errorf("status = %+v", s)
 		}
-		if _, err := os.Stat(filepath.Join(f.workspace, "spent.txt")); !os.IsNotExist(err) || len(evContainers(t, f.state, true)) != 0 {
+		if _, err := os.Stat(filepath.Join(f.workspace, "spent.txt")); !os.IsNotExist(err) {
 			t.Errorf("the effect ran after the budget was spent: %v", err)
 		}
+		checkReleased(t, f, h)
 		evLog(t, image, "finite runs (tokens)", "-token-budget 100 below one response's 110 tokens",
 			fmt.Sprintf("stopped budget_exhausted: %q, effect fenced before bind", stop.Facts.Failure), fmt.Sprintf("110 tokens, no container, exit %d", r.code))
 	})
