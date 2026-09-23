@@ -108,9 +108,13 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 	if !slices.Equal(coldSent, warmSent) {
 		t.Errorf("cold-restart requests differ from the uninterrupted run's\ncold: %q\nwarm: %q", coldSent, warmSent)
 	}
+	if r := cold.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" || len(cold.model.requests()) != len(received) {
+		t.Errorf("resume of the returned run = %d, %d requests\nstdout: %s\nstderr: %s", r.code, len(cold.model.requests()), r.stdout, r.stderr)
+	}
 	for _, f := range []*fixture{cold, warm} {
 		checkFile(t, filepath.Join(f.workspace, "count"), "x\nx\n")
 		checkReleased(t, f, f.history())
+		checkRecords(t, f, "count", f.history())
 	}
 	evidence(t, "cold restart after every step", fmt.Sprintf("process exit after each of %d intents", processes), image, cold, h)
 }
@@ -143,6 +147,7 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 		checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
 		checkFile(t, filepath.Join(f.workspace, "count-2"), "x\n")
 		checkReleased(t, f, h)
+		checkRecords(t, f, "count", h)
 		checkReplay(t, f.status().Run.ID, h)
 		return h
 	}
@@ -194,6 +199,30 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 			})
 		}
 	}
+	// A step is published after its observation is committed and before the
+	// next request is frozen; a crash on either side of the publication
+	// leaves it to the next process.
+	t.Run("after:observed,before:request_frozen", func(t *testing.T) {
+		t.Parallel()
+		f, image := recoveryFixture(t, script)
+		crashRun(t, f, "after:observed", "run", "-goal", "count", "-image", image)
+		pre := f.history()
+		if !slices.Equal(kinds(pre), stepKinds) {
+			t.Fatalf("history after the crash = %q", kinds(pre))
+		}
+		one := filepath.Join(f.state, "history", pre[0].State.RunID, "steps", "00000001")
+		if _, err := os.Stat(one); !os.IsNotExist(err) {
+			t.Fatalf("step 1 records before the next request was prepared: %v", err)
+		}
+		crashRun(t, f, "before:request_frozen", "resume")
+		if h := f.history(); !extends(h, pre) || len(h) != len(pre) {
+			t.Fatalf("the killed resume committed %q", kinds(h[len(pre):]))
+		}
+		checkFile(t, filepath.Join(one, "command"), script[1].Payload)
+		checkFile(t, filepath.Join(one, "preview"), pre[6].Facts.Observation.Preview)
+		h := recovered(t, f, pre, slices.Concat(stepKinds, stepKinds, stepKinds[:4]), 1)
+		evidence(t, "crash at commit boundaries", "after:observed, then before:request_frozen of step 2", image, f, h)
+	})
 	// The executor records a finished job before it releases the job's
 	// container; a crash in between leaves both for the next report.
 	t.Run("before:release", func(t *testing.T) {

@@ -24,6 +24,9 @@ type LoopConfig struct {
 	Workspace      string           // host workspace directory ReadNotes resolves in
 	NotesFile      string           // notes file relative to Workspace, such as ".canti/notes.md"
 	NotesPath      string           // the notes file as the agent sees it, such as "/workspace/.canti/notes.md"
+	History        string           // host directory PublishHistory publishes the step records of every run under
+	HistoryPath    string           // Frame.HistoryDir: the run's records as the agent sees them, such as "/canti/run"
+	RunsPath       string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
 	Limits         PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
@@ -50,9 +53,9 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if j == nil || m == nil {
 		return nil, errors.New("harness: loop journal and model are required")
 	}
-	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.Workspace, cfg.NotesFile, cfg.NotesPath} {
+	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.Workspace, cfg.NotesFile, cfg.NotesPath, cfg.History, cfg.HistoryPath, cfg.RunsPath} {
 		if strings.TrimSpace(v) == "" {
-			return nil, errors.New("harness: loop environment, artifact directory, workspace, and notes paths are required")
+			return nil, errors.New("harness: loop environment, artifact directory, workspace, notes, and history paths are required")
 		}
 	}
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
@@ -80,12 +83,20 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	return &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg}, nil
 }
 
-// Run steps the run until its intent is halt or a step fails.
+// Run steps the run until its intent is halt or a step fails. At a halt it
+// publishes the run's step records, only logging a failure, which a later
+// publication repairs.
 func (l *Loop) Run(ctx context.Context, runID string) (Snapshot, error) {
 	for {
 		snap, err := l.Step(ctx, runID)
-		if err != nil || snap.State.Intent() == core.IntentHalt {
+		if err != nil {
 			return snap, err
+		}
+		if snap.State.Intent() == core.IntentHalt {
+			if err := PublishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, runID); err != nil {
+				l.note(ctx, slog.LevelWarn, "step records not published", snap, "error", err)
+			}
+			return snap, nil
 		}
 	}
 }
@@ -229,10 +240,13 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	f := Frame{
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
-		ArtifactDir: l.cfg.ArtifactDir, Notes: Notes{Path: l.cfg.NotesPath},
+		ArtifactDir: l.cfg.ArtifactDir, HistoryDir: l.cfg.HistoryPath, RunsDir: l.cfg.RunsPath, Notes: Notes{Path: l.cfg.NotesPath},
 	}
 	var err error
 	if f.Steps, err = l.recent(ctx, s.RunID, f); err != nil {
+		return snap, err
+	}
+	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {
 		return snap, err
 	}
 	f.Earlier = s.Step - 1 - len(f.Steps)

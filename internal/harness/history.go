@@ -1,0 +1,231 @@
+package harness
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/ChrAlpha/canti/core"
+)
+
+// PublishHistory makes the projection of run runID that jobs read under
+// root/runID complete for its committed facts: goal, constraints when set,
+// steps/<step number in 8 digits>/ with meta, command, and preview for
+// every completed step, and result once the run is closed. meta names an
+// available output under artifactDir, where jobs read the artifacts.
+//
+// The projection is derived from the journal and never an authority. Each
+// file and step directory is published once, atomically, and never
+// rewritten; temporaries live in the run directory, which each call sweeps.
+// A missing steps directory is rebuilt from every completed step; otherwise
+// only the latest one is added, because a loop publishes before it freezes
+// each request. Callers must not publish one run concurrently.
+func PublishHistory(ctx context.Context, j Journal, root, artifactDir, runID string) error {
+	run, err := j.Run(ctx, runID)
+	var snap Snapshot
+	var latest []StepRecord
+	if err == nil {
+		snap, err = j.Latest(ctx, runID)
+	}
+	if err == nil {
+		latest, err = j.Recent(ctx, runID, 0, 1)
+	}
+	if err != nil {
+		return err
+	}
+	return publishHistory(ctx, j, root, artifactDir, run, snap.State, latest)
+}
+
+// publishHistory is PublishHistory for run at s, whose latest completed
+// step, if any, ends latest.
+func publishHistory(ctx context.Context, j Journal, root, artifactDir string, run Run, s core.State, latest []StepRecord) error {
+	if strings.Trim(run.ID, ".") == "" || strings.ContainsRune(run.ID, filepath.Separator) {
+		return fmt.Errorf("harness: run ID %q cannot name a directory", run.ID)
+	}
+	dir := filepath.Join(root, run.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
+	err := putFile(dir, "goal", run.Goal)
+	if err == nil && run.Constraints != "" {
+		err = putFile(dir, "constraints", run.Constraints)
+	}
+	steps, found := filepath.Join(dir, "steps"), false
+	if err == nil {
+		found, err = exists(steps)
+	}
+	switch {
+	case err != nil:
+	case !found:
+		err = rebuild(ctx, j, dir, artifactDir, run.ID)
+	case len(latest) > 0:
+		err = putStep(dir, steps, artifactDir, latest[len(latest)-1])
+	}
+	if err == nil && (s.Phase == core.PhaseReturned || s.Phase == core.PhaseStopped) {
+		result := "phase: returned\n\n" + s.Decision.Payload
+		if s.Phase == core.PhaseStopped {
+			result = "phase: stopped\nreason: " + string(s.Reason) + "\n"
+		}
+		err = putFile(dir, "result", result)
+	}
+	return err
+}
+
+// rebuild publishes the steps directory of the run in dir with every
+// completed step and syncs the directory holding dir.
+func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) error {
+	tmp, err := os.MkdirTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	for before := int64(0); ; {
+		page, err := j.Recent(ctx, runID, before, historyPage)
+		if err != nil {
+			return err
+		}
+		for _, r := range page {
+			step := filepath.Join(tmp, fmt.Sprintf("%08d", r.Step))
+			if err := os.Mkdir(step, 0o755); err != nil {
+				return err
+			}
+			if err := writeStep(step, artifactDir, r); err != nil {
+				return err
+			}
+		}
+		if len(page) < historyPage || page[0].Step == 1 {
+			break
+		}
+		before = page[0].Seq
+	}
+	if err := errors.Join(os.Chmod(tmp, 0o755), syncDir(tmp)); err != nil {
+		return err
+	}
+	if err := install(tmp, filepath.Join(dir, "steps")); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(dir))
+}
+
+// putStep publishes the records of r in steps unless they exist, writing
+// them in a temporary directory of dir.
+func putStep(dir, steps, artifactDir string, r StepRecord) error {
+	target := filepath.Join(steps, fmt.Sprintf("%08d", r.Step))
+	if found, err := exists(target); err != nil || found {
+		return err
+	}
+	tmp, err := os.MkdirTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := writeStep(tmp, artifactDir, r); err != nil {
+		return err
+	}
+	return install(tmp, target)
+}
+
+// writeStep writes the records of r into the directory path and syncs it.
+func writeStep(path, artifactDir string, r StepRecord) error {
+	if err := os.Chmod(path, 0o755); err != nil {
+		return err
+	}
+	for _, file := range [...]struct{ name, data string }{{"meta", meta(r, artifactDir)}, {"command", r.Command}, {"preview", r.Observation.Preview}} {
+		f, err := os.Create(filepath.Join(path, file.name))
+		if err == nil {
+			err = fill(f, file.data)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return syncDir(path)
+}
+
+// putFile publishes data as dir/name unless it exists.
+func putFile(dir, name, data string) error {
+	target := filepath.Join(dir, name)
+	if found, err := exists(target); err != nil || found {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := fill(f, data); err != nil {
+		return err
+	}
+	return install(f.Name(), target)
+}
+
+func fill(f *os.File, data string) error {
+	_, err := f.WriteString(data)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	return errors.Join(err, f.Close())
+}
+
+// install renames tmp, whose content is synced, to target and syncs the
+// directory of target.
+func install(tmp, target string) error {
+	if err := os.Rename(tmp, target); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(target))
+}
+
+func meta(r StepRecord, artifactDir string) string {
+	o := r.Observation
+	var b strings.Builder
+	line := func(key, value string) { b.WriteString(key + ": " + lineBreaks.Replace(value) + "\n") }
+	line("step", strconv.Itoa(r.Step))
+	line("execution", string(o.Execution))
+	if o.ExitCode != nil {
+		line("exit_code", strconv.Itoa(*o.ExitCode))
+	}
+	line("resolved", strconv.FormatBool(r.Resolved))
+	output := "unavailable"
+	if o.Output.Available {
+		output = path.Join(artifactDir, o.Output.Path)
+	}
+	line("output", output)
+	line("output_bytes", strconv.FormatInt(o.Output.Bytes, 10))
+	line("output_complete", strconv.FormatBool(o.Output.Complete))
+	if o.Output.Detail != "" {
+		line("output_detail", o.Output.Detail)
+	}
+	return b.String()
+}
+
+func exists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}

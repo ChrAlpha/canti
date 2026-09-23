@@ -432,7 +432,11 @@ func TestTrustBoundary(t *testing.T) {
 		t.Setenv("DOCKER_HOST", strings.TrimSpace(string(host)))
 	}
 	t.Setenv("DOCKER_CONFIG", config)
-	cfg, id := setup(t, docker.Config{})
+	records := t.TempDir()
+	if err := os.WriteFile(filepath.Join(records, "meta"), []byte("step: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, id := setup(t, docker.Config{Mounts: []docker.Mount{{Source: records, Target: "/canti/run"}}})
 	ctx := testContext(t, time.Minute)
 	script := fmt.Sprintf(`env
 echo "uid=$(id -u):$(id -g)"
@@ -440,6 +444,8 @@ echo "net=$(ls /sys/class/net)"
 grep -E '^(CapEff|NoNewPrivs):' /proc/self/status
 touch %s/x 2>/dev/null && echo artifacts-writable
 test -e %s && echo state-visible
+cat /canti/run/meta
+touch /canti/run/x 2>/dev/null && echo records-writable
 echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, docker.WorkDir)
 	job := run(ctx, t, open(t, cfg), harness.Effect{ID: id("trust"), Command: script})
 	b, err := os.ReadFile(filepath.Join(cfg.State, "artifacts", job.Output.Path))
@@ -447,12 +453,12 @@ echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, d
 		t.Fatalf("trust job = %+v, %v", job, err)
 	}
 	out := string(b)
-	for _, want := range []string{fmt.Sprintf("uid=%d:%d\n", os.Getuid(), os.Getgid()), "net=lo\n", "CapEff:\t0000000000000000\n", "NoNewPrivs:\t1\n", "workspace-writable\n"} {
+	for _, want := range []string{fmt.Sprintf("uid=%d:%d\n", os.Getuid(), os.Getgid()), "net=lo\n", "CapEff:\t0000000000000000\n", "NoNewPrivs:\t1\n", "step: 1\n", "workspace-writable\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "proxy:3128", "artifacts-writable", "state-visible"} {
+	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "proxy:3128", "artifacts-writable", "records-writable", "state-visible"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("output contains %q:\n%s", leak, out)
 		}
@@ -460,7 +466,9 @@ echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, d
 	if b, err := os.ReadFile(filepath.Join(cfg.Workspace, "trust")); err != nil || string(b) != "ok\n" {
 		t.Errorf("workspace write = %q, %v", b, err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.State, "artifacts", "x")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("job wrote the artifact root: %v", err)
+	for _, dir := range []string{filepath.Join(cfg.State, "artifacts"), records} {
+		if _, err := os.Stat(filepath.Join(dir, "x")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("job wrote the read-only mount of %s: %v", dir, err)
+		}
 	}
 }

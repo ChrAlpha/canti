@@ -36,6 +36,9 @@ func TestNewLoopRequiresDependencies(t *testing.T) {
 		func(c *harness.LoopConfig) { c.Workspace = "" },
 		func(c *harness.LoopConfig) { c.NotesFile = "" },
 		func(c *harness.LoopConfig) { c.NotesPath = "" },
+		func(c *harness.LoopConfig) { c.History = "" },
+		func(c *harness.LoopConfig) { c.HistoryPath = " " },
+		func(c *harness.LoopConfig) { c.RunsPath = "" },
 		func(c *harness.LoopConfig) { c.Poll = -1 },
 		func(c *harness.LoopConfig) { c.InspectRetries = -1 },
 		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 64 << 10} },
@@ -125,7 +128,7 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 		whole := harness.Frame{
 			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
 			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Steps: all,
-			ArtifactDir: f.cfg.ArtifactDir, Notes: harness.Notes{Path: f.cfg.NotesPath},
+			ArtifactDir: f.cfg.ArtifactDir, HistoryDir: f.cfg.HistoryPath, RunsDir: f.cfg.RunsPath, Notes: harness.Notes{Path: f.cfg.NotesPath},
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]

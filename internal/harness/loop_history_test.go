@@ -70,7 +70,8 @@ func historyObservation(s core.State) *harness.Observation {
 }
 
 // growHistory commits the events and facts of the loop's exec cycle until the
-// run is idle at step n+1, and appends a notes line for every completed step.
+// run is idle at step n+1, appends a notes line for every completed step, and
+// publishes the step records of the whole run, as a loop would have.
 func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 	t.Helper()
 	ctx := context.Background()
@@ -111,6 +112,12 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 		if snap, err = r.Commit(ctx, snap, event, facts); err != nil {
 			t.Fatalf("seed %s at %+v: %v", event.Kind(), s, err)
 		}
+	}
+	if err := os.RemoveAll(filepath.Join(f.cfg.History, runID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.PublishHistory(ctx, f.store, f.cfg.History, f.cfg.ArtifactDir, runID); err != nil {
+		t.Fatal(err)
 	}
 }
 

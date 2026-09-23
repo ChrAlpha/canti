@@ -8,7 +8,7 @@ import (
 func testFrame() Frame {
 	return Frame{
 		Goal: "repair tests", Environment: "/workspace", Step: 1, MaxSteps: 10, Attempt: 1, MaxAttempts: 3,
-		ArtifactDir: "/canti/artifacts", Notes: Notes{Path: "/workspace/.canti/notes.md"},
+		ArtifactDir: "/canti/artifacts", HistoryDir: "/canti/run", RunsDir: "/canti/runs", Notes: Notes{Path: "/workspace/.canti/notes.md"},
 	}
 }
 
@@ -27,6 +27,8 @@ func TestFrameValidate(t *testing.T) {
 		{name: "missing environment", edit: func(f *Frame) { f.Environment = "" }, wantErr: true},
 		{name: "blank environment", edit: func(f *Frame) { f.Environment = "  " }, wantErr: true},
 		{name: "missing artifact directory", edit: func(f *Frame) { f.ArtifactDir = " " }, wantErr: true},
+		{name: "missing history directory", edit: func(f *Frame) { f.HistoryDir = "" }, wantErr: true},
+		{name: "missing runs directory", edit: func(f *Frame) { f.RunsDir = "\t" }, wantErr: true},
 		{name: "missing notes path", edit: func(f *Frame) { f.Notes.Path = "" }, wantErr: true},
 		{name: "zero step", edit: func(f *Frame) { f.Step = 0 }, wantErr: true},
 		{name: "step beyond the limit", edit: func(f *Frame) { f.Step, f.Earlier = 11, 10 }, wantErr: true},

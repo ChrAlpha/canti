@@ -208,7 +208,13 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
 			return exitError, err
 		}
-		x, err := docker.New(executorConfig(s.config, a.state))
+		created := false
+		defer func() {
+			if !created {
+				os.Remove(filepath.Join(historyRoot(a.state), run.ID))
+			}
+		}()
+		x, err := newExecutor(s.config, a.state, run.ID)
 		if err != nil {
 			return exitError, err
 		}
@@ -227,6 +233,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
+		created = true
 		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
 		snap, err := drive(l, run.ID)
 		return a.report(snap, err, exitActive)
@@ -345,6 +352,8 @@ func (a *app) find(ctx context.Context, store *sqlite.Store) (harness.Run, confi
 	return run, c, err
 }
 
+// closed fails unless the latest run of the state directory, if any, is
+// closed and its step records are published.
 func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	last, err := store.LastRun(ctx)
 	if errors.Is(err, harness.ErrNotFound) {
@@ -358,8 +367,13 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 		snap, err = store.Latest(ctx, last.ID)
 	}
 	switch p := snap.State.Phase; {
-	case err != nil || p == core.PhaseReturned || p == core.PhaseStopped:
+	case err != nil:
 		return err
+	case p == core.PhaseReturned || p == core.PhaseStopped:
+		if err := harness.PublishHistory(ctx, store, historyRoot(a.state), docker.ArtifactDir, last.ID); err != nil {
+			return fmt.Errorf("publishing the step records of run %s: %w", last.ID, err)
+		}
+		return nil
 	case p == core.PhaseNeedsResolution:
 		return fmt.Errorf("run %s needs resolution: resolve it first", last.ID)
 	}
@@ -370,6 +384,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 	return harness.NewLoop(wrapJournal(j), x, m, harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, Workspace: c.Workspace,
 		NotesFile: ".canti/notes.md", NotesPath: docker.WorkDir + "/.canti/notes.md",
+		History: historyRoot(a.state), HistoryPath: runDir, RunsPath: runsDir,
 		Limits: promptLimits(c), Logger: a.log,
 	})
 }
@@ -391,7 +406,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 		m, err = model(c)
 	}
 	if err == nil {
-		x, err = docker.New(executorConfig(c, a.state))
+		x, err = newExecutor(c, a.state, run.ID)
 	}
 	if err == nil {
 		l, err = a.loop(store, x, m, c, run.Budget)

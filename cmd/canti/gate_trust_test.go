@@ -129,8 +129,10 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 			mounts[fields[4]] = fields[5]
 		}
 	}
-	if a, w := strings.Split(mounts[docker.ArtifactDir], ","), strings.Split(mounts[docker.WorkDir], ","); a[0] != "ro" || w[0] != "rw" {
-		t.Errorf("artifact mount %q, workspace mount %q", mounts[docker.ArtifactDir], mounts[docker.WorkDir])
+	for dir, mode := range map[string]string{docker.WorkDir: "rw", docker.ArtifactDir: "ro", runDir: "ro", runsDir: "ro"} {
+		if got := strings.Split(mounts[dir], ","); got[0] != mode {
+			t.Errorf("mount %s = %q, want %s", dir, mounts[dir], mode)
+		}
 	}
 	if !strings.Contains(s["touch"], "Read-only file system") || !strings.Contains(s["touch"], "touch=1") {
 		t.Errorf("touch in the artifacts = %q", s["touch"])
@@ -166,8 +168,8 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 		t.Errorf("container config = %+v", c)
 	}
 	evLog(t, image, "trust boundary", "fixture key and CANTI_TRUST_PROBE in the CLI environment; job probes env, uid, caps, mounts, state, journal, network",
-		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s; state and journal absent; interfaces %s only; model URL unreachable",
-			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], strings.TrimSpace(s["net"])),
+		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s, run %s, runs %s; state and journal absent; interfaces %s only; model URL unreachable",
+			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], mounts[runDir], mounts[runsDir], strings.TrimSpace(s["net"])),
 		fmt.Sprintf("output %d bytes, network %s, cap-drop %v, user %s", len(data), c.HostConfig.NetworkMode, c.HostConfig.CapDrop, c.Config.User))
 }
 
@@ -314,4 +316,92 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	evLog(t, image, "trust boundary (facts)", "step 2 runs rm -rf /canti/artifacts/*, writes into /canti/artifacts, and forges canti.db and artifacts/output in /workspace",
 		"removal and write fail read-only; committed history is an unchanged prefix; step 1 artifact intact; forgeries stay in the workspace",
 		fmt.Sprintf("history %d bytes before, %d after; artifact %d bytes", len(before.stdout), len(after.stdout), fact.Output.Bytes))
+}
+
+func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
+	long := "echo fact-one; echo 日本; : " + strings.Repeat("x", 3000)
+	probe := strings.Join([]string{
+		"cd " + runDir,
+		"echo '== meta'", "cat steps/00000001/meta",
+		"echo '== command'", "cat steps/00000001/command; echo",
+		"echo '== preview'", "cat steps/00000001/preview",
+		"echo '== goal'", "cat goal; echo",
+		"echo '== tamper'",
+		`touch x; echo "touch=$?"`,
+		`echo forged > goal; echo "goal=$?"`,
+		`echo forged > steps/00000001/preview; echo "preview=$?"`,
+		`rm -rf steps/00000001; echo "rm=$?"`,
+		`mkdir steps/00000002; echo "mkdir=$?"`,
+		`mkdir ` + runsDir + `/forged; echo "runs=$?"`,
+		"echo '== runs'", "ls " + runsDir,
+	}, "\n")
+	f, image := evFixture(t, map[int]core.Decision{
+		1: {Kind: core.Exec, Payload: long},
+		2: {Kind: core.Exec, Payload: probe},
+		3: {Kind: core.Return, Payload: "done"},
+	})
+	if r := f.cli(nil, "run", "-goal", "records", "-image", image); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	h := f.history()
+	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) {
+		t.Fatalf("history = %q", kinds(h))
+	}
+	id, one := h[0].State.RunID, h[6].Facts.Observation
+	data, err := os.ReadFile(filepath.Join(f.state, "artifacts", h[13].Facts.Observation.Output.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := evSections(string(data))
+	meta := fmt.Sprintf("step: 1\nexecution: exited\nexit_code: 0\nresolved: false\noutput: %s\noutput_bytes: %d\noutput_complete: true\n",
+		path.Join(docker.ArtifactDir, one.Output.Path), one.Output.Bytes)
+	if s["meta"] != meta || s["command"] != long+"\n" || s["preview"] != "fact-one\n日本\n" || s["preview"] != one.Preview || s["goal"] != "records\n" || s["runs"] != id+"\n" {
+		t.Errorf("records read by step 2 = %q\nwant meta %q", s, meta)
+	}
+	for _, want := range []string{"touch=1", "goal=1", "preview=1", "rm=1", "mkdir=1", "runs=1", "Read-only file system"} {
+		if !strings.Contains(s["tamper"], want) {
+			t.Errorf("tampering output lacks %q:\n%s", want, s["tamper"])
+		}
+	}
+	if p := f.model.prompts(2); len(p) != 1 || strings.Contains(p[0], long) || !strings.Contains(p[0], "…[truncated ") || !strings.Contains(p[0], runDir+"/steps/") {
+		t.Errorf("step 2 prompt does not cut the command and name the records: %q", p)
+	}
+	for _, name := range []string{filepath.Join(id, "x"), "forged"} {
+		if _, err := os.Stat(filepath.Join(f.state, "history", name)); !os.IsNotExist(err) {
+			t.Errorf("the job created %s: %v", name, err)
+		}
+	}
+	checkRecords(t, f, "records", h)
+
+	earlier := strings.Join([]string{
+		"cd " + runsDir + "/" + id,
+		"echo '== goal'", "cat goal; echo",
+		"echo '== result'", "cat result; echo",
+		"echo '== command'", "cat steps/00000002/command; echo",
+		"echo '== runs'", "ls " + runsDir,
+	}, "\n")
+	for step, d := range map[int]core.Decision{1: {Kind: core.Exec, Payload: earlier}, 2: {Kind: core.Return, Payload: "second"}} {
+		text, _ := json.Marshal(d)
+		f.model.answer(step, 2, reply{text: string(text)})
+	}
+	if r := f.cli(nil, "run", "-goal", "again", "-image", image); r.code != exitOK || r.stdout != "second\n" {
+		t.Fatalf("second run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	h2 := f.history()
+	if !slices.Equal(kinds(h2), slices.Concat(evStep, evReturn)) || h2[0].State.RunID == id {
+		t.Fatalf("second run history = %q", kinds(h2))
+	}
+	if data, err = os.ReadFile(filepath.Join(f.state, "artifacts", h2[6].Facts.Observation.Output.Path)); err != nil {
+		t.Fatal(err)
+	}
+	s2 := evSections(string(data))
+	runs := strings.Join(slices.Sorted(slices.Values([]string{id, h2[0].State.RunID})), "\n") + "\n"
+	if s2["goal"] != "records\n" || s2["result"] != "phase: returned\n\ndone\n" || s2["command"] != probe+"\n" || s2["runs"] != runs {
+		t.Errorf("first run read by the second = %q", s2)
+	}
+	checkRecords(t, f, "again", h2)
+	checkReleased(t, f, slices.Concat(h, h2))
+	evLog(t, image, "trust boundary (step records)", "step 2 reads /canti/run and tries to write, overwrite, and remove it and /canti/runs; a second run reads the first under /canti/runs",
+		"step 1 records match its observation and full command; every write fails read-only; the second run reads the first run's goal, result, and commands",
+		fmt.Sprintf("command %d bytes, meta %d bytes, %d runs", len(long), len(meta), strings.Count(runs, "\n")))
 }

@@ -58,11 +58,14 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 	if err := os.Symlink(ws, link); err != nil {
 		t.Fatal(err)
 	}
-	state := filepath.Join(root, "state")
-	for _, dir := range []string{state, filepath.Join(ws, "state"), filepath.Join(root, "a:b")} {
+	state, outer, records := filepath.Join(root, "state"), filepath.Join(root, "outer"), filepath.Join(root, "records")
+	for _, dir := range []string{state, filepath.Join(ws, "state"), filepath.Join(root, "a:b"), outer, filepath.Join(outer, "state"), records} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	mount := func(source, target string) Config {
+		return Config{Image: "i", Workspace: ws, State: state, Mounts: []Mount{{Source: records, Target: "/canti/runs"}, {Source: source, Target: target}}}
 	}
 	for _, tt := range []struct {
 		name string
@@ -83,13 +86,31 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		{"negative output limit", Config{Image: "i", Workspace: ws, State: state, OutputLimit: -1}},
 		{"tiny preview", Config{Image: "i", Workspace: ws, State: state, PreviewLimit: 63}},
 		{"negative grace", Config{Image: "i", Workspace: ws, State: state, StopGrace: -time.Second}},
+		{"relative mount", mount("records", "/canti/run")},
+		{"missing mount", mount(filepath.Join(root, "none"), "/canti/run")},
+		{"mount file", mount(file, "/canti/run")},
+		{"mount in workspace", mount(filepath.Join(ws, "state"), "/canti/run")},
+		{"mount of linked workspace", mount(link, "/canti/run")},
+		{"mount containing workspace", mount(root, "/canti/run")},
+		{"mount containing state", Config{Image: "i", Workspace: ws, State: filepath.Join(outer, "state"), Mounts: []Mount{{Source: outer, Target: "/canti/run"}}}},
+		{"mount with colon", mount(filepath.Join(root, "a:b"), "/canti/run")},
+		{"relative target", mount(records, "canti/run")},
+		{"unclean target", mount(records, "/canti/run/")},
+		{"target with colon", mount(records, "/canti:run")},
+		{"target at workspace", mount(records, WorkDir)},
+		{"target in workspace", mount(records, WorkDir+"/records")},
+		{"target at artifacts", mount(records, ArtifactDir)},
+		{"target over artifacts", mount(records, "/canti")},
+		{"root target", mount(records, "/")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := New(tt.cfg); err == nil {
 				t.Fatalf("New(%+v) succeeded", tt.cfg)
 			}
-			if _, err := os.Stat(filepath.Join(ws, "state", "jobs")); !errors.Is(err, fs.ErrNotExist) {
-				t.Fatalf("rejected New() wrote into the workspace: %v", err)
+			for _, dir := range []string{filepath.Join(ws, "state"), state, filepath.Join(outer, "state")} {
+				if _, err := os.Stat(filepath.Join(dir, "jobs")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("rejected New() wrote into %s: %v", dir, err)
+				}
 			}
 		})
 	}
@@ -105,9 +126,20 @@ func pair(args []string, flag, value string) bool {
 }
 
 func TestCreateArgsIsolateTheJob(t *testing.T) {
-	x := newTestExecutor(t, Config{User: "1234:5678", Memory: "256m", CPUs: "0.5", PidsLimit: 64})
+	runs, records := t.TempDir(), t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(records, link); err != nil {
+		t.Fatal(err)
+	}
+	x := newTestExecutor(t, Config{User: "1234:5678", Memory: "256m", CPUs: "0.5", PidsLimit: 64,
+		Mounts: []Mount{{Source: runs, Target: "/canti/runs"}, {Source: link, Target: "/canti/run"}}})
 	run := x.runArgs("echo hi")
 	args := x.createArgs("effect_1", run)
+	mounts := []string{"-v", x.cfg.Workspace + ":" + WorkDir, "-v", filepath.Join(x.cfg.State, "artifacts") + ":" + ArtifactDir + ":ro",
+		"-v", runs + ":/canti/runs:ro", "-v", records + ":/canti/run:ro", "alpine:3.23"}
+	if i := slices.Index(args, "-v"); i < 0 || !slices.Equal(args[i:i+len(mounts)], mounts) {
+		t.Errorf("create args do not mount %q in order: %q", mounts, args)
+	}
 	for _, p := range [][2]string{
 		{"--name", "canti-effect_1"},
 		{"--label", "canti.effect=effect_1"},
@@ -125,8 +157,6 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 		{"--log-driver", "json-file"},
 		{"--log-opt", "max-size=1p"},
 		{"--log-opt", "mode=blocking"},
-		{"-v", x.cfg.Workspace + ":" + WorkDir},
-		{"-v", filepath.Join(x.cfg.State, "artifacts") + ":" + ArtifactDir + ":ro"},
 	} {
 		if !pair(args, p[0], p[1]) {
 			t.Errorf("create args lack %s %s: %q", p[0], p[1], args)
@@ -161,7 +191,7 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 }
 
 func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
-	ws, state := t.TempDir(), t.TempDir()
+	ws, state, records := t.TempDir(), t.TempDir(), t.TempDir()
 	base := Config{Image: "alpine:3.23", Workspace: ws, State: state}
 	hash := func(cfg Config, command string) string {
 		return specHash(newTestExecutor(t, cfg).runArgs(command))
@@ -185,6 +215,8 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 		"memory":    func(c *Config) { c.Memory = "64m" },
 		"cpus":      func(c *Config) { c.CPUs = "1" },
 		"pids":      func(c *Config) { c.PidsLimit = 10 },
+		"mount":     func(c *Config) { c.Mounts = []Mount{{Source: records, Target: "/canti/run"}} },
+		"target":    func(c *Config) { c.Mounts = []Mount{{Source: records, Target: "/canti/runs"}} },
 		"command":   nil,
 	} {
 		cfg, command := base, "echo hi"

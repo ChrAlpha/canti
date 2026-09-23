@@ -28,8 +28,8 @@ func DefaultPromptLimits() PromptLimits {
 	}
 }
 
-// refLimit caps the execution state, output path and detail, artifact
-// directory, and notes path.
+// refLimit caps the execution state, output path and detail, artifact,
+// history, and runs directories, and notes path.
 const refLimit = 1 << 10
 
 var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
@@ -46,7 +46,7 @@ Ends the run and hands the payload to the user. It does not claim success: use i
 
 The payload is a JSON string, so escape quotes, backslashes, and newlines.
 
-The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step; outputs of steps no longer shown remain there.
+The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including steps no longer shown.
 
 Use the notes file named in the Notes section for your plan and findings. It persists between steps and is shown back to you in every request, cut to a size limit. The harness does not verify notes.`
 
@@ -110,7 +110,10 @@ func (f Frame) head(l PromptLimits) string {
 		section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
 	}
 	section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
-		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n")
+		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n"+
+		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.HistoryDir)+"/steps/<step number in 8 digits>/ "+
+		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
+		"Earlier runs of this workspace are recorded under "+inline(f.RunsDir)+"/<run ID>/ with their goal, steps, and result.\n")
 	section(&b, "Recent steps", "")
 	return b.String()
 }

@@ -166,6 +166,44 @@ func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
 	return out
 }
 
+// checkRecords checks that the step records of the run of h hold goal, the
+// command and preview of every completed step and no other, and the run's
+// result once it is closed.
+func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
+	t.Helper()
+	last := h[len(h)-1].State
+	dir := filepath.Join(f.state, "history", last.RunID)
+	checkFile(t, filepath.Join(dir, "goal"), goal)
+	var want, got []string
+	for i, e := range h {
+		if e.Kind != "observed" && e.Kind != "resolved" {
+			continue
+		}
+		s := h[i-1].State
+		step := filepath.Join(dir, "steps", fmt.Sprintf("%08d", s.Step))
+		checkFile(t, filepath.Join(step, "command"), s.Decision.Payload)
+		checkFile(t, filepath.Join(step, "preview"), e.Facts.Observation.Preview)
+		want = append(want, filepath.Base(step))
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "steps"))
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("step records %q, %v; want %q", got, err, want)
+	}
+	result := ""
+	switch last.Phase {
+	case core.PhaseReturned:
+		result = "phase: returned\n\n" + last.Decision.Payload
+	case core.PhaseStopped:
+		result = "phase: stopped\nreason: " + string(last.Reason) + "\n"
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "result")); string(data) != result || (result == "") != os.IsNotExist(err) {
+		t.Errorf("result = %q, %v; want %q", data, err, result)
+	}
+}
+
 func decodeEvent[E core.Event](raw string) (core.Event, error) {
 	var e E
 	err := strict(raw, &e)

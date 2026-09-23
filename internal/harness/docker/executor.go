@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -45,7 +46,8 @@ type Config struct {
 	Workspace string
 	// State is an existing absolute host directory owned by the executor,
 	// holding per-effect locks, latches, and artifacts. Only its artifacts
-	// subdirectory is mounted, read-only; it must not overlap Workspace.
+	// subdirectory and any Mounts inside it are mounted, read-only; it must
+	// not overlap Workspace.
 	State string
 	// User is the job's "uid:gid"; the current process's by default.
 	User string
@@ -63,7 +65,15 @@ type Config struct {
 	OutputLimit int64
 	// PreviewLimit bounds the preview bytes; 4 KiB by default, at least 64.
 	PreviewLimit int
+	// Mounts are mounted read-only into every job, in order.
+	Mounts []Mount
 }
+
+// Mount mounts Source, an existing absolute host directory that neither
+// overlaps the workspace nor contains the state directory, read-only at
+// Target, a clean absolute container path that overlaps neither WorkDir nor
+// ArtifactDir.
+type Mount struct{ Source, Target string }
 
 // Executor runs each effect as one container named canti-<effect ID>,
 // labelled with the hash of its full execution spec. The start latch, cancel
@@ -119,6 +129,21 @@ func New(cfg Config) (*Executor, error) {
 	if within(ws, state) || within(state, ws) {
 		return nil, fmt.Errorf("docker: workspace %s and state %s overlap", ws, state)
 	}
+	mounts := make([]Mount, len(cfg.Mounts))
+	for i, m := range cfg.Mounts {
+		src, err := resolve(m.Source)
+		if err != nil {
+			return nil, err
+		}
+		t := m.Target
+		switch {
+		case within(ws, src) || within(src, ws) || within(src, state):
+			return nil, fmt.Errorf("docker: mount %s overlaps workspace %s or contains state %s", src, ws, state)
+		case !path.IsAbs(t) || path.Clean(t) != t || strings.Contains(t, ":") || within(t, WorkDir) || within(WorkDir, t) || within(t, ArtifactDir) || within(ArtifactDir, t):
+			return nil, fmt.Errorf("docker: mount target %q is not a clean absolute path apart from %s and %s", t, WorkDir, ArtifactDir)
+		}
+		mounts[i] = Mount{src, t}
+	}
 	for _, dir := range []string{"jobs", "artifacts"} {
 		if err := os.MkdirAll(filepath.Join(state, dir), 0o755); err != nil {
 			return nil, err
@@ -127,7 +152,7 @@ func New(cfg Config) (*Executor, error) {
 	if err := syncDir(state); err != nil {
 		return nil, err
 	}
-	cfg.Workspace, cfg.State = ws, state
+	cfg.Workspace, cfg.State, cfg.Mounts = ws, state, mounts
 	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}}, nil
 }
 
@@ -167,8 +192,11 @@ func (x *Executor) runArgs(command string) []string {
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		args = append(args, "-e", k+"=", "-e", strings.ToLower(k)+"=")
 	}
-	return append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+ArtifactDir+":ro",
-		c.Image, "-c", "exec 2>&1\n"+command)
+	args = append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+ArtifactDir+":ro")
+	for _, m := range c.Mounts {
+		args = append(args, "-v", m.Source+":"+m.Target+":ro")
+	}
+	return append(args, c.Image, "-c", "exec 2>&1\n"+command)
 }
 
 func specHash(run []string) string {

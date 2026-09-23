@@ -28,6 +28,7 @@ is not.
 | `internal/harness/executor.go` | Executor contract: jobs keyed by effect ID, bind/start split, start latch, `ErrJobLost` | Implemented by `docker` |
 | `internal/harness/executortest` | Executable start latch contract | Passed by an offline reference and the Docker executor; rejects single-clause mutants |
 | `internal/harness/artifacts.go` | Observation and output reference records | Types |
+| `internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
 | `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `internal/harness/docker` | One container per effect through the docker CLI, start latch, output capture | Fake-CLI tests and Docker integration tests |
 | `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
@@ -265,11 +266,12 @@ only a response already paid for waits to be decoded, a spent wall-time,
 token, or output-byte budget is committed as a stop instead of the intent.
 Otherwise `Step` performs the one I/O the intent authorizes, so a new `Loop`,
 in the same or another process, continues any run. `Run` repeats `Step` until
-the intent is `halt` or a step fails.
+the intent is `halt` or a step fails, and at a halt publishes the run's
+[step records](#step-records), logging a failure without changing its result.
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps up to the prompt's total, the notes, and in a repair the rejected response; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
+| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps up to the prompt's total, the notes, and in a repair the rejected response; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
 | `bind`, `start` | `Runner.Bind`, `Runner.Start` |
@@ -315,7 +317,8 @@ reads for the latest `Snapshot`, the frozen request of the current revision,
 and the saved response of the current attempt. `returned` and `stopped`
 accept no events, and nothing is recorded after a run closes: the usage of a
 model request abandoned by a stop, for example, is never learned. No archive
-outside run transitions exists.
+outside run transitions exists; the [step records](#step-records) are a
+projection of them.
 
 `sqlite.Store` implements the `Journal` on one database file, `canti.db` in
 the CLI's state directory. It bundles SQLite 3.53.4 through
@@ -398,6 +401,60 @@ A stable effect ID deduplicates job identity, not arbitrary command side effects
 or a later decision with a new identity. Timeouts, cancellation, and non-zero
 exit codes do not prove that no business effect occurred.
 
+### Step records
+
+A job can read files, not the journal. `harness.PublishHistory` therefore
+publishes a derived projection of a run's committed facts under
+`history/<run ID>/` in the CLI's state directory, which jobs mount read-only
+(see [execution](#execution)): `goal`, `constraints` when set,
+`steps/<step number in 8 digits>/` for every completed step, and `result`
+once the run is closed. A step's `meta` holds one `key: value` line each,
+line breaks replaced, for the step, execution, exit code when recorded,
+whether it was set by explicit resolution, the output's container path or
+`unavailable`, its bytes, whether it is complete, and any detail; `command`
+and `preview` hold the committed command and preview verbatim, so the
+command is whole where the prompt cuts it, and the preview holds the
+output's head and true tail even when its artifact kept only a prefix.
+`result` is `phase: returned`, a blank line, and the payload, or
+`phase: stopped` and `reason: <stop reason>`. The content is a pure function
+of committed facts.
+
+Every file and step directory is written under a temporary name in the run
+directory, synced, renamed into place, and its directory synced; an existing
+one is never rewritten, and every publication removes stale temporaries. A
+publication adds the goal, the constraints, and once the run is closed the
+result when they are missing. A missing `steps` directory, as after the loss
+of the run directory, is rebuilt from every completed step by paging
+`Recent` backward; otherwise a publication adds at most the latest completed
+step. That suffices by induction over the publication points:
+
+- `Loop.prepare` publishes after it reads the recent steps and before it
+  renders and freezes the request. When that fails it returns the error and
+  freezes and commits nothing, so no frozen request names records that are
+  not published. Once the request of step N is frozen, steps 1 to N-1 are
+  published: step N-1 by that preparation and the others by earlier ones. A
+  crash between an observation and the next freeze leaves the step to the
+  next preparation.
+- `Loop.Run` publishes at a halt, adding a final step that no request
+  follows and the result; a failure there is only logged, because the next
+  `canti run` repairs it.
+- `canti run` publishes the latest run of its state directory before it
+  creates a run and refuses, creating nothing, when that fails, so every
+  earlier run a job sees is complete.
+
+The records are never an authority: nothing in canti reads them back, and
+`status` and `history` read the journal. In the CLI only commands holding
+the workspace lock publish; concurrent publications of one run are not
+supported. A process of the same user that deletes or edits files inside a
+run directory is outside the trust model: a step other than the latest that
+it deletes, or a file that it edits, stays so until the `steps` directory is
+removed and rebuilt. A `canti run` killed before it creates its run can leave
+an empty run directory. A state directory used by an earlier version has no
+step records: `canti run` publishes only its latest run, so earlier runs
+stay unpublished, and because the mounts are part of the spec hash, a
+container that version created but did not record as bound is refused by
+`Bind` and recorded as an unknown outcome.
+
 ## Lifecycle boundaries
 
 Three lifetimes must not be conflated. A workspace is the environment and its
@@ -429,31 +486,37 @@ stop of a run in `needs_resolution` records its reason and exits with status
 4: the job may still run until `canti resolve -job` records it, after which
 `canti stop` cancels it.
 `run` refuses to start a run while the latest run of its state directory is
-open or needs resolution.
+open or needs resolution, and publishes the step records of that run first,
+refusing when it cannot.
 
 ## Input
 
 Every request is prepared from committed facts and the notes; the history is
-read only as far back as the prompt needs. A `Frame` holds the run's goal and
-constraints, a description of the environment, the step and attempt positions,
-the number of earlier steps it does not show, a contiguous run of the latest
-completed steps, the artifact directory, the notes, and in a protocol repair
-the rejected response of the current step with its decode error. The loop
-reads those steps from `Journal.Recent` backward by commit sequence, 64 per
-page, until the step blocks the prompt would render for them exceed the
-prompt's total, a page is short, or step 1 is read. No step count caps them:
-the prompt's total is the only bound, the prompt drops the oldest of them that
-do not fit, and it shows what the whole history would show while at most the
-steps that fit plus one page are read.
-`Frame.Validate` requires the goal, environment, artifact directory, and
-notes path, checks the positions, and checks that the shown and earlier steps
-account for exactly the steps before the current one.
+read only as far back as the prompt needs, except to rebuild lost
+[step records](#step-records), which reads every completed step once. A
+`Frame` holds the run's goal and constraints, a description of the
+environment, the step and attempt positions, the number of earlier steps it
+does not show, a contiguous run of the latest completed steps, the artifact
+directory, the directories of the run's and of every run's step records, the
+notes, and in a protocol repair the rejected response of the current step
+with its decode error. The loop reads those steps from `Journal.Recent`
+backward by commit sequence, 64 per page, until the step blocks the prompt
+would render for them exceed the prompt's total, a page is short, or step 1
+is read. No step count caps them: the prompt's total is the only bound, the
+prompt drops the oldest of them that do not fit, and it shows what the whole
+history would show while at most the steps that fit plus one page are read.
+`Frame.Validate` requires the goal, the environment, the artifact, history,
+and runs directories, and the notes path, checks the positions, and checks
+that the shown and earlier steps account for exactly the steps before the
+current one.
 
 `Frame.Prompt` renders one independent prompt: a fixed system message that
 states the decision protocol and the workspace rules, and a user message in
 content blocks. A stable first block holds the Goal, Constraints, and
-Environment sections, the environment followed by the artifact directory, and
-ends with the Recent steps heading; one stable block follows per shown step,
+Environment sections, the environment followed by the artifact directory and
+two lines naming where every completed step of the run and every earlier run
+are recorded, which the system message also points to, and ends with the
+Recent steps heading; one stable block follows per shown step,
 oldest first; a volatile tail holds the Progress section (the step and
 attempt positions and the count of earlier steps not shown), Notes, and
 Rejected response, after a `None.` line when no step is shown. No block is
@@ -491,8 +554,9 @@ written by the agent and never verified.
 
 Per request the loop reads the latest snapshot, the run record, the totals
 when a token or output-byte budget is set, the recent steps, and in a repair
-the previous response. The byte limits bound the prompt, not the number of
-tokens it encodes to.
+the previous response; publishing the latest step reads nothing more unless
+the step records are rebuilt. The byte limits bound the prompt, not the
+number of tokens it encodes to.
 
 `anthropic.Model` implements `Model` for the non-streaming Messages API at
 API version `2023-06-01`, as adapter `canti-anthropic/2`. `Freeze` builds a
@@ -551,7 +615,11 @@ naming the effect, the executor's state directory, and a SHA-256 hash of the
 complete create arguments: image, user, network, resource limits, mounts,
 log options, and command. `Bind` looks for the container before creating one
 and rejects a different spec hash; a container whose labels name another
-effect or state directory is an error, never adopted.
+effect or state directory is an error, never adopted. `Config.Mounts` adds
+read-only mounts in order: `New` requires each source to be an existing
+absolute directory that neither overlaps the workspace nor contains the
+state directory, and each target a clean absolute path that overlaps neither
+`/workspace` nor `/canti/artifacts`.
 
 - **Latch.** The latch is a file under `jobs/<effect ID>/` in the state
   directory. It is published at most once: a temporary file is written and
@@ -624,7 +692,11 @@ unknown outcome.
 
 The trust boundary is Docker's. A job sees the workspace, mounted read-write
 at `/workspace`, and the artifact root, mounted read-only at
-`/canti/artifacts`; the journal, latches, and records in the state directory
+`/canti/artifacts`. The CLI also mounts the [step records](#step-records)
+read-only: `history` in the state directory at `/canti/runs` and the run's
+own directory in it at `/canti/run`, creating both before it builds the
+executor, the same for every command of a run, so a resumed `Bind` finds the
+same spec. The state directory itself, the journal, latches, and job records
 are not mounted, and the state directory must not overlap the workspace. No
 host environment variable reaches a job: the proxy variables that the docker
 CLI's configuration would inject are set empty. Jobs run with `--init`, as
@@ -639,12 +711,12 @@ body, CLI output, or file of the state directory.
 
 The executor trusts the Docker daemon, anything with access to it, and any
 process of the same user that can modify the state directory. Jobs have
-neither: the daemon socket is not mounted, and the state directory is not
-visible to them. Within that assumption, container ownership is proven only
-by the name and the `canti.effect`, `canti.state`, and `canti.spec` labels,
-so a principal with daemon access could plant a matching container that
-`Bind` adopts; docker CLI output and final job records are read without a
-size cap.
+neither: the daemon socket is not mounted, and of the state directory they
+see only the artifacts and the step records, read-only. Within that
+assumption, container ownership is proven only by the name and the
+`canti.effect`, `canti.state`, and `canti.spec` labels, so a principal with
+daemon access could plant a matching container that `Bind` adopts; docker
+CLI output and final job records are read without a size cap.
 
 ## Budgets
 

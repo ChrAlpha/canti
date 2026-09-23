@@ -109,7 +109,9 @@ The state directory defaults to
 resolved path>`, with `~/.local/state` when `XDG_STATE_HOME` is unset or
 relative; `-state` overrides it, and it must not overlap the workspace. It
 holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
-final job records under `jobs/`, and output artifacts under `artifacts/`.
+final job records under `jobs/`, output artifacts under `artifacts/`, and the
+read-only step records of every run under `history/<run ID>/`, which jobs see
+at `/canti/runs`, their own run's at `/canti/run`.
 Each run is bound to the workspace it was created in. The agent's notes are
 `.canti/notes.md` in the workspace.
 

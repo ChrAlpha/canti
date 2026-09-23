@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -294,6 +295,74 @@ func TestRunRefusesWhileTheLatestRunIsOpen(t *testing.T) {
 	}
 	if len(f.model.requests()) != 0 {
 		t.Error("the model was called")
+	}
+}
+
+func TestRunPublishesThePreviousRunFirst(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo one"}, 2: {Kind: core.Return, Payload: "done"}})
+	noDocker := []string{"PATH=" + t.TempDir()}
+	if r := f.cli(noDocker, "run", "-goal", "first"); r.code != exitResolution {
+		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", "checked"); r.code != exitOK {
+		t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	history, first := filepath.Join(f.state, "history"), f.status().Run.ID
+	want := map[string]string{
+		"goal":                   "first",
+		"steps/00000001/meta":    "step: 1\nexecution: failed_to_start\nresolved: true\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\noutput_detail: resolved by operator\n",
+		"steps/00000001/command": "echo one",
+		"steps/00000001/preview": "checked",
+		"result":                 "phase: returned\n\ndone",
+	}
+	check := func(when string) {
+		t.Helper()
+		for name, data := range want {
+			if got, err := os.ReadFile(filepath.Join(history, first, name)); err != nil || string(got) != data {
+				t.Errorf("%s: %s = %q, %v; want %q", when, name, got, err, data)
+			}
+		}
+	}
+	check("after the first run")
+	for _, name := range []string{"result", "steps/00000001"} {
+		if err := os.RemoveAll(filepath.Join(history, first, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := f.cli(nil, "run", "-once", "-goal", "second"); r.code != exitActive {
+		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+	}
+	check("after the next run started")
+	second := f.status().Run.ID
+	if r := f.cli(nil, "stop"); r.code != exitStopped {
+		t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if data, err := os.ReadFile(filepath.Join(history, second, "result")); err != nil || string(data) != "phase: stopped\nreason: cancelled\n" {
+		t.Fatalf("result of the stopped run = %q, %v", data, err)
+	}
+	if err := os.RemoveAll(filepath.Join(history, second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(history, second), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requests := len(f.model.requests())
+	if r := f.cli(nil, "run", "-goal", "third"); r.code != exitError || !strings.Contains(r.stderr, "step records of run "+second) {
+		t.Fatalf("run over unpublishable records = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if s := f.status(); s.Run.ID != second || len(f.model.requests()) != requests {
+		t.Errorf("latest run %s after the refusal, %d requests; want %s and %d", s.Run.ID, len(f.model.requests()), second, requests)
+	}
+	entries, err := os.ReadDir(history)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if err != nil || !slices.Equal(names, slices.Sorted(slices.Values([]string{first, second}))) {
+		t.Errorf("history holds %q, %v; want only the two runs", names, err)
 	}
 }
 
@@ -653,9 +722,9 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if err != nil || c != s.config {
 		t.Fatalf("stored config = %+v, %v\nwant %+v", c, err, s.config)
 	}
-	x := executorConfig(c, "/state")
-	if x != (docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
-		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096}) {
+	x := executorConfig(c, "/state", "run_x")
+	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
+		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}, {Source: "/state/history/run_x", Target: "/canti/run"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
 	if l := promptLimits(c); l.Total != 70000 || l.Goal != harness.DefaultPromptLimits().Goal {

@@ -105,11 +105,15 @@ func shownSteps(user string) []int {
 	return got
 }
 
+const records = "Every completed step of this run, shown or not, is recorded read-only under /canti/run/steps/<step number in 8 digits>/ " +
+	"as meta (its execution, exit code, and output path), command (the full command), and preview.\n" +
+	"Earlier runs of this workspace are recorded under /canti/runs/<run ID>/ with their goal, steps, and result.\n"
+
 func TestPromptRendersSectionsInOrder(t *testing.T) {
 	want := []string{
 		"## Goal\nrepair tests\n" +
 			"\n## Constraints\ndo not touch vendor/\n" +
-			"\n## Environment\n/workspace\nFull step outputs are readable under /canti/artifacts.\n" +
+			"\n## Environment\n/workspace\nFull step outputs are readable under /canti/artifacts.\n" + records +
 			"\n## Recent steps\n",
 		"### Step 2\nCommand:\n```\nls\n```\nExecution: exited, exit code 0\n" +
 			"Output: 7 bytes, complete, at /canti/artifacts/2/output\nPreview:\n```\ngo.mod\n```\n\n",
@@ -193,6 +197,21 @@ func TestPromptAppendsEachCompletedStepToItsStablePrefix(t *testing.T) {
 	}
 }
 
+func TestPromptNamesTheStepRecordsInItsFirstBlock(t *testing.T) {
+	first := mustPrompt(t, longFrame(0, 0), DefaultPromptLimits()).Blocks[0]
+	if !strings.HasSuffix(first, "\n## Environment\n/workspace\nFull step outputs are readable under /canti/artifacts.\n"+records+"\n## Recent steps\n") {
+		t.Fatalf("first block does not name the step records:\n%s", first)
+	}
+	repair := longFrame(3, 40)
+	repair.Attempt, repair.Rejected, repair.Notes.Text = 2, &Rejection{Error: "bad", Response: "{"}, "other notes"
+	for _, f := range []Frame{longFrame(0, 1), longFrame(0, 12), repair} {
+		p := mustPrompt(t, f, DefaultPromptLimits())
+		if p.Blocks[0] != first || strings.Contains(strings.Join(p.Blocks[1:], ""), "/canti/run") {
+			t.Fatalf("step %d attempt %d: first block\n%s\nwant\n%s", f.Step, f.Attempt, p.Blocks[0], first)
+		}
+	}
+}
+
 func TestPromptSystemStatesTheProtocol(t *testing.T) {
 	a := mustPrompt(t, promptFrame(), DefaultPromptLimits())
 	b := mustPrompt(t, fullFrame(), DefaultPromptLimits())
@@ -211,6 +230,8 @@ func TestPromptSystemStatesTheProtocol(t *testing.T) {
 		"does not claim success",
 		"Notes section",
 		"artifact directory named in the Environment section",
+		"step records named there keep the full command",
+		"including steps no longer shown",
 	} {
 		if !strings.Contains(a.System, text) {
 			t.Errorf("System lacks %q", text)
@@ -267,13 +288,13 @@ func TestPromptContainsUntrustedText(t *testing.T) {
 	st.Observation.Execution = core.ExecutionState(forged)
 	st.Observation.Output.Path, st.Observation.Output.Detail = forged, forged
 	g := promptFrame()
-	g.Steps, g.Step, g.ArtifactDir, g.Notes.Path = []StepRecord{st}, 2, forged, forged
+	g.Steps, g.Step, g.ArtifactDir, g.HistoryDir, g.RunsDir, g.Notes.Path = []StepRecord{st}, 2, forged, forged, forged, forged
 	p = mustPrompt(t, g, DefaultPromptLimits())
 	if got, want := headings(p.User()), []string{"Goal", "Environment", "Recent steps", "Progress", "Notes"}; !slices.Equal(got, want) {
 		t.Fatalf("headings = %q, want %q:\n%s", got, want, p.User())
 	}
-	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 6 {
-		t.Fatalf("User renders %d of 6 one-line fields on one line:\n%s", n, p.User())
+	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 8 {
+		t.Fatalf("User renders %d of 8 one-line fields on one line:\n%s", n, p.User())
 	}
 }
 
@@ -300,6 +321,8 @@ func TestPromptSectionLimits(t *testing.T) {
 		{"output path", onStep(func(st *StepRecord, s string) { st.Observation.Output.Path = s }), nil},
 		{"execution", onStep(func(st *StepRecord, s string) { st.Observation.Execution = core.ExecutionState(s) }), nil},
 		{"artifact directory", func(f *Frame, s string) { f.ArtifactDir = s }, nil},
+		{"history directory", func(f *Frame, s string) { f.HistoryDir = s }, nil},
+		{"runs directory", func(f *Frame, s string) { f.RunsDir = s }, nil},
 		{"notes path", func(f *Frame, s string) { f.Notes.Path = s }, nil},
 	}
 	inputs := []struct{ name, huge string }{
@@ -409,7 +432,7 @@ func TestPromptKeepsUTF8(t *testing.T) {
 
 	bad := "ok\xff\xfe\xe6\x97"
 	f := fullFrame()
-	f.Goal, f.Constraints, f.Environment, f.ArtifactDir = bad, bad, bad, bad
+	f.Goal, f.Constraints, f.Environment, f.ArtifactDir, f.HistoryDir, f.RunsDir = bad, bad, bad, bad, bad, bad
 	f.Steps[0].Command, f.Steps[0].Observation.Preview, f.Steps[1].Observation.Output.Detail = bad, bad, bad
 	f.Notes, f.Rejected = Notes{Path: bad, Text: bad}, &Rejection{Error: bad, Response: bad}
 	p := mustPrompt(t, f, DefaultPromptLimits())
