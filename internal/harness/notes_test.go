@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,19 @@ func TestReadNotes(t *testing.T) {
 				t.Fatalf("ReadNotes() = %q, %v, %v; want %q, %v, nil", got, truncated, err, tt.want, tt.truncated)
 			}
 		})
+	}
+}
+
+func TestReadNotesReadsOnlyTheLimit(t *testing.T) {
+	ws := t.TempDir()
+	name := filepath.Join(ws, notesName)
+	writeFile(t, name, "")
+	if err := os.Truncate(name, 1<<36); err != nil {
+		t.Skipf("sparse files unavailable: %v", err)
+	}
+	got, truncated, err := ReadNotes(ws, notesName, 10)
+	if err != nil || got != strings.Repeat("\x00", 10) || !truncated {
+		t.Fatalf("ReadNotes() = %q, %v, %v; want 10 zero bytes, truncated", got, truncated, err)
 	}
 }
 
@@ -139,7 +153,9 @@ func TestReadNotesRejectsBadArguments(t *testing.T) {
 	if _, _, err := ReadNotes(filepath.Join(ws, "missing"), notesName, 64); err == nil {
 		t.Fatal("ReadNotes() on a missing workspace succeeded")
 	}
-	if _, _, err := ReadNotes(ws, notesName, -1); err == nil {
-		t.Fatal("ReadNotes() with a negative limit succeeded")
+	for _, limit := range []int{-1, math.MaxInt} {
+		if _, _, err := ReadNotes(ws, notesName, limit); err == nil {
+			t.Fatalf("ReadNotes() with limit %d succeeded", limit)
+		}
 	}
 }

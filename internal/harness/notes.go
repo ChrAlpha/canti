@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"syscall"
 	"unicode/utf8"
@@ -16,8 +17,8 @@ import (
 // blocks. A missing file is empty notes. truncated reports that the file is
 // longer than limit; the text then ends before any rune the limit splits.
 func ReadNotes(workspace, name string, limit int) (text string, truncated bool, err error) {
-	if limit < 0 {
-		return "", false, fmt.Errorf("harness: notes limit %d is negative", limit)
+	if limit < 0 || limit == math.MaxInt {
+		return "", false, fmt.Errorf("harness: notes limit %d is out of range", limit)
 	}
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
