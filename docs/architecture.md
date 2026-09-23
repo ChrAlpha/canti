@@ -269,7 +269,7 @@ the intent is `halt` or a step fails.
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps, the notes, and in a repair the rejected response; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
+| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps up to the prompt's total, the notes, and in a repair the rejected response; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
 | `bind`, `start` | `Runner.Bind`, `Runner.Start` |
@@ -345,8 +345,10 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
 - Each recovery read is an index search bounded by its limit, never a scan
   of the history. `Latest` and `Transitions` search the primary key; `Request`, `Response`, and `Recent`
   search partial indexes over `request_frozen` rows (run, step, revision),
-  `response_saved` rows (run, step, attempt), and observed or resolved rows;
-  `Totals` reads the run row.
+  `response_saved` rows (run, step, attempt), and observed or resolved rows
+  (run, sequence); `Totals` reads the run row. `Recent` pages backward by
+  commit sequence: it returns the latest steps completed below a given
+  sequence, each with the sequence of the transition that completed it.
 - Several `Store`s, in one or several processes, may share a file; the
   sequence check admits exactly one commit per sequence.
 
@@ -432,11 +434,17 @@ open or needs resolution.
 ## Input
 
 Every request is prepared from committed facts and the notes; the history is
-never read whole. A `Frame` holds the run's goal and constraints, a
-description of the environment, the step and attempt positions, the number of
-earlier steps it does not show, the latest completed steps (8 by default) from
-`Journal.Recent`, the artifact directory, the notes, and in a protocol repair
-the rejected response of the current step with its decode error.
+read only as far back as the prompt needs. A `Frame` holds the run's goal and
+constraints, a description of the environment, the step and attempt positions,
+the number of earlier steps it does not show, a contiguous run of the latest
+completed steps, the artifact directory, the notes, and in a protocol repair
+the rejected response of the current step with its decode error. The loop
+reads those steps from `Journal.Recent` backward by commit sequence, 64 per
+page, until the step blocks the prompt would render for them exceed the
+prompt's total, a page is short, or step 1 is read. No step count caps them:
+the prompt's total is the only bound, the prompt drops the oldest of them that
+do not fit, and it shows what the whole history would show while at most the
+steps that fit plus one page are read.
 `Frame.Validate` requires the goal, environment, artifact directory, and
 notes path, checks the positions, and checks that the shown and earlier steps
 account for exactly the steps before the current one.
@@ -461,6 +469,10 @@ previews, notes, and rejected responses are fenced with a backtick run longer
 than any inside them, with the extra fence length charged to the input's
 limit; single-line references have line breaks replaced; invalid UTF-8 is
 replaced and no cut splits a rune. Equal frames and limits give equal prompts.
+The CLI keeps these limits but sets the total from `-context-bytes`, 256 KiB
+by default and at least 16 KiB; a total too small for the goal and
+constraints stops the run as `unrecoverable` at the first request it cannot
+hold, which may be a later protocol repair.
 
 `ReadNotes` reads at most the notes limit plus one byte of the notes file
 (`.canti/notes.md` in the CLI), the extra byte telling whether the file was

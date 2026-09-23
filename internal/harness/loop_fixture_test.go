@@ -21,6 +21,8 @@ import (
 
 const runID = "run-1"
 
+const historyPage = 64 // records per Recent read of the loop
+
 var (
 	created = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	limits  = core.Limits{MaxSteps: 5, MaxAttempts: 3}
@@ -231,6 +233,55 @@ func (j hookJournal) Commit(ctx context.Context, t harness.Transition) error {
 		j.after(t)
 	}
 	return err
+}
+
+// probe counts the journal reads of a loop and captures, without recording,
+// the request it would commit.
+type probe struct {
+	*sqlite.Store
+	reads, pages, records, recordBytes int
+	frozen                             *harness.Request
+}
+
+func (p *probe) Run(ctx context.Context, runID string) (harness.Run, error) {
+	p.reads++
+	return p.Store.Run(ctx, runID)
+}
+
+func (p *probe) Latest(ctx context.Context, runID string) (harness.Snapshot, error) {
+	p.reads++
+	return p.Store.Latest(ctx, runID)
+}
+
+func (p *probe) Request(ctx context.Context, runID string, step, rev int) (harness.Request, error) {
+	p.reads++
+	return p.Store.Request(ctx, runID, step, rev)
+}
+
+func (p *probe) Response(ctx context.Context, runID string, step, attempt int) (harness.Response, error) {
+	p.reads++
+	return p.Store.Response(ctx, runID, step, attempt)
+}
+
+func (p *probe) Totals(ctx context.Context, runID string) (harness.Totals, error) {
+	p.reads++
+	return p.Store.Totals(ctx, runID)
+}
+
+func (p *probe) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	p.reads++
+	p.pages++
+	rs, err := p.Store.Recent(ctx, runID, before, limit)
+	for _, r := range rs {
+		p.records++
+		p.recordBytes += len(r.Command) + len(r.Observation.Preview)
+	}
+	return rs, err
+}
+
+func (p *probe) Commit(_ context.Context, t harness.Transition) error {
+	p.frozen = t.Facts.Request
+	return nil
 }
 
 type logs struct {

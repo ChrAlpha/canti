@@ -240,7 +240,7 @@ func TestCommitRequiresTheRun(t *testing.T) {
 		"Latest":      func() error { _, err := s.Latest(ctx, "ghost"); return err },
 		"Totals":      func() error { _, err := s.Totals(ctx, "ghost"); return err },
 		"Transitions": func() error { _, err := s.Transitions(ctx, "ghost", 0, 10); return err },
-		"Recent":      func() error { _, err := s.Recent(ctx, "ghost", 10); return err },
+		"Recent":      func() error { _, err := s.Recent(ctx, "ghost", 0, 10); return err },
 		"Request":     func() error { _, err := s.Request(ctx, "ghost", 1, 1); return err },
 		"Response":    func() error { _, err := s.Response(ctx, "ghost", 1, 1); return err },
 	} {

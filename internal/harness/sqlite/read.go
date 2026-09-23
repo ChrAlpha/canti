@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -160,17 +161,22 @@ func (s *Store) facts(ctx context.Context, query, runID string, step, n int) (ha
 	return facts, err
 }
 
-// Recent returns at most limit of the latest observed or resolved steps,
-// oldest first.
-func (s *Store) Recent(ctx context.Context, runID string, limit int) ([]harness.StepRecord, error) {
+// Recent returns at most limit of the latest observed or resolved steps
+// committed below sequence before, or the latest ones when before is not
+// positive, oldest first.
+func (s *Store) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	if before <= 0 {
+		before = math.MaxInt64
+	}
 	var out []harness.StepRecord
-	err := s.each(ctx, runID, limit, recentSQL, []any{runID, limit}, func(rows *sql.Rows) error {
+	err := s.each(ctx, runID, limit, recentSQL, []any{runID, before, limit}, func(rows *sql.Rows) error {
+		var seq int64
 		var kind string
 		var semantics int
 		var from, data string
 		var state core.State
 		var facts harness.Facts
-		if err := rows.Scan(&kind, &semantics, &from, &data); err != nil {
+		if err := rows.Scan(&seq, &kind, &semantics, &from, &data); err != nil {
 			return err
 		}
 		if err := cmp.Or(current(semantics), strict(from, &state), strict(data, &facts)); err != nil {
@@ -179,7 +185,7 @@ func (s *Store) Recent(ctx context.Context, runID string, limit int) ([]harness.
 		if facts.Observation == nil {
 			return fmt.Errorf("%w: %s step without an observation", ErrIncompatible, kind)
 		}
-		out = append(out, harness.StepRecord{Step: state.Step, Command: state.Decision.Payload, Observation: *facts.Observation, Resolved: kind == "resolved"})
+		out = append(out, harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Observation: *facts.Observation, Resolved: kind == "resolved"})
 		return nil
 	})
 	if err != nil {

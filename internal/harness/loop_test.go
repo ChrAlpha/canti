@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -35,7 +36,6 @@ func TestNewLoopRequiresDependencies(t *testing.T) {
 		func(c *harness.LoopConfig) { c.Workspace = "" },
 		func(c *harness.LoopConfig) { c.NotesFile = "" },
 		func(c *harness.LoopConfig) { c.NotesPath = "" },
-		func(c *harness.LoopConfig) { c.History = -1 },
 		func(c *harness.LoopConfig) { c.Poll = -1 },
 		func(c *harness.LoopConfig) { c.InspectRetries = -1 },
 		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 64 << 10} },
@@ -92,15 +92,73 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	}
 }
 
-func TestLoopShowsOnlyRecentHistory(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, twoSteps()...)
-	f.cfg.History = 1
-	f.run(f.loop())
-	third := f.model.prompts[2].User
-	wantContains(t, third, "1 earlier step is not shown", "### Step 2")
-	if strings.Contains(third, "### Step 1") {
-		t.Fatalf("prompt shows more than the recent step:\n%s", third)
+func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
+	const n = 128
+	var replies []reply
+	for i := 1; i <= n; i++ {
+		replies = append(replies, execReply(fmt.Sprintf("echo %d %s", i, strings.Repeat("x", 200))))
 	}
+	f := newFixture(t, core.Limits{MaxSteps: n + 1, MaxAttempts: 1}, harness.Budget{}, replies...)
+	f.steps(f.loop(), 6*n)
+	ctx := context.Background()
+	run, err := f.store.Run(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := f.store.Recent(ctx, runID, 0, n)
+	if err != nil || len(all) != n {
+		t.Fatalf("Recent() = %d records, %v; want %d", len(all), err, n)
+	}
+	for _, tc := range []struct{ total, pages int }{{16 << 10, 1}, {32 << 10, 1}, {48 << 10, 2}, {1 << 20, 2}} {
+		f.cfg.Limits = harness.DefaultPromptLimits()
+		f.cfg.Limits.Total = tc.total
+		p := &probe{Store: f.store}
+		if snap, err := f.loopOn(p).Step(f.bounded(), runID); err != nil || p.frozen == nil {
+			t.Fatalf("Total %d: Step() = %+v, %v; want a frozen request", tc.total, snap.State, err)
+		}
+		whole := harness.Frame{
+			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
+			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Steps: all,
+			ArtifactDir: f.cfg.ArtifactDir, Notes: harness.Notes{Path: f.cfg.NotesPath},
+		}
+		want, err := whole.Prompt(f.cfg.Limits)
+		got := f.model.prompts[len(f.model.prompts)-1]
+		if err != nil || got != want {
+			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User)
+		}
+		shown := strings.Count(got.User, "\n### Step ")
+		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)
+		if shown <= 8 || strings.Contains(got.User, earlier) != (shown < n) || !strings.Contains(got.User, fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
+			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User)
+		}
+		if p.pages != tc.pages || p.records != min(n, tc.pages*historyPage) {
+			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.records, p.pages, tc.pages)
+		}
+	}
+
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	prompts, _ := f.model.calls()
+	if _, err := f.loopOn(&failingRecent{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
+		t.Fatalf("Step() with a failing second page = %v, want %v", err, errRecent)
+	}
+	if after, _ := f.model.calls(); after != prompts || len(f.transitions()) != 7*n {
+		t.Fatalf("a failing page froze %d prompts and left %d transitions, want none and %d", after-prompts, len(f.transitions()), 7*n)
+	}
+}
+
+var errRecent = errors.New("disk I/O error")
+
+// failingRecent fails every Recent read of a journal after the first.
+type failingRecent struct {
+	*sqlite.Store
+	reads int
+}
+
+func (j *failingRecent) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	if j.reads++; j.reads > 1 {
+		return nil, errRecent
+	}
+	return j.Store.Recent(ctx, runID, before, limit)
 }
 
 func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {

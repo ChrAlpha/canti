@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -121,18 +122,90 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 	}
 
 	want := []harness.StepRecord{
-		{Step: 1, Command: "printf ok", Observation: *observation(core.ExecutionExited, 42)},
-		{Step: 2, Command: "make build", Observation: *observation(core.ExecutionExited, 7), Resolved: true},
+		{Seq: 7, Step: 1, Command: "printf ok", Observation: *observation(core.ExecutionExited, 42)},
+		{Seq: 15, Step: 2, Command: "make build", Observation: *observation(core.ExecutionExited, 7), Resolved: true},
 	}
 	for limit, records := range map[int][]harness.StepRecord{1: want[1:], 2: want, 10: want} {
-		got, err := s.Recent(ctx, "run-1", limit)
+		got, err := s.Recent(ctx, "run-1", 0, limit)
 		if err != nil || !reflect.DeepEqual(got, records) {
-			t.Fatalf("Recent(%d) = %#v, %v; want %#v", limit, got, err, records)
+			t.Fatalf("Recent(0, %d) = %#v, %v; want %#v", limit, got, err, records)
 		}
 	}
 	totals := harness.Totals{Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 49, Steps: 2}
 	if got := totalsOf(t, s, "run-1"); got != totals {
 		t.Fatalf("Totals() = %#v, want %#v", got, totals)
+	}
+}
+
+// completed returns the steps that commits observed or resolved, oldest
+// first, derived independently of the store.
+func completed(commits []harness.Transition) []harness.StepRecord {
+	var out []harness.StepRecord
+	for _, tr := range commits {
+		switch tr.Event.(type) {
+		case core.Observed, core.Resolved:
+			_, resolved := tr.Event.(core.Resolved)
+			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Observation: *tr.Facts.Observation, Resolved: resolved})
+		}
+	}
+	return out
+}
+
+func TestRecentPagesBackwardBySequence(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", core.Limits{MaxSteps: 5, MaxAttempts: 2}))
+	d.step("make", harness.Usage{}, 1)
+	d.decide(execBody("make test"), harness.Usage{})
+	d.call(harness.Runner.Bind)
+	d.call(harness.Runner.Start)
+	d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "backend lost the job"})
+	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: observation(core.ExecutionExited, 2)})
+	d.decide([]byte("not a decision"), harness.Usage{})
+	d.step("make vet", harness.Usage{}, 3)
+	d.decide(execBody("make lint"), harness.Usage{})
+	d.observe(core.ExecutionFailedToStart, 0)
+	d.step("make install", harness.Usage{}, 5)
+	if s := d.snap.State; s.Phase != core.PhaseStopped || s.Reason != core.StopStepsExhausted {
+		t.Fatalf("final state = %#v, want steps_exhausted", s)
+	}
+	all := completed(d.commits)
+	if len(all) != 5 || !all[1].Resolved || all[4].Step != 5 {
+		t.Fatalf("completed steps = %#v", all)
+	}
+
+	below := func(before int64, limit int) []harness.StepRecord {
+		rest := all
+		if before > 0 {
+			rest = slices.DeleteFunc(slices.Clone(all), func(r harness.StepRecord) bool { return r.Seq >= before })
+		}
+		return rest[len(rest)-max(0, min(limit, len(rest))):]
+	}
+	for limit := -1; limit <= len(all)+1; limit++ {
+		for before := int64(-1); before <= d.snap.Seq+1; before++ {
+			got, err := s.Recent(ctx, "run-1", before, limit)
+			if want := below(before, limit); err != nil || len(got) != len(want) || len(got) > 0 && !reflect.DeepEqual(got, want) {
+				t.Fatalf("Recent(%d, %d) = %#v, %v; want %#v", before, limit, got, err, want)
+			}
+		}
+		if limit < 1 {
+			continue
+		}
+		var paged []harness.StepRecord
+		pages := 0
+		for before := int64(0); ; pages++ {
+			page, err := s.Recent(ctx, "run-1", before, limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			paged, before = append(page, paged...), page[0].Seq
+		}
+		if !reflect.DeepEqual(paged, all) || pages != (len(all)+limit-1)/limit {
+			t.Fatalf("%d pages of %d = %#v, want %#v", pages, limit, paged, all)
+		}
 	}
 }
 
@@ -157,7 +230,7 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 			reads := map[string]func() error{
 				"Latest":      func() error { _, err := s.Latest(ctx, "run-1"); return err },
 				"Transitions": func() error { _, err := s.Transitions(ctx, "run-1", 0, 100); return err },
-				"Recent":      func() error { _, err := s.Recent(ctx, "run-1", 5); return err },
+				"Recent":      func() error { _, err := s.Recent(ctx, "run-1", 0, 5); return err },
 				"Commit":      func() error { return d.try(core.RequestFrozen{}, harness.Facts{Request: requestFor(d.snap.State)}) },
 			}
 			for _, name := range c.reads {

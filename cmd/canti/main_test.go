@@ -112,7 +112,8 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"status", "-log-level", "loud"}, exitUsage, "", "loud"},
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "0"}, exitUsage, "", "-max-steps"},
-		{[]string{"run", "-goal", "g", "-history", "0"}, exitUsage, "", "-history"},
+		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
+		{[]string{"run", "-goal", "g", "-context-bytes", "16383"}, exitUsage, "", "-context-bytes must be at least 16384"},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -482,6 +483,31 @@ func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
 	}
 }
 
+func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		args  []string
+		shown bool
+	}{{[]string{"-context-bytes", "16384"}, false}, {nil, true}} {
+		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
+			noDocker := []string{"PATH=" + t.TempDir()}
+			if r := f.cli(noDocker, "run", append([]string{"-goal", strings.Repeat("g", 12<<10)}, tc.args...)...); r.code != exitResolution {
+				t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", strings.Repeat("n", 4000)); r.code != exitOK {
+				t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			p := f.model.prompts(2)
+			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown || strings.Contains(p[0], "\n1 earlier step is not shown.\n") == tc.shown {
+				t.Fatalf("resumed prompts = %q, want step 1 shown %v", p, tc.shown)
+			}
+		})
+	}
+}
+
 func TestHistoryPrintsEveryPageInOrder(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
 	noDocker := []string{"PATH=" + t.TempDir()}
@@ -575,19 +601,24 @@ func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
 	want := spec{
 		config: config{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, History: 8},
+			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10},
 		budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}
 	if s != want {
 		t.Errorf("defaults = %+v\nwant %+v", s, want)
 	}
+	l := harness.DefaultPromptLimits()
+	l.Total = 256 << 10
+	if got := promptLimits(s.config); got != l {
+		t.Errorf("prompt limits = %+v\nwant %+v", got, l)
+	}
 }
 
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-model", "claude-test", "-max-tokens", "900", "-structured=false", "-fallbacks=false",
-		"-history", "3", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-context-bytes", "20000", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.config.Workspace = "/work"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
@@ -613,6 +644,9 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if x != (docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
 		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096}) {
 		t.Errorf("executor config = %+v", x)
+	}
+	if l := promptLimits(c); l.Total != 20000 || l.Goal != harness.DefaultPromptLimits().Goal {
+		t.Errorf("prompt limits = %+v", l)
 	}
 	m := modelConfig(c, "http://model.test", credential{authToken: "token"})
 	if m != (anthropic.Config{BaseURL: "http://model.test", AuthToken: "token", Model: "claude-test", MaxTokens: 900}) {

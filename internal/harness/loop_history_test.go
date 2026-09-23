@@ -18,12 +18,11 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
-	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
-// Budgets of TestLoopBoundsRequestsAsHistoryGrows, chosen before measuring.
+// Budgets of TestLoopBoundsRequestsAsHistoryGrows, chosen before measuring;
+// the step and read budgets follow from the prompt total.
 const (
-	shownSteps    = 8
 	commandBytes  = 2000
 	previewBytes  = 4000
 	notesLine     = 240
@@ -32,8 +31,7 @@ const (
 
 	requestSlack  = 16 << 10 // Anthropic envelope and JSON escaping of the fixture's shell text
 	requestGrowth = 64       // step-number digits between the two largest histories
-	maxReads      = 8
-	allocCeiling  = 4 << 20
+	allocCeiling  = 8 << 20  // raised from 4 MiB after measuring: a build decodes a whole page of records
 	allocFactor   = 1.5
 	timeCeiling   = 250 * time.Millisecond
 	timeFactor    = 4.0
@@ -116,62 +114,14 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 	}
 }
 
-// probe counts the journal reads of a loop and captures, without recording,
-// the request it would commit.
-type probe struct {
-	*sqlite.Store
-	reads, records, recordBytes int
-	frozen                      *harness.Request
-}
-
-func (p *probe) Run(ctx context.Context, runID string) (harness.Run, error) {
-	p.reads++
-	return p.Store.Run(ctx, runID)
-}
-
-func (p *probe) Latest(ctx context.Context, runID string) (harness.Snapshot, error) {
-	p.reads++
-	return p.Store.Latest(ctx, runID)
-}
-
-func (p *probe) Request(ctx context.Context, runID string, step, rev int) (harness.Request, error) {
-	p.reads++
-	return p.Store.Request(ctx, runID, step, rev)
-}
-
-func (p *probe) Response(ctx context.Context, runID string, step, attempt int) (harness.Response, error) {
-	p.reads++
-	return p.Store.Response(ctx, runID, step, attempt)
-}
-
-func (p *probe) Totals(ctx context.Context, runID string) (harness.Totals, error) {
-	p.reads++
-	return p.Store.Totals(ctx, runID)
-}
-
-func (p *probe) Recent(ctx context.Context, runID string, limit int) ([]harness.StepRecord, error) {
-	p.reads++
-	rs, err := p.Store.Recent(ctx, runID, limit)
-	for _, r := range rs {
-		p.records++
-		p.recordBytes += len(r.Command) + len(r.Observation.Preview)
-	}
-	return rs, err
-}
-
-func (p *probe) Commit(_ context.Context, t harness.Transition) error {
-	p.frozen = t.Facts.Request
-	return nil
-}
-
 type historySample struct {
-	req                         harness.Request
-	steps, transitions          int64
-	storeBytes, notesBytes      int64
-	prompt, shown               int
-	reads, records, recordBytes int
-	allocBytes, allocs          uint64
-	elapsed, cold               time.Duration
+	req                                harness.Request
+	steps, transitions                 int64
+	storeBytes, notesBytes             int64
+	prompt, shown                      int
+	reads, pages, records, recordBytes int
+	allocBytes, allocs                 uint64
+	elapsed, cold                      time.Duration
 }
 
 func median[T uint64 | time.Duration](xs []T) T {
@@ -211,7 +161,7 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 		}
 		if i == 0 {
 			s.cold, s.req = elapsed, *p.frozen
-			s.reads, s.records, s.recordBytes = p.reads, p.records, p.recordBytes
+			s.reads, s.pages, s.records, s.recordBytes = p.reads, p.pages, p.records, p.recordBytes
 			continue
 		}
 		if !reflect.DeepEqual(*p.frozen, s.req) || p.reads != s.reads || p.records != s.records {
@@ -249,8 +199,8 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 	}
 	user := body.Messages[0].Content
 	s.prompt, s.shown = len(body.System)+len(user), strings.Count(user, "\n### Step ")
-	wantContains(t, user, fmt.Sprintf("%d earlier steps are not shown.", n-shownSteps), fmt.Sprintf("### Step %d\n", n-shownSteps+1),
-		fmt.Sprintf("### Step %d\n", n), historyPreview(n), "The file continues beyond what was read.")
+	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("\n### Step %d\n", n-s.shown+1),
+		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), "The file continues beyond what was read.")
 
 	for _, name := range []string{f.path, f.path + "-wal"} {
 		if info, err := os.Stat(name); err == nil {
@@ -268,7 +218,6 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	top := historyLadder[len(historyLadder)-1]
 	f := newFixture(t, core.Limits{MaxSteps: top + 1, MaxAttempts: 3}, harness.Budget{Tokens: 1 << 50, OutputBytes: 1 << 50})
-	f.cfg.History = shownSteps
 	if err := os.MkdirAll(filepath.Join(f.ws, filepath.Dir(f.cfg.NotesFile)), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +231,10 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	}
 	limits := harness.DefaultPromptLimits()
 	budget := limits.Total + requestSlack
+	// Every shown step renders its whole command and preview.
+	fit := limits.Total / (commandBytes + previewBytes)
+	maxRecords, maxPages := fit+historyPage, fit/historyPage+1
+	maxReads := 3 + maxPages
 
 	var samples []historySample
 	for _, n := range historyLadder {
@@ -290,19 +243,19 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	}
 
 	req := samples[0].req
-	t.Logf("offline fixture: %s %s/%s GOMAXPROCS=%d, %s %s %s, History %d, limits %+v", runtime.Version(), runtime.GOOS, runtime.GOARCH,
-		runtime.GOMAXPROCS(0), req.Adapter, req.Protocol, req.Model, f.cfg.History, limits)
-	t.Logf("budgets: request <= %d B, growth <= %d B, reads <= %d, alloc <= %d B and %.1fx, time <= %v and %.1fx",
-		budget, requestGrowth, maxReads, allocCeiling, allocFactor, timeCeiling, timeFactor)
-	t.Logf("%6s %7s %10s %10s %8s %8s %7s %5s %5s %7s %9s %6s %10s %10s", "steps", "trans", "store B", "history B", "notes B",
-		"request", "prompt", "shown", "reads", "read B", "alloc B", "allocs", "median", "cold")
+	t.Logf("offline fixture: %s %s/%s GOMAXPROCS=%d, %s %s %s, limits %+v", runtime.Version(), runtime.GOOS, runtime.GOARCH,
+		runtime.GOMAXPROCS(0), req.Adapter, req.Protocol, req.Model, limits)
+	t.Logf("budgets: request <= %d B, growth <= %d B, shown <= %d, records <= %d in <= %d pages, reads <= %d, alloc <= %d B and %.1fx, time <= %v and %.1fx",
+		budget, requestGrowth, fit, maxRecords, maxPages, maxReads, allocCeiling, allocFactor, timeCeiling, timeFactor)
+	t.Logf("%6s %7s %10s %10s %8s %8s %7s %5s %7s %5s %5s %7s %9s %6s %10s %10s", "steps", "trans", "store B", "history B", "notes B",
+		"request", "prompt", "shown", "records", "pages", "reads", "read B", "alloc B", "allocs", "median", "cold")
 	for _, s := range samples {
-		t.Logf("%6d %7d %10d %10d %8d %8d %7d %5d %5d %7d %9d %6d %10v %10v", s.steps, s.transitions, s.storeBytes,
-			s.steps*(commandBytes+previewBytes), s.notesBytes, len(s.req.Body), s.prompt, s.shown, s.reads, s.recordBytes,
-			s.allocBytes, s.allocs, s.elapsed, s.cold)
+		t.Logf("%6d %7d %10d %10d %8d %8d %7d %5d %7d %5d %5d %7d %9d %6d %10v %10v", s.steps, s.transitions, s.storeBytes,
+			s.steps*(commandBytes+previewBytes), s.notesBytes, len(s.req.Body), s.prompt, s.shown, s.records, s.pages, s.reads,
+			s.recordBytes, s.allocBytes, s.allocs, s.elapsed, s.cold)
 	}
 
-	first := samples[0]
+	first, last := samples[0], samples[len(samples)-1]
 	for i, s := range samples {
 		n := historyLadder[i]
 		if s.steps != int64(n) {
@@ -311,9 +264,11 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 		if len(s.req.Body) > budget || s.prompt > limits.Total {
 			t.Errorf("%d steps: request of %d bytes with a %d-byte prompt exceeds %d or %d bytes", n, len(s.req.Body), s.prompt, budget, limits.Total)
 		}
-		if s.shown != shownSteps || s.records != shownSteps || s.reads > maxReads || s.reads != first.reads {
-			t.Errorf("%d steps: showed %d of %d records in %d reads, want %d records in the %d reads at %d steps, at most %d",
-				n, s.shown, s.records, s.reads, shownSteps, first.reads, historyLadder[0], maxReads)
+		if s.shown < 1 || s.shown > fit || s.shown != first.shown || s.records > maxRecords || s.records != min(n, last.records) ||
+			s.pages > maxPages || s.reads > maxReads || s.reads != first.reads {
+			t.Errorf("%d steps: showed %d steps from %d records in %d pages and %d reads; want the %d steps shown at %d steps, "+
+				"at most %d, from at most %d records or the whole history, in at most %d pages and the %d reads at %d steps, at most %d",
+				n, s.shown, s.records, s.pages, s.reads, first.shown, historyLadder[0], fit, maxRecords, maxPages, first.reads, historyLadder[0], maxReads)
 		}
 		if s.allocBytes > allocCeiling || float64(s.allocBytes) > allocFactor*float64(first.allocBytes) || float64(s.allocs) > allocFactor*float64(first.allocs) {
 			t.Errorf("%d steps: allocated %d bytes in %d allocations, over %d bytes or %.1fx of %d bytes in %d",
@@ -323,7 +278,7 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 			t.Errorf("%d steps: built in %v, cold %v, over %v or %.1fx of %v", n, s.elapsed, s.cold, timeCeiling, timeFactor, first.elapsed)
 		}
 	}
-	if prev, last := samples[len(samples)-2], samples[len(samples)-1]; len(last.req.Body)-len(prev.req.Body) > requestGrowth {
+	if prev := samples[len(samples)-2]; len(last.req.Body)-len(prev.req.Body) > requestGrowth {
 		t.Errorf("request grew from %d to %d bytes between %d and %d steps", len(prev.req.Body), len(last.req.Body), prev.steps, last.steps)
 	}
 

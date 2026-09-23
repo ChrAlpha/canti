@@ -99,9 +99,10 @@ goal, constraints, and the image, limit, model, prompt, and budget flags of
 `-workspace` must name the run's workspace. Defaults: image
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
-output tokens per response, structured output and fallbacks on, 8 recent
-steps per prompt, 20 steps, 3 attempts per step, 30 min wall time, no token
-budget, 256 MiB of output per run, and 10 min per job.
+output tokens per response, structured output and fallbacks on, 256 KiB per
+prompt (`-context-bytes`, at least 16 KiB, the only bound on the recent steps
+shown), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
+256 MiB of output per run, and 10 min per job.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's

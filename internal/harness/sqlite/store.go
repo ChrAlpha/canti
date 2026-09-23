@@ -86,8 +86,8 @@ const (
 		FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
 	requestSQL  = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
 	responseSQL = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
-	recentSQL   = `SELECT kind, semantics, from_state, facts FROM transitions
-		WHERE run_id = ? AND kind IN ('observed', 'resolved') ORDER BY seq DESC LIMIT ?`
+	recentSQL   = `SELECT seq, kind, semantics, from_state, facts FROM transitions
+		WHERE run_id = ? AND kind IN ('observed', 'resolved') AND seq < ? ORDER BY seq DESC LIMIT ?`
 )
 
 var queries = []string{

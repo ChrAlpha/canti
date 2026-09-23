@@ -99,17 +99,24 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 	if got, want := totalsOf(t, s, "long"), sums(all); got != want || got.Steps != 2000 {
 		t.Fatalf("Totals() = %#v, want %#v with 2000 steps", got, want)
 	}
-	recent, err := s.Recent(ctx, "long", 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, record := range recent {
-		if step := 1996 + i; record.Step != step || record.Command != fmt.Sprintf("step %d", step) {
-			t.Fatalf("Recent()[%d] = %#v, want step %d", i, record, step)
+	next, pages := 2000, 0
+	for before := int64(0); next > 0; pages++ {
+		page, err := s.Recent(ctx, "long", before, 64)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if len(page) != min(64, next) {
+			t.Fatalf("Recent(%d, 64) returned %d records, want %d", before, len(page), min(64, next))
+		}
+		for i, record := range page {
+			if step := next - len(page) + 1 + i; record.Step != step || record.Seq != 5*int64(step) || record.Command != fmt.Sprintf("step %d", step) {
+				t.Fatalf("Recent(%d, 64)[%d] = %#v, want step %d at seq %d", before, i, record, step, 5*step)
+			}
+		}
+		next, before = next-len(page), page[0].Seq
 	}
-	if len(recent) != 5 {
-		t.Fatalf("Recent() returned %d records, want 5", len(recent))
+	if pages != 32 {
+		t.Fatalf("paged 2000 steps in %d pages of 64, want 32", pages)
 	}
 
 	queries := map[string]struct {
@@ -120,7 +127,8 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 		"Transitions": {transitionsSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
 		"Request":     {requestSQL, "transitions_request", []any{"long", 7, 1}},
 		"Response":    {responseSQL, "transitions_response", []any{"long", 7, 1}},
-		"Recent":      {recentSQL, "transitions_steps", []any{"long", 5}},
+		"Recent":      {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", int64(math.MaxInt64), 5}},
+		"Recent page": {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", 5000, 5}},
 	}
 	for name, q := range queries {
 		detail := plan(t, s, q.query, q.args...)
@@ -129,18 +137,18 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 		}
 	}
 
-	allocs := func(runID string) float64 {
+	allocs := func(runID string, before int64) float64 {
 		return testing.AllocsPerRun(50, func() {
-			if _, err := s.Recent(ctx, runID, 5); err != nil {
+			if _, err := s.Recent(ctx, runID, before, 5); err != nil {
 				t.Fatal(err)
 			}
 		})
 	}
-	short, long := allocs("short"), allocs("long")
-	if math.Abs(long-short) > 2 {
-		t.Fatalf("Recent allocations depend on history: %.0f at 200 steps, %.0f at 2000", short, long)
+	short, long, deep := allocs("short", 0), allocs("long", 0), allocs("long", 5000)
+	if math.Abs(long-short) > 2 || math.Abs(deep-long) > 2 {
+		t.Fatalf("Recent allocations depend on history: %.0f at 200 steps, %.0f at 2000, %.0f 1000 steps back", short, long, deep)
 	}
-	t.Logf("Recent(5) allocations: %.0f at 200 steps, %.0f at 2000 steps", short, long)
+	t.Logf("Recent(5) allocations: %.0f at 200 steps, %.0f at 2000 steps, %.0f 1000 steps back", short, long, deep)
 }
 
 func benchmarkStore(b *testing.B) *Store {
@@ -163,7 +171,7 @@ func BenchmarkLatest(b *testing.B) {
 func BenchmarkRecent(b *testing.B) {
 	s := benchmarkStore(b)
 	for b.Loop() {
-		if _, err := s.Recent(context.Background(), "long", 5); err != nil {
+		if _, err := s.Recent(context.Background(), "long", 0, 5); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -14,6 +14,8 @@ import (
 
 const maxBackoff = 30 * time.Second
 
+const historyPage = 64
+
 // LoopConfig wires a Loop to its environment. Zero values take the defaults
 // noted on each field.
 type LoopConfig struct {
@@ -22,8 +24,7 @@ type LoopConfig struct {
 	Workspace      string           // host workspace directory ReadNotes resolves in
 	NotesFile      string           // notes file relative to Workspace, such as ".canti/notes.md"
 	NotesPath      string           // the notes file as the agent sees it, such as "/workspace/.canti/notes.md"
-	History        int              // recent steps per prompt; 8
-	Limits         PromptLimits     // DefaultPromptLimits()
+	Limits         PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
 	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
@@ -54,10 +55,9 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 			return nil, errors.New("harness: loop environment, artifact directory, workspace, and notes paths are required")
 		}
 	}
-	if cfg.History < 0 || cfg.Poll < 0 || cfg.InspectRetries < 0 {
-		return nil, errors.New("harness: loop history, poll, and inspect retries must not be negative")
+	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
+		return nil, errors.New("harness: loop poll and inspect retries must not be negative")
 	}
-	cfg.History = cmp.Or(cfg.History, 8)
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
@@ -226,15 +226,16 @@ func (l *Loop) late(run Run) string {
 
 func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
-	recent, err := l.journal.Recent(ctx, s.RunID, l.cfg.History)
-	if err != nil {
-		return snap, err
-	}
 	f := Frame{
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
-		Earlier: s.Step - 1 - len(recent), Steps: recent, ArtifactDir: l.cfg.ArtifactDir, Notes: Notes{Path: l.cfg.NotesPath},
+		ArtifactDir: l.cfg.ArtifactDir, Notes: Notes{Path: l.cfg.NotesPath},
 	}
+	var err error
+	if f.Steps, err = l.recent(ctx, s.RunID, f); err != nil {
+		return snap, err
+	}
+	f.Earlier = s.Step - 1 - len(f.Steps)
 	if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
 		l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
 		f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
@@ -258,6 +259,28 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
+}
+
+// recent reads the latest completed steps backward in pages until the
+// blocks f renders for them exceed the prompt total, a page is short, or
+// step 1 is read, so that Frame.Prompt shows the steps it would show from
+// the whole history.
+func (l *Loop) recent(ctx context.Context, runID string, f Frame) ([]StepRecord, error) {
+	var steps []StepRecord
+	for size, before := 0, int64(0); ; {
+		page, err := l.journal.Recent(ctx, runID, before, historyPage)
+		if err != nil {
+			return nil, err
+		}
+		for i := len(page) - 1; i >= 0 && size <= l.cfg.Limits.Total; i-- {
+			size += len(f.step(page[i], l.cfg.Limits))
+		}
+		steps = append(page, steps...)
+		if size > l.cfg.Limits.Total || len(page) < historyPage || page[0].Step == 1 {
+			return steps, nil
+		}
+		before = page[0].Seq
+	}
 }
 
 func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {

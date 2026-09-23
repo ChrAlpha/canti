@@ -47,15 +47,17 @@ var ErrNotFound = errors.New("harness: record not found")
 // Request returns the frozen request of the named step and revision and
 // Response the saved complete response of the named step and attempt, or
 // ErrNotFound. Recent returns at most limit of the latest observed or
-// resolved steps in commit order. Totals are maintained in the same
-// transaction as each commit.
+// resolved steps committed at a sequence below before, or the latest ones
+// when before is not positive, oldest first; paging backward passes the Seq
+// of the oldest record read. Totals are maintained in the same transaction
+// as each commit.
 type Journal interface {
 	Store
 	Run(ctx context.Context, runID string) (Run, error)
 	Latest(ctx context.Context, runID string) (Snapshot, error)
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
-	Recent(ctx context.Context, runID string, limit int) ([]StepRecord, error)
+	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
 }
 
@@ -79,8 +81,10 @@ type Budget struct {
 	JobTimeout  time.Duration
 }
 
-// StepRecord is one completed step as the input builder sees it.
+// StepRecord is one completed step as the input builder sees it. Seq is the
+// sequence of the observed or resolved transition that completed it.
 type StepRecord struct {
+	Seq         int64
 	Step        int
 	Command     string
 	Observation Observation

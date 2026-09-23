@@ -25,19 +25,21 @@ import (
 // config is the host wiring stored with a run; every later command rebuilds
 // the executor and model from it.
 type config struct {
-	Workspace   string `json:"workspace"`
-	Image       string `json:"image"`
-	Network     string `json:"network"`
-	Memory      string `json:"memory"`
-	CPUs        string `json:"cpus"`
-	Pids        int    `json:"pids"`
-	OutputLimit int64  `json:"output_limit"`
-	Model       string `json:"model"`
-	MaxTokens   int    `json:"max_tokens"`
-	Structured  bool   `json:"structured"`
-	Fallbacks   bool   `json:"fallbacks"`
-	History     int    `json:"history"`
+	Workspace    string `json:"workspace"`
+	Image        string `json:"image"`
+	Network      string `json:"network"`
+	Memory       string `json:"memory"`
+	CPUs         string `json:"cpus"`
+	Pids         int    `json:"pids"`
+	OutputLimit  int64  `json:"output_limit"`
+	Model        string `json:"model"`
+	MaxTokens    int    `json:"max_tokens"`
+	Structured   bool   `json:"structured"`
+	Fallbacks    bool   `json:"fallbacks"`
+	ContextBytes int    `json:"context_bytes"`
 }
+
+const minContextBytes = 16 << 10
 
 type spec struct {
 	config config
@@ -57,7 +59,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
 	fs.BoolVar(&c.Structured, "structured", true, "constrain responses to the decision schema")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
-	fs.IntVar(&c.History, "history", 8, "recent `steps` shown in each prompt")
+	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, which bound the recent steps shown; at least 16384")
 	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")
@@ -69,8 +71,10 @@ func (s *spec) register(fs *flag.FlagSet) {
 func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.config, s.budget
 	switch {
-	case c.History < 1 || c.MaxTokens < 1 || c.OutputLimit < 1:
-		return harness.Run{}, core.State{}, errors.New("-history, -max-tokens, and -output-limit must be positive")
+	case c.ContextBytes < minContextBytes:
+		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes must be at least %d", minContextBytes)
+	case c.MaxTokens < 1 || c.OutputLimit < 1:
+		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.Image == "" || c.Network == "" || c.Model == "":
 		return harness.Run{}, core.State{}, errors.New("-image, -network, and -model must not be empty")
 	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
@@ -100,6 +104,12 @@ func decodeConfig(run harness.Run, workspace string) (config, error) {
 		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)
 	}
 	return c, nil
+}
+
+func promptLimits(c config) harness.PromptLimits {
+	l := harness.DefaultPromptLimits()
+	l.Total = c.ContextBytes
+	return l
 }
 
 func executorConfig(c config, state string) docker.Config {

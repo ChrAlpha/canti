@@ -370,7 +370,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 	return harness.NewLoop(wrapJournal(j), x, m, harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, Workspace: c.Workspace,
 		NotesFile: ".canti/notes.md", NotesPath: docker.WorkDir + "/.canti/notes.md",
-		History: c.History, Logger: a.log,
+		Limits: promptLimits(c), Logger: a.log,
 	})
 }
 
