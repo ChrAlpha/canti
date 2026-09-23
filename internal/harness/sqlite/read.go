@@ -1,7 +1,6 @@
 package sqlite
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"database/sql"
@@ -11,6 +10,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -40,11 +40,11 @@ func (s *Store) LastRun(ctx context.Context) (harness.Run, error) {
 
 func (s *Store) run(row *sql.Row) (harness.Run, error) {
 	var run harness.Run
-	var record []byte
-	if err := row.Scan(&record); err != nil {
+	var data string
+	if err := row.Scan(&data); err != nil {
 		return run, missing(err, "run")
 	}
-	return run, strict(record, &run)
+	return run, strict(data, &run)
 }
 
 // Latest returns the last committed transition's sequence and state, or
@@ -57,7 +57,7 @@ func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.S
 	var snap harness.Snapshot
 	var kind string
 	var semantics int
-	var state []byte
+	var state string
 	err := s.stmt(ctx, tx, latestSQL).QueryRowContext(ctx, runID).Scan(&snap.Seq, &kind, &semantics, &state)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -89,21 +89,17 @@ func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error
 func (s *Store) Transitions(ctx context.Context, runID string, after int64, limit int) ([]harness.Transition, error) {
 	var out []harness.Transition
 	err := s.each(ctx, runID, limit, transitionsSQL, []any{runID, after, limit}, func(rows *sql.Rows) error {
-		var t harness.Transition
-		var kind string
-		var semantics int
-		var event, from, to, facts []byte
-		if err := rows.Scan(&t.Seq, &t.EventID, &kind, &semantics, &event, &from, &to, &facts); err != nil {
+		var r record
+		var seq int64
+		var eventID string
+		if err := rows.Scan(&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts); err != nil {
 			return err
 		}
-		if err := cmp.Or(known(kind), current(semantics)); err != nil {
+		t, err := r.decode()
+		if err != nil {
 			return err
 		}
-		value := reflect.New(events[kind])
-		if err := cmp.Or(strict(event, value.Interface()), strict(from, &t.From), strict(to, &t.To), strict(facts, &t.Facts)); err != nil {
-			return err
-		}
-		t.Event = value.Elem().Interface().(core.Event)
+		t.Seq, t.EventID = seq, eventID
 		out = append(out, t)
 		return nil
 	})
@@ -111,6 +107,19 @@ func (s *Store) Transitions(ctx context.Context, runID string, after int64, limi
 		return nil, err
 	}
 	return out, nil
+}
+
+func (r record) decode() (harness.Transition, error) {
+	var t harness.Transition
+	if err := cmp.Or(known(r.kind), current(r.semantics)); err != nil {
+		return t, err
+	}
+	event := reflect.New(events[r.kind])
+	if err := cmp.Or(strict(r.event, event.Interface()), strict(r.from, &t.From), strict(r.to, &t.To), strict(r.facts, &t.Facts)); err != nil {
+		return t, err
+	}
+	t.Event = event.Elem().Interface().(core.Event)
+	return t, nil
 }
 
 // Request returns the request frozen at revision rev of step.
@@ -140,7 +149,7 @@ func (s *Store) Response(ctx context.Context, runID string, step, attempt int) (
 func (s *Store) facts(ctx context.Context, query, runID string, step, n int) (harness.Facts, error) {
 	var facts harness.Facts
 	var semantics int
-	var data []byte
+	var data string
 	err := missing(s.stmts[query].QueryRowContext(ctx, runID, step, n).Scan(&semantics, &data), "record")
 	if err == nil {
 		err = current(semantics)
@@ -158,7 +167,7 @@ func (s *Store) Recent(ctx context.Context, runID string, limit int) ([]harness.
 	err := s.each(ctx, runID, limit, recentSQL, []any{runID, limit}, func(rows *sql.Rows) error {
 		var kind string
 		var semantics int
-		var from, data []byte
+		var from, data string
 		var state core.State
 		var facts harness.Facts
 		if err := rows.Scan(&kind, &semantics, &from, &data); err != nil {
@@ -201,7 +210,7 @@ func (s *Store) each(ctx context.Context, runID string, limit int, query string,
 		}
 	}
 	var semantics int
-	var state []byte
+	var state string
 	return missing(s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
 }
 
@@ -226,8 +235,8 @@ func missing(err error, what string) error {
 	return err
 }
 
-func strict(data []byte, v any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+func strict(data string, v any) error {
+	decoder := json.NewDecoder(strings.NewReader(data))
 	decoder.DisallowUnknownFields()
 	err := decoder.Decode(v)
 	if err == nil {

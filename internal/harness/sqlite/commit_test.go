@@ -316,7 +316,7 @@ func TestConcurrentStoresCommitOneTransitionPerSeq(t *testing.T) {
 			t.Fatalf("%s: no commit succeeded: %v", runID, errs)
 		}
 		for _, s := range stores {
-			unchanged(t, s, runID, candidates[winner:winner+1], totalsOf(t, s, runID))
+			unchanged(t, s, runID, candidates[winner:winner+1], harness.Totals{})
 		}
 	}
 }

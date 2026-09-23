@@ -195,13 +195,34 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 	})
 }
 
-func TestCommitRefusesEventsItCannotDecode(t *testing.T) {
+func TestCommitRefusesRecordsItCannotReproduce(t *testing.T) {
+	ctx := context.Background()
 	s := open(t, tempPath(t))
-	snap := createRun(t, s, "run-1", limits)
-	tr := derive(t, snap, core.RequestFrozen{}, harness.Facts{Request: requestFor(snap.State)})
-	tr.Event = &core.RequestFrozen{}
-	if err := s.Commit(context.Background(), tr); !errors.Is(err, ErrIncompatible) {
-		t.Fatalf("Commit(pointer event) error = %v, want ErrIncompatible", err)
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.decide(execBody("cat binary"), harness.Usage{})
+	d.call(harness.Runner.Bind)
+	d.call(harness.Runner.Start)
+	observed := core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}
+	pointer := derive(t, d.snap, observed, harness.Facts{Observation: observation(core.ExecutionExited, 1)})
+	pointer.Event = &observed
+	lossy := observation(core.ExecutionExited, 1)
+	lossy.Preview = "truncated \xe2\x82"
+	for name, tr := range map[string]harness.Transition{
+		"pointer event": pointer,
+		"invalid UTF-8": derive(t, d.snap, observed, harness.Facts{Observation: lossy}),
+	} {
+		if err := s.Commit(ctx, tr); !errors.Is(err, ErrIncompatible) {
+			t.Errorf("Commit(%s) error = %v, want ErrIncompatible", name, err)
+		}
 	}
-	unchanged(t, s, "run-1", nil, harness.Totals{})
+	if err := s.Commit(ctx, harness.Transition{Seq: d.snap.Seq + 1, From: d.snap.State, To: d.snap.State}); err == nil {
+		t.Error("Commit(no event) succeeded, want refusal")
+	}
+	unchanged(t, s, "run-1", d.commits, totalsOf(t, s, "run-1"))
+
+	run := testRun("run-2")
+	run.Goal = "\xff"
+	if err := s.CreateRun(ctx, run, fresh(t, "run-2", limits)); err == nil {
+		t.Fatal("CreateRun(invalid UTF-8 goal) succeeded, want refusal")
+	}
 }

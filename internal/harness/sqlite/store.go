@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -178,8 +179,13 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	if want, _ := core.NewState(run.ID, initial.Limits); initial != want {
 		return fmt.Errorf("sqlite: run %q must start from its fresh state", run.ID)
 	}
+	for _, text := range []string{run.ID, run.Goal, run.Constraints} {
+		if !utf8.ValidString(text) {
+			return fmt.Errorf("sqlite: run %q holds invalid UTF-8", run.ID)
+		}
+	}
 	run.Created = run.Created.UTC()
-	record, err := json.Marshal(run)
+	data, err := json.Marshal(run)
 	if err != nil {
 		return err
 	}
@@ -189,7 +195,7 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	}
 	return s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var same bool
-		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, core.SemanticsVersion, string(record), string(state), run.ID).Scan(&same)
+		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, core.SemanticsVersion, string(data), string(state), run.ID).Scan(&same)
 		switch {
 		case err == nil && same:
 			return nil
@@ -198,7 +204,7 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, string(record), string(state))
+		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, string(data), string(state))
 		return err
 	})
 }
@@ -233,7 +239,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	}
 	if t.Seq > 0 && t.Seq <= last.Seq {
 		var same bool
-		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind, core.SemanticsVersion,
+		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind, r.semantics,
 			r.event, r.from, r.to, r.facts, r.run, t.Seq).Scan(&same); err != nil {
 			return err
 		}
@@ -248,7 +254,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if t.From != last.State {
 		return fmt.Errorf("%w: seq %d of run %q", harness.ErrBrokenChain, t.Seq, r.run)
 	}
-	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, core.SemanticsVersion,
+	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
 	}
@@ -266,19 +272,20 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 }
 
 type record struct {
-	run, kind, event, from, to, facts string
+	run, kind              string
+	semantics              int
+	event, from, to, facts string
 }
 
+// encode fails unless the record decodes back to t: JSON silently replaces
+// invalid UTF-8, and a value type is the only event form a read returns.
 func encode(t harness.Transition) (record, error) {
 	if t.Event == nil {
 		return record{}, errors.New("sqlite: transition has no event")
 	}
-	r := record{run: t.From.RunID, kind: t.Event.Kind()}
+	r := record{run: t.From.RunID, kind: t.Event.Kind(), semantics: core.SemanticsVersion}
 	if t.To.RunID != r.run {
 		return r, fmt.Errorf("sqlite: transition moves run %q to run %q", r.run, t.To.RunID)
-	}
-	if events[r.kind] != reflect.TypeOf(t.Event) {
-		return r, fmt.Errorf("%w: event %T of kind %q", ErrIncompatible, t.Event, r.kind)
 	}
 	for dst, v := range map[*string]any{&r.event: t.Event, &r.from: t.From, &r.to: t.To, &r.facts: t.Facts} {
 		data, err := json.Marshal(v)
@@ -286,6 +293,13 @@ func encode(t harness.Transition) (record, error) {
 			return r, err
 		}
 		*dst = string(data)
+	}
+	back, err := r.decode()
+	if err != nil {
+		return r, err
+	}
+	if !reflect.DeepEqual(back, harness.Transition{From: t.From, Event: t.Event, To: t.To, Facts: t.Facts}) {
+		return r, fmt.Errorf("%w: %s transition %T does not survive encoding", ErrIncompatible, r.kind, t.Event)
 	}
 	return r, nil
 }
