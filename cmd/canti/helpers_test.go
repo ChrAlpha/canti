@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -173,12 +174,14 @@ func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() res
 }
 
 // fixture is one workspace and state directory driven against a scripted
-// model with a fake API key.
+// model with a fake API key. When the test ends it fails if the key appears
+// in any CLI output or any file under the state directory.
 type fixture struct {
 	t                *testing.T
 	workspace, state string
 	key              string
 	model            *scriptedModel
+	output           strings.Builder
 }
 
 func newFixture(t *testing.T, script map[int]core.Decision) *fixture {
@@ -189,6 +192,19 @@ func newFixture(t *testing.T, script map[int]core.Decision) *fixture {
 		t.Fatal(err)
 	}
 	f.model = newScriptedModel(t, f.key, script)
+	t.Cleanup(func() {
+		if strings.Contains(f.output.String(), f.key) {
+			t.Error("CLI output holds the credential")
+		}
+		filepath.WalkDir(f.state, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && d.Type().IsRegular() {
+				if data, err := os.ReadFile(path); err != nil || bytes.Contains(data, []byte(f.key)) {
+					t.Errorf("%s holds the credential: %v", path, err)
+				}
+			}
+			return nil
+		})
+	})
 	return f
 }
 
@@ -207,7 +223,12 @@ func (f *fixture) start(env []string, command string, args ...string) (*exec.Cmd
 	if command == "run" || command == "resume" {
 		all = append(all, "-model-url", f.model.URL)
 	}
-	return startCLI(f.t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
+	cmd, wait := startCLI(f.t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
+	return cmd, func() result {
+		r := wait()
+		f.output.WriteString(r.stdout + r.stderr)
+		return r
+	}
 }
 
 // status is the object the status command prints.

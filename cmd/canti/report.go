@@ -78,15 +78,13 @@ func (a *app) encoder() *json.Encoder {
 	return enc
 }
 
-// open opens the workspace journal, holding the workspace lock until done
-// when lock is set. Unless create is set, a missing journal is an error.
 // read opens the workspace journal without the lock and finds the run.
 func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, func(), error) {
 	store, done, err := a.open(ctx, false, false)
 	if err != nil {
 		return nil, harness.Run{}, nil, err
 	}
-	run, err := a.find(ctx, store)
+	run, _, err := a.find(ctx, store)
 	if err != nil {
 		done()
 	}
@@ -111,6 +109,10 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 			"record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\".\n", s.RunID, s.EffectID)
 		return exitResolution, nil
 	}
-	fmt.Fprintf(a.stderr, "canti: run %s is %s; continue it with \"canti resume -run %[1]s\".\n", s.RunID, s.Phase)
+	next := "resume"
+	if s.Phase == core.PhaseCancelling {
+		next = "stop"
+	}
+	fmt.Fprintf(a.stderr, "canti: run %s is %s; continue it with \"canti %s -run %[1]s\".\n", s.RunID, s.Phase, next)
 	return active, nil
 }

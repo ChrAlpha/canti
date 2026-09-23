@@ -167,8 +167,7 @@ func runFlag(fs *flag.FlagSet, a *app) {
 }
 
 func modelURL(fs *flag.FlagSet) *string {
-	return fs.String("model-url", cmp.Or(os.Getenv("ANTHROPIC_BASE_URL"), "https://api.anthropic.com"),
-		"Anthropic API base `URL` (default $ANTHROPIC_BASE_URL); not stored with the run")
+	return fs.String("model-url", "", "Anthropic API base `URL` (default $ANTHROPIC_BASE_URL, else https://api.anthropic.com); not saved with the run")
 }
 
 func runCommand(fs *flag.FlagSet, a *app) action {
@@ -187,14 +186,18 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitUsage, err
 		}
-		m, err := newModel(s.config, *url)
+		cred, err := credentials()
+		if err != nil {
+			return exitError, err
+		}
+		m, err := newModel(s.config, *url, cred)
 		if err != nil {
 			return exitError, err
 		}
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
 			return exitError, err
 		}
-		x, err := a.executor(s.config)
+		x, err := docker.New(executorConfig(s.config, a.state))
 		if err != nil {
 			return exitError, err
 		}
@@ -224,10 +227,11 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 	once := fs.Bool("once", false, "perform exactly one step")
 	url := modelURL(fs)
 	return func(ctx context.Context) (int, error) {
-		if _, err := credentials(); err != nil {
+		cred, err := credentials()
+		if err != nil {
 			return exitError, err
 		}
-		model := func(c config) (harness.Model, error) { return newModel(c, *url) }
+		model := func(c config) (harness.Model, error) { return newModel(c, *url, cred) }
 		return a.with(ctx, model, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
 			return a.drive(ctx, l, id, *once)
 		})
@@ -244,7 +248,7 @@ func stopCommand(fs *flag.FlagSet, a *app) action {
 		ctx, cancel := context.WithTimeout(ctx, *cleanup)
 		defer cancel()
 		return a.with(ctx, withoutModel, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
-			return l.Stop(ctx, id, core.StopCancelled)
+			return stop(ctx, l, id)
 		})
 	}
 }
@@ -283,6 +287,8 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
+// open opens the workspace journal, holding the workspace lock until done
+// when lock is set. Unless create is set, a missing journal is an error.
 func (a *app) open(ctx context.Context, lock, create bool) (*sqlite.Store, func(), error) {
 	path := filepath.Join(a.state, "canti.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && !create {
@@ -311,42 +317,43 @@ func (a *app) open(ctx context.Context, lock, create bool) (*sqlite.Store, func(
 	return store, func() { store.Close(); release() }, nil
 }
 
-func (a *app) find(ctx context.Context, store *sqlite.Store) (harness.Run, error) {
+// find returns the selected run and its stored config.
+func (a *app) find(ctx context.Context, store *sqlite.Store) (harness.Run, config, error) {
+	var run harness.Run
+	var err error
 	if a.runID != "" {
-		run, err := store.Run(ctx, a.runID)
-		if errors.Is(err, harness.ErrNotFound) {
+		if run, err = store.Run(ctx, a.runID); errors.Is(err, harness.ErrNotFound) {
 			err = fmt.Errorf("run %q not found in workspace %s", a.runID, a.workspace)
 		}
-		return run, err
-	}
-	run, err := store.LastRun(ctx)
-	if errors.Is(err, harness.ErrNotFound) {
+	} else if run, err = store.LastRun(ctx); errors.Is(err, harness.ErrNotFound) {
 		err = fmt.Errorf("no runs in workspace %s", a.workspace)
 	}
-	return run, err
+	if err != nil {
+		return run, config{}, err
+	}
+	c, err := decodeConfig(run, a.workspace)
+	return run, c, err
 }
 
 func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	last, err := store.LastRun(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return nil
+	}
 	var snap harness.Snapshot
+	if err == nil {
+		_, err = decodeConfig(last, a.workspace)
+	}
 	if err == nil {
 		snap, err = store.Latest(ctx, last.ID)
 	}
 	switch p := snap.State.Phase; {
-	case errors.Is(err, harness.ErrNotFound):
-		return nil
-	case err == nil && p != core.PhaseReturned && p != core.PhaseStopped:
-		return fmt.Errorf("run %s in workspace %s is %s: resume or stop it first", last.ID, a.workspace, p)
+	case err != nil || p == core.PhaseReturned || p == core.PhaseStopped:
+		return err
+	case p == core.PhaseNeedsResolution:
+		return fmt.Errorf("run %s needs resolution: resolve it first", last.ID)
 	}
-	return err
-}
-
-func (a *app) executor(c config) (*docker.Executor, error) {
-	x, err := docker.New(executorConfig(c, a.state))
-	if err != nil {
-		return nil, fmt.Errorf("executor for workspace %s and state %s: %w", c.Workspace, a.state, err)
-	}
-	return x, nil
+	return fmt.Errorf("run %s is %s: resume or stop it first", last.ID, snap.State.Phase)
 }
 
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
@@ -366,10 +373,18 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 		return exitError, err
 	}
 	defer done()
-	run, err := a.find(ctx, store)
+	run, c, err := a.find(ctx, store)
+	var m harness.Model
+	var x *docker.Executor
 	var l *harness.Loop
 	if err == nil {
-		l, err = a.rebuild(store, run, model)
+		m, err = model(c)
+	}
+	if err == nil {
+		x, err = docker.New(executorConfig(c, a.state))
+	}
+	if err == nil {
+		l, err = a.loop(store, x, m, c, run.Budget)
 	}
 	if err != nil {
 		return exitError, err
@@ -378,31 +393,27 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 	return a.report(snap, err, active)
 }
 
-func (a *app) rebuild(store *sqlite.Store, run harness.Run, model func(config) (harness.Model, error)) (*harness.Loop, error) {
-	c, err := decodeConfig(run)
-	if err == nil && c.Workspace != a.workspace {
-		err = fmt.Errorf("run %s belongs to workspace %s", run.ID, c.Workspace)
-	}
-	if err != nil {
-		return nil, err
-	}
-	m, err := model(c)
-	if err != nil {
-		return nil, err
-	}
-	x, err := a.executor(c)
-	if err != nil {
-		return nil, err
-	}
-	return a.loop(store, x, m, c, run.Budget)
-}
-
 // drive runs the loop, or one step of it with once. The first SIGINT or
 // SIGTERM shuts the controller down and then stops the run persistently
-// within the cleanup deadline, which a second signal cuts short.
+// within the cleanup deadline; the second abandons the cleanup.
 func (a *app) drive(ctx context.Context, l *harness.Loop, id string, once bool) (harness.Snapshot, error) {
-	loopCtx, release := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer release()
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	loopCtx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
+	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
+	defer abandon()
+	go func() {
+		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+			select {
+			case <-sig:
+				cancel()
+			case <-cleanupCtx.Done():
+				return
+			}
+		}
+	}()
 	step := l.Run
 	if once {
 		step = l.Step
@@ -412,9 +423,15 @@ func (a *app) drive(ctx context.Context, l *harness.Loop, id string, once bool) 
 		return snap, err
 	}
 	a.log.Warn("stopping the run after a signal", "run_id", id)
-	timeout, cancel := context.WithTimeout(ctx, stopCleanup)
+	cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
 	defer cancel()
-	cleanup, release := signal.NotifyContext(timeout, os.Interrupt, syscall.SIGTERM)
-	defer release()
-	return l.Stop(cleanup, id, core.StopCancelled)
+	return stop(cleanup, l, id)
+}
+
+func stop(ctx context.Context, l *harness.Loop, id string) (harness.Snapshot, error) {
+	snap, err := l.Stop(ctx, id, core.StopCancelled)
+	if err != nil {
+		err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\"", id, err)
+	}
+	return snap, err
 }

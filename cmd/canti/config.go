@@ -68,7 +68,10 @@ func (s *spec) register(fs *flag.FlagSet) {
 
 func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.config, s.budget
-	if min(int64(c.Pids), c.OutputLimit, int64(c.MaxTokens), int64(c.History), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0 {
+	switch {
+	case c.History < 1:
+		return harness.Run{}, core.State{}, errors.New("-history must be positive")
+	case min(int64(c.Pids), c.OutputLimit, int64(c.MaxTokens), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
 	}
 	var id [16]byte
@@ -82,12 +85,17 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	return run, initial, err
 }
 
-func decodeConfig(run harness.Run) (config, error) {
+// decodeConfig returns the stored config of run, which must belong to
+// workspace.
+func decodeConfig(run harness.Run, workspace string) (config, error) {
 	var c config
 	d := json.NewDecoder(bytes.NewReader(run.Config))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&c); err != nil {
 		return c, fmt.Errorf("run %s has an unreadable config: %w", run.ID, err)
+	}
+	if c.Workspace != workspace {
+		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)
 	}
 	return c, nil
 }
@@ -101,22 +109,23 @@ func executorConfig(c config, state string) docker.Config {
 
 type credential struct{ apiKey, authToken string }
 
+// credentials reads the model credential and removes it from the
+// environment, so that no child process inherits it.
 func credentials() (credential, error) {
-	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
-		return credential{apiKey: k}, nil
+	c := credential{apiKey: os.Getenv("ANTHROPIC_API_KEY"), authToken: os.Getenv("ANTHROPIC_AUTH_TOKEN")}
+	os.Unsetenv("ANTHROPIC_API_KEY")
+	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
+	switch {
+	case c.apiKey != "":
+		return credential{apiKey: c.apiKey}, nil
+	case c.authToken != "":
+		return c, nil
 	}
-	if t := os.Getenv("ANTHROPIC_AUTH_TOKEN"); t != "" {
-		return credential{authToken: t}, nil
-	}
-	return credential{}, errors.New("set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call the model")
+	return c, errors.New("set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call the model")
 }
 
-func newModel(c config, url string) (harness.Model, error) {
-	cred, err := credentials()
-	if err != nil {
-		return nil, err
-	}
-	return anthropic.New(modelConfig(c, url, cred))
+func newModel(c config, url string, cred credential) (harness.Model, error) {
+	return anthropic.New(modelConfig(c, cmp.Or(url, os.Getenv("ANTHROPIC_BASE_URL")), cred))
 }
 
 func modelConfig(c config, url string, cred credential) anthropic.Config {

@@ -22,15 +22,16 @@ import (
 
 // TestMain runs the binary as the CLI when CANTI_TEST_MAIN=1. There
 // CANTI_TEST_CRASH=before:KIND or after:KIND kills the process with SIGKILL
-// right before, or right after, it commits the first transition of KIND.
+// right before, or right after, it commits the first transition of KIND;
+// block:KIND holds that commit until its context is done.
 func TestMain(m *testing.M) {
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
 			when, kind, _ := strings.Cut(spec, ":")
-			if when != "before" && when != "after" {
-				panic("CANTI_TEST_CRASH must be before:KIND or after:KIND")
+			if when != "before" && when != "after" && when != "block" {
+				panic("CANTI_TEST_CRASH must be before:KIND, after:KIND, or block:KIND")
 			}
-			wrapJournal = func(j harness.Journal) harness.Journal { return crashing{j, when == "before", kind} }
+			wrapJournal = func(j harness.Journal) harness.Journal { return crashing{j, when, kind} }
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 	}
@@ -39,15 +40,17 @@ func TestMain(m *testing.M) {
 
 type crashing struct {
 	harness.Journal
-	before bool
-	kind   string
+	when, kind string
 }
 
 func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
-	if t.Event.Kind() != c.kind {
+	switch {
+	case t.Event.Kind() != c.kind:
 		return c.Journal.Commit(ctx, t)
-	}
-	if c.before {
+	case c.when == "block":
+		<-ctx.Done()
+		return ctx.Err()
+	case c.when == "before":
 		kill()
 	}
 	err := c.Journal.Commit(ctx, t)
@@ -65,6 +68,8 @@ func kill() {
 func TestUsageAndVersion(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, tc := range []struct {
 		args           []string
 		code           int
@@ -82,6 +87,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"status", "-log-level", "loud"}, exitUsage, "", "loud"},
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "0"}, exitUsage, "", "-max-steps"},
+		{[]string{"run", "-goal", "g", "-history", "0"}, exitUsage, "", "-history"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
 		{[]string{"resolve"}, exitUsage, "", "exactly one of -job and -execution"},
 		{[]string{"resolve", "-job", "-execution", "cancelled"}, exitUsage, "", "exactly one of -job and -execution"},
@@ -199,15 +205,6 @@ func TestRunReturnsWithoutExecuting(t *testing.T) {
 	if r.code != exitOK || r.stdout != "nothing to do\n" || len(f.model.requests()) != 1 {
 		t.Errorf("resume of a returned run = %d, %d requests\nstdout: %s", r.code, len(f.model.requests()), r.stdout)
 	}
-	files, _ := filepath.Glob(filepath.Join(f.state, "canti.db*"))
-	for _, name := range files {
-		if data, err := os.ReadFile(name); err != nil || bytes.Contains(data, []byte(f.key)) {
-			t.Errorf("%s holds the credential: %v", name, err)
-		}
-	}
-	if out := f.cli(nil, "history").stdout + r.stderr; strings.Contains(out, f.key) {
-		t.Error("output holds the credential")
-	}
 }
 
 func TestRunRefusesWhileTheLatestRunIsOpen(t *testing.T) {
@@ -291,6 +288,74 @@ func TestASignalStopsTheRunPersistently(t *testing.T) {
 	}
 }
 
+func TestASecondSignalAbandonsTheCleanup(t *testing.T) {
+	f := newFixture(t, nil)
+	held := f.model.holdRequests()
+	cmd, wait := f.start([]string{"CANTI_TEST_CRASH=block:stop_requested"}, "run", "-goal", "g")
+	select {
+	case <-held:
+	case <-time.After(time.Minute):
+		t.Fatal("the model was never called")
+	}
+	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		if err := cmd.Process.Signal(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "context canceled; finish with \"canti stop -run") {
+		t.Fatalf("doubly interrupted run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started"}) {
+		t.Errorf("history = %q", kinds(h))
+	}
+	if r := f.cli(nil, "stop"); r.code != exitStopped {
+		t.Errorf("stop = %d\nstderr: %s", r.code, r.stderr)
+	}
+}
+
+func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
+	noDocker := []string{"PATH=" + t.TempDir()}
+	r := f.cli(noDocker, "run", "-goal", "g")
+	if r.code != exitResolution || !strings.Contains(r.stderr, "canti resolve -run") {
+		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if s := f.status(); s.Phase != core.PhaseNeedsResolution || s.EffectID == "" || s.JobID != "" {
+		t.Fatalf("status = %+v", s)
+	}
+	if r := f.cli(noDocker, "resume"); r.code != exitResolution {
+		t.Errorf("resume = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(noDocker, "run", "-goal", "again"); r.code != exitError || !strings.Contains(r.stderr, "resolve it first") {
+		t.Errorf("run over an unresolved run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(noDocker, "resolve", "-job"); r.code != exitError {
+		t.Errorf("resolve -job without docker = %d\nstderr: %s", r.code, r.stderr)
+	}
+	r = runCLI(t, noDocker, "resolve", "-workspace", f.workspace, "-state", f.state, "-execution", "failed_to_start", "-note", "checked by hand")
+	if r.code != exitOK || !strings.Contains(r.stderr, "canti resume -run") {
+		t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+	}
+	h := f.history()
+	last := h[len(h)-1]
+	want := harness.Observation{Execution: core.ExecutionFailedToStart, Preview: "checked by hand", Output: harness.ArtifactRef{Detail: "resolved by operator"}}
+	if last.Kind != "resolved" || last.To != core.PhaseIdle || last.Facts.Observation == nil || *last.Facts.Observation != want {
+		t.Errorf("resolution = %+v", last)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Errorf("resume after the resolution = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	other := t.TempDir()
+	for _, c := range []string{"status", "history", "stop"} {
+		if r := runCLI(t, nil, c, "-workspace", other, "-state", f.state); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
+			t.Errorf("%s from another workspace = %d\nstderr: %s", c, r.code, r.stderr)
+		}
+	}
+	if r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-goal", "g", "-workspace", other, "-state", f.state); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
+		t.Errorf("run from another workspace = %d\nstderr: %s", r.code, r.stderr)
+	}
+}
+
 func TestDefaultStateDirectory(t *testing.T) {
 	ws := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
@@ -361,7 +426,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if run.Goal != "goal" || run.Constraints != "constraints" || run.Budget != budget || !run.Created.Equal(now) {
 		t.Errorf("run = %+v", run)
 	}
-	c, err := decodeConfig(run)
+	c, err := decodeConfig(run, "/work")
 	if err != nil || c != s.config {
 		t.Fatalf("stored config = %+v, %v\nwant %+v", c, err, s.config)
 	}
@@ -383,24 +448,26 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if _, _, err := newRun("goal", "", parseSpec(t, "-job-timeout", "-1s"), now); err == nil {
 		t.Error("a negative budget was accepted")
 	}
-	run.Config = []byte(`{"image":"x","unknown":1}`)
-	if _, err := decodeConfig(run); err == nil {
+	if _, err := decodeConfig(run, "/elsewhere"); err == nil {
+		t.Error("a config of another workspace was accepted")
+	}
+	run.Config = []byte(`{"workspace":"/work","unknown":1}`)
+	if _, err := decodeConfig(run, "/work"); err == nil {
 		t.Error("an unknown config field was accepted")
 	}
 }
 
-func TestCredentialsPreferTheAPIKey(t *testing.T) {
+func TestCredentialsPreferTheAPIKeyAndLeaveTheEnvironment(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "key")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
 	if c, err := credentials(); err != nil || c != (credential{apiKey: "key"}) {
 		t.Errorf("credentials = %+v, %v", c, err)
 	}
-	t.Setenv("ANTHROPIC_API_KEY", "")
+	if _, err := credentials(); err == nil {
+		t.Error("the credential stayed in the environment")
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
 	if c, err := credentials(); err != nil || c != (credential{authToken: "token"}) {
 		t.Errorf("credentials = %+v, %v", c, err)
-	}
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
-	if _, err := credentials(); err == nil {
-		t.Error("no credential was accepted")
 	}
 }
