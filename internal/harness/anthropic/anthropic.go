@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,8 +70,12 @@ func New(cfg Config) (*Model, error) {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.anthropic.com"
 	}
-	if u, err := url.Parse(cfg.BaseURL); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, errors.New("anthropic: BaseURL must be an absolute http(s) URL")
+	}
+	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return nil, errors.New("anthropic: BaseURL must use https unless it is a loopback address")
 	}
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = 16000
@@ -177,6 +182,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	}
 	defer res.Body.Close()
 	resp.Body, err = io.ReadAll(io.LimitReader(res.Body, m.cfg.MaxResponseBytes+1))
+	resp.Body = bytes.ReplaceAll(resp.Body, []byte(m.cfg.APIKey+m.cfg.AuthToken), []byte("[redacted]"))
 	if err != nil || ctx.Err() != nil {
 		return resp, m.failure(ctx, attempt, err)
 	}

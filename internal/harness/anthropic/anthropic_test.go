@@ -99,6 +99,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		"both credentials": {APIKey: apiKey, AuthToken: authToken, Model: "m"},
 		"no model":         {APIKey: apiKey},
 		"relative url":     {APIKey: apiKey, Model: "m", BaseURL: "api.anthropic.com"},
+		"cleartext remote": {APIKey: apiKey, Model: "m", BaseURL: "http://api.example.com"},
 		"negative tokens":  {APIKey: apiKey, Model: "m", MaxTokens: -1},
 		"negative timeout": {APIKey: apiKey, Model: "m", Timeout: -time.Second},
 		"negative limit":   {APIKey: apiKey, Model: "m", MaxResponseBytes: -1},
@@ -126,13 +127,13 @@ func TestFreeze(t *testing.T) {
 		{"auth token and max tokens", func(c *anthropic.Config) { c.APIKey, c.AuthToken, c.MaxTokens = "", authToken, 512 }, strings.Replace(base, "16000", "512", 1) + `}`, protocol},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newModel(t, "http://unused.test", tc.edit)
+			m := newModel(t, "https://unused.test", tc.edit)
 			req := freeze(t, m)
 			want := harness.Request{Body: []byte(tc.body), Model: "claude-opus-5", Protocol: tc.protocol, Adapter: adapter}
 			if !reflect.DeepEqual(req, want) {
 				t.Fatalf("Freeze =\n%s %s %s %s\nwant\n%s %s %s %s", req.Body, req.Model, req.Protocol, req.Adapter, want.Body, want.Model, want.Protocol, want.Adapter)
 			}
-			if again := freeze(t, newModel(t, "http://other.test", tc.edit)); !reflect.DeepEqual(again, req) {
+			if again := freeze(t, newModel(t, "https://other.test", tc.edit)); !reflect.DeepEqual(again, req) {
 				t.Fatalf("Freeze is not deterministic: %s vs %s", again.Body, req.Body)
 			}
 			noSecret(t, nil, harness.Response{Body: req.Body, Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter})
@@ -141,7 +142,7 @@ func TestFreeze(t *testing.T) {
 }
 
 func TestFreezeOmitsEmptySystemAndRequiresUser(t *testing.T) {
-	m := newModel(t, "http://unused.test", nil)
+	m := newModel(t, "https://unused.test", nil)
 	req, err := m.Freeze(harness.Prompt{User: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -310,6 +311,34 @@ func TestCompleteMapsStatus(t *testing.T) {
 			}
 			if hits.Load() != 1 {
 				t.Errorf("sent %d requests, want 1", hits.Load())
+			}
+			noSecret(t, err, resp)
+		})
+	}
+}
+
+func TestNewAllowsCleartextOnlyToLoopback(t *testing.T) {
+	for _, url := range []string{"http://127.0.0.1:8080", "http://[::1]:8080", "http://localhost:8080", "https://api.example.com"} {
+		if _, err := anthropic.New(anthropic.Config{APIKey: apiKey, Model: "m", BaseURL: url}); err != nil {
+			t.Errorf("New(%s) = %v", url, err)
+		}
+	}
+}
+
+func TestCompleteRedactsAnEchoedCredential(t *testing.T) {
+	for name, edit := range map[string]func(*anthropic.Config){
+		"api key":    nil,
+		"auth token": func(c *anthropic.Config) { c.APIKey, c.AuthToken = "", authToken },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				echoed := r.Header.Get("x-api-key") + strings.TrimPrefix(r.Header.Get("authorization"), "Bearer ")
+				reply(http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"bad key `+echoed+`"}}`)(w, r)
+			})
+			m := newModel(t, srv.URL, edit)
+			resp, err := m.Complete(context.Background(), freeze(t, m))
+			if err == nil || !strings.Contains(err.Error(), "bad key [redacted]") || !strings.Contains(string(resp.Body), "bad key [redacted]") {
+				t.Fatalf("Complete = %q, %v; want the echoed credential redacted", resp.Body, err)
 			}
 			noSecret(t, err, resp)
 		})
@@ -539,7 +568,7 @@ func TestDecision(t *testing.T) {
 		{"not json", "<html>oops</html>", "<html>oops</html>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := newModel(t, "http://unused.test", nil).Decision(harness.Response{Body: []byte(tc.body), Complete: true})
+			got := newModel(t, "https://unused.test", nil).Decision(harness.Response{Body: []byte(tc.body), Complete: true})
 			if string(got) != tc.want {
 				t.Fatalf("Decision = %s, want %s", got, tc.want)
 			}
