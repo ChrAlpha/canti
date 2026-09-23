@@ -309,8 +309,8 @@ execution backend.
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
 
-`harness.Loop` performs these actions; redisplaying a handoff or a stop is
-left to its host.
+`harness.Loop` performs these actions, bounding cleanup by the deadline of its
+caller's context; redisplaying a handoff or a stop is left to its host.
 
 A retryable model request assumes the provider does not execute hosted tools.
 Request replay can incur another charge and does not promise the same response.
@@ -382,9 +382,9 @@ are measured by the harness and reported as `StopRequested` with a reason.
 Stop on return, cancellation, exhausted budgets, protocol failure, or
 abandonment; the state preserves the reason. `harness.Loop` checks the
 wall-time, token, and output-byte budgets before each step and the wall time
-while it waits on a job, and observes a job it cancels past
-`Budget.JobTimeout` as `timed_out`. See [V1 acceptance](v1-acceptance.md)
-for the required evidence.
+while it waits on a job. It cancels a job past `Budget.JobTimeout` when the
+backend reports the job's start time and observes it as `timed_out`. See
+[V1 acceptance](v1-acceptance.md) for the required evidence.
 
 ## Complexity budget
 

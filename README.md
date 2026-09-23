@@ -63,8 +63,8 @@ Every I/O follows the committed phase that authorizes it, so a restart resumes
 from the last committed state by asking the core for its intent again. The
 recovery and fresh-step paths share the same transition code.
 
-SQLite storage, a concrete model adapter, a queryable execution backend, and
-the loop that drives intents are not implemented. `return` means control was
+`harness.Loop` drives committed intents to a halt over a SQLite journal, an
+Anthropic Messages adapter, and a Docker executor. `return` means control was
 handed back; it does not claim that the task succeeded.
 
 ## Development
