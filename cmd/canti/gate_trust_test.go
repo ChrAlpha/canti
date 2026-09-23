@@ -70,7 +70,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 		"echo '== touch'", `touch /canti/artifacts/x; echo "touch=$?"`,
 		"echo '== root'", "ls -la /",
 		"echo '== state'", "ls " + f.state + `; echo "ls=$?"`,
-		"echo '== journal'", `find / \( -path /proc -o -path /sys \) -prune -o \( -name 'canti.db*' -o -name docker.sock \) -print 2>/dev/null`,
+		"echo '== journal'", `find / \( -path /proc -o -path /sys \) -prune -o \( -name 'canti.db*' -o -name docker.sock -o -path /etc/hostname \) -print 2>/dev/null`,
 		"echo '== net'", "ls /sys/class/net",
 		"echo '== wget'", "wget -q -T 2 -O- " + f.model.URL + `; echo "wget=$?"`,
 		"echo end",
@@ -138,7 +138,10 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	if !strings.Contains(s["state"], "No such file or directory") || strings.Contains(s["state"], "ls=0") {
 		t.Errorf("the state directory in the job = %q", s["state"])
 	}
-	if s["journal"] != "" || s["net"] != "lo\n" {
+	if !strings.Contains(s["root"], " canti\n") || !strings.Contains(s["root"], " workspace\n") {
+		t.Errorf("job root = %q", s["root"])
+	}
+	if s["journal"] != "/etc/hostname\n" || s["net"] != "lo\n" {
 		t.Errorf("journal files %q, network interfaces %q", s["journal"], s["net"])
 	}
 	if !strings.Contains(s["wget"], "wget=") || strings.Contains(s["wget"], "wget=0") || strings.Contains(s["wget"], "unexpected credentials") {
@@ -160,7 +163,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 		t.Errorf("container config = %+v", c)
 	}
 	evLog(t, image, "trust boundary", "fixture key and CANTI_TRUST_PROBE in the CLI environment; job probes env, uid, caps, mounts, state, journal, network",
-		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s; state and journal absent; interfaces %s; wget failed",
+		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s; state and journal absent; interfaces %s only; model URL unreachable",
 			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], strings.TrimSpace(s["net"])),
 		fmt.Sprintf("output %d bytes, network %s, cap-drop %v, user %s", len(data), c.HostConfig.NetworkMode, c.HostConfig.CapDrop, c.Config.User))
 }

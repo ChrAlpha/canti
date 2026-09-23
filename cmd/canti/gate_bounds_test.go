@@ -151,10 +151,11 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 	for _, tc := range []struct {
 		name, failure string
 		first         reply
+		paid          int64
 	}{
-		{"overloaded", "status 529 overloaded_error", reply{status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`}},
-		{"max_tokens", `stop_reason "max_tokens"`, reply{stopReason: "max_tokens", text: `{"kind":"exec","payload":"echo truncated > trunc.txt"}`}},
-		{"cut", "unexpected EOF", reply{cut: true}},
+		{"overloaded", "status 529 overloaded_error", reply{status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`}, 2},
+		{"max_tokens", `stop_reason "max_tokens"`, reply{stopReason: "max_tokens", text: `{"kind":"exec","payload":"echo truncated > trunc.txt"}`}, 3},
+		{"cut", "unexpected EOF", reply{cut: true}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo ok >> ok.txt"}, 2: {Kind: core.Return, Payload: "done"}})
@@ -221,6 +222,9 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 			}
 			if ids := evContainers(t, f.state, true); len(ids) != 1 {
 				t.Errorf("containers %q, want the one job of attempt 2", ids)
+			}
+			if s := f.status(); s.Totals.InputTokens != 100*tc.paid || s.Totals.OutputTokens != 10*tc.paid {
+				t.Errorf("totals = %+v, want the usage of %d responses", s.Totals, tc.paid)
 			}
 			evInspect(t, evJob(t, h))
 			evLog(t, image, "frozen request replay", "step 1 attempt 1: "+tc.name,
@@ -294,7 +298,7 @@ func TestGateLargeOutput(t *testing.T) {
 			t.Errorf("step 2 request of %d bytes lacks %q: %v\n%s", len(sent[1]), ref, err, prompt)
 		}
 		if read := h[13].Facts.Observation; read == nil || read.Preview != fmt.Sprintf("%s %d\n", where, limit) {
-			t.Errorf("reading the artifact in the job = %+v", read)
+			t.Fatalf("reading the artifact in the job = %+v", read)
 		}
 		if s := f.status(); s.Totals.OutputBytes != limit+h[13].Facts.Observation.Output.Bytes {
 			t.Errorf("status totals = %+v", s.Totals)
@@ -354,7 +358,7 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 		}
 		obs := h[6].Facts.Observation
 		if obs == nil || obs.Execution != core.ExecutionTimedOut || obs.ExitCode == nil || obs.Output.Complete || !strings.Contains(obs.Output.Detail, "cancelled") {
-			t.Errorf("observation = %+v", obs)
+			t.Fatalf("observation = %+v", obs)
 		}
 		c := evInspect(t, evJob(t, h))
 		ran := c.State.FinishedAt.Sub(c.State.StartedAt)
@@ -505,8 +509,8 @@ func TestGateFiniteRuns(t *testing.T) {
 			"stopped attempts_exhausted with both failures recorded, nothing dispatched", fmt.Sprintf("2 byte-identical requests, exit %d", r.code))
 	})
 	t.Run("wall_time", func(t *testing.T) {
-		const wall, grace, slack = 3 * time.Second, 5 * time.Second, 5 * time.Second
-		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 30"}})
+		const wall, grace, slack = 5 * time.Second, 5 * time.Second, 5 * time.Second
+		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 60"}})
 		begin := time.Now()
 		r := f.cli(nil, "run", "-goal", "g", "-image", image, "-wall-time", wall.String())
 		elapsed := time.Since(begin)
@@ -521,7 +525,7 @@ func TestGateFiniteRuns(t *testing.T) {
 			t.Errorf("run took %v, want at most %v", elapsed, wall+grace+slack)
 		}
 		c := evInspect(t, evJob(t, f.history()))
-		evLog(t, image, "finite runs (wall time)", "-wall-time 3s on sleep 30",
+		evLog(t, image, "finite runs (wall time)", "-wall-time 5s on sleep 60",
 			fmt.Sprintf("stopped timed_out, job observed %s exit %d, container exited", obs.Execution, *obs.ExitCode),
 			fmt.Sprintf("run %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), wall+grace+slack, c.State.FinishedAt.Sub(c.State.StartedAt).Round(time.Millisecond)))
 	})
