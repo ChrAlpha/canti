@@ -25,6 +25,7 @@ type backend struct {
 type memoryJob struct {
 	effect harness.Effect
 	job    harness.Job
+	next   harness.JobStatus
 }
 
 type memory struct {
@@ -50,14 +51,14 @@ func (b *backend) bind(effect harness.Effect) *memoryJob {
 	}
 	b.jobs[effect.ID] = j
 	if b.mutant == "bind runs" {
-		b.run(j)
+		b.runs[effect.ID]++
 	}
 	return j
 }
 
 func (b *backend) run(j *memoryJob) {
 	b.runs[j.effect.ID]++
-	j.job.Status = harness.JobRunning
+	j.job.Status, j.next = harness.JobRunning, harness.JobSucceeded
 }
 
 func (m *memory) Bind(_ context.Context, effect harness.Effect) (harness.Job, error) {
@@ -87,10 +88,10 @@ func (m *memory) Start(_ context.Context, effectID string) (harness.Job, error) 
 	defer m.mu.Unlock()
 	j, ok := m.jobs[effectID]
 	if !ok {
-		if m.mutant != "unbound start" {
-			return harness.Job{}, errors.New("no job is bound")
+		if m.mutant == "unbound start" {
+			return harness.Job{}, nil
 		}
-		j = m.bind(harness.Effect{ID: effectID})
+		return harness.Job{}, errors.New("no job is bound")
 	}
 	cancelled := j.job.Status == harness.JobCancelled
 	switch {
@@ -104,17 +105,24 @@ func (m *memory) Start(_ context.Context, effectID string) (harness.Job, error) 
 			defer m.mu.Unlock()
 			m.runs[effectID]++
 		})
+	case cancelled && m.mutant == "lying fence":
+		m.runs[effectID]++
 	case m.mutant == "volatile latch":
 		if !cancelled && !m.latched[effectID] {
 			m.latched[effectID] = true
-			m.run(j)
+			if j.job.Status == harness.JobPending {
+				m.run(j)
+			} else {
+				m.runs[effectID]++
+			}
 		}
-	case j.job.Status == harness.JobPending && !m.fenced[effectID]:
-		switch m.mutant {
-		case "unlocked gate":
-			m.pause()
-		case "racy fence":
-			j.job.Status = harness.JobRunning
+	case j.job.Status != harness.JobPending || m.fenced[effectID]:
+	case m.mutant == "racy fence":
+		j.job.Status, j.next = harness.JobRunning, harness.JobSucceeded
+		m.pause()
+		m.runs[effectID]++
+	default:
+		if m.mutant == "unlocked gate" {
 			m.pause()
 		}
 		m.run(j)
@@ -138,10 +146,12 @@ func (m *memory) Inspect(_ context.Context, effectID string) (harness.Job, bool,
 	if !ok {
 		return harness.Job{}, false, nil
 	}
+	if j.job.Status == harness.JobPending && m.mutant == "inspect starts" {
+		m.run(j)
+	}
 	job := j.job
-	if job.Status == harness.JobRunning {
-		code := 0
-		j.job.Status, j.job.ExitCode = harness.JobSucceeded, &code
+	if j.next != "" {
+		j.job.Status, j.next = j.next, ""
 	}
 	return job, true, nil
 }
@@ -149,10 +159,7 @@ func (m *memory) Inspect(_ context.Context, effectID string) (harness.Job, bool,
 func (m *memory) Cancel(_ context.Context, effectID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	switch {
-	case m.mutant == "unfenced":
-		return nil
-	case m.mutant == "cancel twice fails" && m.fenced[effectID]:
+	if m.mutant == "cancel twice fails" && m.fenced[effectID] {
 		return errors.New("already cancelled")
 	}
 	m.fenced[effectID] = true
@@ -162,7 +169,11 @@ func (m *memory) Cancel(_ context.Context, effectID string) error {
 	}
 	switch status := j.job.Status; {
 	case status == harness.JobPending && m.mutant == "silent fence":
-	case status == harness.JobPending, status == harness.JobRunning, m.mutant == "cancel rewrites":
+	case status == harness.JobRunning && m.mutant == "optimistic cancel":
+		j.job.Status, j.next = harness.JobCancelled, harness.JobSucceeded
+	case status == harness.JobRunning:
+		j.next = harness.JobCancelled
+	case status == harness.JobPending, m.mutant == "cancel rewrites":
 		j.job.Status = harness.JobCancelled
 	}
 	return nil
@@ -200,6 +211,7 @@ func TestCheckRejectsEachViolation(t *testing.T) {
 	for _, tt := range []struct{ mutant, violated string }{
 		{"bind runs", "bind"},
 		{"duplicate bind", "bind"},
+		{"inspect starts", "bind"},
 		{"rebind", "changed-command"},
 		{"volatile latch", "start-once"},
 		{"bind resets", "start-once"},
@@ -207,12 +219,12 @@ func TestCheckRejectsEachViolation(t *testing.T) {
 		{"cancel rewrites", "start-once"},
 		{"unbound start", "unbound-start"},
 		{"inspect creates", "unbound-start"},
-		{"unfenced", "fence-bound"},
 		{"silent fence", "fence-bound"},
 		{"fence resets", "fence-bound"},
 		{"cancel twice fails", "fence-bound"},
 		{"fenced start fails", "fence-bound"},
-		{"late run", "fence-bound"},
+		{"lying fence", "fence-bound fence-unbound"},
+		{"late run", "fence-bound fence-unbound"},
 		{"fenced bind fails", "fence-unbound"},
 		{"late bind", "fence-unbound"},
 		{"fenced inspect fails", "fence-unbound"},
@@ -220,11 +232,14 @@ func TestCheckRejectsEachViolation(t *testing.T) {
 		{"racy bind", "concurrent-start"},
 		{"busy start", "concurrent-start"},
 		{"racy fence", "start-cancel"},
+		{"optimistic cancel", "start-cancel"},
 	} {
 		t.Run(tt.mutant, func(t *testing.T) {
 			err := executortest.Check(checkContext(t), fixture(newBackend(tt.mutant)))
-			if err == nil || !strings.Contains(err.Error(), "executortest: "+tt.violated+":") {
-				t.Fatalf("Check() = %v, want a %s violation", err, tt.violated)
+			for _, violated := range strings.Fields(tt.violated) {
+				if err == nil || !strings.Contains(err.Error(), "executortest: "+violated+":") {
+					t.Fatalf("Check() = %v, want a %s violation", err, violated)
+				}
 			}
 		})
 	}

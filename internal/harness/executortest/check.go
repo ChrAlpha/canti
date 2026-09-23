@@ -13,10 +13,11 @@ import (
 )
 
 // Fixture opens the executor under test and observes its executions. Open
-// must return a new executor over the same backend on every call, as a
-// restarted or competing controller would see it; Check opens one for every
-// operation. Effect must return a fresh effect with a distinct command for
-// each name, and Runs must report how many times the command of an effect has
+// must return a new executor on every call that shares only clients and
+// durable backend state, as a restarted or competing controller would see
+// it; Check opens one for every operation and leaves releasing them to the
+// fixture. Effect must return a fresh effect with a distinct command for each
+// name, and Runs must report how many times the command of an effect has
 // started running.
 type Fixture struct {
 	Open   func(context.Context) (harness.Executor, error)
@@ -26,7 +27,7 @@ type Fixture struct {
 
 // Check runs every contract case against f and returns the violations
 // joined, or nil. After the cases it counts every run again, so an execution
-// that lands late still fails its case. ctx bounds the whole check, including
+// that lands before Check returns still fails its case. ctx bounds the whole check, including
 // waits for started jobs to finish. Check cannot inject crashes, and it
 // detects a start racing a cancel only when the two calls overlap.
 func Check(ctx context.Context, f Fixture) error {
@@ -84,7 +85,7 @@ func (c checker) bind(ctx context.Context, e harness.Effect) error {
 	if err := c.rebind(ctx, e, job.ID); err != nil {
 		return err
 	}
-	return c.ran(ctx, e, 0)
+	return c.expect(ctx, e, c.inspect, harness.JobPending, 0)
 }
 
 func (c checker) changedCommand(ctx context.Context, e harness.Effect) error {
@@ -106,7 +107,7 @@ func (c checker) startOnce(ctx context.Context, e harness.Effect) error {
 	if err := c.start(ctx, e, bound.ID); err != nil {
 		return err
 	}
-	finished, err := c.settle(ctx, e)
+	settled, err := c.settle(ctx, e)
 	if err != nil {
 		return err
 	}
@@ -119,7 +120,7 @@ func (c checker) startOnce(ctx context.Context, e harness.Effect) error {
 	if err := c.x.Cancel(ctx, e.ID); err != nil {
 		return err
 	}
-	return c.expect(ctx, e, c.settle, finished.Status, 1)
+	return c.expect(ctx, e, c.inspect, settled.Status, 1)
 }
 
 func (c checker) unboundStart(ctx context.Context, e harness.Effect) error {
@@ -196,20 +197,17 @@ func (c checker) startCancel(ctx context.Context, e harness.Effect) error {
 	go func() { started <- c.start(ctx, e, bound.ID) }()
 	time.Sleep(5 * time.Millisecond)
 	var cancelled harness.Job
+	var runs int
 	if err = c.x.Cancel(ctx, e.ID); err == nil {
-		cancelled, err = c.inspect(ctx, e)
+		cancelled, err = c.settle(ctx, e)
+	}
+	if err == nil {
+		runs, err = c.Runs(ctx, e.ID)
 	}
 	if err := errors.Join(err, <-started); err != nil {
 		return err
 	}
-	settled, err := c.settle(ctx, e)
-	if err != nil {
-		return err
-	}
-	if finished(cancelled.Status) && settled.Status != cancelled.Status {
-		return fmt.Errorf("job was %q after cancel returned, then %q", cancelled.Status, settled.Status)
-	}
-	return nil
+	return c.expect(ctx, e, c.inspect, cancelled.Status, runs)
 }
 
 func (c checker) rebind(ctx context.Context, e harness.Effect, jobID string) error {
@@ -239,7 +237,7 @@ func (c checker) inspect(ctx context.Context, e harness.Effect) (harness.Job, er
 func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, error) {
 	for {
 		job, err := c.inspect(ctx, e)
-		if err != nil || finished(job.Status) {
+		if err != nil || terminal(job.Status) {
 			return job, err
 		}
 		select {
@@ -250,7 +248,7 @@ func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, err
 	}
 }
 
-func finished(status harness.JobStatus) bool {
+func terminal(status harness.JobStatus) bool {
 	return status == harness.JobSucceeded || status == harness.JobFailed || status == harness.JobCancelled
 }
 

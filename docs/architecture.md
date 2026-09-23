@@ -356,12 +356,10 @@ controller re-issues `Start` from `job_bound`, so the latch must survive
 restarts; a naive `docker start` restarts an exited container, so the
 executor gates on its own record instead. A fenced job reports `cancelled`,
 which is what lets a `cancelling` run commit a true result while a stale
-controller may still hold `job_bound`; `Bind` and `Start` report such a job
-as-is instead of failing, so a known outcome never becomes an unknown one.
-`executortest.Check` exercises the latch through a fresh executor for every
-call, as a restarted or competing controller would see it. It cannot inject
-a crash between latching and launching, and it catches a start racing a
-cancel only when the calls overlap. A concrete executor must bind the
+controller may still hold `job_bound`; `Bind` and `Start` report it as-is,
+exactly as they report a job whose latch `Start` set. `executortest.Check`
+exercises the latch through a fresh executor for every call, as a restarted
+or competing controller would see it. A concrete executor must bind the
 effect ID to the full execution specification it runs under (backend,
 workspace, working directory, interpretation of the command, resource
 limits), not only the command text, and must reject changed content under an
