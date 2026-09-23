@@ -29,18 +29,18 @@ var events = func() map[string]reflect.Type {
 
 // Run returns the stored run record.
 func (s *Store) Run(ctx context.Context, runID string) (harness.Run, error) {
-	return s.run(ctx, `SELECT run FROM runs WHERE id = ?`, runID)
+	return s.run(s.stmts[runSQL].QueryRowContext(ctx, runID))
 }
 
 // LastRun returns the run created most recently in this store.
 func (s *Store) LastRun(ctx context.Context) (harness.Run, error) {
-	return s.run(ctx, `SELECT run FROM runs ORDER BY n DESC LIMIT 1`)
+	return s.run(s.stmts[lastRunSQL].QueryRowContext(ctx))
 }
 
-func (s *Store) run(ctx context.Context, query string, args ...any) (harness.Run, error) {
+func (s *Store) run(row *sql.Row) (harness.Run, error) {
 	var run harness.Run
 	var record []byte
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&record); err != nil {
+	if err := row.Scan(&record); err != nil {
 		return run, missing(err, "run")
 	}
 	return run, strict(record, &run)
@@ -49,22 +49,18 @@ func (s *Store) run(ctx context.Context, query string, args ...any) (harness.Run
 // Latest returns the last committed transition's sequence and state, or
 // sequence zero with the initial state of a run without transitions.
 func (s *Store) Latest(ctx context.Context, runID string) (harness.Snapshot, error) {
-	return latest(ctx, s.db, runID)
+	return s.latest(ctx, nil, runID)
 }
 
-const latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
-
-func latest(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, runID string) (harness.Snapshot, error) {
+func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.Snapshot, error) {
 	var snap harness.Snapshot
 	var kind string
 	var semantics int
 	var state []byte
-	err := q.QueryRowContext(ctx, latestSQL, runID).Scan(&snap.Seq, &kind, &semantics, &state)
+	err := s.stmt(ctx, tx, latestSQL).QueryRowContext(ctx, runID).Scan(&snap.Seq, &kind, &semantics, &state)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		err = missing(q.QueryRowContext(ctx, `SELECT semantics, initial FROM runs WHERE id = ?`, runID).Scan(&semantics, &state), "run")
+		err = missing(s.stmt(ctx, tx, initialSQL).QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
 	case err == nil:
 		err = known(kind)
 	}
@@ -83,56 +79,62 @@ func latest(ctx context.Context, q interface {
 // Totals returns the run-wide sums maintained by Commit.
 func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error) {
 	var t harness.Totals
-	err := s.db.QueryRowContext(ctx, `SELECT input_tokens, output_tokens, output_bytes, steps FROM runs WHERE id = ?`, runID).
-		Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps)
+	err := s.stmts[totalsSQL].QueryRowContext(ctx, runID).Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps)
 	return t, missing(err, "run")
 }
-
-const transitionsSQL = `SELECT seq, event_id, kind, semantics, event, from_state, to_state, facts
-	FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
 
 // Transitions returns at most limit transitions of the run with a sequence
 // after after, in commit order.
 func (s *Store) Transitions(ctx context.Context, runID string, after int64, limit int) ([]harness.Transition, error) {
-	if limit < 1 {
-		return nil, s.exists(ctx, runID)
-	}
-	rows, err := s.db.QueryContext(ctx, transitionsSQL, runID, after, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []harness.Transition
-	for rows.Next() {
+	err := s.each(ctx, runID, limit, transitionsSQL, []any{runID, after, limit}, func(rows *sql.Rows) error {
 		var t harness.Transition
 		var kind string
 		var semantics int
 		var event, from, to, facts []byte
 		if err := rows.Scan(&t.Seq, &t.EventID, &kind, &semantics, &event, &from, &to, &facts); err != nil {
-			return nil, err
+			return err
 		}
 		if err := cmp.Or(known(kind), current(semantics)); err != nil {
-			return nil, err
+			return err
 		}
 		value := reflect.New(events[kind])
-		if err := errors.Join(strict(event, value.Interface()), strict(from, &t.From), strict(to, &t.To), strict(facts, &t.Facts)); err != nil {
-			return nil, err
+		if err := cmp.Or(strict(event, value.Interface()), strict(from, &t.From), strict(to, &t.To), strict(facts, &t.Facts)); err != nil {
+			return err
 		}
 		t.Event = value.Elem().Interface().(core.Event)
 		out = append(out, t)
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-	if len(out) == 0 {
-		return nil, s.exists(ctx, runID)
 	}
 	return out, nil
 }
 
-func (s *Store) exists(ctx context.Context, runID string) error {
-	var one int
-	return missing(s.db.QueryRowContext(ctx, `SELECT 1 FROM runs WHERE id = ?`, runID).Scan(&one), "run")
+// each calls fn for every row of a query bounded by limit and reports an
+// unknown run when no row matched.
+func (s *Store) each(ctx context.Context, runID string, limit int, query string, args []any, fn func(*sql.Rows) error) error {
+	if limit > 0 {
+		rows, err := s.stmts[query].QueryContext(ctx, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		found := false
+		for rows.Next() {
+			found = true
+			if err := fn(rows); err != nil {
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil || found {
+			return err
+		}
+	}
+	var semantics int
+	var state []byte
+	return missing(s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
 }
 
 func known(kind string) error {
