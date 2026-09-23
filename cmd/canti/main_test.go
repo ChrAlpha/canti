@@ -367,7 +367,7 @@ func TestASecondSignalAbandonsTheCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := wait()
-			if r.code != exitError || !strings.Contains(r.stderr, `; finish with "canti stop -run`) || strings.Contains(r.stderr, "deadline exceeded") {
+			if r.code != exitError || !strings.Contains(r.stderr, `; finish with "canti stop -run`) || !strings.Contains(r.stderr, "with a longer -cleanup") || strings.Contains(r.stderr, "deadline exceeded") {
 				t.Fatalf("doubly interrupted run = %d\nstderr: %s", r.code, r.stderr)
 			}
 			if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started"}) {

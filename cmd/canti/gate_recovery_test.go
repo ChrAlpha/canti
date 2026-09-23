@@ -349,7 +349,7 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 	h := f.history()
 	last := h[len(h)-1]
 	if !slices.Equal(kinds(h), slices.Concat(stepKinds[:6], []string{"outcome_unknown"})) || last.To != core.PhaseNeedsResolution ||
-		!strings.Contains(last.Facts.Failure, "inspect failed") || !strings.Contains(last.Facts.Failure, "job status unavailable") {
+		!strings.Contains(last.Facts.Failure, "inspect failed 6 consecutive times") || !strings.Contains(last.Facts.Failure, "job status unavailable") {
 		t.Fatalf("history = %q, last %+v", kinds(h), last)
 	}
 	s := h[len(h)-2].State

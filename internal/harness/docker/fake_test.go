@@ -246,6 +246,15 @@ func TestRejectedStartKeepsItsReason(t *testing.T) {
 	if want := "job never started: unable to find user nosuchuser; logs unavailable: exit status 1"; err != nil || job.Status != harness.JobFailedToStart || job.Output.Detail != want {
 		t.Fatalf("Start(rejected, capture fails) = %+v, %v; want detail %q", job, err, want)
 	}
+	w := newFake(t)
+	w.rejecting("")
+	if err := os.WriteFile(filepath.Join(w.x.artifacts(), "e"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job, err = w.x.Start(t.Context(), "e")
+	if err != nil || !strings.HasPrefix(job.Output.Detail, "job never started: unable to find user nosuchuser; artifact write failed: ") {
+		t.Fatalf("Start(rejected, artifact unwritable) = %+v, %v; want the reason kept", job, err)
+	}
 	g := newFake(t)
 	g.rejecting("")
 	if _, err := g.x.Start(t.Context(), "e"); err != nil {
