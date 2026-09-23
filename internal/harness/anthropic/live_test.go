@@ -22,7 +22,8 @@ func TestLiveDecision(t *testing.T) {
 	if model == "" {
 		model = "claude-opus-5"
 	}
-	m, err := anthropic.New(anthropic.Config{APIKey: key, Model: model, MaxTokens: 1024, StructuredOutput: true, Timeout: 2 * time.Minute})
+	m, err := anthropic.New(anthropic.Config{BaseURL: os.Getenv("ANTHROPIC_BASE_URL"), APIKey: key, Model: model, MaxTokens: 1024,
+		StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", Timeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
