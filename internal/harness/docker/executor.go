@@ -72,8 +72,20 @@ type Config struct {
 // observe a half-done start. Once recorded, a finished job is reported from
 // its record alone. Host environment variables never reach a job.
 type Executor struct {
-	cfg Config
+	cfg      Config
+	timeouts timeouts
 }
+
+// Every docker CLI call has its own deadline, so a hung daemon cannot hold an
+// effect's lock forever: callTimeout, extended by Config.StopGrace for a
+// stop, or captureTimeout to read a job's whole Docker log.
+const (
+	callTimeout    = time.Minute
+	captureTimeout = 10 * time.Minute
+)
+
+// timeouts are the deadlines of docker CLI calls; tests shorten them.
+type timeouts struct{ call, capture time.Duration }
 
 var _ harness.Executor = (*Executor)(nil)
 
@@ -115,7 +127,7 @@ func New(cfg Config) (*Executor, error) {
 		return nil, err
 	}
 	cfg.Workspace, cfg.State = ws, state
-	return &Executor{cfg: cfg}, nil
+	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, captureTimeout}}, nil
 }
 
 func resolve(path string) (string, error) {
@@ -190,8 +202,6 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 
 var errMissing = errors.New("no such container")
 
-const launchTimeout = 30 * time.Second
-
 func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, x.cfg.Docker, args...)
 	cmd.WaitDelay = time.Second
@@ -199,13 +209,25 @@ func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// docker runs one CLI call under its own deadline. Once ctx is done it
+// returns ctx's error; a call past only its own deadline fails with an
+// ordinary error, never mistaken for the caller's shutdown.
 func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
-	out, err := x.command(ctx, args...).Output()
+	limit := x.timeouts.call
+	if args[0] == "stop" {
+		limit += x.cfg.StopGrace
+	}
+	call, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	out, err := x.command(call, args...).Output()
 	if err == nil {
 		return out, nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, cerr
+	}
+	if call.Err() != nil {
+		return nil, fmt.Errorf("docker %s: no response within %v", args[0], limit)
 	}
 	var stderr string
 	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
@@ -307,8 +329,8 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 
 // Start sets the effect's latch and starts its never-started container,
 // unless the latch was already set, in which case it only reports the job.
-// Once the latch is set the launch finishes even if ctx is done, within a
-// fixed timeout.
+// Once the latch is set the launch finishes even if ctx is done, each of its
+// calls within its own deadline.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -336,8 +358,7 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 		if err := setLatch(x.dir(effectID), latchStart); err != nil {
 			return harness.Job{}, err
 		}
-		launch, cancel := context.WithTimeout(context.WithoutCancel(ctx), launchTimeout)
-		defer cancel()
+		launch := context.WithoutCancel(ctx)
 		if _, err := x.docker(launch, "start", c.ID); err != nil {
 			return harness.Job{}, err
 		}

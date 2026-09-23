@@ -62,9 +62,13 @@ func (f *fake) missing() {
 }
 
 func (f *fake) container(status string, exit int) string {
+	return f.containerOf("e", "true", status, exit)
+}
+
+func (f *fake) containerOf(id, command, status string, exit int) string {
 	var c container
-	c.ID = "c-e"
-	c.Config.Labels = map[string]string{"canti.effect": "e", "canti.state": f.x.cfg.State, "canti.spec": specHash(f.x.runArgs("true"))}
+	c.ID = "c-" + id
+	c.Config.Labels = map[string]string{"canti.effect": id, "canti.state": f.x.cfg.State, "canti.spec": specHash(f.x.runArgs(command))}
 	c.State.Status, c.State.ExitCode = status, exit
 	c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
@@ -199,6 +203,41 @@ func TestLaunchOutlivesShutdown(t *testing.T) {
 	}
 	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobRunning {
 		t.Fatalf("Inspect() = %+v, %v; want running", job, err)
+	}
+}
+
+func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
+	f := newFake(t)
+	f.x.timeouts = timeouts{call: 50 * time.Millisecond, capture: 100 * time.Millisecond}
+	f.x.cfg.StopGrace = 200 * time.Millisecond
+	f.latch(latchStart)
+	ordinary := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), "no response within") &&
+			!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)
+	}
+	f.set("inspect.sh", "exec sleep 5\n")
+	began := time.Now()
+	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !ordinary(err) || time.Since(began) > time.Second {
+		t.Fatalf("Inspect(hung) = %v, %v after %v; want an ordinary error at the call's deadline", found, err, time.Since(began))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, _, err := f.x.Inspect(ctx, "e"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Inspect(hung, caller's deadline first) = %v, want the caller's error", err)
+	}
+	f.unset("inspect.sh")
+	f.set("inspect.out", f.container("running", 0))
+	f.set("stop.sh", "exec sleep 5\n")
+	began = time.Now()
+	if err := f.x.Cancel(t.Context(), "e"); !ordinary(err) || time.Since(began) < 250*time.Millisecond {
+		t.Fatalf("Cancel(hung) = %v after %v; want an ordinary error after the stop grace", err, time.Since(began))
+	}
+	f.unset("stop.sh")
+	f.set("inspect.out", f.container("exited", 143))
+	f.set("logs.sh", "exec sleep 5\n")
+	job, _, err := f.x.Inspect(t.Context(), "e")
+	if err != nil || job.Status != harness.JobCancelled || job.Output.Available || !strings.HasPrefix(job.Output.Detail, "logs unavailable: no response within") {
+		t.Fatalf("Inspect(capture hung) = %+v, %v; want the job recorded without output", job, err)
 	}
 }
 
