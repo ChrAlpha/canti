@@ -381,8 +381,8 @@ grants new budget within a run. Wall-time, token, storage, and cost budgets
 are measured by the harness and reported as `StopRequested` with a reason.
 Stop on return, cancellation, exhausted budgets, protocol failure, or
 abandonment; the state preserves the reason. `harness.Loop` checks the
-wall-time, token, and output-byte budgets before each step and the wall time
-while it waits on a job. It cancels a job past `Budget.JobTimeout` when the
+wall-time, token, and output-byte budgets before each step except decoding a
+response already paid for, and the wall time while it waits on a job. It cancels a job past `Budget.JobTimeout` when the
 backend reports the job's start time and observes it as `timed_out`. See
 [V1 acceptance](v1-acceptance.md) for the required evidence.
 

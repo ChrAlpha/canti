@@ -92,8 +92,8 @@ func (l *Loop) Run(ctx context.Context, runID string) (Snapshot, error) {
 
 // Step performs the one intent of the run's latest snapshot and returns the
 // snapshot it reached; a halted run is returned unchanged. Unless the run
-// already records a stop reason, a spent wall-time, token, or output budget
-// is committed as a stop instead. On an error the snapshot is the last one
+// already records a stop reason or only has a saved response to decode, a
+// spent wall-time, token, or output budget is committed as a stop instead. On an error the snapshot is the last one
 // committed. Once ctx is done nothing more is committed, and a later Step
 // resumes from the journal.
 func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
@@ -105,7 +105,7 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 	if err != nil {
 		return snap, err
 	}
-	if snap.State.Reason == "" {
+	if snap.State.Reason == "" && snap.State.Intent() != core.IntentDecode {
 		reason, why, err := l.spent(ctx, run)
 		if err != nil {
 			return snap, err

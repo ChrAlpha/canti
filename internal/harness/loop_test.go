@@ -346,17 +346,24 @@ func TestLoopStopsWhenMeasuredBudgetsRunOut(t *testing.T) {
 		kinds   []string
 		failure string
 	}{
-		{"tokens", harness.Budget{Tokens: 110}, []string{"request_frozen", "attempt_started", "response_saved"}, "110 tokens"},
-		{"output bytes", harness.Budget{OutputBytes: 10}, cycle, "15 output bytes"},
+		{"tokens", harness.Budget{Tokens: 110}, []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "stop_requested", "observed"}, "110 tokens"},
+		{"output bytes", harness.Budget{OutputBytes: 10}, append(slices.Clone(cycle), "stop_requested"), "15 output bytes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFixture(t, limits, tt.budget, execReply("echo hello"), returnReply("done"))
 			wantState(t, f.run(f.loop()), core.PhaseStopped, core.StopBudgetExhausted)
-			f.wantKinds(tt.kinds, []string{"stop_requested"})
-			wantContains(t, f.last().Facts.Failure, tt.failure)
+			f.wantKinds(tt.kinds)
+			stops := slices.DeleteFunc(f.transitions(), func(tr harness.Transition) bool { return tr.Event.Kind() != "stop_requested" })
+			wantContains(t, stops[0].Facts.Failure, tt.failure)
 		})
 	}
+}
+
+func TestLoopDecodesAResponseSavedWithinBudget(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{Tokens: 110}, returnReply("done"))
+	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+	f.wantKinds([]string{"request_frozen", "attempt_started", "response_saved", "response_loaded"})
 }
 
 func TestLoopShowsNotes(t *testing.T) {

@@ -53,7 +53,8 @@ type Usage struct {
 }
 
 // StopError reports a model failure that no retry of the same bytes can fix;
-// the loop reports Reason through core.StopRequested.
+// the loop reports Reason through core.StopRequested, so it must be a reason
+// that event accepts: StopUnrecoverable or StopBudgetExhausted.
 type StopError struct {
 	Reason core.StopReason
 	Err    error
