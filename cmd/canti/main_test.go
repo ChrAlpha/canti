@@ -432,6 +432,30 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 	}
 }
 
+func TestHistoryPrintsEveryPageInOrder(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "done"}})
+	noDocker := []string{"PATH=" + t.TempDir()}
+	if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
+		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start"); r.code != exitOK {
+		t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK {
+		t.Fatalf("resume = %d\nstderr: %s", r.code, r.stderr)
+	}
+	step := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}
+	h := f.history()
+	if want := slices.Concat(step, []string{"outcome_unknown", "resolved"}, step); len(h) <= historyPage || !slices.Equal(kinds(h), want) {
+		t.Fatalf("history = %q\nwant %q", kinds(h), want)
+	}
+	for i, e := range h {
+		if e.Seq != int64(i+1) {
+			t.Errorf("line %d has seq %d", i, e.Seq)
+		}
+	}
+}
+
 func TestDefaultStateDirectory(t *testing.T) {
 	ws := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")

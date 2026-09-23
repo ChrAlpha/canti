@@ -43,6 +43,8 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
+const historyPage = 8
+
 func historyCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
@@ -53,7 +55,7 @@ func historyCommand(fs *flag.FlagSet, a *app) action {
 		defer done()
 		enc := a.encoder()
 		for after := int64(0); ; {
-			page, err := store.Transitions(ctx, run.ID, after, 256)
+			page, err := store.Transitions(ctx, run.ID, after, historyPage)
 			if err != nil {
 				return exitError, err
 			}
@@ -65,7 +67,7 @@ func historyCommand(fs *flag.FlagSet, a *app) action {
 				}
 				after = t.Seq
 			}
-			if len(page) < 256 {
+			if len(page) < historyPage {
 				return exitOK, nil
 			}
 		}
