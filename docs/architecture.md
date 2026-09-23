@@ -30,7 +30,7 @@ is not.
 | `internal/harness/artifacts.go` | Observation and output reference records | Types |
 | `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `internal/harness/docker` | One container per effect through the docker CLI, start latch, output capture | Fake-CLI tests and Docker integration tests |
-| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; one opt-in live test with no recorded run |
+| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
 | `cmd/canti` | CLI: commands, state directory, workspace lock, signals, credential | Subprocess tests; Docker-backed gate tests |
 
 The core imports only the standard library and holds no per-run state between

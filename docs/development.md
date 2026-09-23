@@ -56,6 +56,9 @@ or CI:
 ANTHROPIC_API_KEY=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
 ```
 
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` select another Messages endpoint
+and model, and `CANTI_LIVE_STRUCTURED=0` omits the decision schema.
+
 It skips without `ANTHROPIC_API_KEY`, uses `ANTHROPIC_MODEL` or
 `claude-opus-5`, caps the response at 1,024 output tokens, and may be billed.
 It checks one decision, not a loop.

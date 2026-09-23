@@ -5,8 +5,10 @@ a SQLite journal, a Docker executor, an Anthropic Messages adapter, and a CLI.
 Every integration gate below has concrete-backend evidence except where its
 status says otherwise. The model in every end-to-end test is a scripted local
 HTTP server speaking the Messages format: the adapter's HTTP path is
-exercised, a provider's behavior is not. No live provider run has been
-recorded.
+exercised, a provider's behavior is not. Live provider evidence is limited to
+the three manual samples recorded under
+[Live provider samples](#live-provider-samples-2026-09-23): one model through
+an Anthropic Messages-compatible gateway.
 
 ## Offline evidence
 
@@ -69,13 +71,17 @@ Results apply only to that revision and environment.
 | Finite runs | Partial | `TestGateFiniteRuns` (4 cases), `TestGateLargeOutput/disk_budget` | Step, attempt, wall-time, token, and output-byte budgets each stop a run with `steps_exhausted`, `attempts_exhausted`, `timed_out`, or `budget_exhausted`, with failure text on the stop for the measured budgets and on each failed attempt, keep earlier observations, and dispatch nothing after the budget is spent; a wall-time stop cancels the running job and records its result | Cost is not measured; tokens are provider-reported usage, so a run can exceed its token budget by one response; the wall-time stop during a model request is tested only with a fake model |
 | Trust boundary | Passed | `TestGateTrustBoundaryKeepsCredentialsAndStateOut`, `TestGateTrustBoundaryNotes` (2 cases), `TestGateTrustBoundaryProtectsFacts`, `docker.TestTrustBoundary` | A job sees no host environment variable, credential, or injected proxy; runs as the host uid with no capabilities and only a loopback interface, and its running container has network `none`, `CapDrop` `ALL`, and the host uid and gid; cannot reach the model URL; sees the artifacts read-only and neither the state directory nor the journal; cannot delete or forge committed artifacts or history, and forgeries stay in the workspace. The credential appears in no request body, CLI output, or state file. Notes written by a job reach the next prompt marked unverified; a notes symlink out of the workspace is reported unreadable and its target never enters a request | Docker is the isolation boundary: a shared kernel and the daemon's own security. The test credential is fake. The workspace is writable by the agent by design. A non-default network lets jobs reach the network |
 | Complete loop | Passed | `TestRunDrivesExecAndReturn`, `TestRunOnceStepsAcrossProcesses`, and every gate above | The concrete adapter, core, SQLite journal, and Docker executor drive exec, observation, a second exec that reads the first one's file, and return in one isolated workspace, in one process or one process per step | Scripted provider |
-| Live provider | Pending | `anthropic.TestLiveDecision` (`live` tag) | One real request decodes to one decision | Not run; no live loop exists as a test |
+| Live provider | Partial | `anthropic.TestLiveDecision` (`live` tag) and two manual `canti run` sessions ([samples](#live-provider-samples-2026-09-23)) | One real request with structured output decodes to one decision; two CLI runs drive real model decisions through the SQLite journal and Docker executor to `return`, one with structured output and one without, in which the first command failed with exit status 1 and the next decision corrected it | One model through a gateway, not Anthropic's API; manual runs, not a repeatable test; rate limits, refusals, fallbacks, and long runs are not exercised; three samples |
 
 The live test is opt-in and may be billed:
 
 ```sh
 ANTHROPIC_API_KEY=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
 ```
+
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` select another Messages endpoint
+and model; `CANTI_LIVE_STRUCTURED=0` sends the request without the decision
+schema.
 
 Neither a successful command nor a `return` decision proves the user's task
 succeeded. Do not claim exactly-once arbitrary shell effects: job identity
@@ -137,10 +143,30 @@ long-history rows.
 | Trust probe | 6,695 bytes of job output; uid 1000; artifacts `ro`, workspace `rw`; interfaces `lo` only |
 
 Run, effect, and job IDs appear in the test log of this run, which is not
-committed. Unmet: the live provider gate, the partial conditions above, OS
+committed. Unmet: live provider evidence beyond the samples below, the partial
+conditions above, OS
 crash or power loss, a Docker daemon restart, and retention: the gates' output
 and error artifacts are deleted with their temporary directories, and no
 run, effect, or job identity is committed.
+
+### Live provider samples, 2026-09-23
+
+Live provider evidence, run by hand from code revision `ee968c6` with the
+binary built from `53a4f11` (documentation changes only since `ee968c6`),
+the `live` test at `ee968c6` plus a change that reads `ANTHROPIC_BASE_URL`,
+on the platform above. Model `grok-4.7` through an Anthropic
+Messages-compatible gateway, protocol `anthropic-messages/2023-06-01`, adapter
+`canti-anthropic/1`, image `alpine:3.23`, `-fallbacks=false`,
+`-max-tokens 4096`, `-max-attempts 3`, `-job-timeout 1m`. The credential was
+passed in `ANTHROPIC_API_KEY` only; afterwards no file in the state
+directories, workspaces, or captured output contained it, and no container of
+either run remained. Usage is provider-reported; cost was not measured.
+
+| Sample | Budgets | Result | Usage (input / output tokens) | Time |
+| --- | --- | --- | --- | --- |
+| `TestLiveDecision`, structured output | 1,024 output tokens | `{"kind":"return","payload":"ok"}` | 3,368 / 316 | 10.8 s |
+| `canti run`, structured output: write `hello.txt`, verify it, return it | 6 steps, 5 min, 200,000 tokens | Exit status 0, stdout `canti live check`; one exec (`printf ... > /workspace/hello.txt && cat ...`, exit 0) then `return`; 11 transitions, one attempt per step; the file holds the line | 7,799 / 466 | 10 s |
+| `canti run`, `-structured=false`: write, run, and note `count.sh`, return its output | 8 steps, 6 min, 300,000 tokens | Exit status 0, stdout `17`; step 1 failed with exit status 1 (`can't create /workspace/.canti/notes.md`), step 2 added `mkdir -p` and printed `17`, step 3 returned; 18 transitions, one attempt per step; `17` equals the line count of `/etc/passwd` in the image, and the notes file holds it | 12,093 / 542 | 11 s |
 
 For each integration gate, retain:
 
@@ -171,9 +197,9 @@ above.
 
 Beyond V1:
 
-1. Record a live provider run under finite budgets, and exercise provider
-   behavior the scripted server cannot: rate limits, refusals, fallbacks, and
-   structured output.
+1. Extend live provider evidence to Anthropic's API and repeatable runs under
+   finite budgets, and exercise provider behavior the scripted server cannot:
+   rate limits, refusals, fallbacks, and long runs.
 2. Test OS crash and power loss on a durable filesystem, Docker daemon
    restarts, and host reboots.
 3. Stream job output to its artifact while the job runs, so host disk is

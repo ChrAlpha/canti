@@ -108,9 +108,10 @@ competing writers, retries with frozen bytes, large outputs, cancellation,
 budgets, and the container trust boundary. The model in every end-to-end test
 is a scripted local HTTP server speaking the Messages format.
 [V1 acceptance](docs/v1-acceptance.md) records each gate, its tests, and their
-limits; two gates are partial.
+limits; three gates are partial.
 
-Not verified: no run against a live provider has been recorded. SIGKILL tests
+Live provider evidence is limited to three manual samples with one model
+through an Anthropic Messages-compatible gateway. SIGKILL tests
 do not establish durability across power loss or OS crashes. Docker daemon
 restarts and host reboots are not tested, and several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and
