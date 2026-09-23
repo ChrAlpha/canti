@@ -14,18 +14,22 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-// PublishHistory makes the projection of run runID that jobs read under
-// root/runID complete for its committed facts: goal, constraints when set,
-// steps/<step number in 8 digits>/ with meta, command, and preview for
-// every completed step, and result once the run is closed. meta names an
-// available output under artifactDir, where jobs read the artifacts.
+// PublishHistory publishes the projection of run runID that jobs read under
+// root/runID: goal, constraints when set, steps/<step number in 8 digits>/
+// with meta, command, and preview for completed steps, and result once the
+// run is closed. meta names an available output under artifactDir, where
+// jobs read the artifacts.
 //
 // The projection is derived from the journal and never an authority. Each
 // file and step directory is published once, atomically, and never
 // rewritten; temporaries live in the run directory, which each call sweeps.
-// A missing steps directory is rebuilt from every completed step; otherwise
-// only the latest one is added, because a loop publishes before it freezes
-// each request. Callers must not publish one run concurrently.
+// A call adds whichever of the goal, the constraints, the latest completed
+// step, and the result is missing, which suffices because a loop publishes
+// before it freezes each request, and rebuilds a missing steps directory
+// from every completed step; a step directory removed inside an existing
+// steps directory is not detected. An entry it looks at that is not a
+// regular file, or not a directory where one belongs, fails the call; a
+// symlink is neither. Callers must not publish one run concurrently.
 func PublishHistory(ctx context.Context, j Journal, root, artifactDir, runID string) error {
 	run, err := j.Run(ctx, runID)
 	var snap Snapshot
@@ -52,6 +56,9 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	if _, err := exists(dir, true); err != nil {
+		return err
+	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
@@ -64,7 +71,7 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 	}
 	steps, found := filepath.Join(dir, "steps"), false
 	if err == nil {
-		found, err = exists(steps)
+		found, err = exists(steps, true)
 	}
 	switch {
 	case err != nil:
@@ -123,7 +130,12 @@ func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) err
 // them in a temporary directory of dir.
 func putStep(dir, steps, artifactDir string, r StepRecord) error {
 	target := filepath.Join(steps, fmt.Sprintf("%08d", r.Step))
-	if found, err := exists(target); err != nil || found {
+	if found, err := exists(target, true); err != nil || found {
+		for _, name := range [...]string{"meta", "command", "preview"} {
+			if err == nil {
+				_, err = exists(filepath.Join(target, name), false)
+			}
+		}
 		return err
 	}
 	tmp, err := os.MkdirTemp(dir, ".tmp-")
@@ -157,7 +169,7 @@ func writeStep(path, artifactDir string, r StepRecord) error {
 // putFile publishes data as dir/name unless it exists.
 func putFile(dir, name, data string) error {
 	target := filepath.Join(dir, name)
-	if found, err := exists(target); err != nil || found {
+	if found, err := exists(target, false); err != nil || found {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".tmp-")
@@ -214,12 +226,21 @@ func meta(r StepRecord, artifactDir string) string {
 	return b.String()
 }
 
-func exists(path string) (bool, error) {
-	_, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
+// exists reports whether path exists, failing unless it is a directory when
+// dir is set and a regular file otherwise; a symlink is neither.
+func exists(path string, dir bool) (bool, error) {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
+	case err != nil:
+		return false, err
+	case dir && !info.IsDir():
+		return false, fmt.Errorf("harness: step record %s is not a directory", path)
+	case !dir && !info.Mode().IsRegular():
+		return false, fmt.Errorf("harness: step record %s is not a regular file", path)
 	}
-	return err == nil, err
+	return true, nil
 }
 
 func syncDir(dir string) error {

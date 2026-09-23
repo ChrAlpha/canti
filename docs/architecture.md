@@ -440,15 +440,20 @@ step. That suffices by induction over the publication points:
   `canti run` repairs it.
 - `canti run` publishes the latest run of its state directory before it
   creates a run and refuses, creating nothing, when that fails, so every
-  earlier run a job sees is complete.
+  earlier run a job sees has its final step and result published.
 
 The records are never an authority: nothing in canti reads them back, and
 `status` and `history` read the journal. In the CLI only commands holding
 the workspace lock publish; concurrent publications of one run are not
-supported. A process of the same user that deletes or edits files inside a
-run directory is outside the trust model: a step other than the latest that
-it deletes, or a file that it edits, stays so until the `steps` directory is
-removed and rebuilt.
+supported. A publication fails when an entry it looks at has another type:
+the goal, constraints, result, and files of the latest step must be regular
+files, and the run directory, `steps`, and the latest step's directory real
+directories, never symlinks. A process of the same user that deletes or
+edits files inside a run directory is outside the trust model, and a
+publication detects only what it would add: a step directory other than the
+latest that such a process removes inside an existing `steps` directory, or
+a file that it edits, stays so until the `steps` directory is removed and
+rebuilt.
 
 ## Lifecycle boundaries
 

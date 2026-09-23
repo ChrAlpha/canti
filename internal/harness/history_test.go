@@ -305,6 +305,52 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 	}
 }
 
+func TestPublishHistoryRefusesRecordsOfAnotherType(t *testing.T) {
+	ok := 0
+	for _, tc := range []struct{ entry, plant string }{
+		{".", "link"}, {"goal", "link"}, {"constraints", "link"}, {"result", "link"}, {"steps", "link"},
+		{"steps/00000001", "link"}, {"steps/00000001/meta", "link"}, {"steps/00000001/command", "link"}, {"steps/00000001/preview", "link"},
+		{"goal", "dir"}, {"result", "dir"}, {"steps/00000001/preview", "dir"},
+		{".", "file"}, {"steps", "file"}, {"steps/00000001", "file"},
+	} {
+		t.Run(tc.plant+" "+tc.entry, func(t *testing.T) {
+			f := newFixture(t, limits, harness.Budget{})
+			r := runner(t, f)
+			seed(t, f, r, execDecision("true"), harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok}, false)
+			seed(t, f, r, core.Decision{Kind: core.Return, Payload: "done"}, harness.Observation{}, false)
+			publish(t, f, f.store, runID)
+			outside := t.TempDir()
+			if err := os.WriteFile(filepath.Join(outside, "file"), []byte("outside"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(f.cfg.History, runID, tc.entry)
+			info, err := os.Lstat(p)
+			if err == nil {
+				err = os.RemoveAll(p)
+			}
+			target := outside
+			if !info.IsDir() {
+				target = filepath.Join(outside, "file")
+			}
+			switch tc.plant {
+			case "link":
+				err = errors.Join(err, os.Symlink(target, p))
+			case "dir":
+				err = errors.Join(err, os.Mkdir(p, 0o755))
+			case "file":
+				err = errors.Join(err, os.WriteFile(p, nil, 0o644))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := harness.PublishHistory(context.Background(), f.store, f.cfg.History, f.cfg.ArtifactDir, runID); err == nil {
+				t.Fatalf("PublishHistory() accepted a %s for %s", tc.plant, tc.entry)
+			}
+			wantTree(t, outside, map[string]string{"file": "outside"})
+		})
+	}
+}
+
 // watching is a fakeModel that calls freeze before it freezes a prompt.
 type watching struct {
 	*fakeModel
