@@ -346,22 +346,22 @@ usage, timeouts, and the configuration and code revision used for the run.
 Resending a revision must reuse its frozen bytes; reading notes again or
 changing input selection requires a new revision.
 
-The execution backend is keyed by the stable effect ID. `Bind` finds or
-creates the job that owns the effect and must not execute anything; a
-deterministic per-effect identity (for Docker, a create with a name derived
-from the effect ID) makes late duplicates collide instead of running twice.
-Each effect has one durable start latch, set at most once and never reset:
-by `Start`, which runs the bound job, or by `Cancel`, after which no job of
-the effect can run. `Start` fails for an unbound effect, may only start the
-bound job, and once the latch is set is a no-op that reports the job as-is,
-even one that already finished — a naive `docker start` restarts an exited
-container and does not satisfy this, so the executor gates on its own record.
-`Inspect` and `Cancel` never create or start a job; `Cancel` is idempotent,
-never rewrites a finished outcome, and an unstarted job it fences — including
-one bound after the cancel — reports `cancelled`, which is what lets a
-`cancelling` run commit a true result while a stale controller may still hold
-`job_bound`. `executortest.Check` exercises this contract against any
-executor that can count its executions. A concrete executor must bind the
+The execution backend is keyed by the stable effect ID; the `Executor`
+comment states its full contract. `Bind` finds or creates the job that owns
+the effect and must not execute anything; a deterministic per-effect identity
+(for Docker, a create with a name derived from the effect ID) makes late
+duplicates collide instead of running twice. Each effect has one durable
+start latch, set once by `Start` or by `Cancel` and never reset. A resumed
+controller re-issues `Start` from `job_bound`, so the latch must survive
+restarts; a naive `docker start` restarts an exited container, so the
+executor gates on its own record instead. A fenced job reports `cancelled`,
+which is what lets a `cancelling` run commit a true result while a stale
+controller may still hold `job_bound`; `Bind` and `Start` report such a job
+as-is instead of failing, so a known outcome never becomes an unknown one.
+`executortest.Check` exercises the latch through a fresh executor for every
+call, as a restarted or competing controller would see it. It cannot inject
+a crash between latching and launching, and it catches a start racing a
+cancel only when the calls overlap. A concrete executor must bind the
 effect ID to the full execution specification it runs under (backend,
 workspace, working directory, interpretation of the command, resource
 limits), not only the command text, and must reject changed content under an
