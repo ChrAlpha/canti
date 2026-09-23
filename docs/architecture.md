@@ -407,10 +407,11 @@ reason. An operation timeout is a harness observation reported through the
 matching event for its boundary (`ResponseIncomplete`, `StopRequested`, or a
 `timed_out` observation).
 
-The CLI maps signals onto both. While `run` or `resume` drives a run, the
-first SIGINT or SIGTERM shuts the controller down and then calls `Loop.Stop`
-with `cancelled` under a new 30 s cleanup deadline, so an effect that may
-exist is cancelled and its true result recorded. A second signal abandons that
+The CLI maps signals onto both. `run` and `resume` catch SIGINT and SIGTERM
+from before they open the journal; a signal that arrives during setup is held
+until the loop is built. The first signal shuts the controller down and then
+calls `Loop.Stop` with `cancelled` under a new 30 s cleanup deadline, so an
+effect that may exist is cancelled and its true result recorded. A second signal abandons that
 cleanup, after which the CLI stops catching signals. `canti stop` performs the
 same persistent stop under `-cleanup` (30 s by default). A stop that is
 abandoned or misses its deadline leaves the run for a later `canti stop`.
