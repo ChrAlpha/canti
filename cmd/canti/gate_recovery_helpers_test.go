@@ -1,0 +1,195 @@
+//go:build integration
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/ChrAlpha/canti/core"
+)
+
+// recoveryFixture is a dockerFixture whose test also fails if a container of
+// its state directory is still running when the test ends.
+func recoveryFixture(t *testing.T, script map[int]core.Decision) (*fixture, string) {
+	t.Helper()
+	f, image := dockerFixture(t, script)
+	t.Cleanup(func() {
+		for _, c := range effectContainers(t, f.state) {
+			if c.state == "running" {
+				t.Errorf("container %s of effect %s is still running", c.id, c.effect)
+			}
+		}
+	})
+	return f, image
+}
+
+type effectContainer struct{ id, effect, state string }
+
+// effectContainers lists every container labelled with the state directory.
+func effectContainers(t *testing.T, state string) []effectContainer {
+	t.Helper()
+	state, err := filepath.EvalSymlinks(state)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	var out []byte
+	if err == nil {
+		out, err = exec.Command("docker", "ps", "-a", "--no-trunc", "--filter", "label=canti.state="+state,
+			"--format", `{{.ID}} {{.Label "canti.effect"}} {{.State}}`).Output()
+	}
+	if err != nil {
+		t.Errorf("list containers: %v", err)
+		return nil
+	}
+	var cs []effectContainer
+	for line := range strings.Lines(string(out)) {
+		var c effectContainer
+		if _, err := fmt.Sscan(line, &c.id, &c.effect, &c.state); err != nil {
+			t.Errorf("container line %q: %v", line, err)
+		}
+		cs = append(cs, c)
+	}
+	return cs
+}
+
+// boundJobs maps every effect of h to the one job its job_bound transitions
+// name.
+func boundJobs(t *testing.T, h []entry) map[string]string {
+	t.Helper()
+	jobs := map[string]string{}
+	for _, e := range h {
+		if e.Kind != "job_bound" {
+			continue
+		}
+		if job, ok := jobs[e.State.EffectID]; ok && job != e.State.JobID {
+			t.Errorf("effect %s is bound to jobs %s and %s", e.State.EffectID, job, e.State.JobID)
+		}
+		jobs[e.State.EffectID] = e.State.JobID
+	}
+	return jobs
+}
+
+// checkContainers checks that every effect bound in h owns exactly one
+// container, the bound job, which has exited, and that no other exists.
+func checkContainers(t *testing.T, f *fixture, h []entry) {
+	t.Helper()
+	got, want := map[string][]string{}, map[string][]string{}
+	for _, c := range effectContainers(t, f.state) {
+		got[c.effect] = append(got[c.effect], c.id+" "+c.state)
+	}
+	for effect, job := range boundJobs(t, h) {
+		want[effect] = []string{job + " exited"}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("containers by effect = %v\nwant %v", got, want)
+	}
+}
+
+func decodeEvent[E core.Event](raw string) (core.Event, error) {
+	var e E
+	err := strict(raw, &e)
+	return e, err
+}
+
+var eventDecoders = map[string]func(string) (core.Event, error){
+	"request_frozen": decodeEvent[core.RequestFrozen], "attempt_started": decodeEvent[core.AttemptStarted],
+	"response_saved": decodeEvent[core.ResponseSaved], "response_incomplete": decodeEvent[core.ResponseIncomplete],
+	"response_loaded": decodeEvent[core.ResponseLoaded], "job_bound": decodeEvent[core.JobBound],
+	"job_started": decodeEvent[core.JobStarted], "observed": decodeEvent[core.Observed],
+	"outcome_unknown": decodeEvent[core.OutcomeUnknown], "stop_requested": decodeEvent[core.StopRequested],
+	"resolved": decodeEvent[core.Resolved],
+}
+
+// checkReplay folds core.State.Next over the recorded events of h from the
+// fresh state of run and fails unless it reproduces every recorded
+// transition in an unbroken sequence.
+func checkReplay(t *testing.T, runID string, h []entry) {
+	t.Helper()
+	s, err := core.NewState(runID, parseSpec(t).limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range h {
+		decode, ok := eventDecoders[e.Kind]
+		if !ok {
+			t.Fatalf("seq %d has unknown kind %q", e.Seq, e.Kind)
+		}
+		event, err := decode(string(e.Event))
+		if err != nil || event.Kind() != e.Kind {
+			t.Fatalf("seq %d event %s: %v", e.Seq, e.Event, err)
+		}
+		next, err := s.Next(event)
+		if e.Seq != int64(i+1) || e.From != s.Phase || err != nil || next != e.State {
+			t.Fatalf("replay diverges at seq %d (%s from %s): got %+v, %v\nrecorded %+v", e.Seq, e.Kind, s.Phase, next, err, e.State)
+		}
+		s = next
+	}
+}
+
+// extends reports whether h begins with every entry of prefix unchanged.
+func extends(h, prefix []entry) bool {
+	return len(h) >= len(prefix) && slices.EqualFunc(h[:len(prefix)], prefix, func(a, b entry) bool { return reflect.DeepEqual(a, b) })
+}
+
+// crashRun runs the CLI with CANTI_TEST_CRASH=crash and fails unless the
+// process died by SIGKILL.
+func crashRun(t *testing.T, f *fixture, crash, command string, args ...string) {
+	t.Helper()
+	cmd, wait := f.start([]string{"CANTI_TEST_CRASH=" + crash}, command, args...)
+	if r := wait(); !killed(cmd) {
+		t.Fatalf("canti %s with %s = %d, not killed\nstdout: %s\nstderr: %s", command, crash, r.code, r.stdout, r.stderr)
+	}
+}
+
+func killed(cmd *exec.Cmd) bool {
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
+}
+
+// awaitPhase waits until the latest run of f reports phase.
+func awaitPhase(t *testing.T, f *fixture, phase core.Phase) {
+	t.Helper()
+	waitFor(t, func() bool {
+		r := f.cli(nil, "status")
+		var s status
+		return r.code == exitOK && strict(r.stdout, &s) == nil && s.Phase == phase
+	})
+}
+
+func writeFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkFile(t *testing.T, path, want string) {
+	t.Helper()
+	if data, err := os.ReadFile(path); err != nil || string(data) != want {
+		t.Errorf("%s = %q, %v; want %q", filepath.Base(path), data, err, want)
+	}
+}
+
+// evidence logs the one-line evidence record of a gate case.
+func evidence(t *testing.T, gate, injected, image string, f *fixture, h []entry) {
+	t.Helper()
+	var jobs []string
+	for _, e := range h {
+		if e.Kind == "job_bound" {
+			jobs = append(jobs, fmt.Sprintf("step%d:%s=%s", e.State.Step, e.State.EffectID, e.State.JobID))
+		}
+	}
+	last := h[len(h)-1]
+	t.Logf("evidence gate=%q label=%q injected=%q platform=%s/%s go=%s image=%s run=%s final=%s seqs=1..%d requests=%d jobs=%v",
+		gate, "concrete backend integration with a scripted provider", injected, runtime.GOOS, runtime.GOARCH, runtime.Version(),
+		image, last.State.RunID, last.To, last.Seq, len(f.model.requests()), jobs)
+}
