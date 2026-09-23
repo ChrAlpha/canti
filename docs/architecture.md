@@ -560,7 +560,8 @@ effect or state directory is an error, never adopted.
   Docker log; a failed removal is retried by the next report of the effect
   and by every `Bind` in the state directory. From then on the record is the
   authority: `Inspect`, `Bind`, and `Start` report the recorded job, `Bind`
-  still rejects a changed spec, and `Cancel` does nothing. Every report
+  still rejects a changed spec, `Cancel` does nothing, and a record that
+  does not decode strictly is an error, never a missing job. Every report
   re-checks the artifact, and a missing or resized file makes it unavailable
   with a detail.
 
