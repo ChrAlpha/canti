@@ -115,7 +115,9 @@ is a scripted local HTTP server speaking the Messages format.
 limits; three gates are partial.
 
 Live provider evidence is limited to three manual samples with one model
-through an Anthropic Messages-compatible gateway. SIGKILL tests
+through an Anthropic Messages-compatible gateway, recorded with the earlier
+adapter `canti-anthropic/1`; none is recorded yet for `canti-anthropic/2`,
+the only adapter the current code sends. SIGKILL tests
 do not establish durability across power loss or OS crashes. Docker daemon
 restarts and host reboots are not tested, and several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and
