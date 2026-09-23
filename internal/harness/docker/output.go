@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -140,18 +141,37 @@ func (x *Executor) finish(ctx context.Context, id string, job harness.Job, spec 
 	return job, nil
 }
 
-// recorded returns the effect's final record, if any, retrying the removal
-// of its container.
-func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error) {
+// load reads the effect's final record, if any. A record that is not exactly
+// a complete record of a finished job is an error, never missing or final.
+func (x *Executor) load(id string) (record, bool, error) {
 	data, err := os.ReadFile(x.record(id))
 	if errors.Is(err, fs.ErrNotExist) {
 		return record{}, false, nil
 	}
 	var rec record
 	if err == nil {
-		err = json.Unmarshal(data, &rec)
+		d := json.NewDecoder(bytes.NewReader(data))
+		d.DisallowUnknownFields()
+		if err = d.Decode(&rec); err == nil {
+			if _, end := d.Token(); end != io.EOF {
+				err = errors.New("trailing data")
+			}
+		}
+	}
+	if err == nil && (rec.ID == "" || rec.Spec == "" || !terminal(rec.Status)) {
+		err = errors.New("incomplete")
 	}
 	if err != nil {
+		return record{}, false, fmt.Errorf("docker: record of effect %s: %w", id, err)
+	}
+	return rec, true, nil
+}
+
+// recorded returns the effect's final record, if any, retrying the removal
+// of its container.
+func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error) {
+	rec, done, err := x.load(id)
+	if err != nil || !done {
 		return record{}, false, err
 	}
 	x.release(ctx, rec.ID)
@@ -180,8 +200,7 @@ func (x *Executor) sweep(ctx context.Context) {
 		if checkID(effect) != nil {
 			continue
 		}
-		var rec record
-		if data, err := os.ReadFile(x.record(effect)); err == nil && json.Unmarshal(data, &rec) == nil && rec.ID == id {
+		if rec, done, err := x.load(effect); err == nil && done && rec.ID == id {
 			x.release(ctx, id)
 		}
 	}

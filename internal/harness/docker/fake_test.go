@@ -419,7 +419,7 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}})
+		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: "spec"})
 		if err := publish(f.x.record(id), data, false); err != nil {
 			t.Fatal(err)
 		}
@@ -519,6 +519,50 @@ func TestUnpublishedRecordIsNotFinal(t *testing.T) {
 	f.unset("logs.sh")
 	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded || !job.Output.Complete || len(f.calls("rm")) != 1 {
 		t.Fatalf("Inspect() = %+v, %v; want the job recorded and released", job, err)
+	}
+}
+
+func TestMalformedRecordIsAnError(t *testing.T) {
+	valid := `{"ID":"c-e","Status":"succeeded","Spec":"SPEC"}`
+	for name, data := range map[string]string{
+		"valid":         valid,
+		"old format":    `{"preview":"hello\n","output":{"Path":"e/output","Bytes":6,"Complete":true,"Available":true}}`,
+		"unknown field": `{"ID":"c-e","Status":"succeeded","Spec":"SPEC","Retry":true}`,
+		"no ID":         `{"Status":"succeeded","Spec":"SPEC"}`,
+		"no status":     `{"ID":"c-e","Spec":"SPEC"}`,
+		"no spec":       `{"ID":"c-e","Status":"succeeded"}`,
+		"trailing data": valid + ` {}`,
+		"truncated":     valid[:20],
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t)
+			f.latch(latchStart)
+			f.set("inspect.out", f.container("running", 0))
+			f.set("ps.out", "c-e e\n")
+			data = strings.ReplaceAll(data, "SPEC", specHash(f.x.runArgs("true")))
+			if err := os.WriteFile(f.x.record("e"), []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, found, inspectErr := f.x.Inspect(t.Context(), "e")
+			_, bindErr := f.x.Bind(t.Context(), effect)
+			_, startErr := f.x.Start(t.Context(), "e")
+			cancelErr := f.x.Cancel(t.Context(), "e")
+			if name == "valid" {
+				if !found || errors.Join(inspectErr, bindErr, startErr, cancelErr) != nil {
+					t.Fatalf("valid record: found %v, errors %v", found, errors.Join(inspectErr, bindErr, startErr, cancelErr))
+				}
+				return
+			}
+			if found || inspectErr == nil || bindErr == nil || startErr == nil || cancelErr == nil {
+				t.Fatalf("found %v, errors %v, %v, %v, %v; want every operation to fail", found, inspectErr, bindErr, startErr, cancelErr)
+			}
+			f.x.Bind(t.Context(), harness.Effect{ID: "other", Command: "true"})
+			for _, cmd := range []string{"rm", "logs", "stop", "start", "create"} {
+				if calls := f.calls(cmd); len(calls) != 0 {
+					t.Fatalf("%s calls = %q", cmd, calls)
+				}
+			}
+		})
 	}
 }
 
