@@ -58,6 +58,35 @@ func TestDeriveStatus(t *testing.T) {
 	}
 }
 
+func TestDeriveFailedStart(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		latch   string
+		failure string
+		started bool
+		marked  bool
+		want    harness.JobStatus
+	}{
+		{"rejected start", latchStart, "unable to find user nosuchuser", false, false, harness.JobFailedToStart},
+		{"rejected start while cancelling", latchStart, "unable to find user nosuchuser", false, true, harness.JobFailedToStart},
+		{"launch uncertain", latchStart, "", false, false, harness.JobUnknown},
+		{"error after a start", latchStart, "boom", true, false, harness.JobUnknown},
+		{"error without latch", "", "boom", false, false, harness.JobPending},
+		{"error after fence", latchCancel, "boom", false, false, harness.JobCancelled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var c container
+			c.State.Status, c.State.ExitCode, c.State.Error = "created", 128, tt.failure
+			if tt.started {
+				c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			}
+			if job := derive(tt.latch, c, tt.marked); job.Status != tt.want || job.ExitCode != nil {
+				t.Fatalf("derive() = %q with exit code %v, want %q without one", job.Status, job.ExitCode, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeriveKeepsZeroTimes(t *testing.T) {
 	var c container
 	c.State.Status = "created"

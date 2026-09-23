@@ -250,7 +250,11 @@ func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, err
 }
 
 func terminal(status harness.JobStatus) bool {
-	return status == harness.JobSucceeded || status == harness.JobFailed || status == harness.JobCancelled
+	switch status {
+	case harness.JobSucceeded, harness.JobFailed, harness.JobCancelled, harness.JobFailedToStart:
+		return true
+	}
+	return false
 }
 
 func (c checker) expect(ctx context.Context, e harness.Effect, observe func(context.Context, harness.Effect) (harness.Job, error), status harness.JobStatus, runs int) error {

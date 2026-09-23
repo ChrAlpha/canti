@@ -193,6 +193,44 @@ func TestFailedStartIsNeverReissued(t *testing.T) {
 	}
 }
 
+func TestRejectedStartFailsToStart(t *testing.T) {
+	f := newFake(t)
+	f.set("inspect.out", f.container("created", 0))
+	var c []container
+	if err := json.Unmarshal([]byte(f.container("created", 128)), &c); err != nil {
+		t.Fatal(err)
+	}
+	c[0].State.Error, c[0].State.StartedAt, c[0].State.FinishedAt = "unable to find user nosuchuser", time.Time{}, time.Time{}
+	rejected, _ := json.Marshal(c)
+	f.set("rejected.json", string(rejected))
+	f.set("start.sh", `cp "$ctl/rejected.json" "$ctl/inspect.out"`+"\n")
+	f.set("start.err", "Error response from daemon: unable to find user nosuchuser\n")
+	f.set("start.exit", "1")
+	want, err := f.x.Start(t.Context(), "e")
+	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || !want.Output.Available {
+		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start", want, err)
+	}
+	if _, err := os.Stat(f.x.record("e")); err != nil {
+		t.Fatalf("the failed start was not recorded: %v", err)
+	}
+	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+		t.Fatalf("rms = %q, want the created container released", rms)
+	}
+	f.missing()
+	if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
+		t.Fatalf("Start() again = %+v, %v; want %+v", job, err, want)
+	}
+	if err := f.x.Cancel(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
+		t.Fatalf("Inspect() = %+v, %v, %v; want %+v", job, found, err, want)
+	}
+	if starts, stops := f.calls("start"), f.calls("stop"); len(starts) != 1 || len(stops) != 0 {
+		t.Fatalf("starts %q, stops %q", starts, stops)
+	}
+}
+
 func TestLaunchOutlivesShutdown(t *testing.T) {
 	f := newFake(t)
 	f.set("inspect.out", f.container("created", 0))

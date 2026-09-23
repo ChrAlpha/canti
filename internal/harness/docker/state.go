@@ -27,6 +27,7 @@ type container struct {
 	State struct {
 		Status     string
 		ExitCode   int
+		Error      string
 		StartedAt  time.Time
 		FinishedAt time.Time
 	}
@@ -36,11 +37,13 @@ func derive(latch string, c container, marked bool) harness.Job {
 	job := harness.Job{ID: c.ID, Status: harness.JobUnknown, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt}
 	switch c.State.Status {
 	case "created":
-		switch latch {
-		case "":
+		switch {
+		case latch == "":
 			job.Status = harness.JobPending
-		case latchCancel:
+		case latch == latchCancel:
 			job.Status = harness.JobCancelled
+		case c.State.Error != "" && c.State.StartedAt.IsZero():
+			job.Status = harness.JobFailedToStart
 		}
 	case "running", "paused", "restarting":
 		if latch == latchStart {
@@ -65,7 +68,11 @@ func derive(latch string, c container, marked bool) harness.Job {
 }
 
 func terminal(status harness.JobStatus) bool {
-	return status == harness.JobSucceeded || status == harness.JobFailed || status == harness.JobCancelled
+	switch status {
+	case harness.JobSucceeded, harness.JobFailed, harness.JobCancelled, harness.JobFailedToStart:
+		return true
+	}
+	return false
 }
 
 func checkID(id string) error {

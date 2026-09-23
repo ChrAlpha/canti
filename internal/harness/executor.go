@@ -21,7 +21,8 @@ var ErrJobLost = errors.New("harness: job of a started effect is lost")
 // done, and reject a changed command under an existing identity. A job
 // reports JobPending exactly until its latch is set; a latched job whose
 // launch is uncertain reports JobUnknown. A job reported succeeded, failed,
-// or cancelled keeps that status and never begins running afterwards.
+// cancelled, or failed to start keeps that status and never begins running
+// afterwards.
 //
 // Start must fail for an unbound effect and start nothing but the bound job;
 // once the latch is set it is a no-op reporting the job as-is, even for a
@@ -64,7 +65,11 @@ const (
 	JobSucceeded JobStatus = "succeeded"
 	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
-	JobUnknown   JobStatus = "unknown"
+	// JobFailedToStart reports that the backend positively determined that
+	// the job's process never started. Like succeeded, failed, and cancelled
+	// it is final.
+	JobFailedToStart JobStatus = "failed_to_start"
+	JobUnknown       JobStatus = "unknown"
 )
 
 // Job is the backend's handle for an effect. Its ID is recorded as a fact;

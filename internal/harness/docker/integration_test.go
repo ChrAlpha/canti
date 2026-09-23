@@ -191,6 +191,36 @@ func TestRestartedExecutorCollectsOriginalJob(t *testing.T) {
 	}
 }
 
+func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
+	cfg, id := setup(t, docker.Config{User: "nosuchuser"})
+	ctx := testContext(t, time.Minute)
+	e := harness.Effect{ID: id("rejected"), Command: "touch /workspace/ran"}
+	x := open(t, cfg)
+	bound, err := x.Bind(ctx, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := x.Start(ctx, e.ID)
+	if err != nil || job.ID != bound.ID || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() {
+		t.Fatalf("Start(rejected) = %+v, %v; want the bound job failed to start", job, err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.State, "jobs", e.ID, "output.json")); err != nil {
+		t.Fatalf("record of the failed start: %v", err)
+	}
+	if ids := containers(t, e.ID); len(ids) != 0 {
+		t.Fatalf("containers of the failed start = %q, want none", ids)
+	}
+	if again, err := open(t, cfg).Start(ctx, e.ID); err != nil || again.ID != job.ID || again.Status != harness.JobFailedToStart {
+		t.Fatalf("Start() again = %+v, %v; want the recorded job", again, err)
+	}
+	if got := inspect(ctx, t, open(t, cfg), e.ID); got.ID != job.ID || got.Status != harness.JobFailedToStart || got.Output != job.Output {
+		t.Fatalf("Inspect() = %+v, want %+v", got, job)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Workspace, "ran")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the rejected job ran: %v", err)
+	}
+}
+
 func TestForeignStateCannotAdoptJob(t *testing.T) {
 	cfg, id := setup(t, docker.Config{})
 	ctx := testContext(t, time.Minute)

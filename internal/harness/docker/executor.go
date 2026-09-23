@@ -330,7 +330,8 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 // Start sets the effect's latch and starts its never-started container,
 // unless the latch was already set, in which case it only reports the job.
 // Once the latch is set the launch finishes even if ctx is done, each of its
-// calls within its own deadline.
+// calls within its own deadline. A start the daemon rejected before the job's
+// process began reports the job failed to start.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -359,10 +360,12 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 			return harness.Job{}, err
 		}
 		launch := context.WithoutCancel(ctx)
-		if _, err := x.docker(launch, "start", c.ID); err != nil {
-			return harness.Job{}, err
+		_, started := x.docker(launch, "start", c.ID)
+		c, err = x.bound(launch, effectID)
+		if started != nil && (err != nil || derive(latchStart, c, false).Status != harness.JobFailedToStart) {
+			return harness.Job{}, started
 		}
-		if c, err = x.bound(launch, effectID); err != nil {
+		if err != nil {
 			return harness.Job{}, err
 		}
 	}

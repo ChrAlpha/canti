@@ -200,6 +200,43 @@ func TestLoopToleratesTransientInspectErrors(t *testing.T) {
 	}
 }
 
+func TestLoopObservesAFailedStart(t *testing.T) {
+	failed := func(id string) (harness.Job, bool, error) {
+		out := harness.ArtifactRef{Path: jobID(id) + ".log", Complete: true, Available: true}
+		return harness.Job{ID: jobID(id), Status: harness.JobFailedToStart, Preview: "never ran", Output: out}, true, nil
+	}
+	want := func(id string) harness.Observation {
+		job, _, _ := failed(id)
+		return harness.Observation{Execution: core.ExecutionFailedToStart, Preview: job.Preview, Output: job.Output}
+	}
+	t.Run("awaiting observation", func(t *testing.T) {
+		f := newFixture(t, limits, harness.Budget{}, execReply("make test"), returnReply("gave up"))
+		f.exec.inspect = failed
+		wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+		f.wantKinds(cycle, closing)
+		observed := f.transitions()[6]
+		if obs := observation(t, observed); !reflect.DeepEqual(obs, want(observed.From.EffectID)) {
+			t.Fatalf("observation = %+v, want %+v", obs, want(observed.From.EffectID))
+		}
+		wantContains(t, f.model.prompts[1].User, "Execution: failed_to_start")
+	})
+	t.Run("cancelling", func(t *testing.T) {
+		f := newFixture(t, limits, harness.Budget{}, execReply("make test"))
+		f.exec.hold = true
+		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		f.exec.inspect = failed
+		snap, err := f.fresh().Stop(f.bounded(), runID, core.StopCancelled)
+		if err != nil {
+			t.Fatalf("Stop() error = %v", err)
+		}
+		wantState(t, snap, core.PhaseStopped, core.StopCancelled)
+		f.wantKinds(running, []string{"stop_requested", "observed"})
+		if obs := observation(t, f.last()); !reflect.DeepEqual(obs, want(snap.State.EffectID)) {
+			t.Fatalf("observation = %+v, want %+v", obs, want(snap.State.EffectID))
+		}
+	})
+}
+
 func unresolved(t *testing.T, inspect func(string) (harness.Job, bool, error), replies ...reply) *fixture {
 	t.Helper()
 	f := newFixture(t, limits, harness.Budget{}, append([]reply{execReply("make test")}, replies...)...)
