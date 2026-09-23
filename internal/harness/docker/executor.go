@@ -407,7 +407,7 @@ func (x *Executor) Cancel(ctx context.Context, effectID string) error {
 	if latch == "" {
 		return setLatch(dir, latchCancel)
 	}
-	if _, done, err := x.load(effectID); err != nil || done {
+	if done, err := exists(x.record(effectID)); err != nil || done {
 		return err
 	}
 	c, found, err := x.inspect(ctx, effectID)

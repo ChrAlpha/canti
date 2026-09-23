@@ -531,6 +531,7 @@ func TestMalformedRecordIsAnError(t *testing.T) {
 		"no ID":         `{"Status":"succeeded","Spec":"SPEC"}`,
 		"no status":     `{"ID":"c-e","Spec":"SPEC"}`,
 		"no spec":       `{"ID":"c-e","Status":"succeeded"}`,
+		"not final":     `{"ID":"c-e","Status":"running","Spec":"SPEC"}`,
 		"trailing data": valid + ` {}`,
 		"truncated":     valid[:20],
 	} {
@@ -553,8 +554,8 @@ func TestMalformedRecordIsAnError(t *testing.T) {
 				}
 				return
 			}
-			if found || inspectErr == nil || bindErr == nil || startErr == nil || cancelErr == nil {
-				t.Fatalf("found %v, errors %v, %v, %v, %v; want every operation to fail", found, inspectErr, bindErr, startErr, cancelErr)
+			if found || inspectErr == nil || bindErr == nil || startErr == nil || cancelErr != nil {
+				t.Fatalf("found %v, errors %v, %v, %v, %v; want every report to fail and nothing to stop", found, inspectErr, bindErr, startErr, cancelErr)
 			}
 			f.x.Bind(t.Context(), harness.Effect{ID: "other", Command: "true"})
 			for _, cmd := range []string{"rm", "logs", "stop", "start", "create"} {

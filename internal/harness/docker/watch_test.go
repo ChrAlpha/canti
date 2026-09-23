@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,16 +25,26 @@ func (execModel) Complete(context.Context, harness.Request) (harness.Response, e
 
 func (execModel) Decision(resp harness.Response) []byte { return resp.Body }
 
-func TestLoopGivesUpOnAHungDaemon(t *testing.T) {
-	f := newFake(t)
-	f.x.timeouts.call = 50 * time.Millisecond
+type loopFixture struct {
+	*fake
+	t      *testing.T
+	ctx    context.Context
+	store  *sqlite.Store
+	loop   *harness.Loop
+	effect string
+}
+
+// newLoop runs a loop on f until its job runs, so its effect is awaiting
+// observation.
+func newLoop(t *testing.T, f *fake) *loopFixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "canti.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() { store.Close() })
 	state, err := core.NewState("run-1", core.Limits{MaxSteps: 2, MaxAttempts: 1})
 	if err == nil {
 		err = store.CreateRun(ctx, harness.Run{ID: "run-1", Goal: "Run true.", Created: time.Now()}, state)
@@ -48,37 +59,66 @@ func TestLoopGivesUpOnAHungDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := func(n int, want core.Phase) harness.Snapshot {
-		t.Helper()
-		var snap harness.Snapshot
-		for range n {
-			if snap, err = l.Step(ctx, "run-1"); err != nil {
-				t.Fatalf("Step() = %v at %+v", err, snap.State)
-			}
-		}
-		if snap.State.Phase != want {
-			t.Fatalf("phase = %q, want %q", snap.State.Phase, want)
-		}
-		return snap
-	}
-	id := step(3, core.PhaseEffectSaved).State.EffectID
-	f.set("inspect.out", f.containerOf(id, "true", "created", 0))
-	f.set("running.json", f.containerOf(id, "true", "running", 0))
+	lf := &loopFixture{fake: f, t: t, ctx: ctx, store: store, loop: l}
+	lf.effect = lf.step(3, core.PhaseEffectSaved).State.EffectID
+	f.set("inspect.out", f.containerOf(lf.effect, "true", "created", 0))
+	f.set("running.json", f.containerOf(lf.effect, "true", "running", 0))
 	f.set("start.sh", `cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
-	step(2, core.PhaseAwaitingObservation)
-	f.set("inspect.sh", "exec sleep 5\n")
-	before := len(f.calls("inspect"))
-	step(1, core.PhaseNeedsResolution)
-	ts, err := store.Transitions(ctx, "run-1", 0, 100)
+	lf.step(2, core.PhaseAwaitingObservation)
+	return lf
+}
+
+func (lf *loopFixture) step(n int, want core.Phase) harness.Snapshot {
+	lf.t.Helper()
+	var snap harness.Snapshot
+	var err error
+	for range n {
+		if snap, err = lf.loop.Step(lf.ctx, "run-1"); err != nil {
+			lf.t.Fatalf("Step() = %v at %+v", err, snap.State)
+		}
+	}
+	if snap.State.Phase != want {
+		lf.t.Fatalf("phase = %q, want %q", snap.State.Phase, want)
+	}
+	return snap
+}
+
+func (lf *loopFixture) wantUnknown(failure string) {
+	lf.t.Helper()
+	ts, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
 	if err != nil {
-		t.Fatal(err)
+		lf.t.Fatal(err)
 	}
 	last := ts[len(ts)-1]
 	if _, ok := last.Event.(core.OutcomeUnknown); !ok || !strings.Contains(last.Facts.Failure, "inspect failed 3 consecutive times") ||
-		!strings.Contains(last.Facts.Failure, "no response within") {
-		t.Fatalf("last transition = %+v, want an unknown outcome after the inspect retries", last)
+		!strings.Contains(last.Facts.Failure, failure) {
+		lf.t.Fatalf("last transition = %+v, want an unknown outcome after the inspect retries", last)
 	}
-	if n := len(f.calls("inspect")) - before; n != 3 {
+}
+
+func TestLoopGivesUpOnAHungDaemon(t *testing.T) {
+	lf := newLoop(t, newFake(t))
+	lf.x.timeouts.call = 50 * time.Millisecond
+	lf.set("inspect.sh", "exec sleep 30\n")
+	before := len(lf.calls("inspect"))
+	lf.step(1, core.PhaseNeedsResolution)
+	lf.wantUnknown("no response within 50ms")
+	if n := len(lf.calls("inspect")) - before; n != 3 {
 		t.Fatalf("inspected %d times, want 3", n)
+	}
+}
+
+func TestLoopStopLeavesAnUnreadableRecordToResolution(t *testing.T) {
+	lf := newLoop(t, newFake(t))
+	if err := os.WriteFile(lf.x.record(lf.effect), []byte(`{"preview":"hello\n","output":{"Path":"x"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := lf.loop.Stop(lf.ctx, "run-1", core.StopCancelled)
+	if err != nil || snap.State.Phase != core.PhaseNeedsResolution || snap.State.Reason != core.StopCancelled {
+		t.Fatalf("Stop() = %+v, %v; want the run to await resolution", snap.State, err)
+	}
+	lf.wantUnknown("record of effect")
+	if stops := lf.calls("stop"); len(stops) != 0 {
+		t.Fatalf("stops = %q, want a recorded job never stopped", stops)
 	}
 }
