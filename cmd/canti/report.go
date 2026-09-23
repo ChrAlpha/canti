@@ -19,11 +19,7 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 			return exitError, err
 		}
 		defer done()
-		snap, err := store.Latest(ctx, run.ID)
-		if err != nil {
-			return exitError, err
-		}
-		t, err := store.Totals(ctx, run.ID)
+		snap, t, err := consistent(ctx, store, run.ID)
 		if err != nil {
 			return exitError, err
 		}
@@ -41,6 +37,24 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 		}
 		return exitOK, a.encoder().Encode(out)
 	}
+}
+
+func consistent(ctx context.Context, j harness.Journal, id string) (harness.Snapshot, harness.Totals, error) {
+	for range 5 {
+		snap, err := j.Latest(ctx, id)
+		var t harness.Totals
+		if err == nil {
+			t, err = j.Totals(ctx, id)
+		}
+		var again harness.Snapshot
+		if err == nil {
+			again, err = j.Latest(ctx, id)
+		}
+		if err != nil || again.Seq == snap.Seq {
+			return snap, t, err
+		}
+	}
+	return harness.Snapshot{}, harness.Totals{}, fmt.Errorf("run %s changed during every attempt to read its status", id)
 }
 
 const historyPage = 8

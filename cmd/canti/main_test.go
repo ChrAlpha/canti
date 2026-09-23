@@ -456,6 +456,35 @@ func TestHistoryPrintsEveryPageInOrder(t *testing.T) {
 	}
 }
 
+// racing is a journal where a commit lands right before each of the next
+// races reads of the totals.
+type racing struct {
+	harness.Journal
+	seq   int64
+	races int
+}
+
+func (r *racing) Latest(context.Context, string) (harness.Snapshot, error) {
+	return harness.Snapshot{Seq: r.seq}, nil
+}
+
+func (r *racing) Totals(context.Context, string) (harness.Totals, error) {
+	if r.races > 0 {
+		r.races--
+		r.seq++
+	}
+	return harness.Totals{Steps: int(r.seq)}, nil
+}
+
+func TestStatusReadsTheTotalsOfItsSnapshot(t *testing.T) {
+	for races, ok := range map[int]bool{0: true, 4: true, 5: false} {
+		snap, totals, err := consistent(t.Context(), &racing{seq: 1, races: races}, "run_x")
+		if ok && (err != nil || snap.Seq != int64(totals.Steps)) || !ok && (err == nil || !strings.Contains(err.Error(), "run_x")) {
+			t.Errorf("%d races: seq %d with the totals of seq %d, %v", races, snap.Seq, totals.Steps, err)
+		}
+	}
+}
+
 func TestDefaultStateDirectory(t *testing.T) {
 	ws := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
