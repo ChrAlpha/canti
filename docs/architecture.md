@@ -594,9 +594,10 @@ selection requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code
 revision is not. A state directory written by an earlier revision is not
-supported: the stored configuration of its runs holds the removed `history`
-field, so every command refuses them with an unreadable-config error; use a
-fresh `-state`.
+supported, and no compatibility is kept: a stored configuration the current
+one cannot decode, such as the removed `history` field of runs before the
+byte capacity, makes every command refuse the run with an unreadable-config
+error; use a fresh `-state`.
 
 ## Execution
 
