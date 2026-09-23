@@ -1,7 +1,9 @@
 package docker
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -57,6 +59,11 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := filepath.Join(root, "state")
+	for _, dir := range []string{state, filepath.Join(ws, "state"), filepath.Join(root, "a:b")} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tt := range []struct {
 		name string
 		cfg  Config
@@ -65,6 +72,8 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		{"relative workspace", Config{Image: "i", Workspace: "ws", State: state}},
 		{"relative state", Config{Image: "i", Workspace: ws, State: "state"}},
 		{"missing workspace", Config{Image: "i", Workspace: filepath.Join(root, "none"), State: state}},
+		{"missing state", Config{Image: "i", Workspace: ws, State: filepath.Join(root, "none")}},
+		{"state file", Config{Image: "i", Workspace: ws, State: file}},
 		{"workspace file", Config{Image: "i", Workspace: file, State: state}},
 		{"state in workspace", Config{Image: "i", Workspace: ws, State: filepath.Join(ws, "state")}},
 		{"state in linked workspace", Config{Image: "i", Workspace: ws, State: filepath.Join(link, "state")}},
@@ -78,6 +87,9 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := New(tt.cfg); err == nil {
 				t.Fatalf("New(%+v) succeeded", tt.cfg)
+			}
+			if _, err := os.Stat(filepath.Join(ws, "state", "jobs")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("rejected New() wrote into the workspace: %v", err)
 			}
 		})
 	}
@@ -126,10 +138,20 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 	if tail := args[len(args)-3:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", "exec 2>&1\necho hi"}) {
 		t.Errorf("create args end with %q", tail)
 	}
-	for _, a := range args {
-		if a == "-e" || strings.HasPrefix(a, "--env") || a == "--privileged" || strings.HasPrefix(a, "--cap-add") {
+	blanked := map[string]bool{}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
+		blanked[k+"="], blanked[strings.ToLower(k)+"="] = true, true
+	}
+	for i, a := range args {
+		switch {
+		case a == "-e" && blanked[args[i+1]]:
+			delete(blanked, args[i+1])
+		case a == "-e", strings.HasPrefix(a, "--env"), a == "--privileged", strings.HasPrefix(a, "--cap-add"), a == "--rm", strings.HasPrefix(a, "--restart"):
 			t.Errorf("create args pass %q: %q", a, args)
 		}
+	}
+	if len(blanked) != 0 {
+		t.Errorf("create args let the docker CLI inject %v", blanked)
 	}
 	for i, a := range args {
 		if a == "-v" && strings.HasPrefix(args[i+1], x.cfg.State) && !strings.HasSuffix(args[i+1], ":ro") {

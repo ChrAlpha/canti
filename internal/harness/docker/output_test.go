@@ -71,7 +71,9 @@ func TestPreviewCutsOnRuneBoundaries(t *testing.T) {
 		in := strings.Repeat("x", shift) + strings.Repeat("é世🙂", 400)
 		for limit := 64; limit < 96; limit++ {
 			c := capture(t, iotest.HalfReader(strings.NewReader(in)), io.Discard, 1<<20, limit)
-			if p := c.preview(); len(p) > limit || !utf8.ValidString(p) {
+			p := c.preview()
+			head, _, _ := strings.Cut(p, "\n...")
+			if len(p) > limit || len(p) < limit-2*(utf8.UTFMax-1) || !utf8.ValidString(p) || !strings.HasPrefix(in, head) || !strings.HasSuffix(p, "🙂") {
 				t.Fatalf("shift %d limit %d: preview %q (%d bytes)", shift, limit, p, len(p))
 			}
 		}

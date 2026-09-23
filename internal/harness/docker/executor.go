@@ -36,8 +36,8 @@ type Config struct {
 	Image string
 	// Workspace is an absolute host directory mounted read-write at WorkDir.
 	Workspace string
-	// State is an absolute host directory owned by the executor, holding
-	// per-effect locks, latches, and artifacts. Only its artifacts
+	// State is an existing absolute host directory owned by the executor,
+	// holding per-effect locks, latches, and artifacts. Only its artifacts
 	// subdirectory is mounted, read-only; it must not overlap Workspace.
 	State string
 	// User is the job's "uid:gid"; the current process's by default.
@@ -91,17 +91,6 @@ func New(cfg Config) (*Executor, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fi, err := os.Stat(ws); err != nil || !fi.IsDir() {
-		return nil, fmt.Errorf("docker: workspace %s is not a directory", ws)
-	}
-	if !filepath.IsAbs(cfg.State) {
-		return nil, fmt.Errorf("docker: state %q is not an absolute path", cfg.State)
-	}
-	for _, dir := range []string{"jobs", "artifacts"} {
-		if err := os.MkdirAll(filepath.Join(cfg.State, dir), 0o755); err != nil {
-			return nil, err
-		}
-	}
 	state, err := resolve(cfg.State)
 	if err != nil {
 		return nil, err
@@ -109,8 +98,13 @@ func New(cfg Config) (*Executor, error) {
 	if within(ws, state) || within(state, ws) {
 		return nil, fmt.Errorf("docker: workspace %s and state %s overlap", ws, state)
 	}
+	for _, dir := range []string{"jobs", "artifacts"} {
+		if err := os.MkdirAll(filepath.Join(state, dir), 0o755); err != nil {
+			return nil, err
+		}
+	}
 	cfg.Workspace, cfg.State = ws, state
-	return &Executor{cfg: cfg}, nil
+	return &Executor{cfg: cfg}, syncDir(state)
 }
 
 func resolve(path string) (string, error) {
@@ -118,10 +112,13 @@ func resolve(path string) (string, error) {
 		return "", fmt.Errorf("docker: %q is not an absolute path", path)
 	}
 	p, err := filepath.EvalSymlinks(path)
-	if err == nil && strings.Contains(p, ":") {
-		err = fmt.Errorf("docker: path %s contains ':'", p)
+	if err != nil {
+		return "", err
 	}
-	return p, err
+	if fi, err := os.Stat(p); err != nil || !fi.IsDir() || strings.Contains(p, ":") {
+		return "", fmt.Errorf("docker: %s is not a directory that can be mounted", p)
+	}
+	return p, nil
 }
 
 func within(dir, path string) bool {
@@ -142,6 +139,9 @@ func (x *Executor) runArgs(command string) []string {
 	}
 	if c.PidsLimit > 0 {
 		args = append(args, "--pids-limit", strconv.Itoa(c.PidsLimit))
+	}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
+		args = append(args, "-e", k+"=", "-e", strings.ToLower(k)+"=")
 	}
 	return append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+ArtifactDir+":ro",
 		c.Image, "-c", "exec 2>&1\n"+command)
@@ -179,8 +179,16 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 
 var errMissing = errors.New("no such container")
 
+const launchTimeout = 30 * time.Second
+
+func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, x.cfg.Docker, args...)
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
 func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, x.cfg.Docker, args...).Output()
+	out, err := x.command(ctx, args...).Output()
 	if err == nil {
 		return out, nil
 	}
@@ -213,6 +221,19 @@ func (x *Executor) inspect(ctx context.Context, id string) (container, bool, err
 		return container{}, false, fmt.Errorf("docker: container %s is not owned by effect %s under %s", cs[0].ID, id, x.cfg.State)
 	}
 	return cs[0], true, nil
+}
+
+// find is inspect, except that the container of a started effect is never
+// reported missing: its removal leaves the outcome unknown.
+func (x *Executor) find(ctx context.Context, id string) (container, bool, error) {
+	c, found, err := x.inspect(ctx, id)
+	if err == nil && !found {
+		var latch string
+		if latch, err = readLatch(x.dir(id)); err == nil && latch == latchStart {
+			err = fmt.Errorf("docker: the container of started effect %s is gone", id)
+		}
+	}
+	return c, found, err
 }
 
 func (x *Executor) bound(ctx context.Context, id string) (container, error) {
@@ -250,7 +271,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	}
 	defer unlock()
 	run := x.runArgs(effect.Command)
-	c, found, err := x.inspect(ctx, effect.ID)
+	c, found, err := x.find(ctx, effect.ID)
 	if err == nil && !found {
 		if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
 			c, err = x.bound(ctx, effect.ID)
@@ -265,8 +286,10 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	return x.report(ctx, effect.ID, c)
 }
 
-// Start sets the effect's latch and starts its container, unless the latch
-// was already set, in which case it only reports the job.
+// Start sets the effect's latch and starts its never-started container,
+// unless the latch was already set, in which case it only reports the job.
+// Once the latch is set the launch finishes even if ctx is done, within a
+// fixed timeout.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -282,16 +305,21 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 		return harness.Job{}, err
 	}
 	if latch == "" {
+		if c.State.Status != "created" {
+			return harness.Job{}, fmt.Errorf("docker: container %s of effect %s is %s without a start latch", c.ID, effectID, c.State.Status)
+		}
 		if err := ctx.Err(); err != nil {
 			return harness.Job{}, err
 		}
 		if err := setLatch(x.dir(effectID), latchStart); err != nil {
 			return harness.Job{}, err
 		}
-		if _, err := x.docker(ctx, "start", c.ID); err != nil {
+		launch, cancel := context.WithTimeout(context.WithoutCancel(ctx), launchTimeout)
+		defer cancel()
+		if _, err := x.docker(launch, "start", c.ID); err != nil {
 			return harness.Job{}, err
 		}
-		if c, err = x.bound(ctx, effectID); err != nil {
+		if c, err = x.bound(launch, effectID); err != nil {
 			return harness.Job{}, err
 		}
 	}
@@ -299,14 +327,14 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 }
 
 // Inspect reports the effect's job; found is false only when Docker reports
-// that no container exists for it.
+// that no container exists for an effect that never started.
 func (x *Executor) Inspect(ctx context.Context, effectID string) (harness.Job, bool, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
 		return harness.Job{}, false, err
 	}
 	defer unlock()
-	c, found, err := x.inspect(ctx, effectID)
+	c, found, err := x.find(ctx, effectID)
 	if err != nil || !found {
 		return harness.Job{}, false, err
 	}

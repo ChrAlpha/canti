@@ -180,8 +180,14 @@ func TestForeignStateCannotAdoptJob(t *testing.T) {
 	if _, found, err := y.Inspect(ctx, e.ID); err == nil {
 		t.Fatalf("Inspect() under another state = found %v, want an error", found)
 	}
+	if _, err := y.Bind(ctx, e); err == nil {
+		t.Fatal("Bind() under another state succeeded")
+	}
 	if err := y.Cancel(ctx, e.ID); err != nil {
 		t.Fatalf("Cancel() under another state = %v, want a fence", err)
+	}
+	if job := inspect(ctx, t, open(t, cfg), e.ID); job.Status != harness.JobSucceeded {
+		t.Fatalf("original job = %+v, want it unchanged", job)
 	}
 	if b, err := os.ReadFile(filepath.Join(cfg.Workspace, "foreign.runs")); err != nil || string(b) != "run\n" {
 		t.Fatalf("runs = %q, %v; want one", b, err)
@@ -239,7 +245,7 @@ func TestOutputIsBoundedAndVerified(t *testing.T) {
 	small := harness.Effect{ID: id("small"), Command: "echo small; echo err >&2; echo after; exit 3"}
 	job = run(ctx, t, x, small)
 	want := harness.ArtifactRef{Path: small.ID + "/output", Bytes: 16, Complete: true, Available: true}
-	if job.Status != harness.JobFailed || *job.ExitCode != 3 || job.Preview != "small\nerr\nafter\n" || job.Output != want {
+	if job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 3 || job.Preview != "small\nerr\nafter\n" || job.Output != want {
 		t.Fatalf("small job = %+v", job)
 	}
 	if err := os.Remove(filepath.Join(cfg.State, "artifacts", job.Output.Path)); err != nil {
@@ -252,12 +258,15 @@ func TestOutputIsBoundedAndVerified(t *testing.T) {
 }
 
 func TestCancelStopsProcessTree(t *testing.T) {
-	for _, tt := range []struct{ name, command string }{
-		{"terminates", "sleep 300 & sleep 300 & touch /workspace/began; wait"},
-		{"ignores TERM", "trap '' TERM; sleep 300 & sleep 300 & touch /workspace/began; wait"},
+	const grace = 2 * time.Second
+	for _, tt := range []struct {
+		name, command string
+		least         time.Duration
+	}{
+		{"terminates", "sleep 300 & sleep 300 & touch /workspace/began; wait", 0},
+		{"ignores TERM", "trap '' TERM; sleep 300 & sleep 300 & touch /workspace/began; wait", grace},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			const grace = 2 * time.Second
 			cfg, id := setup(t, docker.Config{StopGrace: grace})
 			ctx := testContext(t, time.Minute)
 			e := harness.Effect{ID: id("cancel"), Command: tt.command}
@@ -281,7 +290,7 @@ func TestCancelStopsProcessTree(t *testing.T) {
 			if err := open(t, cfg).Cancel(ctx, e.ID); err != nil {
 				t.Fatal(err)
 			}
-			if took := time.Since(began); took > grace+5*time.Second {
+			if took := time.Since(began); took < tt.least || took > grace+5*time.Second {
 				t.Fatalf("Cancel() took %v", took)
 			}
 			job := inspect(ctx, t, open(t, cfg), e.ID)
@@ -302,6 +311,12 @@ func TestCancelStopsProcessTree(t *testing.T) {
 
 func TestTrustBoundary(t *testing.T) {
 	t.Setenv("CANTI_TRUST_PROBE", "secret")
+	config := t.TempDir()
+	proxies := `{"proxies":{"default":{"httpProxy":"http://user:proxy-secret@proxy:3128","noProxy":"proxy-secret"}}}`
+	if err := os.WriteFile(filepath.Join(config, "config.json"), []byte(proxies), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_CONFIG", config)
 	cfg, id := setup(t, docker.Config{})
 	ctx := testContext(t, time.Minute)
 	script := fmt.Sprintf(`env
@@ -322,7 +337,7 @@ echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, d
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "artifacts-writable", "state-visible"} {
+	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "proxy:3128", "artifacts-writable", "state-visible"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("output contains %q:\n%s", leak, out)
 		}

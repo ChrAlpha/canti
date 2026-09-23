@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -153,7 +152,7 @@ func (x *Executor) collect(ctx context.Context, id, containerID string, status h
 	} else {
 		t.w = f
 	}
-	cmd := exec.CommandContext(ctx, x.cfg.Docker, "logs", containerID)
+	cmd := x.command(ctx, "logs", containerID)
 	cmd.Stdout, cmd.Stderr = t, t
 	logsErr := cmd.Run()
 	if f != nil {
@@ -169,8 +168,17 @@ func (x *Executor) collect(ctx context.Context, id, containerID string, status h
 }
 
 func (x *Executor) artifactFile(path string) (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	stale, _ := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	for _, name := range stale {
+		os.Remove(name)
+	}
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	return f, err
 }
