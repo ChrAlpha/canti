@@ -316,6 +316,13 @@ func TestTrustBoundary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(config, "config.json"), []byte(proxies), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("DOCKER_HOST") == "" {
+		host, err := exec.Command("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("DOCKER_HOST", strings.TrimSpace(string(host)))
+	}
 	t.Setenv("DOCKER_CONFIG", config)
 	cfg, id := setup(t, docker.Config{})
 	ctx := testContext(t, time.Minute)

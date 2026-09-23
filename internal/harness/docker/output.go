@@ -172,9 +172,11 @@ func (x *Executor) artifactFile(path string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	stale, _ := filepath.Glob(filepath.Join(dir, ".tmp-*"))
-	for _, name := range stale {
-		os.Remove(name)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 	f, err := os.CreateTemp(dir, ".tmp-*")
 	if err == nil {

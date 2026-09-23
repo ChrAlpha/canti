@@ -177,9 +177,10 @@ func TestLaunchOutlivesShutdown(t *testing.T) {
 	f.set("running.json", f.container("running", 0))
 	f.set("start.sh", `touch "$ctl/began"; sleep 0.3; cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	go func() {
 		defer cancel()
-		for {
+		for ctx.Err() == nil {
 			if _, err := os.Stat(filepath.Join(f.ctl, "began")); err == nil {
 				return
 			}
@@ -198,11 +199,14 @@ func TestVanishedStartedJobIsNotReportedMissing(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
 	f.missing()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || err == nil {
-		t.Fatalf("Inspect() = %v, %v; want an error for a started effect", found, err)
+	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !errors.Is(err, ErrJobLost) {
+		t.Fatalf("Inspect() = %v, %v; want ErrJobLost", found, err)
 	}
-	if _, err := f.x.Bind(t.Context(), effect); err == nil || len(f.calls("create")) != 0 {
-		t.Fatalf("Bind() = %v, creates %q; want an error and no replacement", err, f.calls("create"))
+	if _, err := f.x.Bind(t.Context(), effect); !errors.Is(err, ErrJobLost) || len(f.calls("create")) != 0 {
+		t.Fatalf("Bind() = %v, creates %q; want ErrJobLost and no replacement", err, f.calls("create"))
+	}
+	if _, err := f.x.Start(t.Context(), "e"); !errors.Is(err, ErrJobLost) || len(f.calls("start")) != 0 {
+		t.Fatalf("Start() = %v, starts %q; want ErrJobLost", err, f.calls("start"))
 	}
 	if err := f.x.Cancel(t.Context(), "e"); err != nil {
 		t.Fatalf("Cancel() = %v", err)
@@ -241,6 +245,10 @@ func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
 	}
 	f.unset("logs.err", "logs.exit")
 	f.set("logs.out", "hello\n")
+	stale := filepath.Join(f.x.artifacts(), "e", ".tmp-crashed")
+	if err := os.WriteFile(stale, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	want := harness.ArtifactRef{Path: "e/output", Bytes: 6, Complete: true, Available: true}
 	for range 2 {
 		job, _, err = f.x.Inspect(t.Context(), "e")
@@ -251,6 +259,9 @@ func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
 	}
 	if logs := f.calls("logs"); len(logs) != 2 {
 		t.Fatalf("logs = %q, want one failed and one kept capture", logs)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale capture file survived: %v", err)
 	}
 	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Mode().Perm() != 0o644 {
 		t.Fatalf("artifact mode: %v, %v", fi, err)

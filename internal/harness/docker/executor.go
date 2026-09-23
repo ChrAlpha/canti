@@ -103,8 +103,11 @@ func New(cfg Config) (*Executor, error) {
 			return nil, err
 		}
 	}
+	if err := syncDir(state); err != nil {
+		return nil, err
+	}
 	cfg.Workspace, cfg.State = ws, state
-	return &Executor{cfg: cfg}, syncDir(state)
+	return &Executor{cfg: cfg}, nil
 }
 
 func resolve(path string) (string, error) {
@@ -179,6 +182,10 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 
 var errMissing = errors.New("no such container")
 
+// ErrJobLost reports that the container of a started effect no longer exists,
+// so its outcome can only be resolved explicitly.
+var ErrJobLost = errors.New("docker: the container of a started effect is gone")
+
 const launchTimeout = 30 * time.Second
 
 func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
@@ -230,14 +237,14 @@ func (x *Executor) find(ctx context.Context, id string) (container, bool, error)
 	if err == nil && !found {
 		var latch string
 		if latch, err = readLatch(x.dir(id)); err == nil && latch == latchStart {
-			err = fmt.Errorf("docker: the container of started effect %s is gone", id)
+			err = fmt.Errorf("%w: effect %s", ErrJobLost, id)
 		}
 	}
 	return c, found, err
 }
 
 func (x *Executor) bound(ctx context.Context, id string) (container, error) {
-	c, found, err := x.inspect(ctx, id)
+	c, found, err := x.find(ctx, id)
 	if err == nil && !found {
 		err = fmt.Errorf("docker: no job is bound to effect %s", id)
 	}
