@@ -381,8 +381,8 @@ bytes — building different input requires a new revision via `RequestFrozen`.
 | `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
 | `cancelling` | `cancel` | With no job recorded, call the fencing `Cancel` by effect ID first, then `Inspect`: a positively missing job is observed as `cancelled` — sound because an unstarted bind can never execute and the fence stops a bind that lands late. An indeterminate lookup is an executor error, never a missing job. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
 | `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`, or at `awaiting_observation` after a committed start) or `Resolved`; never redispatch |
-| `returned` | `halt` | `canti resume` prints the saved handoff without calling the model |
-| `stopped` | `halt` | `canti resume` reports the stop reason; `status` and `history` show the partial results |
+| `returned` | `halt` | `canti resume`, which still requires the credential, prints the saved handoff without calling the model; `canti status` shows it without one |
+| `stopped` | `halt` | `canti resume` reports the stop reason, and `status` and `history` show it and the partial results |
 
 `harness.Loop` performs these actions, bounding cleanup by the deadline of its
 caller's context.
@@ -446,15 +446,15 @@ user messages together. The defaults are 8 KiB for the goal, 4 KiB for the
 constraints, 2 KiB for the environment, 2 KiB for each step's command and
 4 KiB for its output preview, 8 KiB for the notes, 2 KiB each for a rejected
 response and its error, and 64 KiB in total. A cut input ends with a marker
-counting the bytes removed. When the total would be exceeded, the prompt
-drops the oldest shown steps, counting them as earlier steps, then shrinks
-the notes, then drops the newest step and shrinks the notes again; if it
-still does not fit, the loop stops the run as `unrecoverable`. Commands,
+counting the bytes removed, except that notes cut when read are followed only
+by a line saying the file continues. When the total would be exceeded, the
+prompt drops the oldest shown steps, counting them as earlier steps, then
+shrinks the notes, then drops the newest step and shrinks the notes again; if
+it still does not fit, the loop stops the run as `unrecoverable`. Commands,
 previews, notes, and rejected responses are fenced with a backtick run longer
 than any inside them, with the extra fence length charged to the input's
 limit; single-line references have line breaks replaced; invalid UTF-8 is
-replaced and no cut splits a rune. Equal frames and limits give equal
-prompts.
+replaced and no cut splits a rune. Equal frames and limits give equal prompts.
 
 `ReadNotes` reads at most the notes limit plus one byte of the notes file
 (`.canti/notes.md` in the CLI), the extra byte telling whether the file was
@@ -574,8 +574,11 @@ effect or state directory is an error, never adopted.
   with a detail.
 
 Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
-plus Docker's log of each job that is still running or awaiting capture,
-which only that job's run time bounds.
+plus Docker's log and the writable container layer of each job that is still
+running or awaiting capture, which only that job's run time bounds, and the
+container of a finished job whose removal failed, until a later report of the
+effect or `Bind` in the state directory retries it; for the last job of a
+run, none may come.
 
 Every docker CLI call has its own deadline: 30 s, plus the stop grace for
 `docker stop`, and 10 min for a create, which may pull the image, and for

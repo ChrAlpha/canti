@@ -56,8 +56,9 @@ Known limits:
   workspace lock file and defeat single-writer exclusion.
 - A non-default network lets jobs reach any address it can route to.
 - Only retained job output is bounded, per job and per run between steps.
-  Workspace writes, the journal, and Docker's log of a running job, which only
-  the job's run time bounds, are not; there is no filesystem quota.
+  Workspace writes, the journal, and the Docker log and container layer of a
+  running job, which only the job's run time bounds, are not; there is no
+  filesystem quota.
 
 Preserve uncertainty after a timeout or interrupted dispatch; neither proves
 that an external action did not happen. [V1 acceptance](docs/v1-acceptance.md)

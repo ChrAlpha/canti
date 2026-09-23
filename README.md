@@ -63,8 +63,9 @@ By default each command the agent chooses runs in a new
 `debian:bookworm-slim` container with the workspace mounted at `/workspace`,
 no network, and the host user's uid; `canti run -h` lists the image, limit,
 model, and budget flags. Every canti command takes `-workspace` (default: the
-current directory). The journal lives in a state directory outside the
-workspace.
+current directory). The journal lives in a state directory that must be
+outside the workspace; a workspace that contains the default state root, such
+as `$HOME`, needs `-state`.
 
 | Command | Effect |
 | --- | --- |
@@ -113,8 +114,8 @@ Not verified: no run against a live provider has been recorded. SIGKILL tests
 do not establish durability across power loss or OS crashes. Docker daemon
 restarts and host reboots are not tested, and several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and
-per run; workspace writes, the journal, and Docker's log of a running job are
-not, and there is no filesystem quota.
+per run; workspace writes, the journal, and a running job's Docker log and
+container layer are not, and there is no filesystem quota.
 
 Distributed scheduling, multi-tenant policy, generic workflow graphs,
 automatic planning, and automatic memory compaction are outside this scope.
@@ -126,9 +127,10 @@ behavior should come with deterministic protocol tests. New harness behavior
 should state its durable commit point, restart behavior, and treatment of
 unknown external state.
 
-Before opening a pull request, run `make check`, and `make integration` when a
-change touches storage, execution, the model adapter, or the CLI. The CI runs
-both on pushes to `main` and on pull requests.
+Before opening a pull request, run `make check`, `go test -count=1 -race ./...`,
+and `git diff --check`, plus `make integration` when a change touches storage,
+execution, the model adapter, or the CLI. The CI runs the checks and the
+integration tests on pushes to `main` and on pull requests.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for ownership,
 verification, and review rules. Report vulnerabilities using [SECURITY.md](SECURITY.md).

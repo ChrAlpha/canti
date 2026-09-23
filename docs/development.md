@@ -36,7 +36,7 @@ Cloning requires repository access while the repository is private.
 | `make test` | `go test ./...` |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
-| `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | Acceptance gate tests with their `evidence` log lines |
+| `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
 | `go test ./core -run 'TestNext\|TestIntent\|TestValidate\|TestTrajectory\|TestIllegal' -v` | Transition table, budgets, invariants, trajectories, and rejected events |
 | `go test ./internal/harness -run 'TestCommit\|TestBind\|TestStart\|TestRunner\|TestStale\|TestOffline' -v` | Commit protocol, bind/start, failure, and cancellation cases |
@@ -128,10 +128,10 @@ Anthropic-format server. The gate tests are `cmd/canti/gate_*_test.go`.
 Protocol and transition tests should stay deterministic and require no
 credentials. A new run rule belongs in `core.State.Next` with a row in the
 transition table test; the illegal-pair sweep must keep rejecting everything
-else. Backend tests use temporary, isolated workspaces and state directories,
-remove their containers, and fail on containers left running. Live model
-checks must be explicit opt-ins with finite budgets; do not make paid provider
-calls part of default tests.
+else. Backend tests use temporary, isolated workspaces and state directories
+and remove their containers; the CLI gate fixtures also fail on a container
+left running. Live model checks must be explicit opt-ins with finite budgets;
+do not make paid provider calls part of default tests.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.
