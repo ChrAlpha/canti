@@ -52,6 +52,7 @@ type reply struct {
 	err   error
 	flip  bool // reports the opposite completeness, as a faulty adapter might
 	late  bool // completes even though ctx is done
+	block bool // answers only once ctx is done
 	hook  func()
 }
 
@@ -90,6 +91,9 @@ func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.
 	m.mu.Unlock()
 	if r.hook != nil {
 		r.hook()
+	}
+	if r.block {
+		<-ctx.Done()
 	}
 	if err := ctx.Err(); err != nil && !r.late {
 		return harness.Response{}, err

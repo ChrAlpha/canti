@@ -118,7 +118,7 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 	case core.IntentPrepareRequest:
 		return l.prepare(ctx, run, snap)
 	case core.IntentSendRequest:
-		return l.send(ctx, snap)
+		return l.send(ctx, run, snap)
 	case core.IntentDecode:
 		return l.decode(ctx, snap)
 	case core.IntentBind:
@@ -260,7 +260,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
 }
 
-func (l *Loop) send(ctx context.Context, snap Snapshot) (Snapshot, error) {
+func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
 	if err != nil {
@@ -274,7 +274,16 @@ func (l *Loop) send(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	if snap, err = l.runner.Commit(ctx, snap, core.AttemptStarted{Step: s.Step, Attempt: attempt}, Facts{}); err != nil || snap.State.Phase != core.PhaseRequestSent {
 		return snap, err
 	}
-	resp, err := l.model.Complete(ctx, req)
+	call, cancel := ctx, context.CancelFunc(func() {})
+	if w := run.Budget.WallTime; w > 0 {
+		call, cancel = context.WithTimeout(ctx, run.Created.Add(w).Sub(l.cfg.Now()))
+	}
+	defer cancel()
+	resp, err := l.model.Complete(call, req)
+	if err != nil && ctx.Err() == nil && call.Err() != nil {
+		why := fmt.Sprintf("the %v wall-time budget ran out during the model request", run.Budget.WallTime)
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: why})
+	}
 	if err == nil && (!resp.Complete || len(resp.Body) == 0) {
 		err = errors.New("harness: model reported success without a complete response")
 	}

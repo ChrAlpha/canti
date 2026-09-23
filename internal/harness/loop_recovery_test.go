@@ -47,6 +47,13 @@ func TestLoopStopsAtWallTime(t *testing.T) {
 			t.Fatal("the model was used after the wall time ran out")
 		}
 	})
+	t.Run("during a model request", func(t *testing.T) {
+		f := newFixture(t, limits, harness.Budget{WallTime: time.Minute}, reply{block: true})
+		f.clock.Advance(time.Minute - 20*time.Millisecond)
+		wantState(t, f.run(f.loop()), core.PhaseStopped, core.StopTimedOut)
+		f.wantKinds([]string{"request_frozen", "attempt_started", "stop_requested"})
+		wantContains(t, f.last().Facts.Failure, "wall-time budget")
+	})
 	t.Run("during a running job", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{WallTime: time.Minute}, execReply("sleep 600"))
 		f.exec.hold, f.exec.tick = true, func() { f.clock.Advance(40 * time.Second) }
