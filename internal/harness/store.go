@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 )
@@ -35,6 +36,64 @@ var ErrBrokenChain = errors.New("harness: transition does not extend the committ
 // of the current revision, and the saved response of the current attempt.
 type Store interface {
 	Commit(context.Context, Transition) error
+}
+
+// ErrNotFound reports a run or record the store does not hold.
+var ErrNotFound = errors.New("harness: record not found")
+
+// Journal is a Store with the recovery and history reads a loop needs. Every
+// read is bounded independently of the run's history length.
+//
+// Request returns the frozen request of the named step and revision and
+// Response the saved complete response of the named step and attempt, or
+// ErrNotFound. Recent returns at most limit of the latest observed or
+// resolved steps in commit order. Totals are maintained in the same
+// transaction as each commit.
+type Journal interface {
+	Store
+	Run(ctx context.Context, runID string) (Run, error)
+	Latest(ctx context.Context, runID string) (Snapshot, error)
+	Request(ctx context.Context, runID string, step, rev int) (Request, error)
+	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
+	Recent(ctx context.Context, runID string, limit int) ([]StepRecord, error)
+	Totals(ctx context.Context, runID string) (Totals, error)
+}
+
+// Run is the immutable record a run is created with. Config is opaque host
+// wiring, such as executor and model settings, that a resume must reuse.
+type Run struct {
+	ID          string
+	Goal        string
+	Constraints string
+	Budget      Budget
+	Created     time.Time
+	Config      []byte
+}
+
+// Budget holds the limits the harness measures itself. Zero means unlimited.
+// JobTimeout bounds one job's run time from its backend start.
+type Budget struct {
+	WallTime    time.Duration
+	Tokens      int64
+	OutputBytes int64
+	JobTimeout  time.Duration
+}
+
+// StepRecord is one completed step as the input builder sees it.
+type StepRecord struct {
+	Step        int
+	Command     string
+	Observation Observation
+	Resolved    bool
+}
+
+// Totals are the run-wide sums the budgets are checked against: usage of
+// every saved or incomplete response, output bytes of every observation, and
+// the number of observed or resolved steps.
+type Totals struct {
+	Usage       Usage
+	OutputBytes int64
+	Steps       int
 }
 
 // Snapshot is the committed position of a run: the state and the sequence of

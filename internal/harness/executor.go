@@ -1,6 +1,9 @@
 package harness
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Executor owns external effects, keyed by the stable effect ID. Each effect
 // has one durable start latch, set at most once and never reset: by Start,
@@ -59,9 +62,14 @@ const (
 
 // Job is the backend's handle for an effect. Its ID is recorded as a fact;
 // its status is a snapshot that Inspect must confirm before an observation.
+// StartedAt and FinishedAt come from the backend clock; Preview and Output
+// describe retained output once the job is finished.
 type Job struct {
-	ID       string
-	Status   JobStatus
-	ExitCode *int
-	Output   ArtifactRef
+	ID         string
+	Status     JobStatus
+	ExitCode   *int
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Preview    string
+	Output     ArtifactRef
 }
