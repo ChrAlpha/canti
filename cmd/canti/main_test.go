@@ -23,7 +23,8 @@ import (
 // TestMain runs the binary as the CLI when CANTI_TEST_MAIN=1. There
 // CANTI_TEST_CRASH=before:KIND or after:KIND kills the process with SIGKILL
 // right before, or right after, it commits the first transition of KIND;
-// block:KIND holds that commit until its context is done.
+// block:KIND holds that commit until its context is done, after creating the
+// file CANTI_TEST_BLOCKED names.
 func TestMain(m *testing.M) {
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
@@ -31,7 +32,9 @@ func TestMain(m *testing.M) {
 			if when != "before" && when != "after" && when != "block" {
 				panic("CANTI_TEST_CRASH must be before:KIND, after:KIND, or block:KIND")
 			}
-			wrapJournal = func(j harness.Journal) harness.Journal { return crashing{j, when, kind} }
+			wrapJournal = func(j harness.Journal) harness.Journal {
+				return crashing{j, when, kind, os.Getenv("CANTI_TEST_BLOCKED")}
+			}
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 	}
@@ -40,7 +43,7 @@ func TestMain(m *testing.M) {
 
 type crashing struct {
 	harness.Journal
-	when, kind string
+	when, kind, marker string
 }
 
 func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
@@ -48,6 +51,7 @@ func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
 	case t.Event.Kind() != c.kind:
 		return c.Journal.Commit(ctx, t)
 	case c.when == "block":
+		os.WriteFile(c.marker, nil, 0o600)
 		<-ctx.Done()
 		return ctx.Err()
 	case c.when == "before":
@@ -88,6 +92,8 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "0"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "0"}, exitUsage, "", "-history"},
+		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
+		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
 		{[]string{"resolve"}, exitUsage, "", "exactly one of -job and -execution"},
 		{[]string{"resolve", "-job", "-execution", "cancelled"}, exitUsage, "", "exactly one of -job and -execution"},
@@ -149,7 +155,7 @@ func TestReadersReportMissingRuns(t *testing.T) {
 func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 	f := newFixture(t, nil)
 	state := filepath.Join(f.workspace, "state")
-	r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-goal", "g", "-workspace", f.workspace, "-state", state, "-model-url", f.model.URL)
+	r := f.cli(nil, "run", "-goal", "g", "-state", state)
 	if r.code != exitError || !strings.Contains(r.stderr, "overlap") {
 		t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
 	}
@@ -183,7 +189,7 @@ func TestWritersRefuseALockedWorkspace(t *testing.T) {
 
 func TestRunReturnsWithoutExecuting(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "nothing to do"}})
-	r := f.cli(nil, "run", "-goal", "say hi", "-constraints", "be brief")
+	r := f.cli([]string{"ANTHROPIC_BASE_URL=" + f.model.URL}, "run", "-goal", "say hi", "-constraints", "be brief", "-model-url", "")
 	if r.code != exitOK || r.stdout != "nothing to do\n" {
 		t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
@@ -289,27 +295,41 @@ func TestASignalStopsTheRunPersistently(t *testing.T) {
 }
 
 func TestASecondSignalAbandonsTheCleanup(t *testing.T) {
-	f := newFixture(t, nil)
-	held := f.model.holdRequests()
-	cmd, wait := f.start([]string{"CANTI_TEST_CRASH=block:stop_requested"}, "run", "-goal", "g")
-	select {
-	case <-held:
-	case <-time.After(time.Minute):
-		t.Fatal("the model was never called")
+	for _, stopping := range []bool{false, true} {
+		t.Run(map[bool]string{false: "while unwinding", true: "while stopping"}[stopping], func(t *testing.T) {
+			f := newFixture(t, nil)
+			held, blocked := f.model.holdRequests(), filepath.Join(t.TempDir(), "blocked")
+			cmd, wait := f.start([]string{"CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED=" + blocked}, "run", "-goal", "g")
+			waitFor(t, func() bool { return len(held) > 0 })
+			if err := cmd.Process.Signal(os.Interrupt); err != nil {
+				t.Fatal(err)
+			}
+			if stopping {
+				waitFor(t, func() bool { _, err := os.Stat(blocked); return err == nil })
+			}
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			r := wait()
+			if r.code != exitError || !strings.Contains(r.stderr, `; finish with "canti stop -run`) || strings.Contains(r.stderr, "deadline exceeded") {
+				t.Fatalf("doubly interrupted run = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started"}) {
+				t.Errorf("history = %q", kinds(h))
+			}
+			if r := f.cli(nil, "stop"); r.code != exitStopped {
+				t.Errorf("stop = %d\nstderr: %s", r.code, r.stderr)
+			}
+		})
 	}
-	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
-		if err := cmd.Process.Signal(s); err != nil {
-			t.Fatal(err)
+}
+
+func waitFor(t *testing.T, done func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Minute); !done(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
 		}
-	}
-	if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "context canceled; finish with \"canti stop -run") {
-		t.Fatalf("doubly interrupted run = %d\nstderr: %s", r.code, r.stderr)
-	}
-	if h := f.history(); !slices.Equal(kinds(h), []string{"request_frozen", "attempt_started"}) {
-		t.Errorf("history = %q", kinds(h))
-	}
-	if r := f.cli(nil, "stop"); r.code != exitStopped {
-		t.Errorf("stop = %d\nstderr: %s", r.code, r.stderr)
 	}
 }
 
@@ -351,7 +371,7 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 			t.Errorf("%s from another workspace = %d\nstderr: %s", c, r.code, r.stderr)
 		}
 	}
-	if r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-goal", "g", "-workspace", other, "-state", f.state); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
+	if r := f.cli(nil, "run", "-goal", "g", "-workspace", other); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
 		t.Errorf("run from another workspace = %d\nstderr: %s", r.code, r.stderr)
 	}
 }

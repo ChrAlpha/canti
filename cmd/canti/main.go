@@ -77,6 +77,8 @@ type app struct {
 	log              *slog.Logger
 	workspace, state string
 	runID            string
+	cred             credential
+	credErr          error
 }
 
 func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -130,6 +132,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		code, err = exitError, a.locate(*workspace, *state)
 	}
 	if err == nil {
+		a.cred, a.credErr = credentials()
 		code, err = act(ctx)
 	}
 	if err != nil {
@@ -186,11 +189,10 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitUsage, err
 		}
-		cred, err := credentials()
-		if err != nil {
-			return exitError, err
+		if a.credErr != nil {
+			return exitError, a.credErr
 		}
-		m, err := newModel(s.config, *url, cred)
+		m, err := newModel(s.config, *url, a.cred)
 		if err != nil {
 			return exitError, err
 		}
@@ -227,11 +229,10 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 	once := fs.Bool("once", false, "perform exactly one step")
 	url := modelURL(fs)
 	return func(ctx context.Context) (int, error) {
-		cred, err := credentials()
-		if err != nil {
-			return exitError, err
+		if a.credErr != nil {
+			return exitError, a.credErr
 		}
-		model := func(c config) (harness.Model, error) { return newModel(c, *url, cred) }
+		model := func(c config) (harness.Model, error) { return newModel(c, *url, a.cred) }
 		return a.with(ctx, model, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
 			return a.drive(ctx, l, id, *once)
 		})
@@ -413,6 +414,7 @@ func (a *app) drive(ctx context.Context, l *harness.Loop, id string, once bool) 
 				return
 			}
 		}
+		signal.Stop(sig)
 	}()
 	step := l.Run
 	if once {

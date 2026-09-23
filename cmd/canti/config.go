@@ -69,9 +69,11 @@ func (s *spec) register(fs *flag.FlagSet) {
 func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.config, s.budget
 	switch {
-	case c.History < 1:
-		return harness.Run{}, core.State{}, errors.New("-history must be positive")
-	case min(int64(c.Pids), c.OutputLimit, int64(c.MaxTokens), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
+	case c.History < 1 || c.MaxTokens < 1 || c.OutputLimit < 1:
+		return harness.Run{}, core.State{}, errors.New("-history, -max-tokens, and -output-limit must be positive")
+	case c.Image == "" || c.Network == "" || c.Model == "":
+		return harness.Run{}, core.State{}, errors.New("-image, -network, and -model must not be empty")
+	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
 	}
 	var id [16]byte
