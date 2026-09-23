@@ -307,6 +307,8 @@ func TestLoopStopsWhenRequestCannotBeBuilt(t *testing.T) {
 	}{
 		{"freeze", func(f *fixture) { f.model.freezeErr = errors.New("request too large") }, "request too large"},
 		{"prompt", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Total = 64 }, "exceeds"},
+		{"goal", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Goal = 8 }, "goal exceeds its 8-byte limit"},
+		{"constraints", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Constraints = 8 }, "constraints exceed their 8-byte limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

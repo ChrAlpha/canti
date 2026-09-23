@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"slices"
 	"strconv"
@@ -9,10 +10,12 @@ import (
 	"unicode/utf8"
 )
 
-// PromptLimits bounds a prompt in bytes. Every field but Total caps the bytes
-// kept from one input: Command and Preview apply to each step, Rejected to
-// both the error and the response. A cut input ends with a marker counting
-// the bytes removed. Total caps System plus User.
+// PromptLimits bounds a prompt in bytes. Goal and Constraints cap the
+// trimmed goal and constraints, which are refused rather than cut. Every
+// other field but Total caps the bytes kept from one input: Command and
+// Preview apply to each step, Rejected to both the error and the response. A
+// cut input ends with a marker counting the bytes removed. Total caps System
+// plus User.
 type PromptLimits struct {
 	Goal, Constraints, Environment, Command, Preview, Notes, Rejected, Total int
 }
@@ -20,7 +23,7 @@ type PromptLimits struct {
 // DefaultPromptLimits returns limits for a 64 KiB prompt.
 func DefaultPromptLimits() PromptLimits {
 	return PromptLimits{
-		Goal: 8 << 10, Constraints: 4 << 10, Environment: 2 << 10, Command: 2 << 10,
+		Goal: 32 << 10, Constraints: 16 << 10, Environment: 2 << 10, Command: 2 << 10,
 		Preview: 4 << 10, Notes: 8 << 10, Rejected: 2 << 10, Total: 64 << 10,
 	}
 }
@@ -52,13 +55,20 @@ Use the notes file named in the Notes section for your plan and findings. It per
 // counting them as earlier steps, down to the newest one; then it shrinks
 // the notes; then it drops the newest step as well and shrinks the notes
 // again, failing if the prompt still does not fit. Equal frames and limits
-// give equal prompts.
+// give equal prompts. The goal and constraints are never cut: Prompt fails
+// when either exceeds its limit after trimming.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
 	}
 	if min(l.Goal, l.Constraints, l.Environment, l.Command, l.Preview, l.Notes, l.Rejected, l.Total) <= 0 {
 		return Prompt{}, fmt.Errorf("harness: prompt limits %+v must be positive", l)
+	}
+	if n := len(strings.TrimSpace(f.Goal)); n > l.Goal {
+		return Prompt{}, fmt.Errorf("harness: goal exceeds its %d-byte limit by %d bytes", l.Goal, n-l.Goal)
+	}
+	if n := len(strings.TrimSpace(f.Constraints)); n > l.Constraints {
+		return Prompt{}, fmt.Errorf("harness: constraints exceed their %d-byte limit by %d bytes", l.Constraints, n-l.Constraints)
 	}
 	hidden, notes := f.Earlier+len(f.Steps), l.Notes
 	fixed, used := len(system)+len(f.user(l, "", "", notes)), 0
@@ -102,9 +112,9 @@ func (f Frame) user(l PromptLimits, progress, steps string, notes int) string {
 		}
 		b.WriteString("## " + title + "\n" + body)
 	}
-	section("Goal", clip(strings.TrimSpace(f.Goal), l.Goal)+"\n")
+	section("Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
 	if c := strings.TrimSpace(f.Constraints); c != "" {
-		section("Constraints", clip(c, l.Constraints)+"\n")
+		section("Constraints", clip(c, math.MaxInt)+"\n")
 	}
 	section("Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n")
 	section("Progress", progress)

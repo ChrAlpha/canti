@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -145,6 +146,36 @@ func TestCommandsWithoutACredentialTouchNothing(t *testing.T) {
 	}
 	if len(f.model.requests()) != 0 {
 		t.Error("the model was called")
+	}
+}
+
+func TestRunRefusesAGoalOrConstraintsOverTheirLimit(t *testing.T) {
+	l := harness.DefaultPromptLimits()
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-goal", strings.Repeat("g", l.Goal+1)}, fmt.Sprintf("-goal must be at most %d bytes", l.Goal)},
+		{[]string{"-goal", "g", "-constraints", strings.Repeat("c", l.Constraints-2) + "日"}, fmt.Sprintf("-constraints must be at most %d bytes", l.Constraints)},
+	} {
+		r := f.cli(nil, "run", tc.args...)
+		if r.code != exitUsage || !strings.Contains(r.stderr, tc.want) || !strings.Contains(r.stderr, "put a long specification in a workspace file and reference it from the goal") {
+			t.Errorf("run = %d\nstderr: %s", r.code, r.stderr)
+		}
+	}
+	if _, err := os.Stat(f.state); !os.IsNotExist(err) {
+		t.Errorf("state directory after refusals: %v", err)
+	}
+	if len(f.model.requests()) != 0 {
+		t.Error("the model was called")
+	}
+	goal, constraints := strings.Repeat("g", l.Goal), strings.Repeat("c", l.Constraints)
+	if r := f.cli(nil, "run", "-goal", "\n"+goal+" ", "-constraints", constraints+"\t"); r.code != exitOK {
+		t.Fatalf("run at the limits = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if p := f.model.prompts(1); len(p) != 1 || !strings.Contains(p[0], "## Goal\n"+goal+"\n\n## Constraints\n"+constraints+"\n\n") {
+		t.Error("the prompt does not hold the whole goal and constraints")
 	}
 }
 

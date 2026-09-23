@@ -182,8 +182,14 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	var s spec
 	s.register(fs)
 	return func(ctx context.Context) (int, error) {
-		if strings.TrimSpace(*goal) == "" {
+		limits, hint := harness.DefaultPromptLimits(), "; put a long specification in a workspace file and reference it from the goal"
+		switch g := strings.TrimSpace(*goal); {
+		case g == "":
 			return exitUsage, errors.New("-goal is required")
+		case len(g) > limits.Goal:
+			return exitUsage, fmt.Errorf("-goal must be at most %d bytes%s", limits.Goal, hint)
+		case len(strings.TrimSpace(*constraints)) > limits.Constraints:
+			return exitUsage, fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
 		}
 		s.config.Workspace = a.workspace
 		run, initial, err := newRun(*goal, *constraints, s, time.Now())

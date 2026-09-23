@@ -227,8 +227,6 @@ func TestPromptSectionLimits(t *testing.T) {
 		set   func(*Frame, string)
 		limit func(*PromptLimits) *int
 	}{
-		{"goal", func(f *Frame, s string) { f.Goal = s }, func(l *PromptLimits) *int { return &l.Goal }},
-		{"constraints", func(f *Frame, s string) { f.Constraints = s }, func(l *PromptLimits) *int { return &l.Constraints }},
 		{"environment", func(f *Frame, s string) { f.Environment = s }, func(l *PromptLimits) *int { return &l.Environment }},
 		{"command", onStep(func(st *StepRecord, s string) { st.Command = s }), func(l *PromptLimits) *int { return &l.Command }},
 		{"preview", onStep(func(st *StepRecord, s string) { st.Observation.Preview = s }), func(l *PromptLimits) *int { return &l.Preview }},
@@ -269,6 +267,38 @@ func TestPromptSectionLimits(t *testing.T) {
 	}
 }
 
+func TestPromptKeepsTheGoalAndConstraintsWhole(t *testing.T) {
+	l := DefaultPromptLimits()
+	if l.Goal != 32<<10 || l.Constraints != 16<<10 {
+		t.Fatalf("default goal and constraints limits = %d and %d bytes", l.Goal, l.Constraints)
+	}
+	for _, r := range []string{"q", "é", "日", "🙂"} {
+		goal := strings.Repeat("g", l.Goal-len(r)) + r
+		constraints := strings.Repeat("c", l.Constraints-len(r)) + r
+		f := fullFrame()
+		f.Goal, f.Constraints = " \n"+goal+"\t\n", "\n "+constraints+" "
+		p := mustPrompt(t, f, l)
+		if want := "## Goal\n" + goal + "\n\n## Constraints\n" + constraints + "\n\n## Environment\n"; !strings.HasPrefix(p.User, want) || strings.Contains(p.User, "…[truncated ") {
+			t.Fatalf("rune %q: User does not hold the whole goal and constraints", r)
+		}
+		for _, over := range []struct {
+			name  string
+			edit  func(*Frame)
+			limit int
+		}{
+			{"goal", func(f *Frame) { f.Goal = "g" + goal }, l.Goal},
+			{"constraints", func(f *Frame) { f.Constraints = "c" + constraints }, l.Constraints},
+		} {
+			g := fullFrame()
+			over.edit(&g)
+			p, err := g.Prompt(l)
+			if err == nil || p != (Prompt{}) || !strings.Contains(err.Error(), over.name) || !strings.Contains(err.Error(), strconv.Itoa(over.limit)+"-byte limit") {
+				t.Fatalf("rune %q: Prompt() with %s one byte over its limit = %d bytes, %v", r, over.name, len(p.User), err)
+			}
+		}
+	}
+}
+
 func TestClip(t *testing.T) {
 	tests := []struct {
 		in    string
@@ -298,9 +328,10 @@ func TestPromptKeepsUTF8(t *testing.T) {
 	multi := strings.Repeat("é日🙂", 64)
 	for limit := 1; limit <= 16; limit++ {
 		f, l := promptFrame(), unlimited()
-		f.Goal, l.Goal = multi, limit
+		f.Environment, l.Environment = multi, limit
 		p := mustPrompt(t, f, l)
-		kept, _, ok := strings.Cut(strings.TrimPrefix(p.User, "## Goal\n"), "…[truncated ")
+		_, env, _ := strings.Cut(p.User, "## Environment\n")
+		kept, _, ok := strings.Cut(env, "…[truncated ")
 		if !ok || !strings.HasPrefix(multi, kept) || len(kept) > limit || len(kept) <= limit-utf8.UTFMax {
 			t.Fatalf("limit %d kept %q", limit, kept)
 		}

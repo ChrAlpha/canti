@@ -269,7 +269,7 @@ the intent is `halt` or a step fails.
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps, the notes, and in a repair the rejected response; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when no prompt fits or freezing fails |
+| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps, the notes, and in a repair the rejected response; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
 | `bind`, `start` | `Runner.Bind`, `Runner.Start` |
@@ -445,12 +445,15 @@ account for exactly the steps before the current one.
 states the decision protocol and the workspace rules, and a user message with
 Goal, Constraints, Environment, Progress, Recent steps, Notes, and Rejected
 response sections. `PromptLimits` caps each input in bytes and the system and
-user messages together. The defaults are 8 KiB for the goal, 4 KiB for the
+user messages together. The defaults are 32 KiB for the goal, 16 KiB for the
 constraints, 2 KiB for the environment, 2 KiB for each step's command and
 4 KiB for its output preview, 8 KiB for the notes, 2 KiB each for a rejected
-response and its error, and 64 KiB in total. A cut input ends with a marker
-counting the bytes removed, except that notes cut when read are followed only
-by a line saying the file continues. When the total would be exceeded, the
+response and its error, and 64 KiB in total. The goal and constraints are
+never cut: when either exceeds its limit after trimming, `Frame.Prompt` fails
+and the loop stops the run as `unrecoverable`, and `canti run` refuses them
+before creating anything. A cut input ends with a marker counting the bytes
+removed, except that notes cut when read are followed only by a line saying
+the file continues. When the total would be exceeded, the
 prompt drops the oldest shown steps, counting them as earlier steps, then
 shrinks the notes, then drops the newest step and shrinks the notes again; if
 it still does not fit, the loop stops the run as `unrecoverable`. Commands,
