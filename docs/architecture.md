@@ -22,6 +22,7 @@ that target from the current skeleton.
 | `internal/harness/model.go` | Independent requests and raw responses | Interface and provenance fields only |
 | `internal/harness/store.go` | Sequenced atomic transition commits | Interface, snapshot, and record types only |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Implemented against store/executor interfaces |
+| `internal/harness/loop.go` | Driving committed intents to a halt, measured budgets, persistent stop, explicit resolution | Implemented against the SQLite journal with a scripted model and an in-memory executor |
 | `internal/harness/executor.go` | External jobs keyed by effect ID, bind/start split | Interface and status types only |
 | `internal/harness/executortest` | Executable start latch contract for executors | Checked against an offline reference and single-clause mutants |
 | `internal/harness/artifacts.go` | Observations and output references | Types only |
@@ -294,7 +295,7 @@ harnesses from acting on the same pending intent; a database that rejects a
 stale writer does not, by itself, stop that writer from touching the
 execution backend.
 
-| Last committed phase | Intent on resume | Required behavior, not implemented yet |
+| Last committed phase | Intent on resume | Required behavior |
 | --- | --- | --- |
 | `idle` | `prepare_request` | Build the bounded input from committed facts and freeze it as the next revision; a mid-step repair includes the decode feedback |
 | `request_frozen` | `send_request` | Commit `AttemptStarted`, then send the frozen bytes |
@@ -307,6 +308,9 @@ execution backend.
 | `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`, or at `awaiting_observation` after a committed start) or `Resolved`; never redispatch |
 | `returned` | `halt` | Redisplay the saved handoff without restarting the agent |
 | `stopped` | `halt` | Report the stop reason and partial results |
+
+`harness.Loop` performs these actions; redisplaying a handoff or a stop is
+left to its host.
 
 A retryable model request assumes the provider does not execute hosted tools.
 Request replay can incur another charge and does not promise the same response.
@@ -376,9 +380,11 @@ protocol repairs. Neither a new revision, a restart, nor a stop-and-resume
 grants new budget within a run. Wall-time, token, storage, and cost budgets
 are measured by the harness and reported as `StopRequested` with a reason.
 Stop on return, cancellation, exhausted budgets, protocol failure, or
-abandonment; the state preserves the reason. No loop, model adapter, budget
-measurement, sandbox, or cleanup implementation exists yet. See
-[V1 acceptance](v1-acceptance.md) for the required evidence.
+abandonment; the state preserves the reason. `harness.Loop` checks the
+wall-time, token, and output-byte budgets before each step and the wall time
+while it waits on a job, and observes a job it cancels past
+`Budget.JobTimeout` as `timed_out`. See [V1 acceptance](v1-acceptance.md)
+for the required evidence.
 
 ## Complexity budget
 
