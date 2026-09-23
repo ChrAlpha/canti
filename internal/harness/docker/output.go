@@ -83,15 +83,15 @@ func omitted(n int64) string {
 	return fmt.Sprintf("\n... %d bytes omitted ...\n", n)
 }
 
-func describe(path string, t *tap, logsErr error, status harness.JobStatus) (harness.ArtifactRef, bool) {
+func describe(path string, t *tap, logsErr error, status harness.JobStatus) harness.ArtifactRef {
 	ref := harness.ArtifactRef{Path: path}
 	switch {
 	case logsErr != nil:
 		ref.Detail = "logs unavailable: " + logsErr.Error()
-		return ref, false
+		return ref
 	case t.werr != nil:
 		ref.Detail = "artifact write failed: " + t.werr.Error()
-		return ref, false
+		return ref
 	}
 	var notes []string
 	if t.stored < t.total {
@@ -101,7 +101,7 @@ func describe(path string, t *tap, logsErr error, status harness.JobStatus) (har
 		notes = append(notes, "job was cancelled; output is partial")
 	}
 	ref.Bytes, ref.Available, ref.Complete, ref.Detail = t.stored, true, len(notes) == 0, strings.Join(notes, "; ")
-	return ref, true
+	return ref
 }
 
 func verify(root string, ref harness.ArtifactRef) harness.ArtifactRef {
@@ -121,21 +121,21 @@ func verify(root string, ref harness.ArtifactRef) harness.ArtifactRef {
 	return ref
 }
 
-// finish captures the output of a finished job. Only once its artifact is
-// stored is the job recorded, and only once it is recorded is its container
-// removed; a failed capture keeps the container and is retried on the next
-// report.
+// finish captures the output of a finished job and records the job, with an
+// unavailable artifact if the capture failed, because the report is final.
+// Only once it is recorded is its container removed. A capture interrupted
+// because ctx is done, or a record that cannot be published, reports an
+// error and leaves the capture to the next report.
 func (x *Executor) finish(ctx context.Context, id string, job harness.Job, spec string) (harness.Job, error) {
-	job, persist, err := x.collect(ctx, id, job)
-	if err == nil && persist {
+	job, err := x.collect(ctx, id, job)
+	if err == nil {
 		data, _ := json.Marshal(record{job, spec})
-		if err = publish(x.record(id), data, false); err == nil {
-			x.release(ctx, job.ID)
-		}
+		err = publish(x.record(id), data, false)
 	}
 	if err != nil {
 		return harness.Job{}, err
 	}
+	x.release(ctx, job.ID)
 	job.Output = verify(x.artifacts(), job.Output)
 	return job, nil
 }
@@ -189,7 +189,7 @@ func (x *Executor) sweep(ctx context.Context) {
 
 func (x *Executor) record(id string) string { return filepath.Join(x.dir(id), "output.json") }
 
-func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (harness.Job, bool, error) {
+func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (harness.Job, error) {
 	rel := id + "/output"
 	path := filepath.Join(x.artifacts(), rel)
 	t := &tap{w: io.Discard, limit: x.cfg.OutputLimit, previewLimit: x.cfg.PreviewLimit}
@@ -208,12 +208,11 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return harness.Job{}, false, err
+		return harness.Job{}, err
 	}
-	var persist bool
-	job.Output, persist = describe(rel, t, logsErr, job.Status)
+	job.Output = describe(rel, t, logsErr, job.Status)
 	job.Preview = t.preview()
-	return job, persist, nil
+	return job, nil
 }
 
 func (x *Executor) artifactFile(path string) (*os.File, error) {

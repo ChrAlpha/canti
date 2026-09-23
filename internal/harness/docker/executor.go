@@ -1,10 +1,11 @@
 // Package docker runs harness effects as Docker containers through the docker
 // CLI.
 //
-// A finished job's container, with its Docker log, is removed once its output
-// is captured and its result recorded, so host disk holds at most
-// Config.OutputLimit bytes of retained output per job, plus the Docker log of
-// each job still running or awaiting capture, bounded only by its runtime.
+// A finished job's container, with its Docker log, is removed once its result
+// is recorded, even when its output could not be captured, so host disk holds
+// at most Config.OutputLimit bytes of retained output per job, plus the Docker
+// log of each job still running or awaiting capture, bounded only by its
+// runtime.
 package docker
 
 import (

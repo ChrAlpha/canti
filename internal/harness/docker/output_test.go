@@ -108,34 +108,32 @@ func TestTapRecordsWriteFailureAndKeepsReading(t *testing.T) {
 		if p := c.preview(); !strings.HasPrefix(p, "HEAD") || !strings.HasSuffix(p, "TAIL") {
 			t.Fatalf("preview = %q", p)
 		}
-		ref, persist := describe("e/output", c, nil, harness.JobSucceeded)
-		if persist || ref.Available || ref.Complete || ref.Bytes != 0 || !strings.Contains(ref.Detail, want.Error()) {
-			t.Fatalf("describe() = %+v %v", ref, persist)
+		ref := describe("e/output", c, nil, harness.JobSucceeded)
+		if ref.Available || ref.Complete || ref.Bytes != 0 || !strings.Contains(ref.Detail, want.Error()) {
+			t.Fatalf("describe() = %+v", ref)
 		}
 	}
 }
 
 func TestDescribe(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		stored   int64
-		total    int64
-		logs     error
-		status   harness.JobStatus
-		want     harness.ArtifactRef
-		persists bool
+		name   string
+		stored int64
+		total  int64
+		logs   error
+		status harness.JobStatus
+		want   harness.ArtifactRef
 	}{
-		{"complete success", 5, 5, nil, harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Bytes: 5, Complete: true, Available: true}, true},
-		{"complete failure", 5, 5, nil, harness.JobFailed, harness.ArtifactRef{Path: "e/output", Bytes: 5, Complete: true, Available: true}, true},
-		{"truncated", 5, 9, nil, harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "kept 5 of 9 bytes"}, true},
-		{"cancelled", 5, 5, nil, harness.JobCancelled, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "job was cancelled; output is partial"}, true},
-		{"cancelled and truncated", 5, 9, nil, harness.JobCancelled, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "kept 5 of 9 bytes; job was cancelled; output is partial"}, true},
-		{"logs unavailable", 5, 5, errors.New("exit status 1"), harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Detail: "logs unavailable: exit status 1"}, false},
+		{"complete success", 5, 5, nil, harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Bytes: 5, Complete: true, Available: true}},
+		{"complete failure", 5, 5, nil, harness.JobFailed, harness.ArtifactRef{Path: "e/output", Bytes: 5, Complete: true, Available: true}},
+		{"truncated", 5, 9, nil, harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "kept 5 of 9 bytes"}},
+		{"cancelled", 5, 5, nil, harness.JobCancelled, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "job was cancelled; output is partial"}},
+		{"cancelled and truncated", 5, 9, nil, harness.JobCancelled, harness.ArtifactRef{Path: "e/output", Bytes: 5, Available: true, Detail: "kept 5 of 9 bytes; job was cancelled; output is partial"}},
+		{"logs unavailable", 5, 5, errors.New("exit status 1"), harness.JobSucceeded, harness.ArtifactRef{Path: "e/output", Detail: "logs unavailable: exit status 1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ref, persist := describe("e/output", &tap{stored: tt.stored, total: tt.total}, tt.logs, tt.status)
-			if ref != tt.want || persist != tt.persists {
-				t.Fatalf("describe() = %+v %v, want %+v %v", ref, persist, tt.want, tt.persists)
+			if ref := describe("e/output", &tap{stored: tt.stored, total: tt.total}, tt.logs, tt.status); ref != tt.want {
+				t.Fatalf("describe() = %+v, want %+v", ref, tt.want)
 			}
 		})
 	}

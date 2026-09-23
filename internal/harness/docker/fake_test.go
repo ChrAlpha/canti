@@ -98,6 +98,22 @@ func (f *fake) latch(value string) {
 	}
 }
 
+// cancelAt returns a context that is cancelled once the fake creates name.
+func (f *fake) cancelAt(name string) context.Context {
+	ctx, cancel := context.WithCancel(f.t.Context())
+	f.t.Cleanup(cancel)
+	go func() {
+		defer cancel()
+		for ctx.Err() == nil {
+			if _, err := os.Stat(filepath.Join(f.ctl, name)); err == nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	return ctx
+}
+
 var effect = harness.Effect{ID: "e", Command: "true"}
 
 func TestInspectReportsMissingOnlyWhenDockerSaysSo(t *testing.T) {
@@ -178,18 +194,7 @@ func TestLaunchOutlivesShutdown(t *testing.T) {
 	f.set("inspect.out", f.container("created", 0))
 	f.set("running.json", f.container("running", 0))
 	f.set("start.sh", `touch "$ctl/began"; sleep 0.3; cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go func() {
-		defer cancel()
-		for ctx.Err() == nil {
-			if _, err := os.Stat(filepath.Join(f.ctl, "began")); err == nil {
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-	if job, err := f.x.Start(ctx, "e"); err != nil || job.Status != harness.JobRunning {
+	if job, err := f.x.Start(f.cancelAt("began"), "e"); err != nil || job.Status != harness.JobRunning {
 		t.Fatalf("Start() interrupted after the latch = %+v, %v; want running", job, err)
 	}
 	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobRunning {
@@ -251,6 +256,13 @@ func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
 	f.set("inspect.out", f.container("exited", 3))
 	f.set("logs.out", "hello\n")
 	f.set("rm.sh", fmt.Sprintf("test -s %q || touch \"$ctl/early\"\n", filepath.Join(f.x.dir("e"), "output.json")))
+	stale := filepath.Join(f.x.artifacts(), "e", ".tmp-crashed")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	want, found, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || !found || want.ID != "c-e" || want.Status != harness.JobFailed || want.ExitCode == nil || *want.ExitCode != 3 ||
 		want.Preview != "hello\n" || !want.Output.Complete || want.StartedAt.IsZero() || !want.FinishedAt.After(want.StartedAt) {
@@ -261,6 +273,12 @@ func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.ctl, "early")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("the container was removed before its record was durable")
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale capture file survived: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("artifact mode: %v, %v", fi, err)
 	}
 	foreign := strings.ReplaceAll(strings.ReplaceAll(f.container("created", 0), `"c-e"`, `"c-other"`), f.x.cfg.State, "/other")
 	for name, gone := range map[string]func(){
@@ -341,41 +359,89 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	}
 }
 
-func TestFailedCaptureIsRetriedAndSuccessKept(t *testing.T) {
+func TestFailedCaptureIsRecordedAndReleased(t *testing.T) {
+	for _, tt := range []struct {
+		name, detail string
+		fail         func(*fake)
+	}{
+		{"logs unavailable", "logs unavailable: ", func(f *fake) {
+			f.set("logs.err", "Error response from daemon: boom\n")
+			f.set("logs.exit", "1")
+		}},
+		{"artifact unwritable", "artifact write failed: ", func(f *fake) {
+			f.set("logs.out", "hello\n")
+			if err := os.WriteFile(filepath.Join(f.x.artifacts(), "e"), nil, 0o644); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFake(t)
+			f.latch(latchStart)
+			f.set("inspect.out", f.container("exited", 0))
+			tt.fail(f)
+			want, found, err := f.x.Inspect(t.Context(), "e")
+			if err != nil || !found || want.Status != harness.JobSucceeded || want.Output.Path != "e/output" ||
+				want.Output.Available || want.Output.Complete || !strings.HasPrefix(want.Output.Detail, tt.detail) {
+				t.Fatalf("Inspect(capture fails) = %+v, %v, %v", want, found, err)
+			}
+			data, err := os.ReadFile(f.x.record("e"))
+			var rec record
+			if err == nil {
+				err = json.Unmarshal(data, &rec)
+			}
+			if err != nil || !same(rec.Job, want) || rec.Spec != specHash(f.x.runArgs("true")) {
+				t.Fatalf("record = %+v, %v; want %+v", rec, err, want)
+			}
+			if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+				t.Fatalf("rms = %q, want the container and its log released", rms)
+			}
+			f.unset("logs.err", "logs.exit")
+			f.set("logs.out", "late\n")
+			if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || !same(job, want) {
+				t.Fatalf("Inspect() again = %+v, %v; want the recorded job", job, err)
+			}
+			if logs := f.calls("logs"); len(logs) != 1 {
+				t.Fatalf("logs = %q, want the final report never captured again", logs)
+			}
+		})
+	}
+}
+
+func TestInterruptedCaptureIsNotRecorded(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
 	f.set("inspect.out", f.container("exited", 0))
-	f.set("logs.err", "Error response from daemon: boom\n")
-	f.set("logs.exit", "1")
-	job, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || !strings.HasPrefix(job.Output.Detail, "logs unavailable") {
-		t.Fatalf("Inspect(logs fail) = %+v, %v", job, err)
+	f.set("logs.sh", `touch "$ctl/began"; exec sleep 5`+"\n")
+	if _, _, err := f.x.Inspect(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Inspect(shutdown during capture) = %v, want cancellation", err)
 	}
-	if _, err := os.Stat(filepath.Join(f.x.dir("e"), "output.json")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-		t.Fatalf("a failed capture was recorded: %v, rms %q", err, f.calls("rm"))
+	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatalf("an interrupted capture was recorded: %v, rms %q", err, f.calls("rm"))
 	}
-	f.unset("logs.err", "logs.exit")
+	f.unset("logs.sh")
 	f.set("logs.out", "hello\n")
-	stale := filepath.Join(f.x.artifacts(), "e", ".tmp-crashed")
-	if err := os.WriteFile(stale, []byte("partial"), 0o600); err != nil {
+	job, _, err := f.x.Inspect(t.Context(), "e")
+	if err != nil || job.Preview != "hello\n" || !job.Output.Complete || len(f.calls("logs")) != 2 || len(f.calls("rm")) != 1 {
+		t.Fatalf("Inspect() = %+v, %v, logs %q; want the next report to capture again", job, err, f.calls("logs"))
+	}
+}
+
+func TestUnpublishedRecordIsNotFinal(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.set("inspect.out", f.container("exited", 0))
+	f.set("logs.out", "hello\n")
+	f.set("logs.sh", fmt.Sprintf("mkdir -p %q\n", filepath.Join(f.x.record("e"), "blocked")))
+	if job, _, err := f.x.Inspect(t.Context(), "e"); err == nil || len(f.calls("rm")) != 0 {
+		t.Fatalf("Inspect(record unpublishable) = %+v, %v, rms %q; want an error and the container kept", job, err, f.calls("rm"))
+	}
+	if err := os.RemoveAll(f.x.record("e")); err != nil {
 		t.Fatal(err)
 	}
-	want := harness.ArtifactRef{Path: "e/output", Bytes: 6, Complete: true, Available: true}
-	for range 2 {
-		job, _, err = f.x.Inspect(t.Context(), "e")
-		if err != nil || job.Preview != "hello\n" || job.Output != want {
-			t.Fatalf("Inspect() = %+v, %v", job, err)
-		}
-		f.set("logs.out", "changed\n")
-	}
-	if logs := f.calls("logs"); len(logs) != 2 {
-		t.Fatalf("logs = %q, want one failed and one kept capture", logs)
-	}
-	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("stale capture file survived: %v", err)
-	}
-	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Fatalf("artifact mode: %v, %v", fi, err)
+	f.unset("logs.sh")
+	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded || !job.Output.Complete || len(f.calls("rm")) != 1 {
+		t.Fatalf("Inspect() = %+v, %v; want the job recorded and released", job, err)
 	}
 }
 
