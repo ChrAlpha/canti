@@ -80,7 +80,7 @@ func (m *fakeModel) Freeze(p harness.Prompt) (harness.Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prompts = append(m.prompts, p)
-	return harness.Request{Body: []byte(p.System + "\n\n" + p.User), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, m.freezeErr
+	return harness.Request{Body: []byte(p.System + "\n\n" + p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, m.freezeErr
 }
 
 func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.Response, error) {

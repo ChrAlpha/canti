@@ -75,12 +75,23 @@ var progressLine = regexp.MustCompile(`(?m)^Step (\d+) of at most \d+, attempt \
 
 func promptOf(body []byte) (step int, prompt string, err error) {
 	var req struct {
-		Messages []struct{ Content string } `json:"messages"`
+		Messages []struct{ Content json.RawMessage } `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 {
 		return 0, "", errors.New("request is not one user message")
 	}
-	prompt = req.Messages[0].Content
+	if json.Unmarshal(req.Messages[0].Content, &prompt) != nil {
+		var blocks []struct{ Type, Text string }
+		if err := json.Unmarshal(req.Messages[0].Content, &blocks); err != nil {
+			return 0, "", errors.New("user message content is neither text nor content blocks")
+		}
+		for _, b := range blocks {
+			if b.Type != "text" || b.Text == "" {
+				return 0, "", errors.New("user message has an empty or non-text block")
+			}
+			prompt += b.Text
+		}
+	}
 	m := progressLine.FindStringSubmatch(prompt)
 	if m == nil {
 		return 0, prompt, errors.New("prompt has no progress line")

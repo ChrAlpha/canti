@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,7 +28,8 @@ const (
 	version        = "2023-06-01"
 	protocol       = "anthropic-messages/" + version
 	fallbackBeta   = "server-side-fallback-2026-07-01"
-	adapter        = "canti-anthropic/1"
+	adapter        = "canti-anthropic/2"
+	adapterV1      = "canti-anthropic/1"
 	decisionFormat = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{` +
 		`"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},` +
 		`"required":["kind","payload"],"additionalProperties":false}}}`
@@ -95,15 +97,32 @@ func New(cfg Config) (*Model, error) {
 }
 
 type userMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content []textBlock `json:"content"`
 }
 
-// Freeze builds the deterministic request body for p. It never includes
-// credentials.
+type textBlock struct {
+	Type         string          `json:"type"`
+	Text         string          `json:"text"`
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
+}
+
+// Freeze builds the deterministic request body for p, one text block per
+// prompt block, with a cache breakpoint on the last stable block. It never
+// includes credentials.
 func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
-	if p.User == "" {
-		return harness.Request{}, errors.New("anthropic: empty user prompt")
+	if len(p.Blocks) == 0 || slices.Contains(p.Blocks, "") {
+		return harness.Request{}, errors.New("anthropic: user prompt is empty or has an empty block")
+	}
+	if p.Stable < 0 || p.Stable > len(p.Blocks) {
+		return harness.Request{}, fmt.Errorf("anthropic: %d stable blocks of %d", p.Stable, len(p.Blocks))
+	}
+	content := make([]textBlock, len(p.Blocks))
+	for i, text := range p.Blocks {
+		content[i] = textBlock{Type: "text", Text: text}
+	}
+	if p.Stable > 0 {
+		content[p.Stable-1].CacheControl = json.RawMessage(`{"type":"ephemeral"}`)
 	}
 	body := struct {
 		Model        string          `json:"model"`
@@ -112,7 +131,7 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 		Messages     []userMessage   `json:"messages"`
 		OutputConfig json.RawMessage `json:"output_config,omitempty"`
 		Fallbacks    string          `json:"fallbacks,omitempty"`
-	}{Model: m.cfg.Model, MaxTokens: m.cfg.MaxTokens, System: p.System, Messages: []userMessage{{"user", p.User}}}
+	}{Model: m.cfg.Model, MaxTokens: m.cfg.MaxTokens, System: p.System, Messages: []userMessage{{"user", content}}}
 	proto := protocol
 	if m.cfg.StructuredOutput {
 		body.OutputConfig = json.RawMessage(decisionFormat)
@@ -142,16 +161,17 @@ type message struct {
 	} `json:"usage"`
 }
 
-// Complete sends exactly req.Body once. It returns a nil error exactly when
-// the response is complete, a *harness.StopError when resending cannot help,
-// and ctx's error once ctx is done.
+// Complete sends exactly req.Body once, including a body frozen by
+// canti-anthropic/1. It returns a nil error exactly when the response is
+// complete, a *harness.StopError when resending cannot help, and ctx's error
+// once ctx is done.
 func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return harness.Response{}, err
 	}
 	var beta string
 	switch {
-	case req.Adapter != adapter:
+	case req.Adapter != adapter && req.Adapter != adapterV1:
 		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
 		beta = fallbackBeta

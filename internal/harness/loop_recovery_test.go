@@ -79,7 +79,7 @@ func TestLoopTimesOutARunningJob(t *testing.T) {
 	if obs := observation(t, f.transitions()[6]); obs.Execution != core.ExecutionTimedOut {
 		t.Fatalf("observation = %+v, want timed_out", obs)
 	}
-	wantContains(t, f.model.prompts[1].User, "Execution: timed_out")
+	wantContains(t, f.model.prompts[1].User(), "Execution: timed_out")
 }
 
 func TestLoopCancelsATimedOutJobOnce(t *testing.T) {
@@ -218,7 +218,7 @@ func TestLoopObservesAFailedStart(t *testing.T) {
 		if obs := observation(t, observed); !reflect.DeepEqual(obs, want(observed.From.EffectID)) {
 			t.Fatalf("observation = %+v, want %+v", obs, want(observed.From.EffectID))
 		}
-		wantContains(t, f.model.prompts[1].User, "Execution: failed_to_start")
+		wantContains(t, f.model.prompts[1].User(), "Execution: failed_to_start")
 	})
 	t.Run("cancelling", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{}, execReply("make test"))
@@ -288,7 +288,7 @@ func TestLoopResolveRecordsAnExplicitOutcome(t *testing.T) {
 			t.Fatalf("resolved run is at step %d, want 2", snap.State.Step)
 		}
 		wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-		wantContains(t, f.model.prompts[1].User, "set by explicit resolution", "checked by hand")
+		wantContains(t, f.model.prompts[1].User(), "set by explicit resolution", "checked by hand")
 	})
 	t.Run("unknown abandons", func(t *testing.T) {
 		f := unresolved(t, missing)

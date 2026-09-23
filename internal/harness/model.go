@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"strings"
 
 	"github.com/ChrAlpha/canti/core"
 )
@@ -20,11 +21,18 @@ type Model interface {
 	Decision(Response) []byte
 }
 
-// Prompt is the provider-neutral input built from a Frame.
+// Prompt is the provider-neutral input built from a Frame: a system prompt
+// and a user message in non-empty blocks. Blocks[:Stable] is the stable
+// prefix, which the next prompt of the run repeats byte for byte unless it
+// drops a step; the blocks after it change with every request.
 type Prompt struct {
 	System string
-	User   string
+	Blocks []string
+	Stable int
 }
+
+// User returns the user message, the blocks joined.
+func (p Prompt) User() string { return strings.Join(p.Blocks, "") }
 
 // Request is the frozen, provider-facing input for one step. Its identity
 // comes from the run state it is committed with.

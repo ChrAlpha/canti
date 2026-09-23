@@ -192,12 +192,18 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 
 	var body struct {
 		System   string
-		Messages []struct{ Role, Content string }
+		Messages []struct {
+			Role    string
+			Content []struct{ Type, Text string }
+		}
 	}
 	if err := json.Unmarshal(s.req.Body, &body); err != nil || len(body.Messages) != 1 {
 		t.Fatalf("request body does not decode to one message: %v", err)
 	}
-	user := body.Messages[0].Content
+	var user string
+	for _, b := range body.Messages[0].Content {
+		user += b.Text
+	}
 	s.prompt, s.shown = len(body.System)+len(user), strings.Count(user, "\n### Step ")
 	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("\n### Step %d\n", n-s.shown+1),
 		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), "The file continues beyond what was read.")

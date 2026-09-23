@@ -3,6 +3,7 @@ package anthropic_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -24,12 +25,14 @@ const (
 	authToken    = "sk-ant-oat-SECRET-token"
 	protocol     = "anthropic-messages/2023-06-01"
 	fallbackBeta = "server-side-fallback-2026-07-01"
-	adapter      = "canti-anthropic/1"
+	adapter      = "canti-anthropic/2"
+	adapterV1    = "canti-anthropic/1"
+	cached       = `,"cache_control":{"type":"ephemeral"}`
 	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}}}`
 	decision     = `[{"type":"text","text":"{\"kind\":\"return\",\"payload\":\"done\"}"}]`
 )
 
-var prompt = harness.Prompt{System: "sys", User: "hi"}
+var prompt = harness.Prompt{System: "sys", Blocks: []string{"head", "step", "tail"}, Stable: 2}
 
 func newModel(t *testing.T, url string, edit func(*anthropic.Config)) *anthropic.Model {
 	t.Helper()
@@ -113,7 +116,8 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestFreeze(t *testing.T) {
-	base := `{"model":"claude-opus-5","max_tokens":16000,"system":"sys","messages":[{"role":"user","content":"hi"}]`
+	base := `{"model":"claude-opus-5","max_tokens":16000,"system":"sys","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"head"},{"type":"text","text":"step"` + cached + `},{"type":"text","text":"tail"}]}]`
 	for _, tc := range []struct {
 		name     string
 		edit     func(*anthropic.Config)
@@ -143,15 +147,82 @@ func TestFreeze(t *testing.T) {
 
 func TestFreezeOmitsEmptySystemAndRequiresUser(t *testing.T) {
 	m := newModel(t, "https://unused.test", nil)
-	req, err := m.Freeze(harness.Prompt{User: "hi"})
+	req, err := m.Freeze(harness.Prompt{Blocks: []string{"hi"}, Stable: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"model":"claude-opus-5","max_tokens":16000,"messages":[{"role":"user","content":"hi"}]}`; string(req.Body) != want {
+	if want := `{"model":"claude-opus-5","max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"hi"` + cached + `}]}]}`; string(req.Body) != want {
 		t.Fatalf("body = %s, want %s", req.Body, want)
 	}
-	if _, err := m.Freeze(harness.Prompt{System: "sys"}); err == nil {
-		t.Fatal("Freeze accepted an empty user prompt")
+	for name, p := range map[string]harness.Prompt{
+		"no blocks":            {System: "sys"},
+		"an empty block":       {System: "sys", Blocks: []string{"head", "", "tail"}, Stable: 2},
+		"only an empty block":  {Blocks: []string{""}},
+		"stable beyond blocks": {Blocks: []string{"head", "tail"}, Stable: 3},
+		"negative stable":      {Blocks: []string{"head"}, Stable: -1},
+	} {
+		if req, err := m.Freeze(p); err == nil {
+			t.Errorf("%s: Freeze = %s, want an error", name, req.Body)
+		}
+	}
+}
+
+func TestFreezeMarksOnlyTheLastStableBlock(t *testing.T) {
+	m := newModel(t, "https://unused.test", nil)
+	for _, tc := range []struct {
+		blocks []string
+		stable int
+		want   string
+	}{
+		{[]string{"head", "tail"}, 0, `{"type":"text","text":"head"},{"type":"text","text":"tail"}`},
+		{[]string{"head", "tail"}, 1, `{"type":"text","text":"head"` + cached + `},{"type":"text","text":"tail"}`},
+		{[]string{"head", "s1", "s2", "tail"}, 3, `{"type":"text","text":"head"},{"type":"text","text":"s1"},{"type":"text","text":"s2"` + cached + `},{"type":"text","text":"tail"}`},
+		{[]string{"only"}, 1, `{"type":"text","text":"only"` + cached + `}`},
+	} {
+		req, err := m.Freeze(harness.Prompt{Blocks: tc.blocks, Stable: tc.stable})
+		want := `{"model":"claude-opus-5","max_tokens":16000,"messages":[{"role":"user","content":[` + tc.want + `]}]}`
+		if err != nil || string(req.Body) != want {
+			t.Errorf("Freeze(%q, %d stable) = %s, %v\nwant %s", tc.blocks, tc.stable, req.Body, err, want)
+		}
+	}
+
+	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, ArtifactDir: "/a", Notes: harness.Notes{Path: "/n"}}
+	for n := 1; n <= 3; n++ {
+		f.Step = n
+		p, err := f.Prompt(harness.DefaultPromptLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := m.Freeze(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type         string          `json:"type"`
+					Text         string          `json:"text"`
+					CacheControl json.RawMessage `json:"cache_control"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(req.Body, &body); err != nil || len(body.Messages) != 1 || len(body.Messages[0].Content) != len(p.Blocks) {
+			t.Fatalf("step %d: body %s does not hold the %d blocks in one message: %v", n, req.Body, len(p.Blocks), err)
+		}
+		for i, b := range body.Messages[0].Content {
+			mark := ""
+			if i == p.Stable-1 {
+				mark = `{"type":"ephemeral"}`
+			}
+			if b.Type != "text" || b.Text != p.Blocks[i] || string(b.CacheControl) != mark {
+				t.Errorf("step %d block %d of %d (%d stable) = %+v", n, i, len(p.Blocks), p.Stable, b)
+			}
+		}
+		if c := bytes.Count(req.Body, []byte("cache_control")); c != 1 {
+			t.Errorf("step %d: %d cache breakpoints, want 1", n, c)
+		}
+		f.Steps = append(f.Steps, harness.StepRecord{Step: n, Command: "true", Observation: harness.Observation{Execution: core.ExecutionExited}})
 	}
 }
 
@@ -192,7 +263,7 @@ func TestCompleteSendsFrozenBytesAndHeaders(t *testing.T) {
 					tc.edit(c)
 				}
 			})
-			req, err := m.Freeze(harness.Prompt{System: "Use <tags> & \"quotes\"", User: "ünïcode\n\tline & <b>"})
+			req, err := m.Freeze(harness.Prompt{System: "Use <tags> & \"quotes\"", Blocks: []string{"ünïcode\n\tline & <b>", "tail"}, Stable: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -224,15 +295,23 @@ func TestCompleteSendsFrozenBytesAndHeaders(t *testing.T) {
 }
 
 func TestCompleteSendsRequestBodyVerbatim(t *testing.T) {
-	srv, got := recorder(t, http.StatusOK, message(`"end_turn"`, decision))
-	body := []byte("{ \"messages\" : [{\"role\":\"user\",\"content\":\"<&>\"}],\n\"model\":\"claude-opus-5\", \"max_tokens\":1 }\n")
-	req := harness.Request{Body: body, Model: "claude-opus-5", Protocol: protocol, Adapter: adapter}
-	if _, err := newModel(t, srv.URL+"/", nil).Complete(context.Background(), req); err != nil {
-		t.Fatal(err)
-	}
-	c := <-got
-	if c.path != "/v1/messages" || !bytes.Equal(c.body, body) {
-		t.Fatalf("sent %s %q, want /v1/messages %q", c.path, c.body, body)
+	for _, tc := range []struct{ adapter, content string }{
+		{adapterV1, `"<&>"`},
+		{adapter, `[{"type":"text","text":"<&>"` + cached + `},{"type":"text","text":"x"}]`},
+	} {
+		t.Run(tc.adapter, func(t *testing.T) {
+			srv, got := recorder(t, http.StatusOK, message(`"end_turn"`, decision))
+			body := []byte("{ \"messages\" : [{\"role\":\"user\",\"content\":" + tc.content + "}],\n\"model\":\"claude-opus-5\", \"max_tokens\":1 }\n")
+			req := harness.Request{Body: body, Model: "claude-opus-5", Protocol: protocol, Adapter: tc.adapter}
+			resp, err := newModel(t, srv.URL+"/", nil).Complete(context.Background(), req)
+			if err != nil || !resp.Complete || resp.Adapter != tc.adapter {
+				t.Fatalf("Complete = %+v, %v", resp, err)
+			}
+			c := <-got
+			if c.path != "/v1/messages" || !bytes.Equal(c.body, body) {
+				t.Fatalf("sent %s %q, want /v1/messages %q", c.path, c.body, body)
+			}
+		})
 	}
 }
 
@@ -252,6 +331,8 @@ func TestCompleteHonorsFrozenProtocol(t *testing.T) {
 	for name, req := range map[string]harness.Request{
 		"unknown protocol": {Body: req.Body, Model: req.Model, Protocol: "anthropic-messages/2099-01-01", Adapter: adapter},
 		"unknown adapter":  {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "other/1"},
+		"future adapter":   {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/3"},
+		"no adapter":       {Body: req.Body, Model: req.Model, Protocol: protocol},
 	} {
 		if _, err := m.Complete(context.Background(), req); stopReason(err) != core.StopUnrecoverable {
 			t.Errorf("%s: err = %v, want unrecoverable stop", name, err)

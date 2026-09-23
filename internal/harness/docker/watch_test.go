@@ -16,7 +16,7 @@ import (
 type execModel struct{}
 
 func (execModel) Freeze(p harness.Prompt) (harness.Request, error) {
-	return harness.Request{Body: []byte(p.User), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, nil
+	return harness.Request{Body: []byte(p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, nil
 }
 
 func (execModel) Complete(context.Context, harness.Request) (harness.Response, error) {

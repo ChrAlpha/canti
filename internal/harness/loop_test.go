@@ -68,10 +68,16 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	if n, _ := f.model.calls(); n != 3 {
 		t.Fatalf("prompts = %d, want 3", n)
 	}
-	wantContains(t, f.model.prompts[1].User, "### Step 1", "ls -la /workspace", "ran: ls -la /workspace", "Execution: exited, exit code 0")
-	wantContains(t, f.model.prompts[2].User, "### Step 1", "### Step 2", "ran: find . -name '*.go' | wc -l")
-	if strings.Contains(f.model.prompts[0].User, "ls -la") {
-		t.Errorf("first prompt shows a step that has not run:\n%s", f.model.prompts[0].User)
+	wantContains(t, f.model.prompts[1].User(), "### Step 1", "ls -la /workspace", "ran: ls -la /workspace", "Execution: exited, exit code 0")
+	wantContains(t, f.model.prompts[2].User(), "### Step 1", "### Step 2", "ran: find . -name '*.go' | wc -l")
+	if strings.Contains(f.model.prompts[0].User(), "ls -la") {
+		t.Errorf("first prompt shows a step that has not run:\n%s", f.model.prompts[0].User())
+	}
+	for i, p := range f.model.prompts[1:] {
+		prev := f.model.prompts[i]
+		if p.Stable != prev.Stable+1 || !slices.Equal(p.Blocks[:prev.Stable], prev.Blocks[:prev.Stable]) {
+			t.Errorf("prompt %d does not extend the stable blocks of prompt %d by one step:\n%q\n%q", i+2, i+1, p.Blocks[:p.Stable], prev.Blocks[:prev.Stable])
+		}
 	}
 	for i, sent := range f.model.sent {
 		if want := f.frozen(i+1, 1); !bytes.Equal(sent, want) {
@@ -123,13 +129,13 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]
-		if err != nil || got != want {
-			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User())
 		}
-		shown := strings.Count(got.User, "\n### Step ")
+		shown := strings.Count(got.User(), "\n### Step ")
 		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)
-		if shown <= 8 || strings.Contains(got.User, earlier) != (shown < n) || !strings.Contains(got.User, fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
-			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User)
+		if shown <= 8 || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
+			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
 		}
 		if p.pages != tc.pages || p.records != min(n, tc.pages*historyPage) {
 			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.records, p.pages, tc.pages)
@@ -320,7 +326,7 @@ func TestLoopRejectsAnEmptyDecision(t *testing.T) {
 	f.model.empty = true
 	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
 	f.wantKinds(closing, closing)
-	wantContains(t, f.model.prompts[1].User, "## Rejected response", "<html>busy</html>")
+	wantContains(t, f.model.prompts[1].User(), "## Rejected response", "<html>busy</html>")
 }
 
 func TestLoopBackoffIsCancellable(t *testing.T) {
@@ -390,9 +396,12 @@ func TestLoopRepairsAnUndecodableResponse(t *testing.T) {
 	if repair := f.transitions()[4]; repair.To.RequestRev != 2 || repair.To.Attempt != 2 {
 		t.Fatalf("repair froze %+v, want revision 2 at attempt 2", repair.To)
 	}
-	wantContains(t, f.model.prompts[1].User, "## Rejected response", "Sure! Here is the plan.", "invalid decision", "attempt 2 of 3")
-	if strings.Contains(f.model.prompts[0].User, "Rejected") {
-		t.Errorf("first prompt carries a rejection:\n%s", f.model.prompts[0].User)
+	wantContains(t, f.model.prompts[1].User(), "## Rejected response", "Sure! Here is the plan.", "invalid decision", "attempt 2 of 3")
+	if strings.Contains(f.model.prompts[0].User(), "Rejected") {
+		t.Errorf("first prompt carries a rejection:\n%s", f.model.prompts[0].User())
+	}
+	if first, repair := f.model.prompts[0], f.model.prompts[1]; !slices.Equal(repair.Blocks[:repair.Stable], first.Blocks[:first.Stable]) {
+		t.Errorf("the repair changed the stable blocks:\n%q\n%q", repair.Blocks[:repair.Stable], first.Blocks[:first.Stable])
 	}
 	if !bytes.Equal(f.model.sent[1], f.frozen(1, 2)) || bytes.Equal(f.model.sent[0], f.model.sent[1]) {
 		t.Fatal("the repair did not send the newly frozen revision")
@@ -461,7 +470,7 @@ func TestLoopShowsNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.run(f.loop())
-	wantContains(t, f.model.prompts[0].User, "/workspace/.canti/notes.md", "plan: count the files first")
+	wantContains(t, f.model.prompts[0].User(), "/workspace/.canti/notes.md", "plan: count the files first")
 }
 
 func TestLoopToleratesUnreadableNotes(t *testing.T) {
@@ -476,7 +485,7 @@ func TestLoopToleratesUnreadableNotes(t *testing.T) {
 		t.Fatalf("Step() error = %v", err)
 	}
 	wantState(t, snap, core.PhaseRequestFrozen, "")
-	wantContains(t, f.model.prompts[0].User, "notes unreadable: ", "not a regular file")
+	wantContains(t, f.model.prompts[0].User(), "notes unreadable: ", "not a regular file")
 	if w := h.find("notes unreadable"); len(w) != 1 || w[0]["level"] != "WARN" {
 		t.Fatalf("notes warnings = %v, want one", w)
 	}

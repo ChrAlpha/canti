@@ -29,7 +29,8 @@ func TestLiveDecision(t *testing.T) {
 	}
 	req, err := m.Freeze(harness.Prompt{
 		System: `Reply with one JSON object {"kind":"exec"|"return","payload":string}.`,
-		User:   `Hand control back to the caller with the payload "ok".`,
+		Blocks: []string{"Hand control back to the caller ", `with the payload "ok".`},
+		Stable: 1,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,11 +57,26 @@ func mustPrompt(t *testing.T, f Frame, l PromptLimits) Prompt {
 	if err != nil {
 		t.Fatalf("Frame.Prompt() error = %v", err)
 	}
-	if n := len(p.System) + len(p.User); n > l.Total {
+	if n := len(p.System) + len(p.User()); n > l.Total {
 		t.Fatalf("prompt is %d bytes, over the %d-byte total", n, l.Total)
 	}
-	if !utf8.ValidString(p.System) || !utf8.ValidString(p.User) {
+	if !utf8.ValidString(p.System) || !utf8.ValidString(p.User()) {
 		t.Fatal("prompt is not valid UTF-8")
+	}
+	if p.Stable < 1 || p.Stable != len(p.Blocks)-1 || slices.Contains(p.Blocks, "") || !strings.HasSuffix(p.Blocks[0], "\n## Recent steps\n") {
+		t.Fatalf("prompt has %d blocks, %d of them stable, some empty %v:\n%q", len(p.Blocks), p.Stable, slices.Contains(p.Blocks, ""), p.Blocks)
+	}
+	for _, b := range p.Blocks[1:p.Stable] {
+		if !strings.HasPrefix(b, "### Step ") {
+			t.Fatalf("stable block %q is not one step", b)
+		}
+	}
+	start := "## Progress\n"
+	if p.Stable == 1 {
+		start = "None.\n\n" + start
+	}
+	if tail := p.Blocks[p.Stable]; !strings.HasPrefix(tail, start) {
+		t.Fatalf("tail does not start with %q:\n%s", start, tail)
 	}
 	return p
 }
@@ -90,26 +106,33 @@ func shownSteps(user string) []int {
 }
 
 func TestPromptRendersSectionsInOrder(t *testing.T) {
-	want := "## Goal\nrepair tests\n" +
-		"\n## Constraints\ndo not touch vendor/\n" +
-		"\n## Environment\n/workspace\n" +
-		"\n## Progress\nStep 4 of at most 10, attempt 2 of 3.\n1 earlier step is not shown.\n" +
-		"Full step outputs are readable under /canti/artifacts.\n" +
-		"\n## Recent steps\n" +
+	want := []string{
+		"## Goal\nrepair tests\n" +
+			"\n## Constraints\ndo not touch vendor/\n" +
+			"\n## Environment\n/workspace\nFull step outputs are readable under /canti/artifacts.\n" +
+			"\n## Recent steps\n",
 		"### Step 2\nCommand:\n```\nls\n```\nExecution: exited, exit code 0\n" +
-		"Output: 7 bytes, complete, at /canti/artifacts/2/output\nPreview:\n```\ngo.mod\n```\n" +
-		"\n### Step 3\nCommand:\n```\ngo test ./...\n```\nExecution: timed_out, set by explicit resolution\n" +
-		"Output: 9000 bytes, incomplete, unavailable (artifact missing)\nPreview:\n```\nFAIL\n```\n" +
-		"\n## Notes\nWritten by the agent in /workspace/.canti/notes.md and not verified by the harness.\n" +
-		"```\ntry go vet next\n```\n" +
-		"\n## Rejected response\n" +
-		"Your previous reply for this step could not be decoded. " +
-		"Your reply must be exactly one decision object, as the system message describes.\n" +
-		"Error:\n```\ncore: invalid decision: unknown field \"cmd\"\n```\n" +
-		"Rejected reply:\n```\n{\"cmd\":\"ls\"}\n```\n"
+			"Output: 7 bytes, complete, at /canti/artifacts/2/output\nPreview:\n```\ngo.mod\n```\n\n",
+		"### Step 3\nCommand:\n```\ngo test ./...\n```\nExecution: timed_out, set by explicit resolution\n" +
+			"Output: 9000 bytes, incomplete, unavailable (artifact missing)\nPreview:\n```\nFAIL\n```\n\n",
+		"## Progress\nStep 4 of at most 10, attempt 2 of 3.\n1 earlier step is not shown.\n" +
+			"\n## Notes\nWritten by the agent in /workspace/.canti/notes.md and not verified by the harness.\n" +
+			"```\ntry go vet next\n```\n" +
+			"\n## Rejected response\n" +
+			"Your previous reply for this step could not be decoded. " +
+			"Your reply must be exactly one decision object, as the system message describes.\n" +
+			"Error:\n```\ncore: invalid decision: unknown field \"cmd\"\n```\n" +
+			"Rejected reply:\n```\n{\"cmd\":\"ls\"}\n```\n",
+	}
 	p := mustPrompt(t, fullFrame(), DefaultPromptLimits())
-	if p.User != want {
-		t.Fatalf("User =\n%s\nwant\n%s", p.User, want)
+	if !slices.Equal(p.Blocks, want) || p.Stable != 3 {
+		t.Fatalf("Blocks (%d stable) =\n%q\nwant (3 stable)\n%q", p.Stable, p.Blocks, want)
+	}
+	if p.User() != strings.Join(want, "") {
+		t.Fatalf("User() =\n%s\nwant the blocks joined", p.User())
+	}
+	if got, want := headings(p.User()), []string{"Goal", "Constraints", "Environment", "Recent steps", "Progress", "Notes", "Rejected response"}; !slices.Equal(got, want) {
+		t.Fatalf("headings = %q, want %q", got, want)
 	}
 }
 
@@ -117,16 +140,56 @@ func TestPromptOmitsOptionalSections(t *testing.T) {
 	f := promptFrame()
 	f.Constraints = " \n\t"
 	p := mustPrompt(t, f, DefaultPromptLimits())
-	if got, want := headings(p.User), []string{"Goal", "Environment", "Progress", "Recent steps", "Notes"}; !slices.Equal(got, want) {
+	if got, want := headings(p.User()), []string{"Goal", "Environment", "Recent steps", "Progress", "Notes"}; !slices.Equal(got, want) {
 		t.Fatalf("headings = %q, want %q", got, want)
 	}
-	for _, text := range []string{"## Recent steps\nNone.\n", "attempt 1 of 3.\nFull step outputs"} {
-		if !strings.Contains(p.User, text) {
-			t.Errorf("User lacks %q:\n%s", text, p.User)
+	if p.Stable != 1 || len(p.Blocks) != 2 || !strings.HasPrefix(p.Blocks[1], "None.\n\n## Progress\nStep 1 of at most 10, attempt 1 of 3.\n\n## Notes\n") {
+		t.Fatalf("Blocks (%d stable) = %q, want the first block and a tail starting with None.", p.Stable, p.Blocks)
+	}
+	if strings.Contains(p.User(), "earlier") {
+		t.Errorf("User reports hidden steps without any:\n%s", p.User())
+	}
+}
+
+func TestPromptAppendsEachCompletedStepToItsStablePrefix(t *testing.T) {
+	var steps []StepRecord
+	for n := 1; n <= 6; n++ {
+		steps = append(steps, exitedStep(n, "echo "+strconv.Itoa(n), strings.Repeat("o", 10*n)))
+	}
+	frame := func(earlier, done, attempt int, notes string, rejected *Rejection) Frame {
+		f := fullFrame()
+		f.Earlier, f.Steps, f.Step, f.Attempt, f.Notes.Text, f.Rejected = earlier, steps[earlier:done], done+1, attempt, notes, rejected
+		return f
+	}
+	for _, earlier := range []int{0, 2} {
+		var run []Frame
+		for done := earlier; done < len(steps); done++ {
+			run = append(run, frame(earlier, done, 1, "plan "+strconv.Itoa(done), nil),
+				frame(earlier, done, 2, strings.Repeat("revised ", done), &Rejection{Error: "bad", Response: strings.Repeat("{", done)}))
+		}
+		prev := mustPrompt(t, run[0], unlimited())
+		for _, f := range run[1:] {
+			p := mustPrompt(t, f, unlimited())
+			stable := p.Blocks[:p.Stable]
+			if len(stable) != 1+len(f.Steps) || !slices.Equal(stable[:prev.Stable], prev.Blocks[:prev.Stable]) {
+				t.Fatalf("step %d attempt %d after %d earlier: stable blocks\n%q\ndo not extend the previous prompt's\n%q", f.Step, f.Attempt, earlier, stable, prev.Blocks[:prev.Stable])
+			}
+			if p.Stable > prev.Stable && stable[prev.Stable] != f.step(f.Steps[len(f.Steps)-1], unlimited()) {
+				t.Fatalf("step %d: appended block %q, want the newest step", f.Step, stable[prev.Stable])
+			}
+			prev = p
 		}
 	}
-	if strings.Contains(p.User, "earlier") {
-		t.Errorf("User reports hidden steps without any:\n%s", p.User)
+
+	all := frame(0, len(steps), 1, "plan", nil)
+	l := unlimited()
+	l.Total = len(system) + len(mustPrompt(t, all, l).User()) - 1
+	before, after := mustPrompt(t, frame(0, len(steps)-1, 1, "plan", nil), l), mustPrompt(t, all, l)
+	if got := shownSteps(before.User()); len(got) != len(steps)-1 {
+		t.Fatalf("before step %d: steps %v shown, want all", len(steps), got)
+	}
+	if got := shownSteps(after.User()); got[0] != 2 || after.Stable != before.Stable || after.Blocks[0] != before.Blocks[0] || after.Blocks[1] == before.Blocks[1] {
+		t.Fatalf("after dropping step 1: steps %v shown, first block kept %v", got, after.Blocks[0] == before.Blocks[0])
 	}
 }
 
@@ -147,7 +210,7 @@ func TestPromptSystemStatesTheProtocol(t *testing.T) {
 		"Standard output and standard error",
 		"does not claim success",
 		"Notes section",
-		"artifact directory",
+		"artifact directory named in the Environment section",
 	} {
 		if !strings.Contains(a.System, text) {
 			t.Errorf("System lacks %q", text)
@@ -173,8 +236,8 @@ func TestPromptNotes(t *testing.T) {
 			f := promptFrame()
 			f.Notes = tt.notes
 			p := mustPrompt(t, f, DefaultPromptLimits())
-			if !strings.HasSuffix(p.User, tt.want) {
-				t.Fatalf("User does not end with %q:\n%s", tt.want, p.User)
+			if !strings.HasSuffix(p.User(), tt.want) {
+				t.Fatalf("User does not end with %q:\n%s", tt.want, p.User())
 			}
 		})
 	}
@@ -194,8 +257,8 @@ func TestPromptContainsUntrustedText(t *testing.T) {
 		"Error:\n```\ntrailing value \"\n\n## Goal\"\n```\n",
 		"Rejected reply:\n```\n{}\n## Notes\n```\n",
 	} {
-		if !strings.Contains(p.User, text) {
-			t.Errorf("User lacks %q:\n%s", text, p.User)
+		if !strings.Contains(p.User(), text) {
+			t.Errorf("User lacks %q:\n%s", text, p.User())
 		}
 	}
 
@@ -206,11 +269,11 @@ func TestPromptContainsUntrustedText(t *testing.T) {
 	g := promptFrame()
 	g.Steps, g.Step, g.ArtifactDir, g.Notes.Path = []StepRecord{st}, 2, forged, forged
 	p = mustPrompt(t, g, DefaultPromptLimits())
-	if got, want := headings(p.User), []string{"Goal", "Environment", "Progress", "Recent steps", "Notes"}; !slices.Equal(got, want) {
-		t.Fatalf("headings = %q, want %q:\n%s", got, want, p.User)
+	if got, want := headings(p.User()), []string{"Goal", "Environment", "Recent steps", "Progress", "Notes"}; !slices.Equal(got, want) {
+		t.Fatalf("headings = %q, want %q:\n%s", got, want, p.User())
 	}
-	if n := strings.Count(p.User, "x  ## Goal  ## Notes forged"); n != 6 {
-		t.Fatalf("User renders %d of 6 one-line fields on one line:\n%s", n, p.User)
+	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 6 {
+		t.Fatalf("User renders %d of 6 one-line fields on one line:\n%s", n, p.User())
 	}
 }
 
@@ -256,10 +319,10 @@ func TestPromptSectionLimits(t *testing.T) {
 				tt.set(&f, huge)
 				tt.set(&short, huge[:1])
 				p := mustPrompt(t, f, l)
-				if i == 0 && (!strings.Contains(p.User, huge[:limit]+"…[truncated ") || strings.Contains(p.User, huge[:limit+1])) {
+				if i == 0 && (!strings.Contains(p.User(), huge[:limit]+"…[truncated ") || strings.Contains(p.User(), huge[:limit+1])) {
 					t.Fatalf("User does not cut the input at %d bytes with a marker", limit)
 				}
-				if grown := len(p.User) - len(mustPrompt(t, short, l).User); grown > limit+32 {
+				if grown := len(p.User()) - len(mustPrompt(t, short, l).User()); grown > limit+32 {
 					t.Fatalf("a huge input grows User by %d bytes", grown)
 				}
 			})
@@ -279,13 +342,13 @@ func TestPromptKeepsTheGoalAndConstraintsWhole(t *testing.T) {
 		f.Goal, f.Constraints = " \n"+goal+"\t\n", "\n "+constraints+" "
 		p := mustPrompt(t, f, l)
 		want := "## Goal\n" + goal + "\n\n## Constraints\n" + constraints + "\n\n## Environment\n"
-		if !strings.HasPrefix(p.User, want) || strings.Contains(p.User, "…[truncated ") {
+		if !strings.HasPrefix(p.User(), want) || strings.Contains(p.User(), "…[truncated ") {
 			t.Fatalf("rune %q: User does not hold the whole goal and constraints", r)
 		}
 		full := f
 		full.Environment, full.Notes.Text = strings.Repeat("e", l.Environment), strings.Repeat("n", l.Notes)
 		full.Rejected = &Rejection{Error: strings.Repeat("x", l.Rejected), Response: strings.Repeat("r", l.Rejected)}
-		if p := mustPrompt(t, full, l); !strings.HasPrefix(p.User, want) {
+		if p := mustPrompt(t, full, l); !strings.HasPrefix(p.User(), want) {
 			t.Fatalf("rune %q: a %d-byte total does not hold the whole goal and constraints beside every fixed section at its limit", r, l.Total)
 		}
 		for _, over := range []struct {
@@ -299,8 +362,8 @@ func TestPromptKeepsTheGoalAndConstraintsWhole(t *testing.T) {
 			g := fullFrame()
 			over.edit(&g)
 			p, err := g.Prompt(l)
-			if err == nil || p != (Prompt{}) || !strings.Contains(err.Error(), over.name) || !strings.Contains(err.Error(), strconv.Itoa(over.limit)+"-byte limit") {
-				t.Fatalf("rune %q: Prompt() with %s one byte over its limit = %d bytes, %v", r, over.name, len(p.User), err)
+			if err == nil || !reflect.DeepEqual(p, Prompt{}) || !strings.Contains(err.Error(), over.name) || !strings.Contains(err.Error(), strconv.Itoa(over.limit)+"-byte limit") {
+				t.Fatalf("rune %q: Prompt() with %s one byte over its limit = %d bytes, %v", r, over.name, len(p.User()), err)
 			}
 		}
 	}
@@ -337,7 +400,7 @@ func TestPromptKeepsUTF8(t *testing.T) {
 		f, l := promptFrame(), unlimited()
 		f.Environment, l.Environment = multi, limit
 		p := mustPrompt(t, f, l)
-		_, env, _ := strings.Cut(p.User, "## Environment\n")
+		_, env, _ := strings.Cut(p.User(), "## Environment\n")
 		kept, _, ok := strings.Cut(env, "…[truncated ")
 		if !ok || !strings.HasPrefix(multi, kept) || len(kept) > limit || len(kept) <= limit-utf8.UTFMax {
 			t.Fatalf("limit %d kept %q", limit, kept)
@@ -350,8 +413,8 @@ func TestPromptKeepsUTF8(t *testing.T) {
 	f.Steps[0].Command, f.Steps[0].Observation.Preview, f.Steps[1].Observation.Output.Detail = bad, bad, bad
 	f.Notes, f.Rejected = Notes{Path: bad, Text: bad}, &Rejection{Error: bad, Response: bad}
 	p := mustPrompt(t, f, DefaultPromptLimits())
-	if n := strings.Count(p.User, "ok\uFFFD\uFFFD\uFFFD\uFFFD"); n < 10 {
-		t.Fatalf("User replaces invalid bytes in %d places, want at least 10:\n%s", n, p.User)
+	if n := strings.Count(p.User(), "ok\uFFFD\uFFFD\uFFFD\uFFFD"); n < 10 {
+		t.Fatalf("User replaces invalid bytes in %d places, want at least 10:\n%s", n, p.User())
 	}
 }
 
@@ -369,7 +432,7 @@ func longFrame(earlier, steps int) Frame {
 func TestPromptBoundsLongHistory(t *testing.T) {
 	l := DefaultPromptLimits()
 	full := mustPrompt(t, longFrame(0, 10000), l)
-	shown := shownSteps(full.User)
+	shown := shownSteps(full.User())
 	if len(shown) == 0 || len(shown) >= 100 {
 		t.Fatalf("%d steps shown", len(shown))
 	}
@@ -378,16 +441,16 @@ func TestPromptBoundsLongHistory(t *testing.T) {
 			t.Fatalf("shown steps = %v, want the newest ending at 10000", shown)
 		}
 	}
-	if text := fmt.Sprintf("\n%d earlier steps are not shown.\n", 10000-len(shown)); !strings.Contains(full.User, text) {
+	if text := fmt.Sprintf("\n%d earlier steps are not shown.\n", 10000-len(shown)); !strings.Contains(full.User(), text) {
 		t.Fatalf("User lacks %q", text)
 	}
-	if !strings.Contains(full.User, "```\ntry go vet next\n```\n") {
+	if !strings.Contains(full.User(), "```\ntry go vet next\n```\n") {
 		t.Fatal("notes were cut while steps could be dropped")
 	}
 
 	short := mustPrompt(t, longFrame(9000, 1000), l)
-	if short != full {
-		t.Fatalf("prompt for 1000 recent steps (%d bytes) differs from 10000 (%d bytes)", len(short.User), len(full.User))
+	if !reflect.DeepEqual(short, full) {
+		t.Fatalf("prompt for 1000 recent steps (%d bytes) differs from 10000 (%d bytes)", len(short.User()), len(full.User()))
 	}
 }
 
@@ -401,7 +464,7 @@ func TestPromptDropsOldestStepsFirst(t *testing.T) {
 	}
 	f.Steps[11] = exitedStep(12, "echo 12", strings.Repeat("o", 600))
 	f.Notes.Text = strings.Repeat("n", 200)
-	size := func(p Prompt) int { return len(p.System) + len(p.User) }
+	size := func(p Prompt) int { return len(p.System) + len(p.User()) }
 	sizes := make([]int, len(all)+1)
 	for k := range sizes {
 		g := f
@@ -421,7 +484,7 @@ func TestPromptDropsOldestStepsFirst(t *testing.T) {
 		if size(p) > l.Total {
 			t.Fatalf("Total %d: prompt is %d bytes", l.Total, size(p))
 		}
-		shown := shownSteps(p.User)
+		shown := shownSteps(p.User())
 		k := len(shown)
 		if want := all[len(all)-k:]; !slices.Equal(shown, want) {
 			t.Fatalf("Total %d: shown steps = %v, want the newest %d", l.Total, shown, k)
@@ -433,10 +496,10 @@ func TestPromptDropsOldestStepsFirst(t *testing.T) {
 		case hidden > 1:
 			report = fmt.Sprintf("\n%d earlier steps are not shown.\n", hidden)
 		}
-		if strings.Contains(p.User, "earlier") != (hidden > 0) || !strings.Contains(p.User, report) {
-			t.Fatalf("Total %d: User does not report %d earlier steps:\n%s", l.Total, hidden, p.User)
+		if strings.Contains(p.User(), "earlier") != (hidden > 0) || !strings.Contains(p.User(), report) {
+			t.Fatalf("Total %d: User does not report %d earlier steps:\n%s", l.Total, hidden, p.User())
 		}
-		cut := strings.Contains(p.User, "…[truncated ")
+		cut := strings.Contains(p.User(), "…[truncated ")
 		switch want := 0; {
 		case l.Total >= sizes[1]:
 			for want+1 < len(sizes) && sizes[want+1] <= l.Total {
@@ -464,7 +527,7 @@ func TestPromptDropsOldestStepsFirst(t *testing.T) {
 		if cut && size(p) < l.Total-2 {
 			t.Fatalf("Total %d: notes shrank to %d bytes, more than needed", l.Total, size(p))
 		}
-		prev = p.User
+		prev = p.User()
 	}
 	if !kept || !dropped {
 		t.Fatalf("newest step kept with cut notes %v, later dropped %v", kept, dropped)
@@ -478,7 +541,7 @@ func TestPromptIsDeterministic(t *testing.T) {
 	g.Steps = slices.Clone(f.Steps)
 	g.Rejected = &Rejection{Error: "bad", Response: "{"}
 	l := DefaultPromptLimits()
-	if a, b := mustPrompt(t, f, l), mustPrompt(t, g, l); a != b {
+	if a, b := mustPrompt(t, f, l), mustPrompt(t, g, l); !reflect.DeepEqual(a, b) {
 		t.Fatal("equal frames give different prompts")
 	}
 }
@@ -500,6 +563,6 @@ func TestPromptRejects(t *testing.T) {
 	l := DefaultPromptLimits()
 	l.Total = 100
 	if p, err := promptFrame().Prompt(l); err == nil {
-		t.Fatalf("Prompt() returned %d bytes for a 100-byte total", len(p.System)+len(p.User))
+		t.Fatalf("Prompt() returned %d bytes for a 100-byte total", len(p.System)+len(p.User()))
 	}
 }

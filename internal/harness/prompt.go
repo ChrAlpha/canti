@@ -15,7 +15,7 @@ import (
 // other field but Total caps the bytes kept from one input: Command and
 // Preview apply to each step, Rejected to both the error and the response. A
 // cut input ends with a marker counting the bytes removed. Total caps System
-// plus User.
+// plus the blocks.
 type PromptLimits struct {
 	Goal, Constraints, Environment, Command, Preview, Notes, Rejected, Total int
 }
@@ -46,17 +46,20 @@ Ends the run and hands the payload to the user. It does not claim success: use i
 
 The payload is a JSON string, so escape quotes, backslashes, and newlines.
 
-The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Progress section, at the path given for each step; outputs of steps no longer shown remain there.
+The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step; outputs of steps no longer shown remain there.
 
 Use the notes file named in the Notes section for your plan and findings. It persists between steps and is shown back to you in every request, cut to a size limit. The harness does not verify notes.`
 
 // Prompt renders the frame within l. System is the same for every frame.
-// When the prompt would exceed l.Total, Prompt drops the oldest shown steps,
-// counting them as earlier steps, down to the newest one; then it shrinks
-// the notes; then it drops the newest step as well and shrinks the notes
-// again, failing if the prompt still does not fit. Equal frames and limits
-// give equal prompts. The goal and constraints are never cut: Prompt fails
-// when either exceeds its limit after trimming.
+// The stable blocks are one with the goal, constraints, and environment and
+// one per shown step, oldest first; the last block holds the progress,
+// notes, and any rejected response. When the prompt would exceed l.Total,
+// Prompt drops the oldest shown steps, counting them as earlier steps, down
+// to the newest one; then it shrinks the notes; then it drops the newest
+// step as well and shrinks the notes again, failing if the prompt still does
+// not fit. Equal frames and limits give equal prompts. The goal and
+// constraints are never cut: Prompt fails when either exceeds its limit
+// after trimming.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
@@ -70,62 +73,65 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if n := len(strings.TrimSpace(f.Constraints)); n > l.Constraints {
 		return Prompt{}, fmt.Errorf("harness: constraints exceed their %d-byte limit by %d bytes", l.Constraints, n-l.Constraints)
 	}
-	hidden, notes := f.Earlier+len(f.Steps), l.Notes
-	fixed, used := len(system)+len(f.user(l, "", "", notes)), 0
-	var blocks []string
+	head, hidden, notes := f.head(l), f.Earlier+len(f.Steps), l.Notes
+	fixed, used := len(system)+len(head)+len(f.tail(l, "", notes)), 0
+	var steps []string
 	for i := len(f.Steps) - 1; i >= 0; i-- {
 		b := f.step(f.Steps[i], l)
-		if len(blocks) > 0 {
-			b += "\n"
-			if fixed+len(f.progress(hidden-1))+used+len(b) > l.Total {
-				break
-			}
+		if len(steps) > 0 && fixed+len(f.progress(hidden-1))+used+len(b) > l.Total {
+			break
 		}
-		blocks, used, hidden = append(blocks, b), used+len(b), hidden-1
+		steps, used, hidden = append(steps, b), used+len(b), hidden-1
 	}
-	slices.Reverse(blocks)
+	slices.Reverse(steps)
 	for {
-		steps := strings.Join(blocks, "")
-		if steps == "" {
-			steps = "None.\n"
+		tail := f.tail(l, f.progress(hidden), notes)
+		if len(steps) == 0 {
+			tail = "None.\n\n" + tail
 		}
-		user := f.user(l, f.progress(hidden), steps, notes)
-		over := len(system) + len(user) - l.Total
+		over := len(system) + len(head) + used + len(tail) - l.Total
 		switch kept, _ := cut(f.Notes.Text, notes); {
 		case over <= 0:
-			return Prompt{System: system, User: user}, nil
+			return Prompt{System: system, Blocks: slices.Concat([]string{head}, steps, []string{tail}), Stable: 1 + len(steps)}, nil
 		case kept != "":
 			notes = max(0, len(kept)-over)
-		case len(blocks) > 0:
-			blocks, hidden, notes = nil, hidden+len(blocks), l.Notes
+		case len(steps) > 0:
+			steps, used, hidden, notes = nil, 0, hidden+len(steps), l.Notes
 		default:
 			return Prompt{}, fmt.Errorf("harness: prompt exceeds its %d-byte total by %d bytes", l.Total, over)
 		}
 	}
 }
 
-func (f Frame) user(l PromptLimits, progress, steps string, notes int) string {
+func (f Frame) head(l PromptLimits) string {
 	var b strings.Builder
-	section := func(title, body string) {
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString("## " + title + "\n" + body)
-	}
-	section("Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
+	section(&b, "Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
 	if c := strings.TrimSpace(f.Constraints); c != "" {
-		section("Constraints", clip(c, math.MaxInt)+"\n")
+		section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
 	}
-	section("Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n")
-	section("Progress", progress)
-	section("Recent steps", steps)
-	section("Notes", f.notes(notes))
+	section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
+		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n")
+	section(&b, "Recent steps", "")
+	return b.String()
+}
+
+func (f Frame) tail(l PromptLimits, progress string, notes int) string {
+	var b strings.Builder
+	section(&b, "Progress", progress)
+	section(&b, "Notes", f.notes(notes))
 	if r := f.Rejected; r != nil {
-		section("Rejected response", "Your previous reply for this step could not be decoded. "+
+		section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
 			"Your reply must be exactly one decision object, as the system message describes.\n"+
 			quote("Error", r.Error, l.Rejected)+quote("Rejected reply", r.Response, l.Rejected))
 	}
 	return b.String()
+}
+
+func section(b *strings.Builder, title, body string) {
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("## " + title + "\n" + body)
 }
 
 func (f Frame) progress(hidden int) string {
@@ -136,7 +142,7 @@ func (f Frame) progress(hidden int) string {
 	case hidden > 1:
 		s += strconv.Itoa(hidden) + " earlier steps are not shown.\n"
 	}
-	return s + "Full step outputs are readable under " + inline(f.ArtifactDir) + ".\n"
+	return s
 }
 
 func (f Frame) step(s StepRecord, l PromptLimits) string {
@@ -160,7 +166,7 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	if o.Output.Detail != "" {
 		b.WriteString(" (" + inline(o.Output.Detail) + ")")
 	}
-	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview))
+	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
 	return b.String()
 }
 

@@ -450,10 +450,19 @@ notes path, checks the positions, and checks that the shown and earlier steps
 account for exactly the steps before the current one.
 
 `Frame.Prompt` renders one independent prompt: a fixed system message that
-states the decision protocol and the workspace rules, and a user message with
-Goal, Constraints, Environment, Progress, Recent steps, Notes, and Rejected
-response sections. `PromptLimits` caps each input in bytes and the system and
-user messages together. The defaults are 32 KiB for the goal, 16 KiB for the
+states the decision protocol and the workspace rules, and a user message in
+content blocks. A stable first block holds the Goal, Constraints, and
+Environment sections, the environment followed by the artifact directory, and
+ends with the Recent steps heading; one stable block follows per shown step,
+oldest first; a volatile tail holds the Progress section (the step and
+attempt positions and the count of earlier steps not shown), Notes, and
+Rejected response, after a `None.` line when no step is shown. No block is
+empty. Consecutive prompts of a run share their stable blocks byte for byte
+unless the later one drops a step: a completed step appends one block, and
+positions, notes, and rejections appear only in the tail, though their size
+can make a prompt drop a step. `PromptLimits` caps each input in
+bytes and the system message and blocks together. The defaults are 32 KiB for
+the goal, 16 KiB for the
 constraints, 2 KiB for the environment, 2 KiB for each step's command and
 4 KiB for its output preview, 8 KiB for the notes, 2 KiB each for a rejected
 response and its error, and 64 KiB in total. The goal and constraints are
@@ -486,16 +495,22 @@ the previous response. The byte limits bound the prompt, not the number of
 tokens it encodes to.
 
 `anthropic.Model` implements `Model` for the non-streaming Messages API at
-API version `2023-06-01`, as adapter `canti-anthropic/1`. `Freeze` builds a
-deterministic body — model, `max_tokens` (16,000 by default), system prompt,
-one user message, and optionally a JSON-schema output format for the decision
-object and server-side fallbacks — that never contains credentials. The body
+API version `2023-06-01`, as adapter `canti-anthropic/2`. `Freeze` builds a
+deterministic body — model, `max_tokens` (16,000 by default), the system
+prompt as a string, one user message with a text block per prompt block, and
+optionally a JSON-schema output format for the decision object and
+server-side fallbacks — that never contains credentials. The last stable block
+carries the only `cache_control` breakpoint, `ephemeral`, so that a provider
+that caches prompt prefixes can reuse the stable blocks of the previous
+request; no cache hit has been measured. The body
 and the model, protocol, and adapter identifiers are committed with
 `RequestFrozen` before any send. The base URL must use `https` unless it is a
 loopback address. `Complete` sends exactly the frozen body once over
 `net/http`, with no SDK, no hidden retries, and no followed redirects, under a
 per-attempt timeout (10 min by default) and an 8 MiB response limit, and
 replaces the credential with `[redacted]` wherever a response body echoes it.
+It still sends a request frozen by `canti-anthropic/1`, whose user message is
+one string, so an upgrade does not strand a frozen request.
 A 2xx response is complete only with `stop_reason` `end_turn`,
 `stop_sequence`, or `refusal`. Another stop reason, a malformed, truncated, or
 oversized body, and statuses 408, 409, 429, and 5xx are incomplete and
