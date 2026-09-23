@@ -28,8 +28,8 @@ func DefaultPromptLimits() PromptLimits {
 	}
 }
 
-// refLimit caps the execution state, output path and detail, artifact,
-// history, and runs directories, and notes path.
+// refLimit caps the execution state, output path and detail, artifact and
+// runs directories, run ID, and notes path.
 const refLimit = 1 << 10
 
 var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
@@ -111,9 +111,9 @@ func (f Frame) head(l PromptLimits) string {
 	}
 	section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
 		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n"+
-		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.HistoryDir)+"/steps/<step number in 8 digits>/ "+
+		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.RunsDir)+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
 		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
-		"Earlier runs of this workspace are recorded under "+inline(f.RunsDir)+"/<run ID>/ with their goal, steps, and result.\n")
+		"Every run of this state directory, including this one, is recorded under "+inline(f.RunsDir)+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
 	section(&b, "Recent steps", "")
 	return b.String()
 }

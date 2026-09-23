@@ -16,8 +16,8 @@ type Frame struct {
 	Earlier                              int          // completed steps before Steps that the prompt does not show
 	Steps                                []StepRecord // most recent completed steps, oldest first
 	ArtifactDir                          string       // container path under which ArtifactRef.Path is readable
-	HistoryDir                           string       // container path of the run's step records, as PublishHistory lays them out
-	RunsDir                              string       // container path holding the step records of every run by run ID
+	RunsDir                              string       // container path holding the step records of every run by run ID, as PublishHistory lays them out
+	RunID                                string       // the run, whose step records are under RunsDir/RunID
 	Notes                                Notes
 	Rejected                             *Rejection // set when the previous response of this step failed to decode
 }
@@ -45,8 +45,8 @@ func (f Frame) Validate() error {
 		return errors.New("harness: frame environment is required")
 	case strings.TrimSpace(f.ArtifactDir) == "":
 		return errors.New("harness: frame artifact directory is required")
-	case strings.TrimSpace(f.HistoryDir) == "" || strings.TrimSpace(f.RunsDir) == "":
-		return errors.New("harness: frame history and runs directories are required")
+	case strings.TrimSpace(f.RunsDir) == "" || strings.TrimSpace(f.RunID) == "":
+		return errors.New("harness: frame runs directory and run ID are required")
 	case strings.TrimSpace(f.Notes.Path) == "":
 		return errors.New("harness: frame notes path is required")
 	case f.Step < 1 || f.Step > f.MaxSteps:

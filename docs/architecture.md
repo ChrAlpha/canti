@@ -448,8 +448,7 @@ the workspace lock publish; concurrent publications of one run are not
 supported. A process of the same user that deletes or edits files inside a
 run directory is outside the trust model: a step other than the latest that
 it deletes, or a file that it edits, stays so until the `steps` directory is
-removed and rebuilt. A `canti run` killed before it creates its run can leave
-an empty run directory.
+removed and rebuilt.
 
 ## Lifecycle boundaries
 
@@ -493,7 +492,7 @@ read only as far back as the prompt needs, except to rebuild lost
 `Frame` holds the run's goal and constraints, a description of the
 environment, the step and attempt positions, the number of earlier steps it
 does not show, a contiguous run of the latest completed steps, the artifact
-directory, the directories of the run's and of every run's step records, the
+directory, the run ID and the directory of every run's step records, the
 notes, and in a protocol repair the rejected response of the current step
 with its decode error. The loop reads those steps from `Journal.Recent`
 backward by commit sequence, 64 per page, until the step blocks the prompt
@@ -501,8 +500,8 @@ would render for them exceed the prompt's total, a page is short, or step 1
 is read. No step count caps them: the prompt's total is the only bound, the
 prompt drops the oldest of them that do not fit, and it shows what the whole
 history would show while at most the steps that fit plus one page are read.
-`Frame.Validate` requires the goal, the environment, the artifact, history,
-and runs directories, and the notes path, checks the positions, and checks
+`Frame.Validate` requires the goal, the environment, the artifact and runs
+directories, the run ID, and the notes path, checks the positions, and checks
 that the shown and earlier steps account for exactly the steps before the
 current one.
 
@@ -510,9 +509,11 @@ current one.
 states the decision protocol and the workspace rules, and a user message in
 content blocks. A stable first block holds the Goal, Constraints, and
 Environment sections, the environment followed by the artifact directory and
-two lines naming where every completed step of the run and every earlier run
-are recorded, which the system message also points to, and ends with the
-Recent steps heading; one stable block follows per shown step,
+two lines, which the system message also points to, naming the run's own
+step records, `<runs directory>/<run ID>/steps/`, and the runs directory,
+where every run of the state directory, this one included, is recorded; the
+run ID is constant within a run, so these lines are too. The block ends with
+the Recent steps heading; one stable block follows per shown step,
 oldest first; a volatile tail holds the Progress section (the step and
 attempt positions and the count of earlier steps not shown), Notes, and
 Rejected response, after a `None.` line when no step is shown. No block is
@@ -690,11 +691,11 @@ unknown outcome.
 The trust boundary is Docker's. A job sees the workspace, mounted read-write
 at `/workspace`, and the artifact root, mounted read-only at
 `/canti/artifacts`. The CLI also mounts the [step records](#step-records)
-read-only: `history` in the state directory at `/canti/runs` and the run's
-own directory in it at `/canti/run`, creating both before it builds the
-executor, the same for every command of a run, so a resumed `Bind` finds the
-same spec. The state directory itself, the journal, latches, and job records
-are not mounted, and the state directory must not overlap the workspace. No
+read-only: `history` in the state directory at `/canti/runs`, creating it
+before it builds the executor. The mount is the same for every command, so
+a resumed `Bind` finds the same spec. The state directory itself, the
+journal, latches, and job records are not mounted, and the state directory
+must not overlap the workspace. No
 host environment variable reaches a job: the proxy variables that the docker
 CLI's configuration would inject are set empty. Jobs run with `--init`, as
 the uid and gid of the canti process, with `--cap-drop ALL`,

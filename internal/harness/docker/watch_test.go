@@ -54,7 +54,7 @@ func newLoop(t *testing.T, f *fake) *loopFixture {
 	}
 	l, err := harness.NewLoop(store, f.x, execModel{}, harness.LoopConfig{
 		Environment: "fake", ArtifactDir: ArtifactDir, Workspace: t.TempDir(), NotesFile: "notes.md", NotesPath: WorkDir + "/notes.md",
-		History: t.TempDir(), HistoryPath: "/canti/run", RunsPath: "/canti/runs",
+		History: t.TempDir(), RunsPath: "/canti/runs",
 		Poll: time.Millisecond, InspectRetries: 2,
 	})
 	if err != nil {

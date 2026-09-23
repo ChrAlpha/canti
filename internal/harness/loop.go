@@ -25,7 +25,6 @@ type LoopConfig struct {
 	NotesFile      string           // notes file relative to Workspace, such as ".canti/notes.md"
 	NotesPath      string           // the notes file as the agent sees it, such as "/workspace/.canti/notes.md"
 	History        string           // host directory PublishHistory publishes the step records of every run under
-	HistoryPath    string           // Frame.HistoryDir: the run's records as the agent sees them, such as "/canti/run"
 	RunsPath       string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
 	Limits         PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
 	Poll           time.Duration    // interval between inspections; 500ms
@@ -53,7 +52,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if j == nil || m == nil {
 		return nil, errors.New("harness: loop journal and model are required")
 	}
-	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.Workspace, cfg.NotesFile, cfg.NotesPath, cfg.History, cfg.HistoryPath, cfg.RunsPath} {
+	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.Workspace, cfg.NotesFile, cfg.NotesPath, cfg.History, cfg.RunsPath} {
 		if strings.TrimSpace(v) == "" {
 			return nil, errors.New("harness: loop environment, artifact directory, workspace, notes, and history paths are required")
 		}
@@ -240,7 +239,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	f := Frame{
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
-		ArtifactDir: l.cfg.ArtifactDir, HistoryDir: l.cfg.HistoryPath, RunsDir: l.cfg.RunsPath, Notes: Notes{Path: l.cfg.NotesPath},
+		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID, Notes: Notes{Path: l.cfg.NotesPath},
 	}
 	var err error
 	if f.Steps, err = l.recent(ctx, s.RunID, f); err != nil {

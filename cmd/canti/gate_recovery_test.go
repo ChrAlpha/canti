@@ -83,9 +83,10 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 		}
 	}
 	// exchanged returns the frozen request bytes of h, the bodies the model
-	// received, and those bodies with every effect ID replaced by its step.
+	// received, and those bodies with the run ID and every effect ID replaced
+	// by a placeholder and its step.
 	exchanged := func(f *fixture, h []entry) (frozen, received, anonymous []string) {
-		var ids []string
+		ids := []string{h[0].State.RunID, "run"}
 		for _, e := range h {
 			switch e.Kind {
 			case "request_frozen":

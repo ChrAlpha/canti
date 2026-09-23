@@ -129,7 +129,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 			mounts[fields[4]] = fields[5]
 		}
 	}
-	for dir, mode := range map[string]string{docker.WorkDir: "rw", docker.ArtifactDir: "ro", runDir: "ro", runsDir: "ro"} {
+	for dir, mode := range map[string]string{docker.WorkDir: "rw", docker.ArtifactDir: "ro", runsDir: "ro"} {
 		if got := strings.Split(mounts[dir], ","); got[0] != mode {
 			t.Errorf("mount %s = %q, want %s", dir, mounts[dir], mode)
 		}
@@ -168,8 +168,8 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 		t.Errorf("container config = %+v", c)
 	}
 	evLog(t, image, "trust boundary", "fixture key and CANTI_TRUST_PROBE in the CLI environment; job probes env, uid, caps, mounts, state, journal, network",
-		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s, run %s, runs %s; state and journal absent; interfaces %s only; model URL unreachable",
-			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], mounts[runDir], mounts[runsDir], strings.TrimSpace(s["net"])),
+		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s, runs %s; state and journal absent; interfaces %s only; model URL unreachable",
+			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], mounts[runsDir], strings.TrimSpace(s["net"])),
 		fmt.Sprintf("output %d bytes, network %s, cap-drop %v, user %s", len(data), c.HostConfig.NetworkMode, c.HostConfig.CapDrop, c.Config.User))
 }
 
@@ -320,8 +320,14 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 
 func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	long := "echo fact-one; echo 日本; : " + strings.Repeat("x", 3000)
+	f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: long}, 3: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-once", "-goal", "records", "-image", image); r.code != exitActive {
+		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+	}
+	id := f.status().Run.ID
+	own := runsDir + "/" + id
 	probe := strings.Join([]string{
-		"cd " + runDir,
+		"cd " + own,
 		"echo '== meta'", "cat steps/00000001/meta",
 		"echo '== command'", "cat steps/00000001/command; echo",
 		"echo '== preview'", "cat steps/00000001/preview",
@@ -335,19 +341,16 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 		`mkdir ` + runsDir + `/forged; echo "runs=$?"`,
 		"echo '== runs'", "ls " + runsDir,
 	}, "\n")
-	f, image := evFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: long},
-		2: {Kind: core.Exec, Payload: probe},
-		3: {Kind: core.Return, Payload: "done"},
-	})
-	if r := f.cli(nil, "run", "-goal", "records", "-image", image); r.code != exitOK || r.stdout != "done\n" {
-		t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	text, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: probe})
+	f.model.answer(2, 1, reply{text: string(text)})
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	h := f.history()
-	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) {
+	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) || h[0].State.RunID != id {
 		t.Fatalf("history = %q", kinds(h))
 	}
-	id, one := h[0].State.RunID, h[6].Facts.Observation
+	one := h[6].Facts.Observation
 	data, err := os.ReadFile(filepath.Join(f.state, "artifacts", h[13].Facts.Observation.Output.Path))
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +366,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 			t.Errorf("tampering output lacks %q:\n%s", want, s["tamper"])
 		}
 	}
-	if p := f.model.prompts(2); len(p) != 1 || strings.Contains(p[0], long) || !strings.Contains(p[0], "…[truncated ") || !strings.Contains(p[0], runDir+"/steps/") {
+	if p := f.model.prompts(2); len(p) != 1 || strings.Contains(p[0], long) || !strings.Contains(p[0], "…[truncated ") || !strings.Contains(p[0], own+"/steps/") {
 		t.Errorf("step 2 prompt does not cut the command and name the records: %q", p)
 	}
 	for _, name := range []string{filepath.Join(id, "x"), "forged"} {
@@ -401,7 +404,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	}
 	checkRecords(t, f, "again", h2)
 	checkReleased(t, f, slices.Concat(h, h2))
-	evLog(t, image, "trust boundary (step records)", "step 2 reads /canti/run and tries to write, overwrite, and remove it and /canti/runs; a second run reads the first under /canti/runs",
+	evLog(t, image, "trust boundary (step records)", "step 2 reads its run's records under /canti/runs and tries to write, overwrite, and remove them and /canti/runs; a second run reads the first under /canti/runs",
 		"step 1 records match its observation and full command; every write fails read-only; the second run reads the first run's goal, result, and commands",
 		fmt.Sprintf("command %d bytes, meta %d bytes, %d runs", len(long), len(meta), strings.Count(runs, "\n")))
 }

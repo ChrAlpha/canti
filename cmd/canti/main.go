@@ -208,13 +208,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
 			return exitError, err
 		}
-		created := false
-		defer func() {
-			if !created {
-				os.Remove(filepath.Join(historyRoot(a.state), run.ID))
-			}
-		}()
-		x, err := newExecutor(s.config, a.state, run.ID)
+		x, err := newExecutor(s.config, a.state)
 		if err != nil {
 			return exitError, err
 		}
@@ -233,7 +227,6 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
-		created = true
 		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
 		snap, err := drive(l, run.ID)
 		return a.report(snap, err, exitActive)
@@ -384,7 +377,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 	return harness.NewLoop(wrapJournal(j), x, m, harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, Workspace: c.Workspace,
 		NotesFile: ".canti/notes.md", NotesPath: docker.WorkDir + "/.canti/notes.md",
-		History: historyRoot(a.state), HistoryPath: runDir, RunsPath: runsDir,
+		History: historyRoot(a.state), RunsPath: runsDir,
 		Limits: promptLimits(c), Logger: a.log,
 	})
 }
@@ -406,7 +399,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 		m, err = model(c)
 	}
 	if err == nil {
-		x, err = newExecutor(c, a.state, run.ID)
+		x, err = newExecutor(c, a.state)
 	}
 	if err == nil {
 		l, err = a.loop(store, x, m, c, run.Budget)

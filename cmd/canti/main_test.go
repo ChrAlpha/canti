@@ -763,9 +763,9 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if err != nil || c != s.config {
 		t.Fatalf("stored config = %+v, %v\nwant %+v", c, err, s.config)
 	}
-	x := executorConfig(c, "/state", "run_x")
+	x := executorConfig(c, "/state")
 	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
-		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}, {Source: "/state/history/run_x", Target: "/canti/run"}}}) {
+		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
 	if l := promptLimits(c); l.Total != 70000 || l.Goal != harness.DefaultPromptLimits().Goal {

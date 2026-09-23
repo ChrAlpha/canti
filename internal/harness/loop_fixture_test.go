@@ -354,7 +354,7 @@ func newFixture(t *testing.T, limits core.Limits, budget harness.Budget, replies
 	f.cfg = harness.LoopConfig{
 		Environment: "Alpine Linux container", ArtifactDir: "/canti/artifacts", Workspace: f.ws,
 		NotesFile: ".canti/notes.md", NotesPath: "/workspace/.canti/notes.md",
-		History: filepath.Join(dir, "history"), HistoryPath: "/canti/run", RunsPath: "/canti/runs",
+		History: filepath.Join(dir, "history"), RunsPath: "/canti/runs",
 		Poll: time.Microsecond, Backoff: -1, Now: c.Now,
 	}
 	return f

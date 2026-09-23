@@ -112,30 +112,27 @@ func promptLimits(c config) harness.PromptLimits {
 	return l
 }
 
-// runDir and runsDir are where every job of a run reads, read-only, the step
-// records of its run and of every run in the state directory.
-const (
-	runDir  = "/canti/run"
-	runsDir = "/canti/runs"
-)
+// runsDir is where every job reads, read-only, the step records of every run
+// in the state directory.
+const runsDir = "/canti/runs"
 
 func historyRoot(state string) string { return filepath.Join(state, "history") }
 
-func executorConfig(c config, state, runID string) docker.Config {
+func executorConfig(c config, state string) docker.Config {
 	return docker.Config{
 		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
 		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit,
-		Mounts: []docker.Mount{{Source: historyRoot(state), Target: runsDir}, {Source: filepath.Join(historyRoot(state), runID), Target: runDir}},
+		Mounts: []docker.Mount{{Source: historyRoot(state), Target: runsDir}},
 	}
 }
 
-// newExecutor creates the step record directories that the jobs of run
-// runID mount and builds its executor.
-func newExecutor(c config, state, runID string) (*docker.Executor, error) {
-	if err := os.MkdirAll(filepath.Join(historyRoot(state), runID), 0o755); err != nil {
+// newExecutor creates the step record root that jobs mount and builds the
+// executor.
+func newExecutor(c config, state string) (*docker.Executor, error) {
+	if err := os.MkdirAll(historyRoot(state), 0o755); err != nil {
 		return nil, err
 	}
-	return docker.New(executorConfig(c, state, runID))
+	return docker.New(executorConfig(c, state))
 }
 
 type credential struct{ apiKey, authToken string }

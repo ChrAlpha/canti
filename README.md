@@ -62,8 +62,9 @@ bin/canti run -workspace ~/demo -goal "Write hello.txt containing hello, then re
 By default each command the agent chooses runs in a new
 `debian:bookworm-slim` container with the workspace mounted at `/workspace`,
 no network, and the host user's uid. It can read, but not change, earlier
-outputs under `/canti/artifacts` and a record of every completed step of the
-run under `/canti/run` and of earlier runs under `/canti/runs`.
+outputs under `/canti/artifacts` and a record of every completed step of
+every run of the state directory, its own included, under
+`/canti/runs/<run ID>/`.
 `canti run -h` lists the image, limit, model, and budget flags. Every canti
 command takes `-workspace` (default: the current directory). The journal
 lives in a state directory that must not overlap the workspace, neither
