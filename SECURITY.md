@@ -2,14 +2,15 @@
 
 ## Project status
 
-canti is an experimental skeleton with no stable releases or production support
-commitment. The current branch is the development target. There is no concrete
-model adapter, SQLite store, execution backend, or sandbox in the repository.
-The `exec` protocol is not an authorization or isolation mechanism.
+canti is an experimental single-machine agent with no stable releases or
+production support commitment. The current branch is the development target.
+It contains an Anthropic Messages adapter, a SQLite journal, and a Docker
+executor. The `exec` protocol is not an authorization mechanism: the agent may
+run any command inside its container.
 
 Relevant reports include unsafe decision decoding, effect identity collisions,
 recovery that duplicates an external effect, credential exposure, and isolation
-or resource-limit failures in future adapters. Identify the exact revision and
+or resource-limit failures in the adapters. Identify the exact revision and
 any external integration involved.
 
 ## Private reporting
@@ -30,11 +31,29 @@ acknowledgement or remediation deadline is currently promised.
 
 ## Runtime trust boundary
 
-Future execution adapters must keep host credentials and authoritative run facts
-outside the agent's writable workspace. Expose only the required capabilities
-and read-only history projections. Preserve uncertainty after a timeout or
-interrupted dispatch; neither proves that an external action did not happen.
+Each command the agent chooses runs in its own Docker container. The container
+sees the workspace read-write and earlier job outputs read-only; the journal,
+job records, and the model credential stay outside it. It receives no host
+environment variables, runs as the invoking user's uid with all capabilities
+dropped and `no-new-privileges`, and has no network unless the run is created
+with another `-network`. The CLI removes the credential from its environment
+before starting any process and sends it only as an HTTP header, over `https`
+unless the endpoint is a loopback address.
 
-Security claims about persistence, isolation, cancellation, or recovery require
-tests against the concrete backend. The current fixture tests do not establish
-those deployment properties.
+Known limits:
+
+- Docker is the isolation boundary. Jobs share the host kernel, and anyone who
+  can use the Docker daemon controls the host; canti adds no sandbox of its own.
+- The workspace is writable by the agent by design, so anything placed in it
+  is agent-controlled. Notes in the workspace are never trusted as facts.
+- The state directory is protected only by file permissions. A process of the
+  same user can read or change the journal and artifacts, or replace the
+  workspace lock file and defeat single-writer exclusion.
+- A non-default network lets jobs reach any address it can route to.
+- Disk use is bounded per job output and per run, not by a filesystem quota;
+  Docker's log of a running job is bounded only by the job's run time.
+
+Preserve uncertainty after a timeout or interrupted dispatch; neither proves
+that an external action did not happen. [V1 acceptance](docs/v1-acceptance.md)
+records which of these properties the integration tests exercise, and against
+which backend versions.

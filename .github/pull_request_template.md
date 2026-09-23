@@ -39,4 +39,4 @@ restart behavior, cancellation, and unknown-result handling. -->
 - [ ] Durable facts are committed before external effects are dispatched.
 - [ ] Unknown execution state is preserved rather than treated as success.
 - [ ] No credentials, generated artifacts, or unrelated refactors are included.
-- [ ] Remaining skeleton or backend limits are stated explicitly.
+- [ ] Remaining backend, recovery, or verification limits are stated explicitly.
