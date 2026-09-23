@@ -219,6 +219,9 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 			if data, err := os.ReadFile(filepath.Join(f.workspace, "ok.txt")); err != nil || string(data) != "ok\n" {
 				t.Errorf("ok.txt = %q, %v; want one run", data, err)
 			}
+			if ids := evContainers(t, f.state, true); len(ids) != 1 {
+				t.Errorf("containers %q, want the one job of attempt 2", ids)
+			}
 			evInspect(t, evJob(t, h))
 			evLog(t, image, "frozen request replay", "step 1 attempt 1: "+tc.name,
 				fmt.Sprintf("response_incomplete %q, attempt 2 saved and dispatched once, returned", lost.Facts.Failure),
@@ -419,7 +422,7 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 }
 
 // evCheckCancelled checks that the run stopped for reason after its running
-// step 1 job was cancelled and its true result recorded, and evReturn that
+// step 1 job was cancelled and its true result recorded, and returns that
 // result.
 func evCheckCancelled(t *testing.T, f *fixture, reason core.StopReason) *harness.Observation {
 	t.Helper()
