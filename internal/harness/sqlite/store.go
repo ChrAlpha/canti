@@ -1,7 +1,9 @@
 // Package sqlite is the durable harness.Journal on SQLite. Every commit is one
 // immediate write transaction on a WAL database with synchronous=FULL, so an
 // acknowledged transition survives a process crash and, subject to the
-// filesystem honouring fsync, a power loss.
+// filesystem honouring fsync, a power loss. The store does not lock the
+// workspace: rejecting a stale commit does not stop a stale harness from
+// acting on its executor.
 package sqlite
 
 import (
@@ -54,6 +56,9 @@ CREATE TABLE transitions (
 	rev INTEGER NOT NULL,
 	PRIMARY KEY (run_id, seq)
 );
+CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
+CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
+CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
 PRAGMA user_version = 1;
 `
 
@@ -74,11 +79,15 @@ const (
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	transitionsSQL = `SELECT seq, event_id, kind, semantics, event, from_state, to_state, facts
 		FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
+	requestSQL  = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
+	responseSQL = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
+	recentSQL   = `SELECT kind, semantics, from_state, facts FROM transitions
+		WHERE run_id = ? AND kind IN ('observed', 'resolved') ORDER BY seq DESC LIMIT ?`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
-	latestSQL, sameSQL, insertSQL, transitionsSQL,
+	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
@@ -87,6 +96,8 @@ type Store struct {
 	db    *sql.DB
 	stmts map[string]*sql.Stmt
 }
+
+var _ harness.Journal = (*Store)(nil)
 
 // Open opens the database at path, creating the file and schema if missing.
 // A database with another schema version is refused with ErrIncompatible.

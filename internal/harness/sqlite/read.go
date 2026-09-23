@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -109,6 +110,73 @@ func (s *Store) Transitions(ctx context.Context, runID string, after int64, limi
 	if err != nil {
 		return nil, err
 	}
+	return out, nil
+}
+
+// Request returns the request frozen at revision rev of step.
+func (s *Store) Request(ctx context.Context, runID string, step, rev int) (harness.Request, error) {
+	facts, err := s.facts(ctx, requestSQL, runID, step, rev)
+	if err == nil && facts.Request == nil {
+		err = fmt.Errorf("%w: frozen request without a request record", ErrIncompatible)
+	}
+	if err != nil {
+		return harness.Request{}, err
+	}
+	return *facts.Request, nil
+}
+
+// Response returns the complete response saved for attempt of step.
+func (s *Store) Response(ctx context.Context, runID string, step, attempt int) (harness.Response, error) {
+	facts, err := s.facts(ctx, responseSQL, runID, step, attempt)
+	if err == nil && facts.Response == nil {
+		err = fmt.Errorf("%w: saved response without a response record", ErrIncompatible)
+	}
+	if err != nil {
+		return harness.Response{}, err
+	}
+	return *facts.Response, nil
+}
+
+func (s *Store) facts(ctx context.Context, query, runID string, step, n int) (harness.Facts, error) {
+	var facts harness.Facts
+	var semantics int
+	var data []byte
+	err := missing(s.stmts[query].QueryRowContext(ctx, runID, step, n).Scan(&semantics, &data), "record")
+	if err == nil {
+		err = current(semantics)
+	}
+	if err == nil {
+		err = strict(data, &facts)
+	}
+	return facts, err
+}
+
+// Recent returns at most limit of the latest observed or resolved steps,
+// oldest first.
+func (s *Store) Recent(ctx context.Context, runID string, limit int) ([]harness.StepRecord, error) {
+	var out []harness.StepRecord
+	err := s.each(ctx, runID, limit, recentSQL, []any{runID, limit}, func(rows *sql.Rows) error {
+		var kind string
+		var semantics int
+		var from, data []byte
+		var state core.State
+		var facts harness.Facts
+		if err := rows.Scan(&kind, &semantics, &from, &data); err != nil {
+			return err
+		}
+		if err := cmp.Or(current(semantics), strict(from, &state), strict(data, &facts)); err != nil {
+			return err
+		}
+		if facts.Observation == nil {
+			return fmt.Errorf("%w: %s step without an observation", ErrIncompatible, kind)
+		}
+		out = append(out, harness.StepRecord{Step: state.Step, Command: state.Decision.Payload, Observation: *facts.Observation, Resolved: kind == "resolved"})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(out)
 	return out, nil
 }
 
