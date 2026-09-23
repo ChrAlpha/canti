@@ -73,9 +73,12 @@ response completed.
 
 A raw provider response and the decision payload are different layers. The
 adapter records the complete raw response with its provenance
-(model/protocol/adapter); it then extracts exactly one decision JSON, which
+(model/protocol/adapter); it then extracts the decision text, which
 `ResponseLoaded` carries into the core and which is persisted as part of that
-transition. The core never sees provider content blocks or HTTP framing.
+transition. When the adapter extracts no text, the raw body is carried
+instead, which the strict decoder rejects unless it is itself exactly one
+decision object; the core never interprets provider content blocks or HTTP
+framing.
 
 ## Identity and causality
 
@@ -557,8 +560,10 @@ effect or state directory is an error, never adopted.
   boundaries. A truncated or cancelled job's output is marked incomplete,
   with details such as `kept N of M bytes`. A failed `docker logs` call or
   artifact write is recorded as an unavailable artifact with the error as
-  its detail, because the report of a finished job is final; only a capture
-  cut short by the caller's context is left to the next report. The
+  its detail, because the report of a finished job is final. Only a capture
+  cut short by the caller's context, or a final record that cannot be
+  written, is left to the next report; a record that keeps failing to be
+  written ends as an unknown outcome after the inspect retries. The
   json-file log replaces invalid UTF-8 with U+FFFD, so the artifact of binary
   output is not byte-exact and its byte count is that of the replaced text.
 - **Release.** After the capture, the job's final record — status, exit

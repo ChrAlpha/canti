@@ -63,9 +63,9 @@ By default each command the agent chooses runs in a new
 `debian:bookworm-slim` container with the workspace mounted at `/workspace`,
 no network, and the host user's uid; `canti run -h` lists the image, limit,
 model, and budget flags. Every canti command takes `-workspace` (default: the
-current directory). The journal lives in a state directory that must be
-outside the workspace; a workspace that contains the default state root, such
-as `$HOME`, needs `-state`.
+current directory). The journal lives in a state directory that must not
+overlap the workspace, neither inside it nor containing it; a workspace that
+contains the default state root, such as `$HOME`, needs `-state`.
 
 | Command | Effect |
 | --- | --- |
