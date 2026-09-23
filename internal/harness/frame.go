@@ -2,27 +2,53 @@ package harness
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
-// Frame is the bounded input assembled by the harness for one model request.
-// The core never receives a Frame or any other history representation.
+// Frame is the input assembled by the harness for one model request:
+// committed facts of the run plus the agent's notes. Prompt renders it into
+// one independent, bounded Prompt. The core never receives a Frame or any
+// other history representation.
 type Frame struct {
-	Goal            string
-	Constraints     string
-	Environment     string
-	LastObservation string
-	Notes           string
-	HistoryRef      string
+	Goal, Constraints, Environment       string
+	Step, MaxSteps, Attempt, MaxAttempts int
+	Earlier                              int          // completed steps before Steps that the prompt does not show
+	Steps                                []StepRecord // most recent completed steps, oldest first
+	ArtifactDir                          string       // container path under which ArtifactRef.Path is readable
+	Notes                                Notes
+	Rejected                             *Rejection // set when the previous response of this step failed to decode
 }
+
+// Notes is the agent-written notes file as read for one request. Path is
+// where the agent sees the file; Truncated reports that it is longer than
+// Text. The harness never verifies notes.
+type Notes struct {
+	Path, Text string
+	Truncated  bool
+}
+
+// Rejection is a response of the current step that failed to decode, with
+// the decode error.
+type Rejection struct{ Error, Response string }
 
 // Validate checks the minimum information needed to construct a model input.
 func (f Frame) Validate() error {
-	if strings.TrimSpace(f.Goal) == "" {
+	switch {
+	case strings.TrimSpace(f.Goal) == "":
 		return errors.New("harness: frame goal is required")
-	}
-	if strings.TrimSpace(f.Environment) == "" {
+	case strings.TrimSpace(f.Environment) == "":
 		return errors.New("harness: frame environment is required")
+	case strings.TrimSpace(f.ArtifactDir) == "":
+		return errors.New("harness: frame artifact directory is required")
+	case strings.TrimSpace(f.Notes.Path) == "":
+		return errors.New("harness: frame notes path is required")
+	case f.Step < 1 || f.Step > f.MaxSteps:
+		return fmt.Errorf("harness: frame step %d is outside 1..%d", f.Step, f.MaxSteps)
+	case f.Attempt < 1 || f.Attempt > f.MaxAttempts:
+		return fmt.Errorf("harness: frame attempt %d is outside 1..%d", f.Attempt, f.MaxAttempts)
+	case f.Earlier < 0:
+		return fmt.Errorf("harness: frame earlier step count %d is negative", f.Earlier)
 	}
 	return nil
 }
