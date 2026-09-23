@@ -6,16 +6,19 @@ and harness APIs may change before a stable release.
 
 ## Local setup
 
-Use Go 1.25 or newer, Make, and a POSIX shell. Current checks need no credentials,
-model access, database, container runtime, or Memoh checkout.
+Use Go 1.25 or newer, Make, and a POSIX shell. `make check` needs no
+credentials, model access, database server, container runtime, or Memoh
+checkout; `make integration` needs a Docker daemon.
 
 ```sh
 make check
 go test -count=1 -race ./...
+make integration
 go run ./cmd/canti -version
 ```
 
-`make check` validates formatting, runs `go vet`, and runs the tests. See
+`make check` validates formatting, runs `go vet`, and runs the unit tests.
+`make integration` adds the Docker-backed and long-history tests. See
 [AGENTS.md](AGENTS.md) for package ownership and agent contribution rules.
 
 ## Changes and review
@@ -30,7 +33,8 @@ dependencies should have a concrete purpose and a compatible license.
    tests must be deterministic. Harness tests should exercise affected commit,
    cancellation, unknown-result, and restart boundaries.
 3. Format changed Go files with `gofmt -w`. Run relevant tests during iteration,
-   then `make check`, `go test -count=1 -race ./...`, and `git diff --check` for delivery.
+   then `make check`, `go test -count=1 -race ./...`, and `git diff --check` for delivery,
+   plus `make integration` for storage, execution, adapter, or CLI changes.
 4. Inspect the diff and use a Conventional Commit subject such as
    `fix(core): reject duplicate decision fields`.
 5. Fill in the PR template with the problem, resulting behavior, commands and
