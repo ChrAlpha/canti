@@ -112,9 +112,9 @@ limits; two gates are partial.
 Not verified: no run against a live provider has been recorded. SIGKILL tests
 do not establish durability across power loss or OS crashes. Docker daemon
 restarts and host reboots are not tested, and several hosts are out of scope.
-Cost is not measured. Disk use is bounded by per-job and per-run output
-limits, not by a filesystem quota, and Docker's log of a running job only by
-the job's run time.
+Cost is not measured. Only retained job output is bounded on disk, per job and
+per run; workspace writes, the journal, and Docker's log of a running job are
+not, and there is no filesystem quota.
 
 Distributed scheduling, multi-tenant policy, generic workflow graphs,
 automatic planning, and automatic memory compaction are outside this scope.

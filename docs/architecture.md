@@ -277,9 +277,12 @@ the intent is `halt` or a step fails.
 closed or already records a reason, then runs it to a halt; its context
 carries the cleanup deadline. `ResolveJob` records with `JobBound` the job the
 executor finds for the effect of a run in `needs_resolution`, and `Resolve`
-records an explicit outcome with `Resolved`. Every commit attempt is logged
-with its run ID, sequence, phase, event kind, and any failure text; request
-and response bodies are not logged.
+records an explicit outcome with `Resolved`. `Resolve` records the outcome
+only: it leaves the backend untouched, so a job of the effect that may still
+run keeps running, and a created container of the effect that never started
+is not removed. Every commit handed to the store
+is logged with its run ID, sequence, phase, event kind, any failure text, and
+any store error; request and response bodies are not logged.
 
 ## Persistence and recovery
 
@@ -336,8 +339,8 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
   It writes nothing once its context is done.
 - Every read decodes strictly: an unknown field, trailing data, an unknown
   kind, or another semantics version fails with `ErrIncompatible`.
-- Each recovery read does the same work at any history length. `Latest` and
-  `Transitions` search the primary key; `Request`, `Response`, and `Recent`
+- Each recovery read is an index search bounded by its limit, never a scan
+  of the history. `Latest` and `Transitions` search the primary key; `Request`, `Response`, and `Recent`
   search partial indexes over `request_frozen` rows (run, step, revision),
   `response_saved` rows (run, step, attempt), and observed or resolved rows;
   `Totals` reads the run row.
@@ -413,7 +416,9 @@ until the loop is built. The first signal shuts the controller down and then
 calls `Loop.Stop` with `cancelled` under a new 30 s cleanup deadline, so an
 effect that may exist is cancelled and its true result recorded. A second signal abandons that
 cleanup, after which the CLI stops catching signals. `canti stop` performs the
-same persistent stop under `-cleanup` (30 s by default). A stop that is
+same persistent stop under `-cleanup` (30 s by default). The cleanup deadline
+must also cover copying the cancelled job's Docker log into its artifact, so
+a job that wrote a large output needs a longer `-cleanup`. A stop that is
 abandoned or misses its deadline leaves the run for a later `canti stop`. A
 stop of a run in `needs_resolution` records its reason and exits with status
 4: the job may still run until `canti resolve -job` records it, after which
@@ -533,7 +538,9 @@ effect or state directory is an error, never adopted.
 - **Status.** A container in `created` is pending without a latch and
   cancelled under the `cancel` latch. Under the `start` latch it failed to
   start when Docker reports a start error and no start time, as for an
-  unknown user, with the daemon's error as its output detail, and is
+  unknown user, with the output detail `job never started: <daemon error>`,
+  which is kept even if the capture fails or the artifact later goes
+  missing, and is
   otherwise unknown, because the launch may or may not have happened; the
   loop observes a failed start as `failed_to_start`. An exited container is cancelled with
   the marker, otherwise succeeded for exit status 0 and failed for any other.
@@ -592,6 +599,15 @@ from its environment before starting any process; the credential is sent
 only as an HTTP header, and the tests check that it appears in no request
 body, CLI output, or file of the state directory.
 
+The executor trusts the Docker daemon, anything with access to it, and any
+process of the same user that can modify the state directory. Jobs have
+neither: the daemon socket is not mounted, and the state directory is not
+visible to them. Within that assumption, container ownership is proven only
+by the name and the `canti.effect`, `canti.state`, and `canti.spec` labels,
+so a principal with daemon access could plant a matching container that
+`Bind` adopts; docker CLI output and final job records are read without a
+size cap.
+
 ## Budgets
 
 Step and attempt budgets are `core.Limits` and are enforced by `Next`:
@@ -599,24 +615,28 @@ Step and attempt budgets are `core.Limits` and are enforced by `Next`:
 authorized sends per step, shared by lost sends, transport retries, and
 protocol repairs. Neither a new revision, a restart, nor a stop-and-resume
 grants new budget within a run. Wall-time, token, output-byte, and job-time
-budgets are a `harness.Budget` stored with the run, measured by the loop, and
-reported as `StopRequested` with a reason; zero means unlimited. Stop on
-return, cancellation, exhausted budgets, protocol failure, or abandonment;
-the state preserves the reason.
+budgets are a `harness.Budget` stored with the run and measured by the loop;
+zero means unlimited. A spent wall-time, token, or output-byte budget is
+reported as `StopRequested` with a reason. Stop on return, cancellation,
+exhausted budgets, protocol failure, or abandonment; the state preserves the
+reason.
 
 The loop checks the wall time, tokens, and output bytes before each step
 except decoding a response already paid for, bounds each model request by the
 remaining wall time, and checks the wall time while it waits on a running
-job. It cancels a job once the host clock is `Budget.JobTimeout` past the
-start time the Docker daemon reports, and observes it as `timed_out`; a
-restarted controller that finds a cancelled job observes it as `timed_out`
-when the daemon's start and finish times span the timeout. Both assume the
-daemon shares the host clock. Tokens
+job. The job timeout stops the job, not the run: while inspecting, the loop
+cancels a job once the host clock is `Budget.JobTimeout` past the start time
+the Docker daemon reports, observes it as `timed_out`, and continues with the
+next step. A restarted controller that finds a cancelled job observes it as
+`timed_out` when the daemon's start and finish times span the timeout. Both
+assume the daemon shares the host clock. Tokens
 are the provider-reported usage of saved and incomplete responses, so a run
 can end up to one response over its token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between
-steps, so a run can end up to one per-job output limit over it. Neither is a
-filesystem quota. See [V1 acceptance](v1-acceptance.md) for the evidence.
+steps, so a run can end up to one per-job output limit over it. It is not a
+filesystem quota: workspace writes, the journal's request and response
+bodies, and Docker's log of a running job are not counted. See
+[V1 acceptance](v1-acceptance.md) for the evidence.
 
 ## Complexity budget
 

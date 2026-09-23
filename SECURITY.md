@@ -44,14 +44,20 @@ Known limits:
 
 - Docker is the isolation boundary. Jobs share the host kernel, and anyone who
   can use the Docker daemon controls the host; canti adds no sandbox of its own.
+- canti trusts the Docker daemon, anything with access to it, and any process
+  of the same user that can modify the state directory; jobs have neither.
+  Within that assumption, a container is recognized by its name and labels
+  alone, so a principal with daemon access could plant one that canti adopts,
+  and docker CLI output and final job records are read without a size cap.
 - The workspace is writable by the agent by design, so anything placed in it
   is agent-controlled. Notes in the workspace are never trusted as facts.
 - The state directory is protected only by file permissions. A process of the
   same user can read or change the journal and artifacts, or replace the
   workspace lock file and defeat single-writer exclusion.
 - A non-default network lets jobs reach any address it can route to.
-- Disk use is bounded per job output and per run, not by a filesystem quota;
-  Docker's log of a running job is bounded only by the job's run time.
+- Only retained job output is bounded, per job and per run between steps.
+  Workspace writes, the journal, and Docker's log of a running job, which only
+  the job's run time bounds, are not; there is no filesystem quota.
 
 Preserve uncertainty after a timeout or interrupted dispatch; neither proves
 that an external action did not happen. [V1 acceptance](docs/v1-acceptance.md)
