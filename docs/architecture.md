@@ -545,13 +545,15 @@ effect or state directory is an error, never adopted.
   most `PreviewLimit` bytes (4 KiB by default): the head, a
   `... N bytes omitted ...` marker, and the true tail, cut at rune
   boundaries. A truncated or cancelled job's output is marked incomplete,
-  with details such as `kept N of M bytes`; a failed capture is retried on
-  the next report. The json-file log replaces invalid UTF-8 with U+FFFD, so
-  the artifact of binary output is not byte-exact and its byte count is that
-  of the replaced text.
-- **Release.** Once the artifact is stored, the job's final record — status,
-  exit code, times, container ID, spec hash, preview, and artifact
-  reference — is published as `jobs/<effect ID>/output.json`, and only then
+  with details such as `kept N of M bytes`. A failed `docker logs` call or
+  artifact write is recorded as an unavailable artifact with the error as
+  its detail, because the report of a finished job is final; only a capture
+  cut short by the caller's context is left to the next report. The
+  json-file log replaces invalid UTF-8 with U+FFFD, so the artifact of binary
+  output is not byte-exact and its byte count is that of the replaced text.
+- **Release.** After the capture, the job's final record — status, exit
+  code, times, container ID, spec hash, preview, and artifact reference — is
+  published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
   Docker log; a failed removal is retried by the next report of the effect
   and by every `Bind` in the state directory. From then on the record is the
