@@ -464,7 +464,7 @@ func (s logged) Commit(ctx context.Context, t Transition) error {
 	attrs := []any{"run_id", t.From.RunID, "seq", t.Seq, "phase", t.To.Phase, "event", t.Event.Kind()}
 	switch {
 	case err != nil:
-		s.log.WarnContext(ctx, "commit failed", append(attrs, "error", err)...)
+		s.log.WarnContext(ctx, "commit failed", append(attrs, "failure", t.Facts.Failure, "error", err)...)
 	case t.Facts.Failure != "":
 		s.log.WarnContext(ctx, "committed", append(attrs, "failure", t.Facts.Failure)...)
 	default:

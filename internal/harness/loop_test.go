@@ -16,6 +16,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func TestNewLoopRequiresDependencies(t *testing.T) {
@@ -141,6 +142,31 @@ func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+type failingJournal struct {
+	*sqlite.Store
+	kind string
+}
+
+func (j failingJournal) Commit(ctx context.Context, t harness.Transition) error {
+	if t.Event.Kind() == j.kind {
+		return errors.New("disk full")
+	}
+	return j.Store.Commit(ctx, t)
+}
+
+func TestLoopLogsTheFailureOfACommitTheStoreRefused(t *testing.T) {
+	h := &logs{}
+	f := newFixture(t, limits, harness.Budget{}, reply{err: &harness.StopError{Reason: core.StopUnrecoverable, Err: errors.New("bad key")}})
+	f.cfg.Logger = slog.New(h)
+	if _, err := f.loopOn(failingJournal{f.store, "stop_requested"}).Run(f.bounded(), runID); err == nil {
+		t.Fatal("Run() succeeded although the store refused the stop")
+	}
+	failed := h.find("commit failed")
+	if len(failed) != 1 || failed[0]["event"] != "stop_requested" || !strings.Contains(failed[0]["failure"], "bad key") || failed[0]["error"] != "disk full" {
+		t.Fatalf("commit failure logs = %v, want the stop's failure text and the store error", failed)
 	}
 }
 
