@@ -117,7 +117,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
 	err = s.write(ctx, s.migrate)
-	for retry := 0; busy(err) && retry < 50 && ctx.Err() == nil; retry++ {
+	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)
 		err = s.write(ctx, s.migrate)
 	}
