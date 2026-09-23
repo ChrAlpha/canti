@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -26,14 +28,39 @@ import (
 
 // scriptedModel is an Anthropic Messages server that answers every request
 // with the decision scripted for the step named in the prompt's progress
-// line, and records every request body.
+// line, unless answer set a reply for it, and records every request body.
 type scriptedModel struct {
 	*httptest.Server
-	key    string
-	script map[int]core.Decision
-	hold   chan struct{}
-	mu     sync.Mutex
-	bodies [][]byte
+	key     string
+	script  map[int]core.Decision
+	hold    chan struct{}
+	mu      sync.Mutex
+	bodies  [][]byte
+	sent    map[int]int
+	replies map[[2]int]reply
+}
+
+// reply replaces the answer to one request. A non-zero status sends body
+// with that status; otherwise the message carries text instead of the
+// scripted decision when text is set, stops with stopReason instead of
+// end_turn when it is set, and is cut in half by closing the connection
+// when cut is set.
+type reply struct {
+	status     int
+	body       string
+	text       string
+	stopReason string
+	cut        bool
+}
+
+// answer makes the n-th request for step, counting from 1, answer with r.
+func (m *scriptedModel) answer(step, n int, r reply) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.replies == nil {
+		m.replies = map[[2]int]reply{}
+	}
+	m.replies[[2]int{step, n}] = r
 }
 
 func newScriptedModel(t *testing.T, key string, script map[int]core.Decision) *scriptedModel {
@@ -83,18 +110,55 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	step, _, err := promptOf(body)
+	var re reply
+	if err == nil {
+		m.mu.Lock()
+		if m.sent == nil {
+			m.sent = map[int]int{}
+		}
+		m.sent[step]++
+		re = m.replies[[2]int{step, m.sent[step]}]
+		m.mu.Unlock()
+	}
+	if re.status != 0 {
+		w.WriteHeader(re.status)
+		io.WriteString(w, re.body)
+		return
+	}
 	d, ok := m.script[step]
-	if err != nil || !ok {
+	if err != nil || !ok && re.text == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"no scripted decision"}}`)
 		return
 	}
-	text, _ := json.Marshal(d)
-	json.NewEncoder(w).Encode(map[string]any{
-		"id": "msg_test", "type": "message", "role": "assistant", "model": "claude-test", "stop_reason": "end_turn",
-		"content": []map[string]string{{"type": "text", "text": string(text)}},
+	text := re.text
+	if text == "" {
+		b, _ := json.Marshal(d)
+		text = string(b)
+	}
+	msg := map[string]any{
+		"id": "msg_test", "type": "message", "role": "assistant", "model": "claude-test", "stop_reason": cmp.Or(re.stopReason, "end_turn"),
+		"content": []map[string]string{{"type": "text", "text": text}},
 		"usage":   map[string]int{"input_tokens": 100, "output_tokens": 10},
-	})
+	}
+	if re.cut {
+		cutConnection(w, msg)
+		return
+	}
+	json.NewEncoder(w).Encode(msg)
+}
+
+// cutConnection sends the first half of msg under a Content-Length of all of
+// it and closes the connection.
+func cutConnection(w http.ResponseWriter, msg any) {
+	data, _ := json.Marshal(msg)
+	conn, buf, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(data), data[:len(data)/2])
+	buf.Flush()
 }
 
 // holdRequests makes the model answer no request until its client goes
