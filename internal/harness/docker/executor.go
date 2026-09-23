@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -187,6 +188,7 @@ const launchTimeout = 30 * time.Second
 func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, x.cfg.Docker, args...)
 	cmd.WaitDelay = time.Second
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
 }
 

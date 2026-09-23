@@ -200,3 +200,10 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 		seen[got] = name
 	}
 }
+
+func TestCommandsLeaveTheCallersProcessGroup(t *testing.T) {
+	cmd := newTestExecutor(t, Config{}).command(t.Context(), "version")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Fatal("the docker CLI shares the caller's process group, so a terminal interrupt can abort a launch")
+	}
+}
