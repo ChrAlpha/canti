@@ -571,11 +571,11 @@ plus Docker's log of each job that is still running or awaiting capture,
 which only that job's run time bounds.
 
 Every docker CLI call has its own deadline: 30 s, plus the stop grace for
-`docker stop`, and 10 min for a create, which may pull the image, and to read
-a job's log. A call past only its own
-deadline fails with an ordinary error, never taken for the caller's shutdown,
-so a hung daemon cannot hold an effect's lock forever: the loop retries a hung
-inspection and then records an unknown outcome.
+`docker stop`, and 10 min for a create, which may pull the image, and for
+reading a job's log. A call past only its own deadline fails with an ordinary
+error, never taken for the caller's shutdown, so a hung daemon cannot hold an
+effect's lock forever: the loop retries a hung inspection and then records an
+unknown outcome.
 
 The trust boundary is Docker's. A job sees the workspace, mounted read-write
 at `/workspace`, and the artifact root, mounted read-only at
