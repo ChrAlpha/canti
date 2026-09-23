@@ -98,7 +98,7 @@ func decodeConfig(run harness.Run, workspace string) (config, error) {
 	d := json.NewDecoder(bytes.NewReader(run.Config))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&c); err != nil {
-		return c, fmt.Errorf("run %s has an unreadable config: %w", run.ID, err)
+		return c, fmt.Errorf("run %s has an unreadable config: %w; runs of an earlier revision are not supported, so use a fresh -state", run.ID, err)
 	}
 	if c.Workspace != workspace {
 		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)

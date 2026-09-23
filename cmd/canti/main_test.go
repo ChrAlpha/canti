@@ -230,7 +230,7 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"status"}, {"history"}, {"resume"}, {"stop"}, {"resolve", "-job"}, {"run", "-goal", "g"}} {
-		if r := f.cli(nil, args[0], args[1:]...); r.code != exitError || !strings.Contains(r.stderr, "run run_legacy has an unreadable config") {
+		if r := f.cli(nil, args[0], args[1:]...); r.code != exitError || !strings.Contains(r.stderr, "run run_legacy has an unreadable config") || !strings.Contains(r.stderr, "use a fresh -state") {
 			t.Errorf("%q = %d\nstderr: %s", args, r.code, r.stderr)
 		}
 	}
