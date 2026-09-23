@@ -88,17 +88,17 @@ func omitted(n int64) string {
 // derived with, such as why it never started.
 func describe(path string, t *tap, logsErr error, job harness.Job) harness.ArtifactRef {
 	ref := harness.ArtifactRef{Path: path}
-	switch {
-	case logsErr != nil:
-		ref.Detail = "logs unavailable: " + logsErr.Error()
-		return ref
-	case t.werr != nil:
-		ref.Detail = "artifact write failed: " + t.werr.Error()
-		return ref
-	}
 	var notes []string
 	if job.Output.Detail != "" {
 		notes = append(notes, job.Output.Detail)
+	}
+	switch {
+	case logsErr != nil:
+		ref.Detail = strings.Join(append(notes, "logs unavailable: "+logsErr.Error()), "; ")
+		return ref
+	case t.werr != nil:
+		ref.Detail = strings.Join(append(notes, "artifact write failed: "+t.werr.Error()), "; ")
+		return ref
 	}
 	if t.stored < t.total {
 		notes = append(notes, fmt.Sprintf("kept %d of %d bytes", t.stored, t.total))
@@ -115,14 +115,16 @@ func verify(root string, ref harness.ArtifactRef) harness.ArtifactRef {
 		return ref
 	}
 	fi, err := os.Stat(filepath.Join(root, ref.Path))
+	var note string
 	switch {
 	case err != nil:
-		ref.Detail = "artifact missing: " + err.Error()
+		note = "artifact missing: " + err.Error()
 	case fi.Size() != ref.Bytes:
-		ref.Detail = fmt.Sprintf("artifact has %d bytes, recorded %d", fi.Size(), ref.Bytes)
+		note = fmt.Sprintf("artifact has %d bytes, recorded %d", fi.Size(), ref.Bytes)
 	default:
 		return ref
 	}
+	ref.Detail = strings.TrimPrefix(ref.Detail+"; "+note, "; ")
 	ref.Available, ref.Complete = false, false
 	return ref
 }

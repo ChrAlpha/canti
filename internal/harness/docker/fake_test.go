@@ -238,6 +238,28 @@ func TestRejectedStartFailsToStart(t *testing.T) {
 	}
 }
 
+func TestRejectedStartKeepsItsReason(t *testing.T) {
+	f := newFake(t)
+	f.rejecting("")
+	f.set("logs.exit", "1")
+	job, err := f.x.Start(t.Context(), "e")
+	if want := "job never started: unable to find user nosuchuser; logs unavailable: exit status 1"; err != nil || job.Status != harness.JobFailedToStart || job.Output.Detail != want {
+		t.Fatalf("Start(rejected, capture fails) = %+v, %v; want detail %q", job, err, want)
+	}
+	g := newFake(t)
+	g.rejecting("")
+	if _, err := g.x.Start(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(g.x.artifacts(), "e", "output")); err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = g.x.Inspect(t.Context(), "e")
+	if err != nil || !strings.HasPrefix(job.Output.Detail, "job never started: unable to find user nosuchuser; artifact missing: ") {
+		t.Fatalf("Inspect(artifact removed) = %+v, %v; want the reason kept", job, err)
+	}
+}
+
 func TestRejectedStartDuringShutdownIsRecordedLater(t *testing.T) {
 	f := newFake(t)
 	f.rejecting(`touch "$ctl/began"; sleep 0.3; `)
