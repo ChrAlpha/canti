@@ -5,14 +5,13 @@
 package sqlite
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
+	"reflect"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -39,6 +38,21 @@ CREATE TABLE runs (
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	output_bytes INTEGER NOT NULL DEFAULT 0,
 	steps INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE transitions (
+	run_id TEXT NOT NULL REFERENCES runs (id),
+	seq INTEGER NOT NULL CHECK (seq > 0),
+	event_id TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	semantics INTEGER NOT NULL,
+	event TEXT NOT NULL,
+	from_state TEXT NOT NULL,
+	to_state TEXT NOT NULL,
+	facts TEXT NOT NULL,
+	step INTEGER NOT NULL,
+	attempt INTEGER NOT NULL,
+	rev INTEGER NOT NULL,
+	PRIMARY KEY (run_id, seq)
 );
 PRAGMA user_version = 1;
 `
@@ -142,43 +156,111 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	})
 }
 
-// Run returns the stored run record.
-func (s *Store) Run(ctx context.Context, runID string) (harness.Run, error) {
-	return s.run(ctx, `SELECT run FROM runs WHERE id = ?`, runID)
-}
+var (
+	errRecorded = errors.New("sqlite: transition already recorded")
+	afterInsert func() error
+)
 
-// LastRun returns the run created most recently in this store.
-func (s *Store) LastRun(ctx context.Context) (harness.Run, error) {
-	return s.run(ctx, `SELECT run FROM runs ORDER BY n DESC LIMIT 1`)
-}
-
-func (s *Store) run(ctx context.Context, query string, args ...any) (harness.Run, error) {
-	var run harness.Run
-	var record []byte
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&record); err != nil {
-		return run, missing(err, "run")
-	}
-	return run, strict(record, &run)
-}
-
-func missing(err error, what string) error {
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("sqlite: %s: %w", what, harness.ErrNotFound)
+// Commit records t, its facts, and the run totals in one transaction, or
+// nothing. The run is t.From.RunID. A transition identical to the one already
+// recorded at t.Seq succeeds without recording again; any other transition at
+// a used or non-consecutive sequence fails with harness.ErrStaleSnapshot, and
+// one whose From is not the state committed at t.Seq-1 fails with
+// harness.ErrBrokenChain.
+func (s *Store) Commit(ctx context.Context, t harness.Transition) error {
+	err := s.write(ctx, func(ctx context.Context, tx *sql.Tx) error { return commit(ctx, tx, t) })
+	if errors.Is(err, errRecorded) {
+		return nil
 	}
 	return err
 }
 
-func strict(data []byte, v any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	err := decoder.Decode(v)
-	if err == nil {
-		if _, trailing := decoder.Token(); trailing != io.EOF {
-			err = errors.New("trailing data")
+func commit(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
+	r, err := encode(t)
+	if err != nil {
+		return err
+	}
+	var same bool
+	err = tx.QueryRowContext(ctx, `SELECT event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
+		FROM transitions WHERE run_id = ? AND seq = ?`,
+		t.EventID, r.kind, core.SemanticsVersion, r.event, r.from, r.to, r.facts, r.run, t.Seq).Scan(&same)
+	switch {
+	case err == nil && same:
+		return errRecorded
+	case err == nil:
+		return fmt.Errorf("%w: seq %d of run %q holds another transition", harness.ErrStaleSnapshot, t.Seq, r.run)
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	last, err := latest(ctx, tx, r.run)
+	if err != nil {
+		return err
+	}
+	if t.Seq != last.Seq+1 {
+		return fmt.Errorf("%w: seq %d does not follow seq %d of run %q", harness.ErrStaleSnapshot, t.Seq, last.Seq, r.run)
+	}
+	if t.From != last.State {
+		return fmt.Errorf("%w: seq %d of run %q", harness.ErrBrokenChain, t.Seq, r.run)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions
+		(run_id, seq, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.run, t.Seq, t.EventID, r.kind, core.SemanticsVersion, r.event, r.from, r.to, r.facts,
+		t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
+		return err
+	}
+	if afterInsert != nil {
+		if err := afterInsert(); err != nil {
+			return err
 		}
 	}
-	if err != nil {
-		return fmt.Errorf("%w: decode %T: %v", ErrIncompatible, v, err)
+	d := delta(t)
+	if d == (harness.Totals{}) {
+		return nil
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
+		output_bytes = output_bytes + ?, steps = steps + ? WHERE id = ?`,
+		d.Usage.InputTokens, d.Usage.OutputTokens, d.OutputBytes, d.Steps, r.run)
+	return err
+}
+
+type record struct {
+	run, kind, event, from, to, facts string
+}
+
+func encode(t harness.Transition) (record, error) {
+	if t.Event == nil {
+		return record{}, errors.New("sqlite: transition has no event")
+	}
+	r := record{run: t.From.RunID, kind: t.Event.Kind()}
+	if t.To.RunID != r.run {
+		return r, fmt.Errorf("sqlite: transition moves run %q to run %q", r.run, t.To.RunID)
+	}
+	if events[r.kind] != reflect.TypeOf(t.Event) {
+		return r, fmt.Errorf("%w: event %T of kind %q", ErrIncompatible, t.Event, r.kind)
+	}
+	for dst, v := range map[*string]any{&r.event: t.Event, &r.from: t.From, &r.to: t.To, &r.facts: t.Facts} {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return r, err
+		}
+		*dst = string(data)
+	}
+	return r, nil
+}
+
+func delta(t harness.Transition) harness.Totals {
+	var d harness.Totals
+	switch t.Event.(type) {
+	case core.ResponseSaved, core.ResponseIncomplete:
+		if t.Facts.Response != nil {
+			d.Usage = t.Facts.Response.Usage
+		}
+	case core.Observed, core.Resolved:
+		d.Steps = 1
+		if t.Facts.Observation != nil {
+			d.OutputBytes = t.Facts.Observation.Output.Bytes
+		}
+	}
+	return d
 }
