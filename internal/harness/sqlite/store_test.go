@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,32 @@ func TestOpenRefusesForeignDatabase(t *testing.T) {
 			s.Close()
 		}
 		t.Fatalf("Open(foreign database) error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestConcurrentFirstOpensShareOneDatabase(t *testing.T) {
+	for i := range 20 {
+		path := tempPath(t)
+		start := make(chan struct{})
+		errs := make([]error, 4)
+		var wg sync.WaitGroup
+		for j := range errs {
+			wg.Go(func() {
+				<-start
+				s, err := Open(context.Background(), path)
+				if err == nil {
+					err = s.Close()
+				}
+				errs[j] = err
+			})
+		}
+		close(start)
+		wg.Wait()
+		for j, err := range errs {
+			if err != nil {
+				t.Fatalf("file %d: Open #%d error = %v", i, j, err)
+			}
+		}
 	}
 }
 

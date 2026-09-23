@@ -16,11 +16,13 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
-	_ "modernc.org/sqlite"
+	modernc "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrIncompatible reports a database or stored record this package cannot
@@ -115,6 +117,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
 	err = s.write(ctx, s.migrate)
+	for retry := 0; busy(err) && retry < 50 && ctx.Err() == nil; retry++ {
+		time.Sleep(10 * time.Millisecond)
+		err = s.write(ctx, s.migrate)
+	}
 	for _, query := range queries {
 		if err == nil {
 			s.stmts[query], err = db.PrepareContext(ctx, query)
@@ -125,6 +131,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// busy reports SQLITE_BUSY, which converting a new file to WAL returns at
+// once, without the busy timeout, when another first Open races it.
+func busy(err error) bool {
+	var e *modernc.Error
+	return errors.As(err, &e) && e.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
