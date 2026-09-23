@@ -195,34 +195,53 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 	})
 }
 
-func TestCommitRefusesRecordsItCannotReproduce(t *testing.T) {
+func TestCommitRefusesTransitionsItCannotReproduce(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))
 	d.decide(execBody("cat binary"), harness.Usage{})
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
-	observed := core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}
-	pointer := derive(t, d.snap, observed, harness.Facts{Observation: observation(core.ExecutionExited, 1)})
-	pointer.Event = &observed
-	lossy := observation(core.ExecutionExited, 1)
-	lossy.Preview = "truncated \xe2\x82"
+	bound := core.JobBound{EffectID: d.snap.State.EffectID, JobID: "job-1"}
+	pointer := derive(t, d.snap, bound, harness.Facts{})
+	pointer.Event = &bound
 	for name, tr := range map[string]harness.Transition{
-		"pointer event": pointer,
-		"invalid UTF-8": derive(t, d.snap, observed, harness.Facts{Observation: lossy}),
+		"pointer event":        pointer,
+		"invalid UTF-8 in IDs": derive(t, d.snap, core.JobBound{EffectID: d.snap.State.EffectID, JobID: "job-\xff"}, harness.Facts{}),
+		"no event":             {Seq: d.snap.Seq + 1, From: d.snap.State, To: d.snap.State},
 	} {
-		if err := s.Commit(ctx, tr); !errors.Is(err, ErrIncompatible) {
-			t.Errorf("Commit(%s) error = %v, want ErrIncompatible", name, err)
+		if err := s.Commit(ctx, tr); err == nil {
+			t.Errorf("Commit(%s) succeeded, want refusal", name)
 		}
 	}
-	if err := s.Commit(ctx, harness.Transition{Seq: d.snap.Seq + 1, From: d.snap.State, To: d.snap.State}); err == nil {
-		t.Error("Commit(no event) succeeded, want refusal")
-	}
-	unchanged(t, s, "run-1", d.commits, totalsOf(t, s, "run-1"))
+	unchanged(t, s, "run-1", d.commits, harness.Totals{})
 
 	run := testRun("run-2")
 	run.Goal = "\xff"
 	if err := s.CreateRun(ctx, run, fresh(t, "run-2", limits)); err == nil {
 		t.Fatal("CreateRun(invalid UTF-8 goal) succeeded, want refusal")
 	}
+}
+
+func TestCommitStoresFactTextAsValidUTF8(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.decide(execBody("cat binary"), harness.Usage{})
+	d.call(harness.Runner.Bind)
+	d.call(harness.Runner.Start)
+	raw := observation(core.ExecutionExited, 1)
+	raw.Preview = "ELF\x7f\xff truncated \xe2\x82"
+	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: raw})
+	last := d.commits[len(d.commits)-1]
+	if err := s.Commit(ctx, last); err != nil {
+		t.Fatalf("identical retry error = %v", err)
+	}
+
+	stored := history(t, s, "run-1")
+	if len(stored) != len(d.commits) {
+		t.Fatalf("stored %d transitions, want %d", len(stored), len(d.commits))
+	}
+	if got, want := stored[len(stored)-1].Facts.Observation.Preview, "ELF\x7f\ufffd truncated \ufffd\ufffd"; got != want {
+		t.Fatalf("stored preview = %q, want %q", got, want)
+	}
+	replay(t, fresh(t, "run-1", limits), stored)
 }

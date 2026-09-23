@@ -3,7 +3,8 @@
 // acknowledged transition survives a process crash and, subject to the
 // filesystem honouring fsync, a power loss. The store does not lock the
 // workspace: rejecting a stale commit does not stop a stale harness from
-// acting on its executor.
+// acting on its executor. Records are JSON, so invalid UTF-8 in fact text
+// reads back as U+FFFD.
 package sqlite
 
 import (
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"unicode/utf8"
 
@@ -21,14 +23,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ErrIncompatible reports a record kind, semantics version, or schema version
-// this package does not support. Such records are refused, never
+// ErrIncompatible reports a database or stored record this package cannot
+// read exactly: another schema or semantics version, an unknown record kind,
+// or content the strict decoder rejects. Such records are refused, never
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
 const schemaVersion = 1
 
-const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_txlock=immediate"
+const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
 const schema = `
 CREATE TABLE runs (
@@ -60,7 +63,6 @@ CREATE TABLE transitions (
 CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
 CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
 CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
-PRAGMA user_version = 1;
 `
 
 const (
@@ -103,8 +105,11 @@ var _ harness.Journal = (*Store)(nil)
 // Open opens the database at path, creating the file and schema if missing.
 // A database with another schema version is refused with ErrIncompatible.
 func Open(ctx context.Context, path string) (*Store, error) {
-	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: options}).String()
-	db, err := sql.Open("sqlite", dsn)
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: options}).String())
 	if err != nil {
 		return nil, err
 	}
@@ -134,23 +139,24 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	switch version {
-	case schemaVersion:
-		return nil
-	case 0:
-		_, err := tx.ExecContext(ctx, schema)
+	var objects int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema").Scan(&objects); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: schema version %d, want %d", ErrIncompatible, version, schemaVersion)
+	switch {
+	case version == schemaVersion:
+		return nil
+	case version == 0 && objects == 0:
+		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
+		return err
+	}
+	return fmt.Errorf("%w: schema version %d with %d objects, want %d", ErrIncompatible, version, objects, schemaVersion)
 }
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) write(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -209,11 +215,6 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	})
 }
 
-var (
-	errRecorded = errors.New("sqlite: transition already recorded")
-	afterInsert func() error
-)
-
 // Commit records t, its facts, and the run totals in one transaction, or
 // nothing. The run is t.From.RunID. A transition identical to the one already
 // recorded at t.Seq succeeds without recording again; any other transition at
@@ -221,11 +222,7 @@ var (
 // one whose From is not the state committed at t.Seq-1 fails with
 // harness.ErrBrokenChain.
 func (s *Store) Commit(ctx context.Context, t harness.Transition) error {
-	err := s.write(ctx, func(ctx context.Context, tx *sql.Tx) error { return s.commit(ctx, tx, t) })
-	if errors.Is(err, errRecorded) {
-		return nil
-	}
-	return err
+	return s.write(ctx, func(ctx context.Context, tx *sql.Tx) error { return s.commit(ctx, tx, t) })
 }
 
 func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
@@ -244,7 +241,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 			return err
 		}
 		if same {
-			return errRecorded
+			return nil
 		}
 		return fmt.Errorf("%w: seq %d of run %q holds another transition", harness.ErrStaleSnapshot, t.Seq, r.run)
 	}
@@ -257,11 +254,6 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
-	}
-	if afterInsert != nil {
-		if err := afterInsert(); err != nil {
-			return err
-		}
 	}
 	d := delta(t)
 	if d == (harness.Totals{}) {
@@ -277,8 +269,9 @@ type record struct {
 	event, from, to, facts string
 }
 
-// encode fails unless the record decodes back to t: JSON silently replaces
-// invalid UTF-8, and a value type is the only event form a read returns.
+// encode fails unless the event and states read back exactly, because the
+// chain check and replay compare them; JSON replaces invalid UTF-8, and reads
+// return value events.
 func encode(t harness.Transition) (record, error) {
 	if t.Event == nil {
 		return record{}, errors.New("sqlite: transition has no event")
@@ -298,8 +291,8 @@ func encode(t harness.Transition) (record, error) {
 	if err != nil {
 		return r, err
 	}
-	if !reflect.DeepEqual(back, harness.Transition{From: t.From, Event: t.Event, To: t.To, Facts: t.Facts}) {
-		return r, fmt.Errorf("%w: %s transition %T does not survive encoding", ErrIncompatible, r.kind, t.Event)
+	if back.From != t.From || back.To != t.To || !reflect.DeepEqual(back.Event, t.Event) {
+		return r, fmt.Errorf("sqlite: %T transition does not read back as committed", t.Event)
 	}
 	return r, nil
 }

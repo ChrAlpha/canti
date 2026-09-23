@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -73,6 +74,7 @@ func TestOpenConfiguresDurableJournal(t *testing.T) {
 		"synchronous":  "2",
 		"foreign_keys": "1",
 		"busy_timeout": "5000",
+		"fullfsync":    "1",
 		"user_version": "1",
 	}
 	for pragma, value := range want {
@@ -104,6 +106,35 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 			s.Close()
 		}
 		t.Fatalf("Open() error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestOpenRefusesForeignDatabase(t *testing.T) {
+	path := tempPath(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE notes (body TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if s, err := Open(context.Background(), path); !errors.Is(err, ErrIncompatible) {
+		if err == nil {
+			s.Close()
+		}
+		t.Fatalf("Open(foreign database) error = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestOpenPinsRelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	s := open(t, "canti.db")
+	s.db.SetMaxIdleConns(0)
+	createRun(t, s, "run-1", limits)
+	t.Chdir(t.TempDir())
+	if _, err := s.Run(context.Background(), "run-1"); err != nil {
+		t.Fatalf("Run() on a new connection after chdir error = %v", err)
 	}
 }
 

@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
-
-var errInjected = errors.New("injected failure")
 
 func latestOf(t testing.TB, s *Store, runID string) harness.Snapshot {
 	t.Helper()
@@ -102,9 +102,13 @@ func TestCommitRejectsSequenceGap(t *testing.T) {
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))
 	d.freeze()
-	d.snap.Seq += 5
-	if err := d.try(core.AttemptStarted{Step: 1, Attempt: 1}, harness.Facts{}); !errors.Is(err, harness.ErrStaleSnapshot) {
-		t.Fatalf("error = %v, want ErrStaleSnapshot", err)
+	next := derive(t, d.snap, core.AttemptStarted{Step: 1, Attempt: 1}, harness.Facts{})
+	for _, seq := range []int64{-1, 0, next.Seq + 1, next.Seq + 5} {
+		gapped := next
+		gapped.Seq = seq
+		if err := s.Commit(context.Background(), gapped); !errors.Is(err, harness.ErrStaleSnapshot) {
+			t.Fatalf("Commit(seq %d) error = %v, want ErrStaleSnapshot", seq, err)
+		}
 	}
 	unchanged(t, s, "run-1", d.commits, harness.Totals{})
 }
@@ -151,8 +155,19 @@ func TestCommitConfirmsIdenticalRetry(t *testing.T) {
 	totals := totalsOf(t, s, "run-1")
 	last := d.commits[len(d.commits)-1]
 
+	walSize := func() int64 {
+		info, err := os.Stat(path + "-wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info.Size()
+	}
+	before := walSize()
 	if err := s.Commit(ctx, last); err != nil {
 		t.Fatalf("identical retry error = %v", err)
+	}
+	if after := walSize(); after != before {
+		t.Fatalf("identical retry grew the WAL from %d to %d bytes", before, after)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -225,6 +240,9 @@ func TestCommitRequiresTheRun(t *testing.T) {
 		"Latest":      func() error { _, err := s.Latest(ctx, "ghost"); return err },
 		"Totals":      func() error { _, err := s.Totals(ctx, "ghost"); return err },
 		"Transitions": func() error { _, err := s.Transitions(ctx, "ghost", 0, 10); return err },
+		"Recent":      func() error { _, err := s.Recent(ctx, "ghost", 10); return err },
+		"Request":     func() error { _, err := s.Request(ctx, "ghost", 1, 1); return err },
+		"Response":    func() error { _, err := s.Response(ctx, "ghost", 1, 1); return err },
 	} {
 		if err := read(); !errors.Is(err, harness.ErrNotFound) {
 			t.Errorf("%s(unknown run) error = %v, want ErrNotFound", name, err)
@@ -262,18 +280,21 @@ func TestCommitRollsBackFailureAfterInsert(t *testing.T) {
 	before, totals := d.snap, totalsOf(t, s, "run-1")
 	committed := append([]harness.Transition(nil), d.commits...)
 
-	afterInsert = func() error { return errInjected }
-	t.Cleanup(func() { afterInsert = nil })
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_totals BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
 	body, usage := execBody("ls"), harness.Usage{InputTokens: 9, OutputTokens: 2}
-	if err := d.try(core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: responseFor(before.State, body, usage)}); !errors.Is(err, errInjected) {
-		t.Fatalf("error = %v, want the injected failure", err)
+	if err := d.try(core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: responseFor(before.State, body, usage)}); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("error = %v, want the injected totals failure", err)
 	}
 	if got := latestOf(t, s, "run-1"); got != before {
 		t.Fatalf("Latest() = %#v, want %#v", got, before)
 	}
 	unchanged(t, s, "run-1", committed, totals)
 
-	afterInsert = nil
+	if _, err := s.db.Exec(`DROP TRIGGER fail_totals`); err != nil {
+		t.Fatal(err)
+	}
 	d.save(body, usage)
 	if got := totalsOf(t, s, "run-1"); got.Usage != usage {
 		t.Fatalf("Totals() after the corrected commit = %#v, want usage %#v", got, usage)
