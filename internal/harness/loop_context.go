@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
@@ -12,9 +11,6 @@ import (
 
 func (f Frame) contextSystem() string {
 	s := system
-	if f.Window != nil {
-		s = strings.Replace(s, "Use the notes file named in the Notes section for your plan and findings. It persists between steps and is shown back to you in every request, cut to a size limit. The harness does not verify notes.", "Work continues across bounded context windows. The handover is the only automatically carried working state; notes and older steps are not automatically included. Current goal and constraints remain authoritative. When asked to hand over, use the exact canti:handover action specified in the request; this records guidance and continues the same run.", 1)
-	}
 	if f.RetrievalEnabled {
 		s += `
 
@@ -31,11 +27,7 @@ func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error 
 	f.RetrievalEnabled = l.cfg.Reader != nil
 	f.ImportsEnabled = l.cfg.Reader != nil && l.cfg.Reader.Imports != ""
 	f.HandoverBytes = l.cfg.HandoverBytes
-	if l.cfg.WindowSteps == 0 && l.cfg.WindowBytes == 0 {
-		return nil
-	}
 	w := Window{FirstStep: 1}
-	w.WithoutHandover = l.cfg.WithoutHandover
 	req, err := l.journal.LatestRequest(ctx, snap.State.RunID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -49,6 +41,15 @@ func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error 
 		}
 		w = *req.Window
 	}
+	if err := w.Validate(snap.State.Step); err != nil {
+		return err
+	}
+	f.Window = &w
+	return nil
+}
+
+func (l *Loop) advanceWindow(snap Snapshot, f *Frame) error {
+	w := *f.Window
 	if snap.State.RequestRev == 0 && w.Requested && len(f.Steps) > 0 {
 		last := f.Steps[len(f.Steps)-1]
 		if h := last.Observation.Handover; h != nil && last.Observation.Execution == core.ExecutionExited && last.Observation.ExitCode != nil && *last.Observation.ExitCode == 0 {
@@ -128,13 +129,6 @@ func (l *Loop) requestHandover(f *Frame) error {
 		return errors.New("harness: fixed context leaves no room for work and handover reserve")
 	}
 	if (l.cfg.WindowSteps > 0 && f.Step-f.Window.FirstStep >= l.cfg.WindowSteps) || (l.cfg.WindowBytes > 0 && used >= l.cfg.WindowBytes) || used >= capacity {
-		if l.cfg.WithoutHandover {
-			f.Window = &Window{FirstStep: f.Step, SourceStep: f.Step - 1, WithoutHandover: true}
-			f.Steps = nil
-			f.Retrieved = nil
-			f.Earlier = f.Step - 1
-			return nil
-		}
 		f.Window.Requested = true
 	}
 	return nil
@@ -148,25 +142,22 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID, Notes: Notes{Path: l.cfg.NotesPath},
 	}
 	var err error
-	if f.Steps, err = l.recent(ctx, s.RunID, f); err != nil {
+	if err := l.contextFrame(ctx, snap, &f); err != nil {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	}
+	if f.Steps, err = l.recent(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}
 	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {
 		return snap, err
 	}
-	if err := l.contextFrame(ctx, snap, &f); err != nil {
+	if err := l.advanceWindow(snap, &f); err != nil {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	if err := l.expandRetrieval(ctx, &f); err != nil {
 		return snap, err
 	}
 	f.Earlier = s.Step - 1 - len(f.Steps)
-	if f.Window == nil {
-		if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
-			l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
-			f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
-		}
-	}
 	if s.RequestRev > 0 {
 		resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt-1)
 		if err != nil {

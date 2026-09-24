@@ -256,23 +256,22 @@ func (l *Loop) late(run Run) string {
 	return ""
 }
 
-// recent reads the latest completed steps backward in pages until the
-// blocks f renders for them exceed the prompt total, a page is short, or
-// step 1 is read, so that Frame.Prompt shows the steps it would show from
-// the whole history. It reads at most the completed steps whose blocks fit
-// the total, plus one page.
-func (l *Loop) recent(ctx context.Context, runID string, f Frame) ([]StepRecord, error) {
+// recent reads the active page only, bounded by the persisted first step
+// and the snapshot sequence. An older page never re-enters the prompt.
+func (l *Loop) recent(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
 	var steps []StepRecord
-	for size, before := 0, int64(0); ; {
+	for before := snapshotSeq + 1; ; {
 		page, err := l.journal.Recent(ctx, runID, before, historyPage)
 		if err != nil {
 			return nil, err
 		}
-		for i := len(page) - 1; i >= 0 && size <= l.cfg.Limits.Total; i-- {
-			size += len(f.step(page[i], l.cfg.Limits))
+		for i, record := range page {
+			if record.Step >= f.Window.FirstStep && record.Step < f.Step {
+				steps = append(append([]StepRecord(nil), page[i:]...), steps...)
+				break
+			}
 		}
-		steps = append(page, steps...)
-		if size > l.cfg.Limits.Total || len(page) < historyPage || page[0].Step == 1 {
+		if len(page) < historyPage || len(page) == 0 || page[0].Step <= f.Window.FirstStep {
 			return steps, nil
 		}
 		before = page[0].Seq

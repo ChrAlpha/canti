@@ -19,7 +19,7 @@ func (w Window) Validate(step int) error {
 	if w.FirstStep < 1 || w.FirstStep > step || w.SourceStep < 0 || w.SourceStep >= w.FirstStep || w.Failures < 0 || w.Failures > 2 {
 		return fmt.Errorf("harness: invalid context window at step %d", step)
 	}
-	if !utf8.ValidString(w.Handover) || (w.FirstStep == 1 && (w.SourceStep != 0 || w.Handover != "")) || (w.FirstStep > 1 && (w.SourceStep != w.FirstStep-1 || (strings.TrimSpace(w.Handover) == "" && !w.WithoutHandover))) || (w.WithoutHandover && (w.Handover != "" || w.Requested)) {
+	if !utf8.ValidString(w.Handover) || w.WithoutHandover || (w.FirstStep == 1 && (w.SourceStep != 0 || w.Handover != "")) || (w.FirstStep > 1 && (w.SourceStep != w.FirstStep-1 || strings.TrimSpace(w.Handover) == "")) {
 		return fmt.Errorf("harness: invalid handover provenance at step %d", step)
 	}
 	return nil
