@@ -288,8 +288,8 @@ Three properties of this gateway shape the evidence:
 
 - It ignores `output_config`, and its model often wrote prose or a code fence
   before the decision object: all three runs of a first pilot stopped as
-  `protocol_failure`, the `v1` one at step 7 after 10 protocol repairs in 17
-  attempts. Every run below therefore went through a loopback proxy of the
+  `protocol_failure`, the `v1` audit run at step 7 after 10 protocol repairs
+  in 17 attempts. Every run below therefore went through a loopback proxy of the
   runner that forces a `decision` tool and, when the gateway ignores it, takes
   the last top-level decision object from the reply's text. canti's strict
   decoding is unchanged; the journal holds the converted responses. Results
@@ -304,7 +304,7 @@ Three properties of this gateway shape the evidence:
   frozen request bytes instead, the comparisons below keep their direction.
 
 The gateway failed with 502 responses, timeouts, and two 429 responses from
-about 22:45 to 00:22 UTC, recovering briefly in between. Runs that finished
+roughly 22:30–22:50 to 00:22 UTC, recovering briefly in between. Runs that finished
 during it are kept with their incomplete attempts, which canti retried with
 the frozen bytes. The two runs that stopped as `attempts_exhausted` and the
 runs still in flight when the sweeps were stopped were set aside and run again
@@ -336,8 +336,8 @@ An `ops` run passes when every service is deployed, `bin/fix reset` never
 ran, and at most two fixes had no effect. The `audit` memory outcome is a
 submission with the right token, no maintenance unit inspected or read, and
 no unit missing; the full `audit` pass also requires every reading, which only
-one run achieved: runs that judged readings with a script and runs that went
-unit by unit both got most of them wrong. Evidence is the share of the steps
+one run achieved: runs of either kind got readings wrong, scripted runs 0 to
+36 of the 36 and runs that went unit by unit 6 to 31. Evidence is the share of the steps
 that needed a planted fact whose frozen request contained it, pooled over an
 arm's runs. Steps and tokens are means per run.
 
@@ -363,8 +363,8 @@ Consecutive requests of a run shared 85–96% of their user message as whole
 leading blocks in every current arm but `S-noproj-nn` (60–67%), and 0% in
 `v1`, whose user message is one string. Pooled over each family's runs, the
 stable blocks were rewritten, because the oldest shown step changed, in none
-of the consecutive requests of the 256 KiB arms, 0–4% of the 64 KiB arms with
-notes, 0–8% of `S-proj-nn`, and 20–43% of `S-noproj-nn`, where the long runs
+of the consecutive requests of the 256 KiB arms, 0–3% of the 64 KiB arms with
+notes and of `S-proj-nn`, and 26–29% of `S-noproj-nn`, where the long runs
 dominate: step blocks stayed small enough that 64 KiB rarely filled.
 
 What these runs show, within their limits: with the notes file, every current
