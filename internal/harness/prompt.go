@@ -108,7 +108,7 @@ func (f Frame) head(l PromptLimits) string {
 			section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+block(f.Window.Handover, len(f.Window.Handover)))
 		}
 	}
-	section(&b, "Recent steps", "")
+	section(&b, "Current window steps", "")
 	return b.String()
 }
 

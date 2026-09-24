@@ -249,9 +249,9 @@ func (l *Loop) late(run Run) string {
 	return ""
 }
 
-// recent reads the active page only, bounded by the persisted first step
+// windowSteps reads the active page only, bounded by the persisted first step
 // and the snapshot sequence. An older page never re-enters the prompt.
-func (l *Loop) recent(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
+func (l *Loop) windowSteps(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
 	var steps []StepRecord
 	for before := snapshotSeq + 1; ; {
 		page, err := l.journal.Recent(ctx, runID, before, historyPage)

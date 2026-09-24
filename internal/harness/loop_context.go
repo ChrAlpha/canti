@@ -145,7 +145,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err := l.contextFrame(ctx, snap, &f); err != nil {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
-	if f.Steps, err = l.recent(ctx, s.RunID, f, snap.Seq); err != nil {
+	if f.Steps, err = l.windowSteps(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}
 	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {

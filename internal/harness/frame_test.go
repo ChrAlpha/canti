@@ -8,7 +8,7 @@ import (
 func testFrame() Frame {
 	return Frame{
 		Goal: "repair tests", Environment: "/workspace", Step: 1, MaxSteps: 10, Attempt: 1, MaxAttempts: 3,
-		ArtifactDir: "/canti/artifacts", RunsDir: "/canti/runs", RunID: "run_x", Notes: Notes{Path: "/workspace/.canti/notes.md"},
+		ArtifactDir: "/canti/artifacts", RunsDir: "/canti/runs", RunID: "run_x", Window: &Window{FirstStep: 1},
 	}
 }
 
@@ -19,8 +19,10 @@ func TestFrameValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid", edit: func(*Frame) {}},
-		{name: "last step and attempt", edit: func(f *Frame) { f.Step, f.Attempt, f.Earlier = 10, 3, 9 }},
-		{name: "recent steps", edit: func(f *Frame) { f.Step, f.Earlier, f.Steps = 4, 1, []StepRecord{{Step: 2}, {Step: 3}} }},
+		{name: "last step and attempt", edit: func(f *Frame) {
+			f.Step, f.Attempt, f.Earlier, f.Window = 10, 3, 9, &Window{FirstStep: 10, SourceStep: 9, Handover: "continue"}
+		}},
+		{name: "current page", edit: func(f *Frame) { f.Step, f.Earlier, f.Steps = 4, 0, []StepRecord{{Step: 1}, {Step: 2}, {Step: 3}} }},
 		{name: "rejection after an attempt", edit: func(f *Frame) { f.Attempt, f.Rejected = 2, &Rejection{} }},
 		{name: "missing goal", edit: func(f *Frame) { f.Goal = "" }, wantErr: true},
 		{name: "blank goal", edit: func(f *Frame) { f.Goal = " \n\t" }, wantErr: true},
@@ -29,7 +31,8 @@ func TestFrameValidate(t *testing.T) {
 		{name: "missing artifact directory", edit: func(f *Frame) { f.ArtifactDir = " " }, wantErr: true},
 		{name: "missing runs directory", edit: func(f *Frame) { f.RunsDir = "\t" }, wantErr: true},
 		{name: "missing run ID", edit: func(f *Frame) { f.RunID = "" }, wantErr: true},
-		{name: "missing notes path", edit: func(f *Frame) { f.Notes.Path = "" }, wantErr: true},
+		{name: "missing window", edit: func(f *Frame) { f.Window = nil }, wantErr: true},
+		{name: "missing page steps", edit: func(f *Frame) { f.Step, f.Earlier, f.Steps = 4, 1, []StepRecord{{Step: 2}, {Step: 3}} }, wantErr: true},
 		{name: "zero step", edit: func(f *Frame) { f.Step = 0 }, wantErr: true},
 		{name: "step beyond the limit", edit: func(f *Frame) { f.Step, f.Earlier = 11, 10 }, wantErr: true},
 		{name: "zero attempt", edit: func(f *Frame) { f.Attempt = 0 }, wantErr: true},

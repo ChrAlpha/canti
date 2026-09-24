@@ -51,6 +51,10 @@ func (f Frame) Validate() error {
 		return errors.New("harness: frame rejects a response before any attempt")
 	case f.Earlier < 0 || f.Earlier+len(f.Steps) != f.Step-1:
 		return fmt.Errorf("harness: frame has %d earlier and %d recent steps before step %d", f.Earlier, len(f.Steps), f.Step)
+	case f.Window == nil:
+		return errors.New("harness: frame context window is required")
+	case f.Earlier != f.Window.FirstStep-1:
+		return errors.New("harness: frame steps do not begin at the context window boundary")
 	}
 	for i, s := range f.Steps {
 		if want := f.Earlier + 1 + i; s.Step != want {
