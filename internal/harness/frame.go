@@ -20,6 +20,11 @@ type Frame struct {
 	RunID                                string       // the run, whose step records are under RunsDir/RunID
 	Notes                                Notes
 	Rejected                             *Rejection // set when the previous response of this step failed to decode
+	Window                               *Window
+	RetrievalEnabled                     bool
+	ImportsEnabled                       bool
+	HandoverBytes                        int
+	Retrieved                            map[int]string
 }
 
 // Notes is the agent-written notes file as read for one request. Path is
@@ -61,6 +66,14 @@ func (f Frame) Validate() error {
 	for i, s := range f.Steps {
 		if want := f.Earlier + 1 + i; s.Step != want {
 			return fmt.Errorf("harness: frame recent step %d is step %d, want %d", i, s.Step, want)
+		}
+	}
+	if f.Window != nil {
+		if err := f.Window.Validate(f.Step); err != nil {
+			return err
+		}
+		if len(f.Steps) > 0 && f.Steps[0].Step < f.Window.FirstStep {
+			return errors.New("harness: recent steps cross the context window boundary")
 		}
 	}
 	return nil

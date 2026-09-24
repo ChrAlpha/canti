@@ -61,6 +61,7 @@ Use the notes file named in the Notes section for your plan and findings. It per
 // constraints are never cut: Prompt fails when either exceeds its limit
 // after trimming.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
+	system := f.contextSystem()
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
 	}
@@ -114,6 +115,12 @@ func (f Frame) head(l PromptLimits) string {
 		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.RunsDir)+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
 		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
 		"Every run of this state directory, including this one, is recorded under "+inline(f.RunsDir)+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
+	if f.Window != nil {
+		section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
+		if f.Window.Handover != "" {
+			section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+block(f.Window.Handover, len(f.Window.Handover)))
+		}
+	}
 	section(&b, "Recent steps", "")
 	return b.String()
 }
@@ -121,7 +128,12 @@ func (f Frame) head(l PromptLimits) string {
 func (f Frame) tail(l PromptLimits, progress string, notes int) string {
 	var b strings.Builder
 	section(&b, "Progress", progress)
-	section(&b, "Notes", f.notes(notes))
+	if f.Window == nil {
+		section(&b, "Notes", f.notes(notes))
+	}
+	if f.Window != nil && f.Window.Requested {
+		section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes))
+	}
 	if r := f.Rejected; r != nil {
 		section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
 			"Your reply must be exactly one decision object, as the system message describes.\n"+
@@ -170,6 +182,9 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString(" (" + inline(o.Output.Detail) + ")")
 	}
 	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
+	if text := f.Retrieved[s.Step]; text != "" {
+		b.WriteString(quote("Retrieved original evidence", text, len(text)))
+	}
 	return b.String()
 }
 

@@ -15,8 +15,7 @@ const retrievePrefix = "canti:retrieve "
 const handoverPrefix = "canti:handover "
 
 func (l *Loop) isBuiltin(command string) bool {
-	return (l.cfg.Reader != nil && strings.HasPrefix(command, retrievePrefix)) ||
-		((l.cfg.WindowSteps > 0 || l.cfg.WindowBytes > 0) && strings.HasPrefix(command, handoverPrefix))
+	return strings.HasPrefix(command, retrievePrefix) || strings.HasPrefix(command, handoverPrefix)
 }
 
 func decodeAction(text string, value any) error {
@@ -66,6 +65,9 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	if strings.HasPrefix(command, retrievePrefix) {
 		var q RetrievalQuery
 		err = decodeAction(strings.TrimPrefix(command, retrievePrefix), &q)
+		if l.cfg.Reader == nil {
+			err = errors.New("retrieval is disabled for this run")
+		}
 		if err == nil {
 			var r Retrieval
 			r, err = l.cfg.Reader.Retrieve(ctx, q)

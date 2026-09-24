@@ -266,10 +266,18 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {
 		return snap, err
 	}
+	if err := l.contextFrame(ctx, snap, &f); err != nil {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	}
+	if err := l.expandRetrieval(ctx, &f); err != nil {
+		return snap, err
+	}
 	f.Earlier = s.Step - 1 - len(f.Steps)
-	if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
-		l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
-		f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
+	if f.Window == nil {
+		if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
+			l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
+			f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
+		}
 	}
 	if s.RequestRev > 0 {
 		resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt-1)
@@ -281,6 +289,11 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 			f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
 		}
 	}
+	if s.RequestRev == 0 {
+		if err := l.requestHandover(&f); err != nil {
+			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+		}
+	}
 	p, err := f.Prompt(l.cfg.Limits)
 	var req Request
 	if err == nil {
@@ -289,6 +302,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err != nil {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
+	req.Window = f.Window
 	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
 }
 
