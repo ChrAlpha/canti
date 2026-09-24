@@ -110,6 +110,9 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 			}
 		}
 	}
+	if err == nil && q.Operation == "search" && len(result.Sources) > 1 {
+		result.Sources, err = r.coalesceSources(ctx, result.Sources)
+	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
@@ -120,6 +123,61 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		result.Error = err.Error()
 	}
 	return result, nil
+}
+
+func (r Reader) coalesceSources(ctx context.Context, sources []SourceRange) ([]SourceRange, error) {
+	merged := make([]SourceRange, 0, len(sources))
+	for i := 0; i < len(sources); {
+		first := sources[i]
+		end := first.Offset + int64(first.Length)
+		j := i + 1
+		for j < len(sources) && sources[j].Path == first.Path && sources[j].Offset < end {
+			end = max(end, sources[j].Offset+int64(sources[j].Length))
+			j++
+		}
+		if j == i+1 {
+			merged = append(merged, first)
+			i = j
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if end-first.Offset > RetrievalMaxBytes {
+			return nil, errors.New("merged source range exceeds retrieval limit")
+		}
+		f, err := r.open(first.Path)
+		if err != nil {
+			return nil, err
+		}
+		info, err := f.Stat()
+		if err == nil && !info.Mode().IsRegular() {
+			err = errors.New("source is not a regular file")
+		}
+		data := make([]byte, int(end-first.Offset))
+		if err == nil {
+			_, err = f.ReadAt(data, first.Offset)
+		}
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("merged source unavailable: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+			return nil, errors.New("merged source is not UTF-8 text")
+		}
+		for _, source := range sources[i:j] {
+			start := int(source.Offset - first.Offset)
+			if digest(data[start:start+source.Length]) != source.SHA256 {
+				return nil, errors.New("source range changed: sha256 mismatch")
+			}
+		}
+		merged = append(merged, sourceRange(first.Path, first.Offset, data))
+		i = j
+	}
+	return merged, nil
 }
 
 func (r Reader) Expand(ctx context.Context, source SourceRange) (string, error) {
