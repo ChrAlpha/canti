@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -48,13 +49,17 @@ func readRetrieval(ctx context.Context, f *os.File, size int64, limit int, resul
 }
 
 func searchRetrieval(data []byte, limit int, result *Retrieval) {
-	q := result.Query
 	end := min(len(data), retrievalScanBytes)
 	for end < len(data) && end > 0 && !utf8.RuneStart(data[end]) {
 		end--
 	}
+	searchRanges(data, limit, end, 32, -1, result)
+}
+
+func searchRanges(data []byte, limit, end, maxSources, references int, result *Retrieval) (int, int) {
+	q := result.Query
 	pos := 0
-	for pos < end && len(result.Sources) < 32 {
+	for pos < end && len(result.Sources) < maxSources {
 		match := bytes.Index(data[pos:], []byte(q.Query))
 		if match < 0 || pos+match >= end {
 			pos = end
@@ -73,11 +78,21 @@ func searchRetrieval(data []byte, limit int, result *Retrieval) {
 		for stop < len(data) && !utf8.RuneStart(data[stop]) {
 			stop--
 		}
-		result.Sources = append(result.Sources, sourceRange(q.Path, q.Offset+int64(start), data[start:stop]))
+		source := sourceRange(q.Path, q.Offset+int64(start), data[start:stop])
+		if references >= 0 {
+			encoded, _ := json.Marshal(source)
+			if len(encoded)+1 > references {
+				pos = match
+				break
+			}
+			references -= len(encoded) + 1
+		}
+		result.Sources = append(result.Sources, source)
 		limit -= stop - start
 		pos = match + len(q.Query)
 	}
 	result.NextOffset = q.Offset + int64(pos)
+	return limit, references
 }
 
 func textPrefix(data []byte, partial bool) ([]byte, error) {

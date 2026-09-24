@@ -30,6 +30,7 @@ type RetrievalQuery struct {
 	Offset    int64  `json:"offset,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
 	Query     string `json:"query,omitempty"`
+	Cursor    string `json:"cursor,omitempty"`
 }
 
 type SourceRange struct {
@@ -44,6 +45,7 @@ type Retrieval struct {
 	Sources    []SourceRange  `json:"sources,omitempty"`
 	Entries    []string       `json:"entries,omitempty"`
 	NextOffset int64          `json:"next_offset"`
+	NextCursor string         `json:"next_cursor,omitempty"`
 	More       bool           `json:"more"`
 	Error      string         `json:"error,omitempty"`
 }
@@ -83,6 +85,10 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		result.Error = "search query must be nonempty UTF-8 and fit within limit"
 		return result, nil
 	}
+	if len(q.Cursor) > 1024 || (q.Cursor != "" && (q.Operation != "search" || q.Offset != 0)) {
+		result.Error = "cursor is only valid for directory search with offset zero and at most 1024 bytes"
+		return result, nil
+	}
 	f, err := r.open(q.Path)
 	if err == nil {
 		defer f.Close()
@@ -90,12 +96,16 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		info, err = f.Stat()
 		if err == nil {
 			switch {
+			case q.Operation == "search" && info.IsDir():
+				err = r.searchDirectory(ctx, f, limit, &result)
 			case q.Operation == "list" && info.IsDir():
 				err = listRetrieval(ctx, f, limit, &result)
+			case q.Cursor != "":
+				err = errors.New("cursor requires a directory search")
 			case q.Operation != "list" && info.Mode().IsRegular():
 				err = readRetrieval(ctx, f, info.Size(), limit, &result)
 			default:
-				err = errors.New("list requires a directory; read and search require a regular file")
+				err = errors.New("list requires a directory; read requires a regular file; search requires either")
 			}
 		}
 	}
@@ -105,6 +115,7 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 	if err != nil {
 		result.Sources, result.Entries = nil, nil
 		result.More = false
+		result.NextCursor = ""
 		result.Error = err.Error()
 	}
 	return result, nil
@@ -189,33 +200,10 @@ func (r Reader) open(name string) (*os.File, error) {
 }
 
 func listRetrieval(ctx context.Context, f *os.File, limit int, result *Retrieval) error {
-	var names []string
-	scanned := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entries, err := f.ReadDir(256)
-		scanned += len(entries)
-		for _, entry := range entries {
-			if !utf8.ValidString(entry.Name()) {
-				return errors.New("directory contains a non-UTF-8 path")
-			}
-			if !forbiddenRetrievalName(entry.Name()) && (entry.Type().IsRegular() || entry.IsDir()) {
-				names = append(names, entry.Name())
-			}
-		}
-		if scanned > retrievalMaxEntries {
-			return errors.New("directory exceeds 32768 entries; choose a narrower path")
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
+	names, err := retrievalDirectory(ctx, f, false)
+	if err != nil {
+		return err
 	}
-	sort.Strings(names)
 	if result.Query.Offset > int64(len(names)) {
 		return errors.New("list offset is beyond directory entries")
 	}
@@ -234,6 +222,37 @@ func listRetrieval(ctx context.Context, f *os.File, limit int, result *Retrieval
 	}
 	result.More = result.NextOffset < int64(len(names))
 	return nil
+}
+
+func retrievalDirectory(ctx context.Context, f *os.File, filesOnly bool) ([]string, error) {
+	var names []string
+	scanned := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, err := f.ReadDir(256)
+		scanned += len(entries)
+		for _, entry := range entries {
+			if !utf8.ValidString(entry.Name()) {
+				return nil, errors.New("directory contains a non-UTF-8 path")
+			}
+			if !forbiddenRetrievalName(entry.Name()) && (entry.Type().IsRegular() || !filesOnly && entry.IsDir()) {
+				names = append(names, entry.Name())
+			}
+		}
+		if scanned > retrievalMaxEntries {
+			return nil, errors.New("directory exceeds 32768 entries; choose a narrower path")
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func forbiddenRetrievalName(name string) bool {
