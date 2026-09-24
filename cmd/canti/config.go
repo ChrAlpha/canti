@@ -89,6 +89,8 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
 	case c.HistoryImports != "" && !c.Retrieval:
 		return harness.Run{}, core.State{}, errors.New("-history-imports requires -retrieval")
+	case c.WithoutHandover && c.WindowSteps == 0 && c.WindowBytes == 0:
+		return harness.Run{}, core.State{}, errors.New("-without-handover requires a window trigger")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.Image == "" || c.Network == "" || c.Model == "":

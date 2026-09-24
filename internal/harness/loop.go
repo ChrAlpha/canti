@@ -68,6 +68,9 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
 		return nil, errors.New("harness: context window limits must not be negative")
 	}
+	if cfg.WithoutHandover && cfg.WindowSteps == 0 && cfg.WindowBytes == 0 {
+		return nil, errors.New("harness: without-handover requires a window trigger")
+	}
 	if cfg.HandoverBytes == 0 {
 		cfg.HandoverBytes = 2048
 	}

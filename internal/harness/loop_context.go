@@ -82,21 +82,29 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) error {
 			continue
 		}
 		var b strings.Builder
+		appendBudget := func(text string) { kept, _ := cut(text, remaining); b.WriteString(kept); remaining -= len(kept) }
+		previousPath := ""
 		for _, source := range r.Sources {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if source.Length > remaining {
-				b.WriteString("Evidence not expanded: active retrieval byte budget reached. Read the original reference again if needed.\n")
+			header := ""
+			if source.Path != previousPath {
+				header = fmt.Sprintf("Source %s:\n", source.Path)
+			}
+			header += fmt.Sprintf("Bytes [%d,%d), sha256 %s:\n", source.Offset, source.Offset+int64(source.Length), source.SHA256)
+			if source.Length+len(header)+1 > remaining {
+				appendBudget(fmt.Sprintf("Evidence expansion stopped at offset %d: active retrieval byte budget reached. Read the original reference again if needed.\n", source.Offset))
 				break
 			}
 			text, err := l.cfg.Reader.Expand(ctx, source)
 			if err != nil {
-				fmt.Fprintf(&b, "Evidence unavailable at %s offset %d: %s\n", source.Path, source.Offset, clip(err.Error(), 512))
+				appendBudget(header + "Evidence unavailable: " + clip(err.Error(), 512) + "\n")
+				previousPath = source.Path
 				continue
 			}
-			fmt.Fprintf(&b, "Source %s bytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
-			remaining -= source.Length
+			appendBudget(header + text + "\n")
+			previousPath = source.Path
 		}
 		f.Retrieved[f.Steps[i].Step] = b.String()
 	}
@@ -111,7 +119,7 @@ func (l *Loop) requestHandover(f *Frame) error {
 	for _, step := range f.Steps {
 		used += len(f.step(step, l.cfg.Limits))
 	}
-	reserve := l.cfg.HandoverBytes + 2*l.cfg.Limits.Preview + l.cfg.Limits.Command + 4096
+	reserve := l.cfg.HandoverBytes + l.cfg.Limits.Preview + l.cfg.Limits.Command + RetrievalMaxBytes + 4096 + 32*160 + 4096
 	capacity := l.cfg.Limits.Total - len(f.contextSystem()) - len(f.head(l.cfg.Limits)) - reserve
 	if capacity <= 0 {
 		return errors.New("harness: fixed context leaves no room for work and handover reserve")
