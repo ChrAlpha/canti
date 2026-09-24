@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -18,19 +17,19 @@ import (
 // cut input ends with a marker counting the bytes removed. Total caps System
 // plus the blocks.
 type PromptLimits struct {
-	Goal, Constraints, Environment, Command, Preview, Notes, Rejected, Total int
+	Goal, Constraints, Environment, Command, Preview, Rejected, Total int
 }
 
 // DefaultPromptLimits returns limits for a 64 KiB prompt.
 func DefaultPromptLimits() PromptLimits {
 	return PromptLimits{
 		Goal: 32 << 10, Constraints: 16 << 10, Environment: 2 << 10, Command: 2 << 10,
-		Preview: 4 << 10, Notes: 8 << 10, Rejected: 2 << 10, Total: 64 << 10,
+		Preview: 4 << 10, Rejected: 2 << 10, Total: 64 << 10,
 	}
 }
 
 // refLimit caps the execution state, output path and detail, artifact and
-// runs directories, run ID, and notes path.
+// runs directories, and run ID.
 const refLimit = 1 << 10
 
 var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
@@ -49,16 +48,13 @@ The payload is a JSON string, so escape quotes, backslashes, and newlines.
 
 The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including steps no longer shown.
 
-Use the notes file named in the Notes section for your plan and findings. It persists between steps and is shown back to you in every request, cut to a size limit. The harness does not verify notes.`
+Work continues across bounded context windows. The handover is the only automatically carried working state. Current goal and constraints remain authoritative. When asked to hand over, use the exact canti:handover action specified in the request; this records guidance and continues the same run.`
 
 // Prompt renders the frame within l. System is the same for every frame.
 // The stable blocks are one with the goal, constraints, and environment and
-// one per shown step, oldest first; the last block holds the progress,
-// notes, and any rejected response. When the prompt would exceed l.Total,
-// Prompt drops the oldest shown steps, counting them as earlier steps, down
-// to the newest one; then it shrinks the notes; then it drops the newest
-// step as well and shrinks the notes again, failing if the prompt still does
-// not fit. Equal frames and limits give equal prompts. The goal and
+// one per current-page step, oldest first; the last block holds the progress
+// and any rejected response. An oversized page fails visibly. Equal frames
+// and limits give equal prompts. The goal and
 // constraints are never cut: Prompt fails when either exceeds its limit
 // after trimming.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
@@ -66,7 +62,7 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
 	}
-	if min(l.Goal, l.Constraints, l.Environment, l.Command, l.Preview, l.Notes, l.Rejected, l.Total) <= 0 {
+	if min(l.Goal, l.Constraints, l.Environment, l.Command, l.Preview, l.Rejected, l.Total) <= 0 {
 		return Prompt{}, fmt.Errorf("harness: prompt limits %+v must be positive", l)
 	}
 	if n := len(strings.TrimSpace(f.Goal)); n > l.Goal {
@@ -75,34 +71,24 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if n := len(strings.TrimSpace(f.Constraints)); n > l.Constraints {
 		return Prompt{}, fmt.Errorf("harness: constraints exceed their %d-byte limit by %d bytes", l.Constraints, n-l.Constraints)
 	}
-	head, hidden, notes := f.head(l), f.Earlier+len(f.Steps), l.Notes
-	fixed, used := len(system)+len(head)+len(f.tail(l, "", notes)), 0
-	var steps []string
-	for i := len(f.Steps) - 1; i >= 0; i-- {
-		b := f.step(f.Steps[i], l)
-		if len(steps) > 0 && fixed+len(f.progress(hidden-1))+used+len(b) > l.Total {
-			break
-		}
-		steps, used, hidden = append(steps, b), used+len(b), hidden-1
+	head := f.head(l)
+	blocks := make([]string, 0, len(f.Steps)+2)
+	blocks = append(blocks, head)
+	used := len(system) + len(head)
+	for _, step := range f.Steps {
+		b := f.step(step, l)
+		blocks = append(blocks, b)
+		used += len(b)
 	}
-	slices.Reverse(steps)
-	for {
-		tail := f.tail(l, f.progress(hidden), notes)
-		if len(steps) == 0 {
-			tail = "None.\n\n" + tail
-		}
-		over := len(system) + len(head) + used + len(tail) - l.Total
-		switch kept, _ := cut(f.Notes.Text, notes); {
-		case over <= 0:
-			return Prompt{System: system, Blocks: slices.Concat([]string{head}, steps, []string{tail}), Stable: 1 + len(steps)}, nil
-		case kept != "":
-			notes = max(0, len(kept)-over)
-		case len(steps) > 0:
-			steps, used, hidden, notes = nil, 0, hidden+len(steps), l.Notes
-		default:
-			return Prompt{}, fmt.Errorf("harness: prompt exceeds its %d-byte total by %d bytes", l.Total, over)
-		}
+	tail := f.tail(l, f.progress(f.Earlier))
+	if len(f.Steps) == 0 {
+		tail = "None.\n\n" + tail
 	}
+	used += len(tail)
+	if used > l.Total {
+		return Prompt{}, fmt.Errorf("harness: current context page exceeds its %d-byte total by %d bytes", l.Total, used-l.Total)
+	}
+	return Prompt{System: system, Blocks: append(blocks, tail), Stable: 1 + len(f.Steps)}, nil
 }
 
 func (f Frame) head(l PromptLimits) string {
@@ -126,12 +112,9 @@ func (f Frame) head(l PromptLimits) string {
 	return b.String()
 }
 
-func (f Frame) tail(l PromptLimits, progress string, notes int) string {
+func (f Frame) tail(l PromptLimits, progress string) string {
 	var b strings.Builder
 	section(&b, "Progress", progress)
-	if f.Window == nil {
-		section(&b, "Notes", f.notes(notes))
-	}
 	if f.Window != nil && f.Window.Requested {
 		section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
 	}
@@ -202,20 +185,6 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString(quote("Retrieved original evidence", text, len(text)+2*max(0, fence(text)-3)))
 	}
 	return b.String()
-}
-
-func (f Frame) notes(limit int) string {
-	s := "Written by the agent in " + inline(f.Notes.Path) + " and not verified by the harness.\n"
-	switch {
-	case f.Notes.Text != "":
-		s += block(f.Notes.Text, limit)
-	case !f.Notes.Truncated:
-		return s + "The file is empty or missing.\n"
-	}
-	if f.Notes.Truncated {
-		s += "The file continues beyond what was read.\n"
-	}
-	return s
 }
 
 func quote(label, s string, limit int) string {

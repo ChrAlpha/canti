@@ -7,7 +7,7 @@ import (
 )
 
 // Frame is the input assembled by the harness for one model request:
-// committed facts of the run plus the agent's notes. Prompt renders it into
+// committed facts of the run. Prompt renders it into
 // one independent, bounded Prompt. The core never receives a Frame or any
 // other history representation.
 type Frame struct {
@@ -18,21 +18,12 @@ type Frame struct {
 	ArtifactDir                          string       // container path under which ArtifactRef.Path is readable
 	RunsDir                              string       // container path holding the step records of every run by run ID, as PublishHistory lays them out
 	RunID                                string       // the run, whose step records are under RunsDir/RunID
-	Notes                                Notes
-	Rejected                             *Rejection // set when the previous response of this step failed to decode
+	Rejected                             *Rejection   // set when the previous response of this step failed to decode
 	Window                               *Window
 	RetrievalEnabled                     bool
 	ImportsEnabled                       bool
 	HandoverBytes                        int
 	Retrieved                            map[int]string
-}
-
-// Notes is the agent-written notes file as read for one request. Path is
-// where the agent sees the file; Truncated reports that it is longer than
-// Text. The harness never verifies notes.
-type Notes struct {
-	Path, Text string
-	Truncated  bool
 }
 
 // Rejection is a response of the current step that failed to decode, with
@@ -52,8 +43,6 @@ func (f Frame) Validate() error {
 		return errors.New("harness: frame artifact directory is required")
 	case strings.TrimSpace(f.RunsDir) == "" || strings.TrimSpace(f.RunID) == "":
 		return errors.New("harness: frame runs directory and run ID are required")
-	case strings.TrimSpace(f.Notes.Path) == "":
-		return errors.New("harness: frame notes path is required")
 	case f.Step < 1 || f.Step > f.MaxSteps:
 		return fmt.Errorf("harness: frame step %d is outside 1..%d", f.Step, f.MaxSteps)
 	case f.Attempt < 1 || f.Attempt > f.MaxAttempts:

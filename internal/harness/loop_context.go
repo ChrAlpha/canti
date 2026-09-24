@@ -139,7 +139,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	f := Frame{
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
-		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID, Notes: Notes{Path: l.cfg.NotesPath},
+		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID,
 	}
 	var err error
 	if err := l.contextFrame(ctx, snap, &f); err != nil {

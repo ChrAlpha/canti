@@ -19,24 +19,20 @@ const historyPage = 64
 // LoopConfig wires a Loop to its environment. Zero values take the defaults
 // noted on each field.
 type LoopConfig struct {
-	Environment     string           // Frame.Environment
-	ArtifactDir     string           // Frame.ArtifactDir, as the agent sees it
-	Workspace       string           // host workspace directory ReadNotes resolves in
-	NotesFile       string           // notes file relative to Workspace, such as ".canti/notes.md"
-	NotesPath       string           // the notes file as the agent sees it, such as "/workspace/.canti/notes.md"
-	History         string           // host directory PublishHistory publishes the step records of every run under
-	RunsPath        string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
-	Limits          PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
-	Poll            time.Duration    // interval between inspections; 500ms
-	Backoff         time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
-	InspectRetries  int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
-	Now             func() time.Time // clock of the wall-time and job budgets; time.Now
-	Logger          *slog.Logger     // discards
-	Reader          *Reader
-	WindowSteps     int
-	WindowBytes     int
-	HandoverBytes   int
-	WithoutHandover bool
+	Environment    string           // Frame.Environment
+	ArtifactDir    string           // Frame.ArtifactDir, as the agent sees it
+	History        string           // host directory PublishHistory publishes the step records of every run under
+	RunsPath       string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
+	Limits         PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
+	Poll           time.Duration    // interval between inspections; 500ms
+	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
+	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
+	Now            func() time.Time // clock of the wall-time and job budgets; time.Now
+	Logger         *slog.Logger     // discards
+	Reader         *Reader
+	WindowSteps    int
+	WindowBytes    int
+	HandoverBytes  int
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.
@@ -57,9 +53,9 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if j == nil || m == nil {
 		return nil, errors.New("harness: loop journal and model are required")
 	}
-	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.Workspace, cfg.NotesFile, cfg.NotesPath, cfg.History, cfg.RunsPath} {
+	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.History, cfg.RunsPath} {
 		if strings.TrimSpace(v) == "" {
-			return nil, errors.New("harness: loop environment, artifact directory, workspace, notes, and history paths are required")
+			return nil, errors.New("harness: loop environment, artifact directory, and history paths are required")
 		}
 	}
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
@@ -67,9 +63,6 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	}
 	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
 		return nil, errors.New("harness: context window limits must not be negative")
-	}
-	if cfg.WithoutHandover && cfg.WindowSteps == 0 && cfg.WindowBytes == 0 {
-		return nil, errors.New("harness: without-handover requires a window trigger")
 	}
 	if cfg.HandoverBytes == 0 {
 		cfg.HandoverBytes = 2048
@@ -80,7 +73,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
-	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Notes, p.Rejected, p.Total) <= 0 {
+	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Rejected, p.Total) <= 0 {
 		return nil, fmt.Errorf("harness: prompt limits %+v must be positive", p)
 	}
 	cfg.Poll = cmp.Or(cfg.Poll, 500*time.Millisecond)
