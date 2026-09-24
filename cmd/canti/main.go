@@ -376,8 +376,7 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
 	reader := &harness.Reader{History: historyRoot(a.state), Artifacts: filepath.Join(a.state, "artifacts"), Imports: c.HistoryImports}
 	return harness.NewLoop(wrapJournal(j), x, m, harness.LoopConfig{
-		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, Workspace: c.Workspace,
-		NotesFile: ".canti/notes.md", NotesPath: docker.WorkDir + "/.canti/notes.md",
+		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir,
 		History: historyRoot(a.state), RunsPath: runsDir,
 		Limits: promptLimits(c), Logger: a.log,
 		Reader: reader, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,

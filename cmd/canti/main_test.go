@@ -607,7 +607,14 @@ func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 			f := newFixture(t, script)
 			noDocker := []string{"PATH=" + t.TempDir()}
 			args := append([]string{"-goal", strings.Repeat("g", 32<<10), "-constraints", strings.Repeat("c", 16<<10)}, tc.args...)
-			if r := f.cli(noDocker, "run", args...); r.code != exitResolution {
+			r := f.cli(noDocker, "run", args...)
+			if !tc.shown {
+				if r.code == exitOK || len(f.model.requests()) != 0 || !strings.Contains(r.stderr, "handover") {
+					t.Fatalf("oversized fixed context should fail before calling model: %d, %s", r.code, r.stderr)
+				}
+				return
+			}
+			if r.code != exitResolution {
 				t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
 			}
 			for i := 1; i <= steps; i++ {
@@ -624,7 +631,7 @@ func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 				t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 			}
 			p := f.model.prompts(steps + 1)
-			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown || strings.Contains(p[0], " not shown.\n") == tc.shown {
+			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown {
 				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "\n### Step 1\n"), tc.shown, p)
 			}
 		})

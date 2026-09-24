@@ -34,12 +34,6 @@ func evSections(out string) map[string]string {
 	return m
 }
 
-func evNotes(prompt string) string {
-	_, notes, _ := strings.Cut(prompt, "\n## Notes\n")
-	notes, _, _ = strings.Cut(notes, "\n## ")
-	return notes
-}
-
 // evLeaks returns the files under dir holding any of secrets.
 func evLeaks(t *testing.T, dir string, secrets ...string) []string {
 	t.Helper()
@@ -173,31 +167,35 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 		fmt.Sprintf("output %d bytes, network %s, cap-drop %v, user %s", len(data), c.HostConfig.NetworkMode, c.HostConfig.CapDrop, c.Config.User))
 }
 
-func TestGateTrustBoundaryNotes(t *testing.T) {
+func TestGateWorkspaceNotesAreNotAutomaticallyRead(t *testing.T) {
 	t.Run("writable", func(t *testing.T) {
 		f, image := evFixture(t, map[int]core.Decision{
 			1: {Kind: core.Exec, Payload: "mkdir -p .canti && echo plan-alpha > .canti/notes.md"},
 			2: {Kind: core.Return, Payload: "done"},
 		})
+		if err := os.MkdirAll(filepath.Join(f.workspace, ".canti"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.workspace, ".canti", "notes.md"), []byte("AUTOLOAD-MARKER"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if r := f.cli(nil, "run", "-goal", "g", "-image", image); r.code != exitOK || r.stdout != "done\n" {
 			t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 		}
 		p1, p2 := f.model.prompts(1), f.model.prompts(2)
-		if len(p1) != 1 || !strings.Contains(evNotes(p1[0]), "The file is empty or missing.") {
-			t.Errorf("step 1 notes = %q", p1)
+		if len(p1) != 1 || len(p2) != 1 {
+			t.Fatalf("prompts = %q, %q", p1, p2)
 		}
-		if len(p2) != 1 {
-			t.Fatalf("step 2 prompts = %q", p2)
-		}
-		notes := evNotes(p2[0])
-		if !strings.Contains(notes, "plan-alpha") || !strings.Contains(notes, docker.WorkDir+"/.canti/notes.md") || !strings.Contains(notes, "not verified by the harness") {
-			t.Errorf("step 2 notes = %q", notes)
+		for _, prompt := range []string{p1[0], p2[0]} {
+			if strings.Contains(prompt, "## Notes") || strings.Contains(prompt, "AUTOLOAD-MARKER") {
+				t.Errorf("workspace notes auto-loaded: %q", prompt)
+			}
 		}
 		if data, err := os.ReadFile(filepath.Join(f.workspace, ".canti", "notes.md")); err != nil || string(data) != "plan-alpha\n" {
 			t.Errorf("notes file = %q, %v", data, err)
 		}
 		evLog(t, image, "trust boundary (notes)", "step 1 writes plan-alpha to .canti/notes.md in the workspace",
-			"step 2 prompt shows plan-alpha in the Notes section, marked unverified", fmt.Sprintf("step 2 prompt %d bytes", len(p2[0])))
+			"workspace notes remain writable but are never automatically injected", fmt.Sprintf("step 2 prompt %d bytes", len(p2[0])))
 	})
 	t.Run("escaping_symlink", func(t *testing.T) {
 		f, image := evFixture(t, map[int]core.Decision{
@@ -226,8 +224,8 @@ func TestGateTrustBoundaryNotes(t *testing.T) {
 		}
 		for i, body := range sent {
 			_, prompt, err := promptOf(body)
-			if err != nil || !strings.Contains(evNotes(prompt), "notes unreadable") || bytes.Contains(body, []byte("HOSTSECRET")) {
-				t.Errorf("request %d notes = %q, %v", i+1, evNotes(prompt), err)
+			if err != nil || strings.Contains(prompt, "## Notes") || bytes.Contains(body, []byte("HOSTSECRET")) {
+				t.Errorf("request %d notes = %q, %v", i+1, prompt, err)
 			}
 		}
 		if data, err := os.ReadFile(notes); err != nil || string(data) != "HOSTSECRET-relative\n" {
@@ -241,7 +239,7 @@ func TestGateTrustBoundaryNotes(t *testing.T) {
 			t.Errorf("the host secret leaked into %q", leaks)
 		}
 		evLog(t, image, "trust boundary (notes)", "notes.md is a host symlink to an outside file, then the job repoints it with ../../secret.txt",
-			"both prompts report the notes unreadable; HOSTSECRET absent from requests and state", fmt.Sprintf("%d requests checked", len(sent)))
+			"neither prompt has a notes section; HOSTSECRET absent from requests and state", fmt.Sprintf("%d requests checked", len(sent)))
 	})
 }
 
