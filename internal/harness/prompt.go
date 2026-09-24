@@ -199,7 +199,7 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
 	if text := f.Retrieved[s.Step]; text != "" {
-		b.WriteString(quote("Retrieved original evidence", text, len(text)))
+		b.WriteString(quote("Retrieved original evidence", text, len(text)+2*max(0, fence(text)-3)))
 	}
 	return b.String()
 }
