@@ -14,8 +14,16 @@ import (
 const retrievePrefix = "canti:retrieve "
 const handoverPrefix = "canti:handover "
 
-func (l *Loop) isBuiltin(command string) bool {
-	return strings.HasPrefix(command, retrievePrefix) || strings.HasPrefix(command, handoverPrefix)
+func (l *Loop) isBuiltin(ctx context.Context, snap Snapshot) (bool, error) {
+	s := snap.State
+	if strings.HasPrefix(s.Decision.Payload, retrievePrefix) || strings.HasPrefix(s.Decision.Payload, handoverPrefix) || s.JobID == "read_"+s.EffectID {
+		return true, nil
+	}
+	if s.Intent() != core.IntentBind {
+		return false, nil
+	}
+	req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
+	return req.Window != nil && req.Window.Requested, err
 }
 
 func decodeAction(text string, value any) error {
@@ -62,7 +70,13 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	obs := Observation{Execution: core.ExecutionExited, ExitCode: &code}
 	command := snap.State.Decision.Payload
 	var err error
-	if strings.HasPrefix(command, retrievePrefix) {
+	req, err := l.journal.Request(ctx, snap.State.RunID, snap.State.Step, snap.State.RequestRev)
+	if err != nil {
+		return obs, err
+	}
+	if req.Window != nil && req.Window.Requested && !strings.HasPrefix(command, handoverPrefix) {
+		err = errors.New("handover is required before any more work; use canti:handover")
+	} else if strings.HasPrefix(command, retrievePrefix) {
 		var q RetrievalQuery
 		err = decodeAction(strings.TrimPrefix(command, retrievePrefix), &q)
 		if l.cfg.Reader == nil {
@@ -84,15 +98,19 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 		var h Handover
 		err = decodeAction(strings.TrimPrefix(command, handoverPrefix), &h)
 		if err == nil {
-			var req Request
-			req, err = l.journal.Request(ctx, snap.State.RunID, snap.State.Step, snap.State.RequestRev)
-			if err != nil {
-				return obs, err
-			}
 			if req.Window == nil || !req.Window.Requested {
 				err = errors.New("handover was not requested for this step")
 			} else {
 				err = h.Validate(snap.State.RunID, req.Window.FirstStep, l.cfg.HandoverBytes)
+			}
+			if err == nil {
+				run, loadErr := l.journal.Run(ctx, snap.State.RunID)
+				if loadErr != nil {
+					return obs, loadErr
+				}
+				f := l.frame(run, snap.State)
+				f.Window = &Window{FirstStep: snap.State.Step + 1, SourceStep: snap.State.Step, Handover: h.Text}
+				_, err = f.workCapacity(l.cfg.Limits)
 			}
 			if err == nil {
 				obs.Handover = &h

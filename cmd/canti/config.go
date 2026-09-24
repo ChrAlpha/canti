@@ -117,6 +117,16 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps and -max-attempts must be positive")
 	}
+	f := harness.Frame{
+		Goal: goal, Constraints: constraints, Environment: environment(c, b),
+		Step: 1, MaxSteps: s.limits.MaxSteps, Attempt: 1, MaxAttempts: s.limits.MaxAttempts,
+		RunID: run.ID, ArtifactDir: docker.ArtifactDir, RunsDir: runsDir,
+		Window: &harness.Window{FirstStep: 1}, HandoverBytes: c.HandoverBytes,
+		RetrievalEnabled: true, ImportsEnabled: c.HistoryImports != "",
+	}
+	if err := f.ValidateContext(promptLimits(c)); err != nil {
+		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes: %w", err)
+	}
 	run.Config, err = json.Marshal(c)
 	return run, initial, err
 }

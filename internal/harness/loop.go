@@ -134,7 +134,11 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
 		}
 	}
-	if l.isBuiltin(snap.State.Decision.Payload) {
+	builtin, err := l.isBuiltin(ctx, snap)
+	if err != nil {
+		return snap, err
+	}
+	if builtin {
 		if next, handled, err := l.builtin(ctx, snap); handled {
 			return next, err
 		}
