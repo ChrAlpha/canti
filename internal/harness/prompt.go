@@ -133,7 +133,7 @@ func (f Frame) tail(l PromptLimits, progress string, notes int) string {
 		section(&b, "Notes", f.notes(notes))
 	}
 	if f.Window != nil && f.Window.Requested {
-		section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes))
+		section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
 	}
 	if r := f.Rejected; r != nil {
 		section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
