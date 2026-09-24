@@ -40,6 +40,9 @@ func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error 
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
+	if errors.Is(err, ErrNotFound) && (snap.State.Step != 1 || snap.State.RequestRev != 0) {
+		return errors.New("harness: durable context window request is missing after progress")
+	}
 	if err == nil {
 		if req.Window == nil {
 			return errors.New("harness: window configuration changed during a run")
