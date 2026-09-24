@@ -76,3 +76,27 @@ func TestWindowRefusesRepeatedInvalidHandover(t *testing.T) {
 		t.Fatalf("discarded old page: %#v %v", req.Window, err)
 	}
 }
+
+func TestWindowWithoutHandoverAblation(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("echo first-page-marker"), returnReply("done"))
+	f.cfg.WindowSteps = 1
+	f.cfg.WithoutHandover = true
+	ctx := context.Background()
+	for {
+		s, err := f.fresh().Step(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State.Intent() == core.IntentHalt {
+			break
+		}
+	}
+	p := f.model.prompts[1].User()
+	if strings.Contains(p, "first-page-marker") || strings.Contains(p, "Handover required") {
+		t.Fatalf("ablation retained old context: %s", p)
+	}
+	req, err := f.store.LatestRequest(ctx, runID)
+	if err != nil || req.Window.FirstStep != 2 || !req.Window.WithoutHandover || req.Window.Handover != "" {
+		t.Fatalf("window %#v %v", req.Window, err)
+	}
+}

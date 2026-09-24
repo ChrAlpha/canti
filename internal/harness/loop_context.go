@@ -34,6 +34,7 @@ func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error 
 		return nil
 	}
 	w := Window{FirstStep: 1}
+	w.WithoutHandover = l.cfg.WithoutHandover
 	req, err := l.journal.LatestRequest(ctx, snap.State.RunID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -115,6 +116,13 @@ func (l *Loop) requestHandover(f *Frame) error {
 		return errors.New("harness: fixed context leaves no room for work and handover reserve")
 	}
 	if (l.cfg.WindowSteps > 0 && f.Step-f.Window.FirstStep >= l.cfg.WindowSteps) || (l.cfg.WindowBytes > 0 && used >= l.cfg.WindowBytes) || used >= capacity {
+		if l.cfg.WithoutHandover {
+			f.Window = &Window{FirstStep: f.Step, SourceStep: f.Step - 1, WithoutHandover: true}
+			f.Steps = nil
+			f.Retrieved = nil
+			f.Earlier = f.Step - 1
+			return nil
+		}
 		f.Window.Requested = true
 	}
 	return nil

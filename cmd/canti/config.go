@@ -25,23 +25,24 @@ import (
 // config is the host wiring stored with a run; every later command rebuilds
 // the executor and model from it.
 type config struct {
-	Workspace      string `json:"workspace"`
-	Image          string `json:"image"`
-	Network        string `json:"network"`
-	Memory         string `json:"memory"`
-	CPUs           string `json:"cpus"`
-	Pids           int    `json:"pids"`
-	OutputLimit    int64  `json:"output_limit"`
-	Model          string `json:"model"`
-	MaxTokens      int    `json:"max_tokens"`
-	Structured     bool   `json:"structured"`
-	Fallbacks      bool   `json:"fallbacks"`
-	ContextBytes   int    `json:"context_bytes"`
-	Retrieval      bool   `json:"retrieval,omitempty"`
-	HistoryImports string `json:"history_imports,omitempty"`
-	WindowSteps    int    `json:"window_steps,omitempty"`
-	WindowBytes    int    `json:"window_bytes,omitempty"`
-	HandoverBytes  int    `json:"handover_bytes,omitempty"`
+	Workspace       string `json:"workspace"`
+	Image           string `json:"image"`
+	Network         string `json:"network"`
+	Memory          string `json:"memory"`
+	CPUs            string `json:"cpus"`
+	Pids            int    `json:"pids"`
+	OutputLimit     int64  `json:"output_limit"`
+	Model           string `json:"model"`
+	MaxTokens       int    `json:"max_tokens"`
+	Structured      bool   `json:"structured"`
+	Fallbacks       bool   `json:"fallbacks"`
+	ContextBytes    int    `json:"context_bytes"`
+	Retrieval       bool   `json:"retrieval,omitempty"`
+	HistoryImports  string `json:"history_imports,omitempty"`
+	WindowSteps     int    `json:"window_steps,omitempty"`
+	WindowBytes     int    `json:"window_bytes,omitempty"`
+	HandoverBytes   int    `json:"handover_bytes,omitempty"`
+	WithoutHandover bool   `json:"without_handover,omitempty"`
 }
 
 const minContextBytes = 64 << 10
@@ -70,6 +71,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
 	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
 	fs.IntVar(&c.HandoverBytes, "handover-bytes", 2048, "maximum handover UTF-8 `bytes` (1..8192)")
+	fs.BoolVar(&c.WithoutHandover, "without-handover", false, "experimental ablation: reset windows without generating or carrying handover")
 	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")

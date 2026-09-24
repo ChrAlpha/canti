@@ -383,7 +383,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 		NotesFile: ".canti/notes.md", NotesPath: docker.WorkDir + "/.canti/notes.md",
 		History: historyRoot(a.state), RunsPath: runsDir,
 		Limits: promptLimits(c), Logger: a.log,
-		Reader: reader, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+		Reader: reader, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes, WithoutHandover: c.WithoutHandover,
 	})
 }
 
