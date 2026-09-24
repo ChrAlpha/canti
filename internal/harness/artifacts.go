@@ -19,4 +19,6 @@ type Observation struct {
 	ExitCode  *int
 	Preview   string
 	Output    ArtifactRef
+	Retrieval *Retrieval `json:",omitempty"`
+	Handover  *Handover  `json:",omitempty"`
 }

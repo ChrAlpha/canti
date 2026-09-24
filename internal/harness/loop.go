@@ -32,6 +32,10 @@ type LoopConfig struct {
 	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
 	Now            func() time.Time // clock of the wall-time and job budgets; time.Now
 	Logger         *slog.Logger     // discards
+	Reader         *Reader
+	WindowSteps    int
+	WindowBytes    int
+	HandoverBytes  int
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.
@@ -59,6 +63,15 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	}
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
 		return nil, errors.New("harness: loop poll and inspect retries must not be negative")
+	}
+	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
+		return nil, errors.New("harness: context window limits must not be negative")
+	}
+	if cfg.HandoverBytes == 0 {
+		cfg.HandoverBytes = 2048
+	}
+	if cfg.HandoverBytes > 8192 {
+		return nil, errors.New("harness: handover exceeds 8192 bytes")
 	}
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
@@ -122,6 +135,11 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 		}
 		if reason != "" {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
+		}
+	}
+	if l.isBuiltin(snap.State.Decision.Payload) {
+		if next, handled, err := l.builtin(ctx, snap); handled {
+			return next, err
 		}
 	}
 	switch snap.State.Intent() {
