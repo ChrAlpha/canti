@@ -25,13 +25,14 @@ const (
 )
 
 type RetrievalQuery struct {
-	Operation string `json:"operation"`
-	Path      string `json:"path"`
-	Reason    string `json:"reason"`
-	Offset    int64  `json:"offset,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	Query     string `json:"query,omitempty"`
-	Cursor    string `json:"cursor,omitempty"`
+	Operation  string `json:"operation"`
+	Path       string `json:"path"`
+	Reason     string `json:"reason"`
+	Offset     int64  `json:"offset,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Query      string `json:"query,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	IgnoreCase bool   `json:"ignore_case,omitempty"`
 }
 
 type SourceRange struct {
@@ -84,6 +85,14 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 	}
 	if q.Operation == "search" && (q.Query == "" || len(q.Query) > limit || !utf8.ValidString(q.Query) || strings.ContainsRune(q.Query, 0)) {
 		result.Error = "search query must be nonempty UTF-8 and fit within limit"
+		return result, nil
+	}
+	if q.IgnoreCase && q.Operation != "search" {
+		result.Error = "ignore_case only applies to search"
+		return result, nil
+	}
+	if q.IgnoreCase && queryMatchBytes(q) > limit {
+		result.Error = fmt.Sprintf("ignore_case requires a limit of at least %d bytes for folded matches", queryMatchBytes(q))
 		return result, nil
 	}
 	if len(q.Cursor) > 1024 || (q.Cursor != "" && (q.Operation != "search" || q.Offset != 0)) {

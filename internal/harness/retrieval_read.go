@@ -17,7 +17,7 @@ func readRetrieval(ctx context.Context, f *os.File, size int64, limit int, resul
 	}
 	count := int64(limit)
 	if q.Operation == "search" {
-		count = retrievalScanBytes + int64(len(q.Query)) + utf8.UTFMax
+		count = retrievalScanBytes + int64(queryMatchBytes(q)) + utf8.UTFMax
 	}
 	count = min(count, size-q.Offset)
 	data := make([]byte, int(count))
@@ -58,20 +58,28 @@ func searchRetrieval(data []byte, limit int, result *Retrieval) {
 
 func searchRanges(data []byte, limit, end, maxSources, references int, result *Retrieval) (int, int) {
 	q := result.Query
+	var folded foldedLiteral
+	if q.IgnoreCase {
+		folded = newFoldedLiteral(q.Query)
+	}
 	pos := 0
 	for pos < end && len(result.Sources) < maxSources {
 		match := bytes.Index(data[pos:], []byte(q.Query))
+		length := len(q.Query)
+		if q.IgnoreCase {
+			match, length = folded.index(data[pos:])
+		}
 		if match < 0 || pos+match >= end {
 			pos = end
 			break
 		}
 		match += pos
-		if limit < len(q.Query) {
+		if limit < length {
 			pos = match
 			break
 		}
-		padding := min(128, (limit-len(q.Query))/2)
-		start, stop := max(0, match-padding), min(len(data), match+len(q.Query)+padding)
+		padding := min(128, (limit-length)/2)
+		start, stop := max(0, match-padding), min(len(data), match+length+padding)
 		for start < match && !utf8.RuneStart(data[start]) {
 			start++
 		}
@@ -89,7 +97,11 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 		}
 		result.Sources = append(result.Sources, source)
 		limit -= stop - start
-		pos = match + len(q.Query)
+		pos = match + length
+		if q.IgnoreCase {
+			_, width := utf8.DecodeRune(data[match:])
+			pos = match + width
+		}
 	}
 	result.NextOffset = q.Offset + int64(pos)
 	return limit, references

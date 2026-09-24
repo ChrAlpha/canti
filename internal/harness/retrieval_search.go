@@ -43,12 +43,13 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 	}
 	remaining, references := retrievalScanBytes, RetrievalMaxBytes-2
 	examined := 0
+	matchBytes := queryMatchBytes(q)
 	for index < len(names) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		cursor.File = names[index]
-		if limit < len(q.Query) || len(result.Sources) == 32 || remaining < len(q.Query)+utf8.UTFMax || examined == 256 {
+		if limit < matchBytes || len(result.Sources) == 32 || remaining < matchBytes+utf8.UTFMax || examined == 256 {
 			break
 		}
 		fileQuery := q
@@ -118,7 +119,7 @@ func (r Reader) searchDirectoryFile(ctx context.Context, scan, limit, sources, r
 	}
 	end := len(data)
 	if partial {
-		end = max(0, len(data)-len(q.Query)+1)
+		end = max(0, len(data)-queryMatchBytes(q)+1)
 		for end < len(data) && end > 0 && !utf8.RuneStart(data[end]) {
 			end--
 		}
@@ -129,7 +130,11 @@ func (r Reader) searchDirectoryFile(ctx context.Context, scan, limit, sources, r
 }
 
 func decodeDirectoryCursor(q RetrievalQuery) (directoryCursor, error) {
-	bound, _ := json.Marshal([]string{q.Path, q.Query})
+	binding := []string{q.Path, q.Query}
+	if q.IgnoreCase {
+		binding = append(binding, "ignore_case")
+	}
+	bound, _ := json.Marshal(binding)
 	want := digest(bound)
 	if q.Cursor == "" {
 		return directoryCursor{Binding: want}, nil
