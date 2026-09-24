@@ -74,7 +74,7 @@ type qualityAggregate struct {
 }
 
 func TestRetrievalQuality(t *testing.T) {
-	c := qualitySynthetic()
+	var c qualityCorpus
 	if filename := os.Getenv("CANTI_RETRIEVAL_QUALITY_CORPUS"); filename != "" {
 		data, err := os.ReadFile(filename)
 		if err != nil {
@@ -83,6 +83,8 @@ func TestRetrievalQuality(t *testing.T) {
 		if err := json.Unmarshal(data, &c); err != nil {
 			t.Fatal(err)
 		}
+	} else {
+		c = qualitySynthetic()
 	}
 	if c.Format != "retrieval-quality/1" || len(c.Cases) == 0 {
 		t.Fatal("invalid quality corpus")
