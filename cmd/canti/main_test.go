@@ -724,7 +724,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
 	want := spec{
 		config: config{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10},
+			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10, HandoverBytes: 2048},
 		budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}

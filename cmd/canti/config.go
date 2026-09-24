@@ -25,18 +25,23 @@ import (
 // config is the host wiring stored with a run; every later command rebuilds
 // the executor and model from it.
 type config struct {
-	Workspace    string `json:"workspace"`
-	Image        string `json:"image"`
-	Network      string `json:"network"`
-	Memory       string `json:"memory"`
-	CPUs         string `json:"cpus"`
-	Pids         int    `json:"pids"`
-	OutputLimit  int64  `json:"output_limit"`
-	Model        string `json:"model"`
-	MaxTokens    int    `json:"max_tokens"`
-	Structured   bool   `json:"structured"`
-	Fallbacks    bool   `json:"fallbacks"`
-	ContextBytes int    `json:"context_bytes"`
+	Workspace      string `json:"workspace"`
+	Image          string `json:"image"`
+	Network        string `json:"network"`
+	Memory         string `json:"memory"`
+	CPUs           string `json:"cpus"`
+	Pids           int    `json:"pids"`
+	OutputLimit    int64  `json:"output_limit"`
+	Model          string `json:"model"`
+	MaxTokens      int    `json:"max_tokens"`
+	Structured     bool   `json:"structured"`
+	Fallbacks      bool   `json:"fallbacks"`
+	ContextBytes   int    `json:"context_bytes"`
+	Retrieval      bool   `json:"retrieval,omitempty"`
+	HistoryImports string `json:"history_imports,omitempty"`
+	WindowSteps    int    `json:"window_steps,omitempty"`
+	WindowBytes    int    `json:"window_bytes,omitempty"`
+	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
 const minContextBytes = 64 << 10
@@ -60,6 +65,11 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.Structured, "structured", true, "constrain responses to the decision schema")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
 	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, which bound the recent steps shown; at least 65536")
+	fs.BoolVar(&c.Retrieval, "retrieval", false, "enable explicit reference-only history retrieval")
+	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under /canti/imports")
+	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
+	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
+	fs.IntVar(&c.HandoverBytes, "handover-bytes", 2048, "maximum handover UTF-8 `bytes` (1..8192)")
 	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")
@@ -73,12 +83,33 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	switch {
 	case c.ContextBytes < minContextBytes:
 		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes must be at least %d", minContextBytes)
+	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
+		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
+	case c.HistoryImports != "" && !c.Retrieval:
+		return harness.Run{}, core.State{}, errors.New("-history-imports requires -retrieval")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.Image == "" || c.Network == "" || c.Model == "":
 		return harness.Run{}, core.State{}, errors.New("-image, -network, and -model must not be empty")
 	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
+	}
+	if c.HistoryImports != "" {
+		var err error
+		c.HistoryImports, err = filepath.Abs(c.HistoryImports)
+		if err == nil {
+			c.HistoryImports, err = filepath.EvalSymlinks(c.HistoryImports)
+		}
+		if err != nil {
+			return harness.Run{}, core.State{}, fmt.Errorf("history imports: %w", err)
+		}
+		info, err := os.Stat(c.HistoryImports)
+		if err != nil {
+			return harness.Run{}, core.State{}, err
+		}
+		if !info.IsDir() {
+			return harness.Run{}, core.State{}, errors.New("history imports must be a directory")
+		}
 	}
 	var id [16]byte
 	rand.Read(id[:])
