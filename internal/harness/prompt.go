@@ -186,9 +186,10 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	if r := o.Retrieval; r != nil {
 		status, _ := json.Marshal(struct {
 			NextOffset int64  `json:"next_offset"`
+			NextCursor string `json:"next_cursor,omitempty"`
 			More       bool   `json:"more"`
 			Error      string `json:"error,omitempty"`
-		}{r.NextOffset, r.More, clip(r.Error, 512)})
+		}{r.NextOffset, r.NextCursor, r.More, clip(r.Error, 512)})
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
 	if text := f.Retrieved[s.Step]; text != "" {

@@ -3,6 +3,7 @@ package harness_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -98,5 +99,32 @@ func TestWindowWithoutHandoverAblation(t *testing.T) {
 	req, err := f.store.LatestRequest(ctx, runID)
 	if err != nil || req.Window.FirstStep != 2 || !req.Window.WithoutHandover || req.Window.Handover != "" {
 		t.Fatalf("window %#v %v", req.Window, err)
+	}
+}
+
+func TestDirectorySearchCursorAndEvidenceReachFrozenRequest(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"search","path":"/canti/imports","query":"needle","limit":6,"reason":"locate original evidence"}`), returnReply("done"))
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("needle"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.cfg.Reader = &harness.Reader{Imports: root}
+	if _, err := f.loop().Run(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := f.store.Recent(context.Background(), runID, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := steps[0].Observation.Retrieval
+	if r == nil || !r.More || r.NextCursor == "" {
+		t.Fatalf("missing cursor %#v", r)
+	}
+	quoted, _ := json.Marshal(r.NextCursor)
+	body := string(f.model.sent[1])
+	if !strings.Contains(body, `"next_cursor":`+string(quoted)) || !strings.Contains(body, "needle") || !strings.Contains(body, "Source /canti/imports/a.txt") {
+		t.Fatalf("cursor/evidence absent in actual request: %s", body)
 	}
 }
