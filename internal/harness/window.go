@@ -32,8 +32,17 @@ type Handover struct {
 }
 
 func (h Handover) Validate(runID string, firstStep, limit int) error {
-	if h.RunID != runID || h.FirstStep != firstStep || strings.TrimSpace(h.Text) == "" || !utf8.ValidString(h.Text) || len(h.Text) > limit {
-		return fmt.Errorf("harness: handover must bind this run and window and contain 1..%d UTF-8 bytes", limit)
+	switch {
+	case h.RunID != runID:
+		return fmt.Errorf("harness: handover run_id must be %q", runID)
+	case h.FirstStep != firstStep:
+		return fmt.Errorf("harness: handover first_step must be %d, got %d", firstStep, h.FirstStep)
+	case !utf8.ValidString(h.Text):
+		return fmt.Errorf("harness: handover text must be valid UTF-8")
+	case strings.TrimSpace(h.Text) == "":
+		return fmt.Errorf("harness: handover text must not be empty")
+	case len(h.Text) > limit:
+		return fmt.Errorf("harness: handover text is %d UTF-8 bytes; maximum %d. Shorten the text and retry", len(h.Text), limit)
 	}
 	return nil
 }
