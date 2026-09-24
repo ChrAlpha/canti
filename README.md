@@ -114,10 +114,11 @@ is a scripted local HTTP server speaking the Messages format.
 [V1 acceptance](docs/v1-acceptance.md) records each gate, its tests, and their
 limits; three gates are partial.
 
-Live provider evidence is limited to three manual samples with one model
-through an Anthropic Messages-compatible gateway, recorded with the earlier
-adapter `canti-anthropic/1`; none is recorded yet for `canti-anthropic/2`,
-the only adapter the current code sends. SIGKILL tests
+Live provider evidence is three manual samples with the earlier adapter
+`canti-anthropic/1` and a live evaluation of `canti-anthropic/2` in 50 runs,
+both with one model through an Anthropic Messages-compatible gateway; the
+evaluation's decisions passed a proxy that enforces the decision schema, and
+no provider cache hit is measured. SIGKILL tests
 do not establish durability across power loss or OS crashes. Docker daemon
 restarts and host reboots are not tested, and several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and

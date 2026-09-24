@@ -5,12 +5,14 @@ a SQLite journal, a Docker executor, an Anthropic Messages adapter, and a CLI.
 Every integration gate below has concrete-backend evidence except where its
 status says otherwise. The model in every end-to-end test is a scripted local
 HTTP server speaking the Messages format: the adapter's HTTP path is
-exercised, a provider's behavior is not. Live provider evidence is limited to
-the three manual samples recorded under
-[Live provider samples](#live-provider-samples-2026-09-23): one model through
-an Anthropic Messages-compatible gateway, with the earlier adapter
-`canti-anthropic/1`. None is recorded yet for `canti-anthropic/2`, the only
-adapter the current code sends.
+exercised, a provider's behavior is not. Live provider evidence is the three
+manual samples recorded under
+[Live provider samples](#live-provider-samples-2026-09-23), with the earlier
+adapter `canti-anthropic/1`, and the
+[live evaluation](#live-evaluation-of-the-context-changes-2026-09-24) of the
+current adapter `canti-anthropic/2`: 50 runs with one model through an
+Anthropic Messages-compatible gateway, with the decision schema enforced by a
+proxy of the evaluation runner.
 
 ## Offline evidence
 
@@ -78,7 +80,7 @@ Limits column names it. Results apply only to that revision and environment.
 | Finite runs | Partial | `TestGateFiniteRuns` (4 cases), `TestGateLargeOutput/disk_budget` | Step, attempt, wall-time, token, and output-byte budgets each stop a run with `steps_exhausted`, `attempts_exhausted`, `timed_out`, or `budget_exhausted`, with failure text on the stop for the measured budgets and on each failed attempt, keep earlier observations, and dispatch nothing after the budget is spent; a wall-time stop cancels the running job and records its result | Cost is not measured; tokens are provider-reported usage, so a run can exceed its token budget by one response; the wall-time stop during a model request is tested only with a fake model |
 | Trust boundary | Passed | `TestGateTrustBoundaryKeepsCredentialsAndStateOut`, `TestGateTrustBoundaryNotes` (2 cases), `TestGateTrustBoundaryProtectsFacts`, `TestGateTrustBoundaryProtectsStepRecords`, `docker.TestTrustBoundary` | A job sees no host environment variable, credential, or injected proxy; runs as the host uid with no capabilities and only a loopback interface, and its running container has network `none`, `CapDrop` `ALL`, and the host uid and gid; cannot reach the model URL; sees the artifacts, and the step records at `/canti/runs`, read-only, and neither the state directory nor the journal; cannot delete or forge committed artifacts or history, and forgeries stay in the workspace. The credential appears in no request body, CLI output, or state file. Notes written by a job reach the next prompt marked unverified; a notes symlink out of the workspace is reported unreadable and its target never enters a request. A job reads its run's step records — a `meta` matching the committed observation, the whole command that the prompt cut, and the preview — and a later run's job reads the earlier run's goal, result, and a step's command; creating a file, a step directory, or a run directory, overwriting the goal or a preview, or removing a step's records under `/canti/runs` fails read-only and leaves the records as published. A configured extra mount is readable and not writable | Docker is the isolation boundary: a shared kernel and the daemon's own security. The test credential is fake. The workspace is writable by the agent by design. A non-default network lets jobs reach the network. Every job can read the step records of every run of its state directory |
 | Complete loop | Passed | `TestRunDrivesExecAndReturn`, `TestRunOnceStepsAcrossProcesses`, and every gate above | The concrete adapter, core, SQLite journal, and Docker executor drive exec, observation, a second exec that reads the first one's file, and return in one isolated workspace, in one process or one process per step | Scripted provider |
-| Live provider | Partial | `anthropic.TestLiveDecision` (`live` tag) and two manual `canti run` sessions ([samples](#live-provider-samples-2026-09-23)) | One real request with structured output decodes to one decision; two CLI runs drive real model decisions through the SQLite journal and Docker executor to `return`, one with structured output and one without, in which the first command failed with exit status 1 and the next decision corrected it | One model through a gateway, not Anthropic's API; manual runs, not a repeatable test; rate limits, refusals, fallbacks, and long runs are not exercised; three samples, recorded at `ee968c6` with adapter `canti-anthropic/1`, which the current code no longer sends; none with `canti-anthropic/2` |
+| Live provider | Partial | `anthropic.TestLiveDecision` (`live` tag) and two manual `canti run` sessions ([samples](#live-provider-samples-2026-09-23)); 50 runs of the [live evaluation](#live-evaluation-of-the-context-changes-2026-09-24) | With `canti-anthropic/1`: one real request with structured output decodes to one decision; two CLI runs drive real model decisions through the SQLite journal and Docker executor to `return`, one with structured output and one without, in which the first command failed with exit status 1 and the next decision corrected it. With `canti-anthropic/2`: block prompts with cache breakpoints are accepted and answered through runs of up to 197 steps and 4.5 M input tokens; 502 responses and timeouts of an outage are recorded as incomplete attempts and retried with the frozen bytes; two runs killed with SIGKILL mid-run resume to completion with every effect started once | One model through a gateway, not Anthropic's API; the evaluation's decisions pass a proxy that enforces the decision schema, because the gateway ignores structured output; no provider cache hit is measured, as the gateway's usage fields do not report caching; refusals and fallbacks are not exercised |
 
 The live test is opt-in and may be billed:
 
@@ -156,9 +158,9 @@ long-history rows.
 | Long history median build at 50, 500, 2,000 steps | Under the race detector on tmpfs 26.8, 33.3, and 33.4 ms in the dedicated run and 27.4, 35.8, and 34.6 ms in the verbose run; without it 3.4, 3.7, and 4.0 ms on tmpfs and 3.7, 4.6, and 4.4 ms on ext4 |
 
 Run, effect, and job IDs appear in the test log of this run, which is not
-committed. Not run at this revision: `anthropic.TestLiveDecision` and any
-`canti run` against a live provider. Unmet: live provider evidence for
-`canti-anthropic/2`, a measured provider cache hit, the partial conditions
+committed. Not run at this revision: `anthropic.TestLiveDecision`; the live
+evaluation below used this revision. Unmet: live provider evidence on
+Anthropic's API, a measured provider cache hit, the partial conditions
 above, OS crash or power loss, a Docker daemon restart, and retention: the
 gates' output and error artifacts are deleted with their temporary
 directories, and no run, effect, or job identity is committed.
@@ -264,6 +266,113 @@ either run remained. Usage is provider-reported; cost was not measured.
 | `canti run`, structured output: write `hello.txt`, verify it, return it | 6 steps, 5 min, 200,000 tokens | Exit status 0, stdout `canti live check`; one exec (`printf ... > /workspace/hello.txt && cat ...`, exit 0) then `return`; 11 transitions, one attempt per step; the file holds the line | 7,799 / 466 | 10 s |
 | `canti run`, `-structured=false`: write, run, and note `count.sh`, return its output | 8 steps, 6 min, 300,000 tokens | Exit status 0, stdout `17`; step 1 failed with exit status 1 (`can't create /workspace/.canti/notes.md`), step 2 added `mkdir -p` and printed `17`, step 3 returned; 18 transitions, one attempt per step; `17` equals the line count of `/etc/passwd` in the image, and the notes file holds it | 12,093 / 542 | 11 s |
 
+### Live evaluation of the context changes, 2026-09-24
+
+Live provider evidence for `canti-anthropic/2`, run from `d93633e`
+(documentation changes only since) on the platform above. Model
+`claude-sonnet-5` through an Anthropic Messages-compatible gateway, not
+Anthropic's API; protocol `anthropic-messages/2023-06-01`;
+`-structured=false -fallbacks=false`; image `debian:bookworm-slim`. The runs
+were driven by the `canti-trial` runner of the separate memoh-bench
+repository (branch `bench/canti-horizon` at `b61264d`), which builds each
+fixture, runs `canti run` and grades the workspace and journal on the host,
+three runs at a time per task family. Budgets per run: 200 steps, 4 attempts
+per step, 90 min wall time, 5,000,000 tokens, 120 s per job. The recorded
+runs, pilots with earlier builds included, used 39.0 M input and 0.35 M output tokens; runs
+killed without a record are not counted, and cost was not measured.
+
+Two properties of this gateway shape the evidence:
+
+- It ignores `output_config`, and its model often wrote prose or a code fence
+  before the decision object: in a pilot, one run needed 10 protocol repairs in
+  17 attempts and stopped as `protocol_failure` at step 7. Every run below
+  therefore went through a loopback proxy of the runner that forces a
+  `decision` tool and, when the gateway ignores it, takes the last top-level
+  decision object from the reply's text. canti's strict decoding is
+  unchanged; the journal holds the converted responses. Results are
+  labeled "decision schema enforced by a forced-tool proxy with text
+  extraction".
+- Its usage fields do not measure prompt caching: byte-identical requests
+  report the same nonzero cache creation and read counts, with or without
+  `cache_control`. No cache hit has been measured. Token counts below are its
+  input plus output usage.
+
+The gateway failed with 502 responses and timeouts from about 23:20 to 00:22
+UTC, with a short recovery in between. The two runs that stopped as `attempts_exhausted` during it and the runs
+in flight were set aside and run again once it answered eight consecutive
+requests; afterwards the proxy also retried transient upstream failures for up
+to 8 minutes. Every other result is reported, failures included.
+
+Tasks come from the runner's `horizon` suite. A task's `bin/start` prints
+facts needed much later and deletes itself, so they survive only in the run's
+history and whatever the agent writes down. `audit` (36 units): a session
+token needed for the final submission and a maintenance policy that forbids
+inspecting some units; each unit's reading is judged from a long report.
+`ops` (8 services): a runbook mapping error codes to fixes, needed at every
+failed deploy. Seeds 2, 3, and 4, one run per arm and task.
+
+| Arm | Binary | `-context-bytes` | Step records | Notes |
+| --- | --- | --- | --- | --- |
+| `v1` | `56a632f`, `-history 8` | 64 KiB, 8 steps | no | yes |
+| `S-noproj`, `L-noproj` | `d93633e` with the Go changes of `708f497`, `9b79d15`, `bfff53c`, and `8a0faa0` reverse-applied | 64 KiB, 256 KiB | no | yes |
+| `S-proj`, `L-proj` | `d93633e` | 64 KiB, 256 KiB | yes | yes |
+| `S-noproj-nn` | the no-records build without the notes channel | 64 KiB | no | no |
+| `S-proj-nn`, `L-proj-nn` | `d93633e` without the notes channel | 64 KiB, 256 KiB | yes | no |
+
+"Without the notes channel" is an evaluation-only patch, not in this
+repository: the prompt has no Notes section or guidance and the loop reads no
+notes file; the agent can still keep files of its own in the workspace.
+
+An `ops` run passes when every service is deployed, `bin/fix reset` never
+ran, and at most two fixes had no effect. The `audit` memory outcome is a
+submission with the right token, no maintenance unit inspected or read, and
+no unit missing; the full `audit` pass also requires every reading, which only
+one run achieved, because agents judged readings with scripts. Evidence is the
+share of steps that needed a planted fact whose frozen request contained it.
+Steps and tokens are means per run.
+
+| Arm | `ops` pass | `audit` memory | Evidence, ops / audit | Steps, ops / audit | Tokens per run, ops / audit |
+| --- | --- | --- | --- | --- | --- |
+| `v1` | 1/3 | 3/3 | 74% / 65% | 149 / 76 | 451 k / 249 k |
+| `S-noproj` | 3/3 | 3/3 | 100% / 100% | 46 / 14 | 656 k / 69 k |
+| `S-proj` | 3/3 | 3/3 | 100% / 100% | 45 / 17 | 599 k / 86 k |
+| `L-noproj` | 3/3 | 3/3 | 100% / 100% | 42 / 17 | 552 k / 110 k |
+| `L-proj` | 3/3 | 2/3 | 100% / 100% | 48 / 33 | 784 k / 901 k |
+| `S-noproj-nn` | 1/3 | 2/3 | 28% / 33% | 116 / 67 | 2,538 k / 1,383 k |
+| `S-proj-nn` | 2/3 | 3/3 | 96% / 100% | 41 / 24 | 594 k / 221 k |
+| `L-proj-nn` | 3/3 | 3/3 | 100% / 100% | 43 / 25 | 582 k / 190 k |
+
+Two crash-and-resume runs of `L-proj` on the small variants of both tasks were
+killed with SIGKILL at steps 13 and 15 and continued with `canti resume`: the
+`ops` run passed and the `audit` run met the memory outcome with one reading
+wrong. In both journals every effect was started once, no step was observed
+twice, and exactly one attempt, the one in flight, was counted as lost.
+
+Consecutive requests of a run shared 85–96% of their user message as whole
+leading blocks in every current arm but `S-noproj-nn` (60–67%), and 0% in
+`v1`, whose user message is one string. The stable blocks were rewritten, because the oldest shown step
+changed, in none of the requests of the 256 KiB arms, 0–4% of the 64 KiB arms
+with notes, 0–8% of `S-proj-nn`, and 20–43% of `S-noproj-nn`: agents
+filtered most outputs, so step blocks stayed small and 64 KiB rarely filled.
+
+What these runs show, within their limits: with the notes file, every current
+arm passed `ops`, and the one `audit` memory failure, in `L-proj`, inspected
+all units with one script while the policy was in its request. With notes,
+the 64 KiB arms matched the 256 KiB arms on every outcome and used fewer
+tokens per run in three of the four pairs. Without notes and step records,
+the facts were in at most a third of the requests that needed them, and runs
+took 2.8 times the steps and 4 to 6 times the tokens of `S-proj-nn`; with
+step records, the facts were in 96–100% of them. `v1` repeated
+commands without new information in a quarter of its `ops` steps (one run 54
+times, deploying one service of eight).
+
+Limits: synthetic tasks from one suite; one model through one gateway, with
+the proxy above; three tasks per family and one run each, so the task
+bootstrap intervals of every difference span most of 0–100%; the no-notes
+patch is not a shipped configuration; no provider cache hit, latency, or cost
+is measured; run IDs, workspaces, and journals are kept outside the
+repository.
+
 For each integration gate, retain:
 
 - code revision, platform, Go version, and backend versions/configuration;
@@ -293,10 +402,11 @@ above.
 
 Beyond V1:
 
-1. Record live provider evidence for `canti-anthropic/2`, including whether a
-   provider reuses the marked prompt prefix; extend it to Anthropic's API and
-   repeatable runs under finite budgets, and exercise provider behavior the
-   scripted server cannot: rate limits, refusals, fallbacks, and long runs.
+1. Record live provider evidence on Anthropic's API, with structured output
+   instead of the evaluation proxy, including whether the provider reuses the
+   marked prompt prefix; repeat the live evaluation with more tasks and runs;
+   and exercise provider behavior the scripted server cannot: refusals and
+   fallbacks.
 2. Test OS crash and power loss on a durable filesystem, Docker daemon
    restarts, and host reboots.
 3. Stream job output to its artifact while the job runs, so host disk is
