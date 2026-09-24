@@ -33,9 +33,6 @@ func TestNewLoopRequiresDependencies(t *testing.T) {
 	for _, edit := range []func(*harness.LoopConfig){
 		func(c *harness.LoopConfig) { c.Environment = " " },
 		func(c *harness.LoopConfig) { c.ArtifactDir = "" },
-		func(c *harness.LoopConfig) { c.Workspace = "" },
-		func(c *harness.LoopConfig) { c.NotesFile = "" },
-		func(c *harness.LoopConfig) { c.NotesPath = "" },
 		func(c *harness.LoopConfig) { c.History = "" },
 		func(c *harness.LoopConfig) { c.RunsPath = "" },
 		func(c *harness.LoopConfig) { c.Poll = -1 },
@@ -100,13 +97,15 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	}
 }
 
-func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
+func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	const n = 128
 	var replies []reply
 	for i := 1; i <= n; i++ {
 		replies = append(replies, execReply(fmt.Sprintf("echo %d %s", i, strings.Repeat("x", 200))))
 	}
 	f := newFixture(t, core.Limits{MaxSteps: n + 1, MaxAttempts: 1}, harness.Budget{}, replies...)
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	f.cfg.Limits.Total = 1 << 20
 	f.steps(f.loop(), 6*n)
 	ctx := context.Background()
 	run, err := f.store.Run(ctx, runID)
@@ -117,7 +116,7 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 	if err != nil || len(all) != n {
 		t.Fatalf("Recent() = %d records, %v; want %d", len(all), err, n)
 	}
-	for _, tc := range []struct{ total, pages int }{{16 << 10, 1}, {32 << 10, 1}, {48 << 10, 2}, {1 << 20, 2}} {
+	for _, tc := range []struct{ total, pages int }{{1 << 20, 2}} {
 		f.cfg.Limits = harness.DefaultPromptLimits()
 		f.cfg.Limits.Total = tc.total
 		p := &probe{Store: f.store}
@@ -127,7 +126,7 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 		whole := harness.Frame{
 			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
 			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Steps: all,
-			ArtifactDir: f.cfg.ArtifactDir, RunsDir: f.cfg.RunsPath, RunID: runID, Notes: harness.Notes{Path: f.cfg.NotesPath},
+			ArtifactDir: f.cfg.ArtifactDir, RunsDir: f.cfg.RunsPath, RunID: runID, Window: &harness.Window{FirstStep: 1},
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]
@@ -136,7 +135,7 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 		}
 		shown := strings.Count(got.User(), "\n### Step ")
 		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)
-		if shown <= 8 || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
+		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
 			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
 		}
 		if p.pages != tc.pages || p.records != min(n, tc.pages*historyPage) {
@@ -144,7 +143,6 @@ func TestLoopShowsTheLatestStepsThatFitThePrompt(t *testing.T) {
 		}
 	}
 
-	f.cfg.Limits = harness.DefaultPromptLimits()
 	prompts, _ := f.model.calls()
 	if _, err := f.loopOn(&failingRecent{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
 		t.Fatalf("Step() with a failing second page = %v, want %v", err, errRecent)
@@ -463,7 +461,7 @@ func TestLoopDecodesAResponseSavedWithinBudget(t *testing.T) {
 	f.wantKinds([]string{"request_frozen", "attempt_started", "response_saved", "response_loaded"})
 }
 
-func TestLoopShowsNotes(t *testing.T) {
+func TestLoopDoesNotAutomaticallyReadWorkspaceNotes(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
 	if err := os.MkdirAll(filepath.Join(f.ws, ".canti"), 0o755); err != nil {
 		t.Fatal(err)
@@ -472,7 +470,9 @@ func TestLoopShowsNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.run(f.loop())
-	wantContains(t, f.model.prompts[0].User(), "/workspace/.canti/notes.md", "plan: count the files first")
+	if p := f.model.prompts[0].User(); strings.Contains(p, "plan: count the files first") || strings.Contains(p, "## Notes") {
+		t.Fatalf("notes were automatically loaded: %s", p)
+	}
 }
 
 func TestLoopToleratesUnreadableNotes(t *testing.T) {
@@ -487,8 +487,10 @@ func TestLoopToleratesUnreadableNotes(t *testing.T) {
 		t.Fatalf("Step() error = %v", err)
 	}
 	wantState(t, snap, core.PhaseRequestFrozen, "")
-	wantContains(t, f.model.prompts[0].User(), "notes unreadable: ", "not a regular file")
-	if w := h.find("notes unreadable"); len(w) != 1 || w[0]["level"] != "WARN" {
-		t.Fatalf("notes warnings = %v, want one", w)
+	if p := f.model.prompts[0].User(); strings.Contains(p, "notes unreadable") || strings.Contains(p, "## Notes") {
+		t.Fatalf("notes were read: %s", p)
+	}
+	if w := h.find("notes unreadable"); len(w) != 0 {
+		t.Fatalf("notes warnings = %v, want none", w)
 	}
 }

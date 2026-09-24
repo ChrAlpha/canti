@@ -25,7 +25,7 @@ import (
 const (
 	commandBytes  = 2000
 	previewBytes  = 4000
-	notesLine     = 240
+	seedPageSteps = 5
 	artifactBytes = 256 << 10
 	repetitions   = 9
 
@@ -56,7 +56,12 @@ func fill(head, unit string, size int) string {
 }
 
 func historyRequest(step int) *harness.Request {
-	return &harness.Request{Body: fmt.Appendf(nil, `{"seeded_step":%d}`, step), Model: "seed", Protocol: "seed/v1", Adapter: "seed"}
+	w := &harness.Window{FirstStep: (step-1)/seedPageSteps*seedPageSteps + 1}
+	if w.FirstStep > 1 {
+		w.SourceStep = w.FirstStep - 1
+		w.Handover = "Continue the seeded history measurement."
+	}
+	return &harness.Request{Window: w, Body: fmt.Appendf(nil, `{"seeded_step":%d}`, step), Model: "seed", Protocol: "seed/v1", Adapter: "seed"}
 }
 
 func historyResponse(step int) *harness.Response {
@@ -70,7 +75,7 @@ func historyObservation(s core.State) *harness.Observation {
 }
 
 // growHistory commits the events and facts of the loop's exec cycle until the
-// run is idle at step n+1, appends a notes line for every completed step, and
+// run is idle at step n+1, seeding bounded context windows, and
 // publishes the step records of the whole run, as a loop would have.
 func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 	t.Helper()
@@ -79,11 +84,6 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notes, err := os.OpenFile(filepath.Join(f.ws, f.cfg.NotesFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer notes.Close()
 	for s := snap.State; s.Phase != core.PhaseIdle || s.Step <= n; s = snap.State {
 		var event core.Event
 		var facts harness.Facts
@@ -102,10 +102,6 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 			event = core.JobStarted{EffectID: s.EffectID, JobID: s.JobID}
 		case core.PhaseAwaitingObservation:
 			event, facts = core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: historyObservation(s)}
-			line := fmt.Sprintf("- step %05d: %s", s.Step, strings.Repeat("found ", notesLine))[:notesLine-1] + "\n"
-			if _, err := notes.WriteString(line); err != nil {
-				t.Fatal(err)
-			}
 		default:
 			t.Fatalf("seeding reached %+v", s)
 		}
@@ -124,7 +120,7 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 type historySample struct {
 	req                                harness.Request
 	steps, transitions                 int64
-	storeBytes, notesBytes             int64
+	storeBytes                         int64
 	prompt, shown                      int
 	reads, pages, records, recordBytes int
 	allocBytes, allocs                 uint64
@@ -213,27 +209,19 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 	}
 	s.prompt, s.shown = len(body.System)+len(user), strings.Count(user, "\n### Step ")
 	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("\n### Step %d\n", n-s.shown+1),
-		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), "The file continues beyond what was read.")
+		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), "Continue the seeded history measurement.")
 
 	for _, name := range []string{f.path, f.path + "-wal"} {
 		if info, err := os.Stat(name); err == nil {
 			s.storeBytes += info.Size()
 		}
 	}
-	info, err := os.Stat(filepath.Join(f.ws, f.cfg.NotesFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.notesBytes = info.Size()
 	return s
 }
 
 func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	top := historyLadder[len(historyLadder)-1]
 	f := newFixture(t, core.Limits{MaxSteps: top + 1, MaxAttempts: 3}, harness.Budget{Tokens: 1 << 50, OutputBytes: 1 << 50})
-	if err := os.MkdirAll(filepath.Join(f.ws, filepath.Dir(f.cfg.NotesFile)), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused", Model: "claude-opus-5"})
 	if err != nil {
 		t.Fatal(err)
@@ -245,9 +233,9 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	limits := harness.DefaultPromptLimits()
 	budget := limits.Total + requestSlack
 	// Every shown step renders its whole command and preview.
-	fit := limits.Total / (commandBytes + previewBytes)
+	fit := seedPageSteps
 	maxRecords, maxPages := fit+historyPage, fit/historyPage+1
-	maxReads := 3 + maxPages
+	maxReads := 4 + maxPages
 
 	var samples []historySample
 	for _, n := range historyLadder {
@@ -260,11 +248,11 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 		runtime.GOMAXPROCS(0), req.Adapter, req.Protocol, req.Model, limits)
 	t.Logf("budgets: request <= %d B, growth <= %d B, shown <= %d, records <= %d in <= %d pages, reads <= %d, alloc <= %d B and %.1fx, time <= %v and %.1fx",
 		budget, requestGrowth, fit, maxRecords, maxPages, maxReads, allocCeiling, allocFactor, timeCeiling, timeFactor)
-	t.Logf("%6s %7s %10s %10s %8s %8s %7s %5s %7s %5s %5s %7s %9s %6s %10s %10s", "steps", "trans", "store B", "history B", "notes B",
+	t.Logf("%6s %7s %10s %10s %8s %7s %5s %7s %5s %5s %7s %9s %6s %10s %10s", "steps", "trans", "store B", "history B",
 		"request", "prompt", "shown", "records", "pages", "reads", "read B", "alloc B", "allocs", "median", "cold")
 	for _, s := range samples {
-		t.Logf("%6d %7d %10d %10d %8d %8d %7d %5d %7d %5d %5d %7d %9d %6d %10v %10v", s.steps, s.transitions, s.storeBytes,
-			s.steps*(commandBytes+previewBytes), s.notesBytes, len(s.req.Body), s.prompt, s.shown, s.records, s.pages, s.reads,
+		t.Logf("%6d %7d %10d %10d %8d %7d %5d %7d %5d %5d %7d %9d %6d %10v %10v", s.steps, s.transitions, s.storeBytes,
+			s.steps*(commandBytes+previewBytes), len(s.req.Body), s.prompt, s.shown, s.records, s.pages, s.reads,
 			s.recordBytes, s.allocBytes, s.allocs, s.elapsed, s.cold)
 	}
 
