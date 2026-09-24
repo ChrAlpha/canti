@@ -74,44 +74,32 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 	}
 }
 
-func TestEmptyWindowAblationRecoversRetriesAndProtocolRepair(t *testing.T) {
+func TestHandoverPagePreservesRetryAndRepair(t *testing.T) {
 	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{},
 		execReply("echo first-window-marker"),
+		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue after marker; verify source."}`),
 		reply{err: errors.New("transport interruption")},
 		reply{body: "invalid decision", usage: usage},
-		execReply("echo second-window-marker"),
 		returnReply("done"))
 	f.cfg.WindowSteps = 1
-	f.cfg.WithoutHandover = true
 	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			if s.State.Phase != core.PhaseReturned {
-				t.Fatalf("unexpected halt: %+v", s.State)
-			}
-			break
-		}
+	s, err := f.fresh().Run(ctx, runID)
+	if err != nil || s.State.Phase != core.PhaseReturned {
+		t.Fatalf("run=%+v err=%v", s.State, err)
 	}
-	if len(f.model.sent) != 5 || !bytes.Equal(f.model.sent[1], f.model.sent[2]) {
-		t.Fatal("ablation transport retry did not retain frozen request")
+	if len(f.model.sent) != 5 || !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
+		t.Fatal("transport retry changed frozen request")
 	}
 	for _, revision := range []int{1, 2} {
-		req, err := f.store.Request(ctx, runID, 2, revision)
-		if err != nil || req.Window == nil || req.Window.FirstStep != 2 || !req.Window.WithoutHandover || req.Window.Requested || req.Window.Handover != "" {
+		req, err := f.store.Request(ctx, runID, 3, revision)
+		if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 || req.Window.Handover == "" {
 			t.Fatalf("revision %d window=%+v err=%v", revision, req.Window, err)
 		}
-	}
-	for _, request := range f.model.sent[1:] {
-		if strings.Contains(string(request), "first-window-marker") || strings.Contains(string(request), "Handover required") || strings.Contains(string(request), "## Notes") {
-			t.Fatal("empty-window ablation inherited old work or requested handover")
+		if strings.Contains(string(req.Body), "first-window-marker") || !strings.Contains(string(req.Body), "Continue after marker") {
+			t.Fatalf("revision %d leaks old page or loses handover", revision)
 		}
 	}
-	last := string(f.model.sent[4])
-	if strings.Contains(last, "second-window-marker") || !strings.Contains(last, "This window begins at step 3") {
-		t.Fatal("second ablation reset did not establish an empty new window")
+	if !strings.Contains(string(f.model.sent[4]), "Rejected response") {
+		t.Fatal("protocol repair missing")
 	}
 }

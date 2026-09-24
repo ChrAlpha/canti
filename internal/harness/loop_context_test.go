@@ -78,27 +78,56 @@ func TestWindowRefusesRepeatedInvalidHandover(t *testing.T) {
 	}
 }
 
-func TestWindowWithoutHandoverAblation(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, execReply("echo first-page-marker"), returnReply("done"))
-	f.cfg.WindowSteps = 1
-	f.cfg.WithoutHandover = true
-	ctx := context.Background()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
+func TestZeroTriggersRequestAndAdvanceHandoverAtCapacity(t *testing.T) {
+	var replies []reply
+	for i := 0; i < 24; i++ {
+		replies = append(replies, execReply("echo CAPACITY_PAGE_MARKER "+strings.Repeat("x", 1800)))
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 30, MaxAttempts: 3}, harness.Budget{}, replies...)
+	if f.cfg.WindowSteps != 0 || f.cfg.WindowBytes != 0 {
+		t.Fatalf("default triggers = %d steps, %d bytes", f.cfg.WindowSteps, f.cfg.WindowBytes)
+	}
+	ctx := f.bounded()
+	var handoverStep int
+	for i := 0; i < 250; i++ {
+		snap, err := f.fresh().Step(ctx, runID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.State.Intent() == core.IntentHalt {
+		if snap.State.Phase != core.PhaseRequestFrozen {
+			continue
+		}
+		req, err := f.store.Request(ctx, runID, snap.State.Step, snap.State.RequestRev)
+		if err != nil || req.Window == nil {
+			t.Fatalf("frozen request has no window: %+v %v", req, err)
+		}
+		if req.Window.Requested {
+			handoverStep = snap.State.Step
+			if !strings.Contains(string(req.Body), "Handover required") || !strings.Contains(string(req.Body), "### Step 1") {
+				t.Fatal("capacity trigger dropped current-page history before handover")
+			}
 			break
 		}
 	}
-	p := f.model.prompts[1].User()
-	if strings.Contains(p, "first-page-marker") || strings.Contains(p, "Handover required") {
-		t.Fatalf("ablation retained old context: %s", p)
+	if handoverStep < 2 {
+		t.Fatal("automatic capacity trigger did not request a handover")
+	}
+	f.model.mu.Lock()
+	f.model.replies = []reply{
+		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue on the next page; inspect the old record if needed."}`),
+		returnReply("done"),
+	}
+	f.model.mu.Unlock()
+	snap, err := f.fresh().Run(ctx, runID)
+	if err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("run = %+v, %v", snap.State, err)
 	}
 	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window.FirstStep != 2 || !req.Window.WithoutHandover || req.Window.Handover != "" {
-		t.Fatalf("window %#v %v", req.Window, err)
+	if err != nil || req.Window == nil || req.Window.FirstStep != handoverStep+1 || req.Window.SourceStep != handoverStep {
+		t.Fatalf("advanced window = %+v, %v", req.Window, err)
+	}
+	if strings.Contains(string(req.Body), "CAPACITY_PAGE_MARKER") || !strings.Contains(string(req.Body), "Continue on the next page") {
+		t.Fatal("new page inherited old steps or lost handover")
 	}
 }
 
