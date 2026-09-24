@@ -100,8 +100,7 @@ goal, constraints, and the image, limit, model, prompt, and budget flags of
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
 output tokens per response, structured output and fallbacks on, 256 KiB per
-prompt (`-context-bytes`, at least 64 KiB, the only bound on the recent steps
-shown), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
+prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
 
 The state directory defaults to
@@ -112,8 +111,13 @@ holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which jobs see
 at `/canti/runs/<run ID>/`.
-Each run is bound to the workspace it was created in. The agent's notes are
-`.canti/notes.md` in the workspace.
+Each run is bound to the workspace it was created in. Handover windows are
+always enabled; `-window-steps` and `-window-bytes` optionally request an
+earlier handover, while zero leaves the automatic capacity trigger active.
+`-handover-bytes` bounds the continuation text (2048 bytes by default).
+History retrieval is always available; `-history-imports` adds a read-only
+archive. Workspace notes are ordinary files and are not automatically read.
+Runs with the previous context configuration require a fresh state directory.
 
 A CLI check without Docker or credentials proves only that the command builds
 and parses its arguments; the integration tests drive real runs with a

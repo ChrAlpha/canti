@@ -20,7 +20,7 @@ is not.
 | --- | --- | --- |
 | `core/decode.go` | Decision protocol and decoding | Offline tests |
 | `core/state.go`, `core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `internal/harness/frame.go`, `prompt.go`, `notes.go` | The frame of one request, its bounded prompt, and confined notes reads | Offline tests; long-history measurement over SQLite |
+| `internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
 | `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` |
 | `internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Recording-store tests; used by the loop |
@@ -271,7 +271,7 @@ the intent is `halt` or a step fails, and at a halt publishes the run's
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the latest completed steps up to the prompt's total, the notes, and in a repair the rejected response; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
+| `prepare_request` | Build the [frame](#input) from the run record, the complete active window and its handover, and in a repair the rejected response; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the goal or constraints exceed their limit, no prompt fits, or freezing fails |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
 | `bind`, `start` | `Runner.Bind`, `Runner.Start` |
@@ -293,7 +293,7 @@ any store error; request and response bodies are not logged.
 
 SQLite holds the authoritative run state and facts, and files hold large
 outputs. `canti history` prints the committed transitions as a read-only JSON
-Lines projection. Agent-editable notes never decide whether an action
+Lines projection. Agent-written handover never decides whether an action
 occurred.
 
 The store contract is one atomic `Commit(Transition)`. Inside that transaction
@@ -428,7 +428,7 @@ of the run directory, is rebuilt from every completed step by paging
 `Recent` backward; otherwise a publication adds at most the latest completed
 step. That suffices by induction over the publication points:
 
-- `Loop.prepare` publishes after it reads the recent steps and before it
+- `Loop.prepare` publishes after it reads the active window steps and before it
   renders and freezes the request. When that fails it returns the error and
   freezes and commits nothing, so no frozen request names records that are
   not published. Once the request of step N is frozen, steps 1 to N-1 are
@@ -493,76 +493,53 @@ refusing when it cannot.
 
 ## Input
 
-Every request is prepared from committed facts and the notes; the history is
-read only as far back as the prompt needs, except to rebuild lost
-[step records](#step-records), which reads every completed step once. A
-`Frame` holds the run's goal and constraints, a description of the
-environment, the step and attempt positions, the number of earlier steps it
-does not show, a contiguous run of the latest completed steps, the artifact
-directory, the run ID and the directory of every run's step records, the
-notes, and in a protocol repair the rejected response of the current step
-with its decode error. The loop reads those steps from `Journal.Recent`
-backward by commit sequence, 64 per page, until the step blocks the prompt
-would render for them exceed the prompt's total, a page is short, or step 1
-is read. No step count caps them: the prompt's total is the only bound, the
-prompt drops the oldest of them that do not fit, and it shows what the whole
-history would show while reading at most the completed steps whose blocks
-fit the total, plus one page.
-`Frame.Validate` requires the goal, the environment, the artifact and runs
-directories, the run ID, and the notes path, checks the positions, and checks
-that the shown and earlier steps account for exactly the steps before the
-current one.
+Every request is prepared from committed facts and a durable handover window.
+The window begins at `FirstStep`; only its completed steps enter the frame.
+`Journal.Recent` remains a chronological storage query: the loop reads backward
+by commit sequence, 64 records per page, stopping at the window boundary.
+It does not select a sliding suffix by prompt capacity. Lost [step
+records](#step-records) can still be rebuilt from the full committed history.
 
-`Frame.Prompt` renders one independent prompt: a fixed system message that
-states the decision protocol and the workspace rules, and a user message in
-content blocks. A stable first block holds the Goal, Constraints, and
-Environment sections, the environment followed by the artifact directory and
-two lines, which the system message also points to, naming the run's own
-step records, `<runs directory>/<run ID>/steps/`, and the runs directory,
-where every run of the state directory, this one included, is recorded; the
-run ID is constant within a run, so these lines are too. The block ends with
-the Recent steps heading; one stable block follows per shown step,
-oldest first; a volatile tail holds the Progress section (the step and
-attempt positions and the count of earlier steps not shown), Notes, and
-Rejected response, after a `None.` line when no step is shown. No block is
-empty. Consecutive prompts of a run share their stable blocks byte for byte
-unless the oldest shown step changes, as when a step is dropped or shorter
-notes let a dropped step be shown again: a completed step appends one block,
-and positions, notes, and rejections appear only in the tail, though their
-size decides which steps fit. `PromptLimits` caps each input in
-bytes and the system message and blocks together. The defaults are 32 KiB for
-the goal, 16 KiB for the
-constraints, 2 KiB for the environment, 2 KiB for each step's command and
-4 KiB for its output preview, 8 KiB for the notes, 2 KiB each for a rejected
-response and its error, and 64 KiB in total. The goal and constraints are
-never cut: when either exceeds its limit after trimming, `Frame.Prompt` fails
-and the loop stops the run as `unrecoverable`, and `canti run` refuses them
-before creating anything. A cut input ends with a marker counting the bytes
-removed, except that notes cut when read are followed only by a line saying
-the file continues. When the total would be exceeded, the
-prompt drops the oldest shown steps, counting them as earlier steps, then
-shrinks the notes, then drops the newest step and shrinks the notes again; if
-it still does not fit, the loop stops the run as `unrecoverable`. Commands,
-previews, notes, and rejected responses are fenced with a backtick run longer
-than any inside them, with the extra fence length charged to the input's
-limit; single-line references have line breaks replaced; invalid UTF-8 is
-replaced and no cut splits a rune. Equal frames and limits give equal prompts.
-The CLI keeps these limits but sets the total from `-context-bytes`, 256 KiB
-by default and at least 64 KiB, which holds every goal,
-constraints, and fixed section `canti run` accepts.
+A `Frame` holds the authoritative goal and constraints, environment, step and
+attempt positions, complete current-page trajectory, artifact and history
+locations, window state, and any rejected response for protocol repair.
+`Frame.Validate` checks the window boundary and contiguous step coverage.
+Workspace notes are not automatically read or injected.
 
-`ReadNotes` reads at most the notes limit plus one byte of the notes file
-(`.canti/notes.md` in the CLI), the extra byte telling whether the file was
-cut. It resolves the file through an `os.Root` of the workspace: a symlink out
-of the workspace, or anything but a regular file, is an error, which the
-prompt reports as unreadable notes, and opening never blocks. Notes are
-written by the agent and never verified.
+`Frame.Prompt` renders a system message and user content blocks. The first
+block holds Goal, Constraints, Environment, Context window, and the short
+Handover when present. One block follows per current-page step, oldest first;
+the tail holds Progress, any required handover instruction, and a rejected
+response. Appending a completed step preserves the prefix within a window,
+subject to active retrieval expansion. A new window changes the first block.
 
-Per request the loop reads the latest snapshot, the run record, the totals
-when a token or output-byte budget is set, the recent steps, and in a repair
-the previous response; publishing the latest step reads nothing more unless
-the step records are rebuilt. The byte limits bound the prompt, not the
-number of tokens it encodes to.
+`PromptLimits` bounds bytes, not provider tokens: defaults are 32 KiB for the
+goal, 16 KiB for constraints, 2 KiB for the environment and each command,
+4 KiB per output preview, 2 KiB each for a rejected response and its error,
+and 64 KiB total. The CLI defaults the total to 256 KiB. Goal and constraints
+are never truncated. Other bounded inputs use explicit truncation markers,
+valid UTF-8, and fences longer than embedded backtick runs. An oversized page
+fails visibly rather than dropping older steps.
+
+The loop reserves space before the window reaches its prompt capacity and
+requests a bounded `canti:handover` action. Optional step and byte thresholds
+can request this sooner; both zero still enables the capacity trigger. A
+valid proposal becomes the next window's handover and lower history bound
+when the next request is frozen. These window facts are committed with the
+request bytes, so recovery reuses the same boundary and actual handover.
+Invalid proposals keep the current page; repeated failure stops the run.
+Run identity, effect identity, step numbering, and execution recovery do not
+change when a window advances. `return` still ends the run.
+
+Native retrieval records its reason, original paths, byte ranges, hashes,
+continuation information, and errors. Original evidence is expanded only
+for the active context; retrieval observations and projected records do not
+copy that evidence under the retrieval step. Reading a past retrieval thus
+returns references rather than recursively duplicating history. Frozen
+request bodies still retain the actual bytes sent for exact retry. Old pages
+remain accessible through explicit retrieval, including imported history
+when configured. Retrieved evidence and handover text are not authoritative
+instructions or proof that a side effect completed.
 
 `anthropic.Model` implements `Model` for the non-streaming Messages API at
 API version `2023-06-01`, as adapter `canti-anthropic/2`. `Freeze` builds a
@@ -572,8 +549,7 @@ optionally a JSON-schema output format for the decision object and
 server-side fallbacks — that never contains credentials. The first and the
 last stable block carry `ephemeral` `cache_control` breakpoints, so that a
 provider that caches prompt prefixes can reuse the stable blocks of the
-previous request, and still the system prompt and first block once a dropped
-step changes the blocks after it; no cache hit has been measured. The body
+previous request, within the current window; actual cache reuse depends on the provider. The body
 and the model, protocol, and adapter identifiers are committed with
 `RequestFrozen` before any send. The base URL must use `https` unless it is a
 loopback address. `Complete` sends exactly the frozen body once over
@@ -589,15 +565,13 @@ adapter is `StopError{unrecoverable}`. Usage is the provider-reported input
 tokens, including cache creation and reads, plus output tokens. `Decision`
 concatenates the text blocks.
 
-A resend reuses the frozen bytes; reading the notes again or changing input
-selection requires a new revision. Response records keep the raw body,
+A resend reuses the frozen bytes; changing the input requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code
 revision is not. A state directory written by an earlier revision is not
 supported, and no compatibility is kept: a stored configuration the current
-one cannot decode, such as the removed `history` field of runs before the
-byte capacity, makes every command refuse the run with an unreadable-config
-error; use a fresh `-state`.
+one cannot decode, or a missing or unsupported context version, makes the
+CLI refuse to resume the run; use a fresh `-state`.
 
 ## Execution
 
