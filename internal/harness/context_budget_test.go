@@ -1,0 +1,130 @@
+package harness
+
+import (
+	"encoding/json"
+	"math"
+	"math/rand"
+	"strings"
+	"testing"
+
+	"github.com/ChrAlpha/canti/core"
+)
+
+func budgetFrame() Frame {
+	return Frame{Goal: "continue work", Environment: "test", ArtifactDir: "/canti/artifacts",
+		RunsDir: "/canti/runs", RunID: "run-1", Step: 1, MaxSteps: math.MaxInt,
+		Attempt: 1, MaxAttempts: 3, Window: &Window{FirstStep: 1},
+		RetrievalEnabled: true, HandoverBytes: 2048}
+}
+
+func TestContextAdmissionReservesMaximumHandover(t *testing.T) {
+	l := DefaultPromptLimits()
+	f := budgetFrame()
+	if err := f.ValidateContext(l); err != nil {
+		t.Fatal(err)
+	}
+	f.Window = &Window{FirstStep: math.MaxInt, Handover: strings.Repeat("`", f.HandoverBytes)}
+	if _, err := f.workCapacity(l); err != nil {
+		t.Fatal(err)
+	}
+	f = budgetFrame()
+	f.Goal, f.HandoverBytes = strings.Repeat("x", 23000), 8192
+	if _, err := f.Prompt(l); err != nil {
+		t.Fatalf("base input should fit: %v", err)
+	}
+	if err := f.ValidateContext(l); err == nil {
+		t.Fatal("accepted input that leaves no working capacity after a legal handover")
+	}
+}
+
+func TestContextRenderedFieldBounds(t *testing.T) {
+	for _, limit := range []int{1, 2, 3, 4, 16, 2048, 4096} {
+		for _, text := range []string{"", "plain", "```", strings.Repeat("`", 65536),
+			strings.Repeat("\xff", 65536), strings.Repeat("a", 65536), strings.Repeat("\x00", 65536),
+			strings.Repeat("`", limit/3) + strings.Repeat("x", 65536)} {
+			if actual, bound := len(quote("field", text, limit)), quoteBytes("field", limit); actual > bound {
+				t.Fatalf("limit %d: quote %d exceeds %d", limit, actual, bound)
+			}
+		}
+	}
+}
+
+func TestContextStepAndTailBounds(t *testing.T) {
+	l, f := DefaultPromptLimits(), budgetFrame()
+	rng := rand.New(rand.NewSource(1))
+	texts := []string{"", strings.Repeat("`", 40000), strings.Repeat("\xff", 40000),
+		strings.Repeat("\x00", 40000), strings.Repeat("x", 40000)}
+	for i := range 300 {
+		pick := func() string { return texts[rng.Intn(len(texts))] }
+		exit := math.MinInt
+		s := StepRecord{Step: math.MaxInt, Command: pick(), Resolved: true, Observation: Observation{
+			Execution: core.ExecutionFailedToStart, ExitCode: &exit, Preview: pick(),
+			Output: ArtifactRef{Available: true, Bytes: math.MaxInt64, Path: pick(), Detail: pick()},
+		}}
+		switch i % 4 {
+		case 1:
+			s.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32),
+				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: pick()}
+		case 2:
+			entries := []string{strings.Repeat("`", RetrievalMaxBytes-4)}
+			encoded, _ := json.Marshal(entries)
+			if len(encoded) != RetrievalMaxBytes {
+				t.Fatal("invalid test entry budget")
+			}
+			s.Observation.Retrieval = &Retrieval{Query: RetrievalQuery{Operation: "list"},
+				Entries: entries, NextOffset: math.MaxInt64, More: true}
+		case 3:
+			s.Observation.Handover = &Handover{}
+		}
+		if actual, bound := len(f.step(s, l)), f.stepShellBytes(l); actual > bound {
+			t.Fatalf("case %d: shell %d exceeds %d", i, actual, bound)
+		}
+		f.Step, f.Attempt, f.Earlier = math.MaxInt, math.MaxInt, math.MaxInt
+		f.Window = &Window{FirstStep: math.MaxInt, Requested: true}
+		f.Rejected = &Rejection{Error: pick(), Response: pick()}
+		if actual, bound := len(f.tail(l, f.progress(f.Earlier))), f.tailBytes(l); actual > bound {
+			t.Fatalf("case %d: tail %d exceeds %d", i, actual, bound)
+		}
+		s.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &exit,
+			Preview: "Context action failed: " + clip(pick(), 2048)}
+		s.Resolved = false
+		exit = 1
+		if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
+			t.Fatalf("case %d: failed handover %d exceeds %d", i, actual, bound)
+		}
+	}
+}
+
+func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
+	l, f := DefaultPromptLimits(), budgetFrame()
+	f.Window = &Window{FirstStep: 2, SourceStep: 1, Handover: strings.Repeat("`", f.HandoverBytes)}
+	f.Step, f.Earlier = 2, 1
+	capacity, err := f.workCapacity(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	next := StepRecord{Step: 2, Observation: Observation{Execution: core.ExecutionExited, ExitCode: &exit}}
+	used := 0
+	for used+len(f.step(next, l)) < capacity {
+		used += len(f.step(next, l))
+		f.Steps = append(f.Steps, next)
+		next.Step++
+	}
+	next.Command, next.Observation.Preview = strings.Repeat("x", 40000), strings.Repeat("`", 40000)
+	next.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64,
+		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
+	f.Steps = append(f.Steps, next)
+	f.Retrieved = map[int]string{next.Step: strings.Repeat("x", retrievalExpansionLimit(l)-len("Retrieved original evidence:\n")-9)}
+	next.Step++
+	exit = 1
+	next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &exit,
+		Preview: "Context action failed: " + clip(strings.Repeat("x", 40000), 2048)}
+	f.Steps = append(f.Steps, next)
+	f.Step, f.Attempt = next.Step+1, 2
+	f.Window.Requested = true
+	f.Rejected = &Rejection{Error: strings.Repeat("x", 40000), Response: strings.Repeat("x", 40000)}
+	if _, err := f.Prompt(l); err != nil {
+		t.Fatalf("accepted near-capacity page could not render next step, failed handover, and repair: %v", err)
+	}
+}
