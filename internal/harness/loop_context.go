@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
@@ -126,4 +127,58 @@ func (l *Loop) requestHandover(f *Frame) error {
 		f.Window.Requested = true
 	}
 	return nil
+}
+
+func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
+	s := snap.State
+	f := Frame{
+		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
+		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
+		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID, Notes: Notes{Path: l.cfg.NotesPath},
+	}
+	var err error
+	if f.Steps, err = l.recent(ctx, s.RunID, f); err != nil {
+		return snap, err
+	}
+	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {
+		return snap, err
+	}
+	if err := l.contextFrame(ctx, snap, &f); err != nil {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	}
+	if err := l.expandRetrieval(ctx, &f); err != nil {
+		return snap, err
+	}
+	f.Earlier = s.Step - 1 - len(f.Steps)
+	if f.Window == nil {
+		if f.Notes.Text, f.Notes.Truncated, err = ReadNotes(l.cfg.Workspace, l.cfg.NotesFile, l.cfg.Limits.Notes); err != nil {
+			l.note(ctx, slog.LevelWarn, "notes unreadable", snap, "error", err)
+			f.Notes.Text, f.Notes.Truncated = "notes unreadable: "+err.Error(), false
+		}
+	}
+	if s.RequestRev > 0 {
+		resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt-1)
+		if err != nil {
+			return snap, err
+		}
+		body := l.decision(resp)
+		if _, err := core.Decode(body); err != nil {
+			f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
+		}
+	}
+	if s.RequestRev == 0 {
+		if err := l.requestHandover(&f); err != nil {
+			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+		}
+	}
+	p, err := f.Prompt(l.cfg.Limits)
+	var req Request
+	if err == nil {
+		req, err = l.model.Freeze(p)
+	}
+	if err != nil {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	}
+	req.Window = f.Window
+	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
 }
