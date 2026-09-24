@@ -74,6 +74,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 	}
 	if index < len(names) {
 		cursor.File = names[index]
+		cursor.File = base64.RawURLEncoding.EncodeToString([]byte(cursor.File))
 		encoded, _ := json.Marshal(cursor)
 		result.More = true
 		result.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
@@ -141,7 +142,9 @@ func decodeDirectoryCursor(q RetrievalQuery) (directoryCursor, error) {
 	decoder.DisallowUnknownFields()
 	var cursor directoryCursor
 	err = decoder.Decode(&cursor)
-	if err != nil || decoder.Decode(new(any)) != io.EOF || cursor.Binding != want ||
+	filename, fileErr := base64.RawURLEncoding.DecodeString(cursor.File)
+	cursor.File = string(filename)
+	if err != nil || fileErr != nil || decoder.Decode(new(any)) != io.EOF || cursor.Binding != want ||
 		cursor.Offset < 0 || cursor.File == "" || cursor.File == "." || cursor.File == ".." ||
 		strings.ContainsRune(cursor.File, '/') || len(cursor.File) > 255 ||
 		!utf8.ValidString(cursor.File) || forbiddenRetrievalName(cursor.File) {
