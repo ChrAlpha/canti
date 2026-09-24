@@ -133,7 +133,7 @@ func TestRetrievalListContinuation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	q := RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "find evidence", Limit: 25}
+	q := RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "find evidence", Limit: 32}
 	var paths []string
 	for {
 		result := retrieveOK(t, r, q)

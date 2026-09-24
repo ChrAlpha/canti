@@ -105,7 +105,7 @@ func (f Frame) head(l PromptLimits) string {
 	if f.Window != nil {
 		section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
 		if f.Window.Handover != "" {
-			section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+block(f.Window.Handover, len(f.Window.Handover)))
+			section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+fullBlock(f.Window.Handover))
 		}
 	}
 	section(&b, "Current window steps", "")
@@ -171,7 +171,12 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 			b.WriteString(" (" + inline(o.Output.Detail) + ")")
 		}
 	}
-	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
+	if r := o.Retrieval; r != nil && r.Query.Operation == "list" && r.Error == "" {
+		entries, _ := json.Marshal(r.Entries)
+		b.WriteString("\nEntries: " + string(entries) + "\n")
+	} else {
+		b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
+	}
 	if r := o.Retrieval; r != nil {
 		status, _ := json.Marshal(struct {
 			NextOffset int64  `json:"next_offset"`
@@ -182,9 +187,13 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
 	if text := f.Retrieved[s.Step]; text != "" {
-		b.WriteString(quote("Retrieved original evidence", text, len(text)+2*max(0, fence(text)-3)))
+		b.WriteString("Retrieved original evidence:\n" + fullBlock(text))
 	}
 	return b.String()
+}
+
+func fullBlock(s string) string {
+	return block(s, len(s)+2*max(0, fence(s)-3))
 }
 
 func quote(label, s string, limit int) string {

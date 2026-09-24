@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -200,6 +201,9 @@ func (r Reader) open(name string) (*os.File, error) {
 }
 
 func listRetrieval(ctx context.Context, f *os.File, limit int, result *Retrieval) error {
+	if limit < 2 {
+		return errors.New("list limit is too small for entries")
+	}
 	names, err := retrievalDirectory(ctx, f, false)
 	if err != nil {
 		return err
@@ -208,16 +212,26 @@ func listRetrieval(ctx context.Context, f *os.File, limit int, result *Retrieval
 		return errors.New("list offset is beyond directory entries")
 	}
 	result.NextOffset = result.Query.Offset
+	result.Entries = []string{}
+	encodedBytes := 2
 	for result.NextOffset < int64(len(names)) {
 		name := path.Join(result.Query.Path, names[result.NextOffset])
-		if len(name)+1 > limit {
+		encoded, err := json.Marshal(name)
+		if err != nil {
+			return err
+		}
+		cost := len(encoded)
+		if len(result.Entries) > 0 {
+			cost++
+		}
+		if encodedBytes+cost > limit {
 			if len(result.Entries) == 0 {
 				return errors.New("list limit is too small for next path")
 			}
 			break
 		}
 		result.Entries = append(result.Entries, name)
-		limit -= len(name) + 1
+		encodedBytes += cost
 		result.NextOffset++
 	}
 	result.More = result.NextOffset < int64(len(names))
