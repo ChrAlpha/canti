@@ -171,16 +171,22 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	if s.Resolved {
 		b.WriteString(", set by explicit resolution")
 	}
-	complete, where := "incomplete", "unavailable"
-	if o.Output.Complete {
-		complete = "complete"
-	}
-	if o.Output.Available {
-		where = "at " + path.Join(inline(f.ArtifactDir), inline(o.Output.Path))
-	}
-	fmt.Fprintf(&b, "\nOutput: %d bytes, %s, %s", o.Output.Bytes, complete, where)
-	if o.Output.Detail != "" {
-		b.WriteString(" (" + inline(o.Output.Detail) + ")")
+	if r := o.Retrieval; r != nil {
+		fmt.Fprintf(&b, "\nRetrieval: %d original ranges, %d directory entries", len(r.Sources), len(r.Entries))
+	} else if o.Handover != nil {
+		b.WriteString("\nHandover proposal recorded")
+	} else {
+		complete, where := "incomplete", "unavailable"
+		if o.Output.Complete {
+			complete = "complete"
+		}
+		if o.Output.Available {
+			where = "at " + path.Join(inline(f.ArtifactDir), inline(o.Output.Path))
+		}
+		fmt.Fprintf(&b, "\nOutput: %d bytes, %s, %s", o.Output.Bytes, complete, where)
+		if o.Output.Detail != "" {
+			b.WriteString(" (" + inline(o.Output.Detail) + ")")
+		}
 	}
 	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
 	if r := o.Retrieval; r != nil {
