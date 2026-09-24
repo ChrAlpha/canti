@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"path"
@@ -182,6 +183,14 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString(" (" + inline(o.Output.Detail) + ")")
 	}
 	b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
+	if r := o.Retrieval; r != nil {
+		status, _ := json.Marshal(struct {
+			NextOffset int64  `json:"next_offset"`
+			More       bool   `json:"more"`
+			Error      string `json:"error,omitempty"`
+		}{r.NextOffset, r.More, clip(r.Error, 512)})
+		b.WriteString("Retrieval continuation: " + string(status) + "\n")
+	}
 	if text := f.Retrieved[s.Step]; text != "" {
 		b.WriteString(quote("Retrieved original evidence", text, len(text)))
 	}
