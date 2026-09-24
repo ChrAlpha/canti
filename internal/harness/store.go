@@ -56,6 +56,7 @@ type Journal interface {
 	Run(ctx context.Context, runID string) (Run, error)
 	Latest(ctx context.Context, runID string) (Snapshot, error)
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
+	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)

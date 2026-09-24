@@ -55,6 +55,11 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 	if err := facts.check(event); err != nil {
 		return snap, err
 	}
+	if facts.Request != nil && facts.Request.Window != nil {
+		if err := facts.Request.Window.Validate(snap.State.Step); err != nil {
+			return snap, fmt.Errorf("%w: %v", ErrFacts, err)
+		}
+	}
 	id, err := eventID(snap.State.RunID, snap.Seq+1, event)
 	if err != nil {
 		return snap, err

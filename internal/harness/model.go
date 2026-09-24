@@ -42,6 +42,7 @@ type Request struct {
 	Model    string
 	Protocol string
 	Adapter  string
+	Window   *Window `json:",omitempty"`
 }
 
 // Response is the raw model result before core decoding. Complete reports
