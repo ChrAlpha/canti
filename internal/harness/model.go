@@ -23,9 +23,8 @@ type Model interface {
 
 // Prompt is the provider-neutral input built from a Frame: a system prompt
 // and a user message in non-empty blocks. Blocks[:Stable] is the stable
-// prefix, which the next prompt of the run repeats byte for byte unless its
-// oldest shown step differs, as when a step is dropped or shorter notes let a
-// dropped step be shown again; the blocks after it change with every request.
+// prefix, which the next prompt of the same context window extends byte for
+// byte as steps complete. The blocks after it change with every request.
 type Prompt struct {
 	System string
 	Blocks []string

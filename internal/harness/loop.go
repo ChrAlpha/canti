@@ -23,7 +23,7 @@ type LoopConfig struct {
 	ArtifactDir    string           // Frame.ArtifactDir, as the agent sees it
 	History        string           // host directory PublishHistory publishes the step records of every run under
 	RunsPath       string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
-	Limits         PromptLimits     // DefaultPromptLimits(); Total also bounds the recent steps read
+	Limits         PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
 	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
