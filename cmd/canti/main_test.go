@@ -748,7 +748,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-model", "claude-test", "-max-tokens", "900", "-structured=false", "-fallbacks=false",
-		"-context-bytes", "70000", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.config.Workspace = "/work"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
@@ -775,7 +775,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
-	if l := promptLimits(c); l.Total != 70000 || l.Goal != harness.DefaultPromptLimits().Goal {
+	if l := promptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {
 		t.Errorf("prompt limits = %+v", l)
 	}
 	m := modelConfig(c, "http://model.test", credential{authToken: "token"})
