@@ -113,6 +113,63 @@ func verifyQualityCorpus(root string, hashes map[string]string) error {
 	return nil
 }
 
+func copyQualityCorpus(root, frozen string, hashes map[string]string) error {
+	reader := Reader{Imports: root}
+	remaining := int64(qualityMaxBytes)
+	for name := range hashes {
+		f, err := reader.open("/canti/imports/" + filepath.ToSlash(name))
+		if err != nil {
+			return err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, remaining+1))
+		closeErr := f.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		remaining -= int64(len(data))
+		if remaining < 0 || digest(data) != hashes[name] {
+			return fmt.Errorf("corpus source changed while freezing: %s", name)
+		}
+		full := filepath.Join(frozen, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestQualityReaderFreezesExternalCorpus(t *testing.T) {
+	root := t.TempDir()
+	name := filepath.Join(root, "answer.txt")
+	if err := os.WriteFile(name, []byte("approved: 30 seconds"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := qualityCorpus{
+		Root:   root,
+		Hashes: map[string]string{"answer.txt": digest([]byte("approved: 30 seconds"))},
+		Cases:  []qualityCase{{ID: "freeze", Split: "test", Query: "approved", Path: "/canti/imports/answer.txt"}},
+	}
+	r := qualityReader(t, c)
+	if err := os.WriteFile(name, []byte("approved: 99 seconds"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := r.open("/canti/imports/answer.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(f)
+	f.Close()
+	if readErr != nil || string(data) != "approved: 30 seconds" {
+		t.Fatalf("reader did not use frozen corpus: %q %v", data, readErr)
+	}
+}
+
 func TestQualityCorpusManifest(t *testing.T) {
 	root := t.TempDir()
 	write := func(name, body string) {

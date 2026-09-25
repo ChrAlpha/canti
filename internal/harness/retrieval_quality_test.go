@@ -170,6 +170,16 @@ func qualityReader(t *testing.T, c qualityCorpus) Reader {
 		if err := verifyQualityCorpus(root, c.Hashes); err != nil {
 			t.Fatal(err)
 		}
+		if c.Root != "" {
+			frozen := t.TempDir()
+			if err := copyQualityCorpus(root, frozen, c.Hashes); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyQualityCorpus(frozen, c.Hashes); err != nil {
+				t.Fatal(err)
+			}
+			root = frozen
+		}
 	}
 	r := Reader{Imports: root}
 	for _, tc := range c.Cases {
