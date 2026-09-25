@@ -75,6 +75,7 @@ type qualityAggregate struct {
 
 func TestRetrievalQuality(t *testing.T) {
 	var c qualityCorpus
+	synthetic := os.Getenv("CANTI_RETRIEVAL_QUALITY_CORPUS") == ""
 	if filename := os.Getenv("CANTI_RETRIEVAL_QUALITY_CORPUS"); filename != "" {
 		data, err := os.ReadFile(filename)
 		if err != nil {
@@ -124,6 +125,19 @@ func TestRetrievalQuality(t *testing.T) {
 	for _, row := range rows {
 		if row.Error != "" {
 			t.Errorf("retrieval error retained in report: %s: %s", row.ID, row.Error)
+		}
+		if !synthetic || row.Budget != 4096 || row.CallLimit != 4 {
+			continue
+		}
+		switch row.ID {
+		case "sparse", "correction", "no-approved-duration", "case-sensitive":
+			if !row.AllGoldCovered || row.SourceRecall != 1 {
+				t.Errorf("stable synthetic evidence regressed: %+v", row)
+			}
+		case "absent":
+			if row.FalsePositive {
+				t.Errorf("stable synthetic absence regressed: %+v", row)
+			}
 		}
 	}
 }
@@ -373,7 +387,8 @@ func qualitySynthetic() qualityCorpus {
 	add("sparse", "synthetic-control", "freeze", []string{"freeze requests before sending.", strings.Repeat("-", 1600) + "freeze provenance before retrying."}, map[int][]string{0: {"before sending"}, 1: {"before retrying"}})
 	add("correction", "synthetic-control", "Orchid timeout", []string{"Orchid timeout originally used 15 seconds.", "Orchid timeout correction: use 30 seconds."}, map[int][]string{0: {"15 seconds"}, 1: {"30 seconds"}})
 	add("absent", "synthetic-negative", "unsupported archive mode", []string{"archive lists and reads; no extra modes are documented."}, nil)
-	add("hard-negative", "synthetic-negative", "Orchid timeout", []string{"Orchid timeout planning discussion; no approved duration was recorded."}, nil)
+	add("hard-negative", "synthetic-negative", "Orchid timeout", []string{"Orchid timeout is the title of a music track."}, nil)
+	add("no-approved-duration", "synthetic-control", "Orchid timeout", []string{"Orchid timeout planning discussion; no approved duration was recorded."}, map[int][]string{0: {"no approved duration was recorded."}})
 	add("case-sensitive", "synthetic-control", "HTTP", []string{"http lower case is a distinct identifier.", "HTTP deadline: 20 seconds."}, map[int][]string{1: {"20 seconds"}})
 	add("second-hit-right-context", "synthetic-adversarial", "checkpoint", []string{"checkpoint" + strings.Repeat("-", 100) + "checkpoint" + strings.Repeat("-", 40) + "approved answer: durable."}, map[int][]string{0: {"durable"}})
 	add("scan-boundary", "synthetic-control", "中文", []string{strings.Repeat("-", retrievalScanBytes-2) + "中文恢复已验证。"}, map[int][]string{0: {"恢复已验证"}})
