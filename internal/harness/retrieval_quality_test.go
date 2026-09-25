@@ -130,7 +130,7 @@ func TestRetrievalQuality(t *testing.T) {
 			continue
 		}
 		switch row.ID {
-		case "sparse", "correction", "no-approved-duration", "case-sensitive":
+		case "sparse", "correction", "no-approved-duration", "case-sensitive", "dense-checkpoint-100":
 			if !row.AllGoldCovered || row.SourceRecall != 1 {
 				t.Errorf("stable synthetic evidence regressed: %+v", row)
 			}
@@ -394,6 +394,9 @@ func qualitySynthetic() qualityCorpus {
 		add(fmt.Sprintf("dense-%d", i), "synthetic-dev", query, []string{body}, map[int][]string{0: {"preserves approved state."}})
 		add(fmt.Sprintf("dense-files-%d", i), "synthetic-dev", query, []string{cluster, query + " preserves approved state."}, map[int][]string{1: {"preserves approved state."}})
 	}
+	prefix, answer := strings.Repeat("checkpoint ", 100), "checkpoint preserves approved state."
+	add("dense-checkpoint-100", "synthetic-dev", "checkpoint",
+		[]string{prefix + strings.Repeat("-", 1516-len(prefix)-len(answer)) + answer}, map[int][]string{0: {"preserves approved state."}})
 	add("sparse", "synthetic-control", "freeze", []string{"freeze requests before sending.", strings.Repeat("-", 1600) + "freeze provenance before retrying."}, map[int][]string{0: {"before sending"}, 1: {"before retrying"}})
 	add("correction", "synthetic-control", "Orchid timeout", []string{"Orchid timeout originally used 15 seconds.", "Orchid timeout correction: use 30 seconds."}, map[int][]string{0: {"15 seconds"}, 1: {"30 seconds"}})
 	add("absent", "synthetic-negative", "unsupported archive mode", []string{"archive lists and reads; no extra modes are documented."}, nil)
