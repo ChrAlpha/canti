@@ -137,6 +137,9 @@ func qualityReader(t *testing.T, c qualityCorpus) Reader {
 	if root == "" {
 		root = t.TempDir()
 		for name, body := range c.Files {
+			if err := validQualityPath(name); err != nil {
+				t.Fatal(err)
+			}
 			name = filepath.Join(root, name)
 			if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 				t.Fatal(err)
@@ -146,10 +149,12 @@ func qualityReader(t *testing.T, c qualityCorpus) Reader {
 			}
 		}
 	}
-	for name, want := range c.Hashes {
-		data, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil || digest(data) != want {
-			t.Fatalf("corpus source hash mismatch: %s: %v", name, err)
+	if root == c.Root && len(c.Files) > 0 {
+		t.Fatal("external corpus cannot include inline files")
+	}
+	if len(c.Hashes) > 0 {
+		if err := verifyQualityCorpus(root, c.Hashes); err != nil {
+			t.Fatal(err)
 		}
 	}
 	r := Reader{Imports: root}

@@ -1,0 +1,184 @@
+package harness
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+const (
+	qualityMaxEntries = 4096
+	qualityMaxBytes   = 64 << 20
+)
+
+func validQualityPath(name string) error {
+	if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+		return fmt.Errorf("unsafe corpus path: %q", name)
+	}
+	for _, part := range strings.Split(name, string(filepath.Separator)) {
+		if forbiddenRetrievalName(part) {
+			return fmt.Errorf("forbidden corpus path: %q", name)
+		}
+	}
+	return nil
+}
+
+func verifyQualityCorpus(root string, hashes map[string]string) error {
+	if len(hashes) == 0 || len(hashes) > qualityMaxEntries {
+		return fmt.Errorf("corpus manifest requires 1..%d files", qualityMaxEntries)
+	}
+	for name := range hashes {
+		if err := validQualityPath(name); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("corpus root is not a directory: %s", root)
+	}
+	var names []string
+	var bytes int64
+	entries := 0
+	err = filepath.WalkDir(root, func(full string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if full == root {
+			return nil
+		}
+		entries++
+		if entries > qualityMaxEntries {
+			return fmt.Errorf("corpus exceeds %d entries", qualityMaxEntries)
+		}
+		name, err := filepath.Rel(root, full)
+		if err != nil {
+			return err
+		}
+		if err := validQualityPath(name); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("non-regular corpus entry: %s", name)
+		}
+		if _, ok := hashes[name]; !ok {
+			return fmt.Errorf("unlisted corpus file: %s", name)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		bytes += info.Size()
+		if bytes > qualityMaxBytes {
+			return fmt.Errorf("corpus exceeds %d bytes", qualityMaxBytes)
+		}
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(names) != len(hashes) {
+		return fmt.Errorf("corpus manifest lists %d files, found %d", len(hashes), len(names))
+	}
+	reader := Reader{Imports: root}
+	readBytes := int64(0)
+	for _, name := range names {
+		f, err := reader.open("/canti/imports/" + filepath.ToSlash(name))
+		if err != nil {
+			return err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, qualityMaxBytes-readBytes+1))
+		closeErr := f.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		readBytes += int64(len(data))
+		if readBytes > qualityMaxBytes || digest(data) != hashes[name] {
+			return fmt.Errorf("corpus source hash mismatch: %s", name)
+		}
+	}
+	return nil
+}
+
+func TestQualityCorpusManifest(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		full := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("evidence/answer.txt", "approved: 30 seconds")
+	write("evidence/distractor.txt", "planning: 15 seconds")
+	hashes := map[string]string{
+		"evidence/answer.txt":     digest([]byte("approved: 30 seconds")),
+		"evidence/distractor.txt": digest([]byte("planning: 15 seconds")),
+	}
+	if err := verifyQualityCorpus(root, hashes); err != nil {
+		t.Fatal(err)
+	}
+	write("evidence/distractor.txt", "planning: 20 seconds")
+	if err := verifyQualityCorpus(root, hashes); err == nil {
+		t.Fatal("changed distractor was accepted")
+	}
+	write("evidence/distractor.txt", "planning: 15 seconds")
+	write("evidence/extra.txt", "unlisted searchable text")
+	if err := verifyQualityCorpus(root, hashes); err == nil {
+		t.Fatal("unlisted searchable file was accepted")
+	}
+	if err := os.Remove(filepath.Join(root, "evidence/extra.txt")); err != nil {
+		t.Fatal(err)
+	}
+	delete(hashes, "evidence/distractor.txt")
+	if err := verifyQualityCorpus(root, hashes); err == nil {
+		t.Fatal("missing distractor manifest entry was accepted")
+	}
+	hashes["evidence/distractor.txt"] = digest([]byte("planning: 15 seconds"))
+	if err := os.Remove(filepath.Join(root, "evidence/distractor.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyQualityCorpus(root, hashes); err == nil {
+		t.Fatal("absent manifest file was accepted")
+	}
+}
+
+func TestQualityCorpusManifestRejectsUnsafeEntries(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"../outside", "/absolute", "a/../b", ".env", "a/.env.local"} {
+		if err := verifyQualityCorpus(root, map[string]string{name: strings.Repeat("0", 64)}); err == nil {
+			t.Errorf("unsafe manifest path accepted: %q", name)
+		}
+	}
+	if err := os.Symlink(root, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyQualityCorpus(root, map[string]string{"linked/anything": strings.Repeat("0", 64)}); err == nil {
+		t.Fatal("symlinked corpus entry was accepted")
+	}
+	if err := os.Remove(filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("must not read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyQualityCorpus(root, map[string]string{}); err == nil {
+		t.Fatal("forbidden corpus entry was accepted")
+	}
+}
