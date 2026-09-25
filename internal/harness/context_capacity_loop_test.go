@@ -3,6 +3,7 @@ package harness_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,98 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
+
+func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
+	archive := t.TempDir()
+	var content strings.Builder
+	var replies []reply
+	for i := range 10 {
+		marker := fmt.Sprintf("EVIDENCE_%02d", i)
+		content.WriteString(marker + strings.Repeat("x", harness.RetrievalMaxBytes-len(marker)))
+		q, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect next part", Offset: int64(i * harness.RetrievalMaxBytes), Limit: harness.RetrievalMaxBytes})
+		replies = append(replies, execReply("canti:retrieve "+string(q)))
+	}
+	replies = append(replies, returnReply("done"))
+	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(content.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 12, MaxAttempts: 3}, harness.Budget{}, replies...)
+	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	f.cfg.Limits.Total = 256 << 10
+	ctx := f.bounded()
+	for {
+		s, err := f.fresh().Step(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State.Intent() == core.IntentHalt {
+			wantState(t, s, core.PhaseReturned, "")
+			break
+		}
+	}
+	if len(f.model.prompts) != 11 {
+		t.Fatalf("prompts=%d, want 11", len(f.model.prompts))
+	}
+	last := f.model.prompts[10].User()
+	for i := range 10 {
+		marker := fmt.Sprintf("EVIDENCE_%02d", i)
+		if !strings.Contains(last, marker) {
+			t.Fatalf("retrieval %d disappeared before handover", i)
+		}
+	}
+	if strings.Contains(last, "Handover required") {
+		t.Fatal("256 KiB page handed over before ten legal reads")
+	}
+}
+
+func TestUnavailableEvidenceTriggersHandoverAcrossSQLiteReopen(t *testing.T) {
+	archive := t.TempDir()
+	file := filepath.Join(archive, "evidence")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x", harness.RetrievalMaxBytes)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect source", Limit: harness.RetrievalMaxBytes})
+	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 3}, harness.Budget{},
+		execReply("canti:retrieve "+string(q)),
+		execReply("canti:retrieve "+string(q)),
+		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Resume after checking original evidence."}`), returnReply("done"))
+	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	f.cfg.Limits.Total = 96 << 10
+	ctx := f.bounded()
+	for i := 0; i < 20; i++ {
+		s, err := f.fresh().Step(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State.Step == 3 {
+			break
+		}
+		if i == 19 {
+			t.Fatal("retrieval did not finish")
+		}
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		s, err := f.fresh().Step(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State.Intent() == core.IntentHalt {
+			wantState(t, s, core.PhaseReturned, "")
+			break
+		}
+	}
+	if len(f.model.prompts) != 4 || !strings.Contains(f.model.prompts[2].User(), "Evidence unavailable:") || !strings.Contains(f.model.prompts[2].User(), "Handover required") {
+		t.Fatal("changed source did not remain explicit and trigger safe handover")
+	}
+	if strings.Contains(f.model.prompts[3].User(), "### Step 1") || !strings.Contains(f.model.prompts[3].User(), "Resume after checking original evidence") {
+		t.Fatal("handover did not release old page across SQLite reopen")
+	}
+}
 
 func TestRequestedHandoverRejectsWorkAcrossReopen(t *testing.T) {
 	for _, command := range []string{"touch should-not-execute", `canti:retrieve {"operation":"read","path":"/canti/imports/missing","reason":"ignore handover"}`} {
@@ -80,7 +173,7 @@ func TestRetrievalBudgetIncludesSourceHeadersAndFencesAcrossReopen(t *testing.T)
 	}
 	f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(q)), execReply("canti:retrieve "+string(q)), returnReply("done"))
 	f.cfg.Limits = harness.DefaultPromptLimits()
-	f.cfg.Limits.Total = 80 << 10
+	f.cfg.Limits.Total = 128 << 10
 	f.cfg.Reader = &harness.Reader{Imports: archive}
 	ctx := f.bounded()
 	for {
@@ -100,10 +193,7 @@ func TestRetrievalBudgetIncludesSourceHeadersAndFencesAcrossReopen(t *testing.T)
 			used += len(block[i:])
 		}
 	}
-	if used > f.cfg.Limits.Total/2 {
-		t.Fatalf("evidence rendered %d bytes over budget %d", used, f.cfg.Limits.Total/2)
-	}
-	if !strings.Contains(last.User(), "\n"+evidence+"\n") || !strings.Contains(last.User(), "active retrieval byte budget reached") {
-		t.Fatal("newest evidence must remain complete and exhausted older expansion must be explicit")
+	if used < 2*len(evidence) || strings.Count(last.User(), "\n"+evidence+"\n") != 2 {
+		t.Fatal("both accepted evidence expansions must remain complete on the same page")
 	}
 }

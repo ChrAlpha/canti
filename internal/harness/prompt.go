@@ -20,11 +20,11 @@ type PromptLimits struct {
 	Goal, Constraints, Environment, Command, Preview, Rejected, Total int
 }
 
-// DefaultPromptLimits returns limits for a 64 KiB prompt.
+// DefaultPromptLimits returns limits for a 128 KiB prompt.
 func DefaultPromptLimits() PromptLimits {
 	return PromptLimits{
 		Goal: 32 << 10, Constraints: 16 << 10, Environment: 2 << 10, Command: 2 << 10,
-		Preview: 4 << 10, Rejected: 2 << 10, Total: 64 << 10,
+		Preview: 4 << 10, Rejected: 2 << 10, Total: 128 << 10,
 	}
 }
 

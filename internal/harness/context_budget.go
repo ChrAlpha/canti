@@ -10,8 +10,13 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-func retrievalExpansionLimit(l PromptLimits) int {
-	return min(l.Total/2, 64<<10)
+func retrievalExpansionReserve() int {
+	const sources = 32
+	// Directory source references fit 8192 JSON bytes; the rendered headers
+	// can add at most 16 bytes per source. File search has one repeated path.
+	return len("Retrieved original evidence:\n") + RetrievalMaxBytes + sources*16 +
+		RetrievalMaxBytes + sources*(len("Evidence unavailable: ")+512+truncationBytes()+1) +
+		2*(RetrievalMaxBytes+1) + 2
 }
 
 func truncationBytes() int {
@@ -66,7 +71,7 @@ func (f Frame) tailBytes(l PromptLimits) int {
 func (f Frame) workCapacity(l PromptLimits) (int, error) {
 	evidence := 0
 	if f.RetrievalEnabled {
-		evidence = retrievalExpansionLimit(l)
+		evidence = retrievalExpansionReserve()
 	}
 	capacity := l.Total - len(f.contextSystem()) - len(f.head(l)) - evidence -
 		f.stepShellBytes(l) - f.failedHandoverShellBytes(l) - f.tailBytes(l)

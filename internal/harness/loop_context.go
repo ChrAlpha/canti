@@ -74,24 +74,23 @@ func (l *Loop) advanceWindow(snap Snapshot, f *Frame) error {
 	return nil
 }
 
-func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) error {
+func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 	if l.cfg.Reader == nil {
-		return nil
+		return 0, nil
 	}
 	f.Retrieved = make(map[int]string)
-	remaining := retrievalExpansionLimit(l.cfg.Limits)
-	for i := len(f.Steps) - 1; i >= 0; i-- {
+	growth := 0
+	maxError := len("Evidence unavailable: ") + 512 + truncationBytes()
+	for i := range f.Steps {
 		r := f.Steps[i].Observation.Retrieval
 		if r == nil {
 			continue
 		}
 		var b strings.Builder
-		const notice = "Evidence expansion stopped: active retrieval byte budget reached. Read the original reference again if needed.\n"
-		rendered := func(text string) int { return len("Retrieved original evidence:\n") + len(fullBlock(text)) }
 		previousPath := ""
-		for i, source := range r.Sources {
+		for _, source := range r.Sources {
 			if err := ctx.Err(); err != nil {
-				return err
+				return 0, err
 			}
 			header := ""
 			if source.Path != previousPath {
@@ -101,33 +100,24 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) error {
 			text, err := l.cfg.Reader.Expand(ctx, source)
 			if err != nil {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return 0, ctx.Err()
 				}
 				text = "Evidence unavailable: " + clip(err.Error(), 512)
+				growth += max(max(0, maxError-len(text))+2*(maxError+1),
+					max(0, source.Length-len(text))+2*(source.Length+1))
+			} else {
+				growth += max(0, maxError-len(text)) + 2*(maxError+1)
 			}
 			part := header + text + "\n"
-			candidate := b.String() + part
-			if i+1 < len(r.Sources) {
-				candidate += notice
-			}
-			if rendered(candidate) > remaining {
-				if rendered(b.String()+notice) <= remaining {
-					b.WriteString(notice)
-				}
-				break
-			}
 			b.WriteString(part)
 			previousPath = source.Path
 		}
-		if b.Len() > 0 {
-			remaining -= rendered(b.String())
-		}
 		f.Retrieved[f.Steps[i].Step] = b.String()
 	}
-	return nil
+	return growth, nil
 }
 
-func (l *Loop) requestHandover(f *Frame) error {
+func (l *Loop) requestHandover(f *Frame, growth int) error {
 	if f.Window == nil || f.Window.Requested {
 		return nil
 	}
@@ -135,14 +125,11 @@ func (l *Loop) requestHandover(f *Frame) error {
 	if err != nil {
 		return err
 	}
-	used, rendered := 0, 0
-	shell := *f
-	shell.Retrieved = nil
+	used := 0
 	for _, step := range f.Steps {
-		used += len(shell.step(step, l.cfg.Limits))
-		rendered += len(f.step(step, l.cfg.Limits))
+		used += len(f.step(step, l.cfg.Limits))
 	}
-	if (l.cfg.WindowSteps > 0 && f.Step-f.Window.FirstStep >= l.cfg.WindowSteps) || (l.cfg.WindowBytes > 0 && rendered >= l.cfg.WindowBytes) || used >= capacity {
+	if (l.cfg.WindowSteps > 0 && f.Step-f.Window.FirstStep >= l.cfg.WindowSteps) || (l.cfg.WindowBytes > 0 && used >= l.cfg.WindowBytes) || used+growth >= capacity {
 		f.Window.Requested = true
 	}
 	return nil
@@ -179,7 +166,8 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err := l.advanceWindow(snap, &f); err != nil {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
-	if err := l.expandRetrieval(ctx, &f); err != nil {
+	growth, err := l.expandRetrieval(ctx, &f)
+	if err != nil {
 		return snap, err
 	}
 	f.Earlier = s.Step - 1 - len(f.Steps)
@@ -194,7 +182,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		}
 	}
 	if s.RequestRev == 0 {
-		if err := l.requestHandover(&f); err != nil {
+		if err := l.requestHandover(&f, growth); err != nil {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 		}
 	}

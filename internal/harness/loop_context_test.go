@@ -84,6 +84,8 @@ func TestZeroTriggersRequestAndAdvanceHandoverAtCapacity(t *testing.T) {
 		replies = append(replies, execReply("echo CAPACITY_PAGE_MARKER "+strings.Repeat("x", 1800)))
 	}
 	f := newFixture(t, core.Limits{MaxSteps: 30, MaxAttempts: 3}, harness.Budget{}, replies...)
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	f.cfg.Limits.Total = 96 << 10
 	if f.cfg.WindowSteps != 0 || f.cfg.WindowBytes != 0 {
 		t.Fatalf("default triggers = %d steps, %d bytes", f.cfg.WindowSteps, f.cfg.WindowBytes)
 	}

@@ -13,8 +13,15 @@ func TestRunRejectsContextWithoutRoomForMaximumHandover(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsDefaultHandoverAtMinimumContext(t *testing.T) {
+func TestRunRejectsContextWithoutRetrievalReserve(t *testing.T) {
 	s := parseSpec(t, "-context-bytes", "65536")
+	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err == nil || !strings.Contains(err.Error(), "handover reserve") {
+		t.Fatalf("accepted context without room for a full retrieval and handover: %v", err)
+	}
+}
+
+func TestRunAcceptsDefaultHandoverWithRetrievalReserve(t *testing.T) {
+	s := parseSpec(t, "-context-bytes", "98304")
 	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err != nil {
 		t.Fatal(err)
 	}

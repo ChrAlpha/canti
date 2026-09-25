@@ -28,6 +28,7 @@ func TestContextAdmissionReservesMaximumHandover(t *testing.T) {
 		t.Fatal(err)
 	}
 	f = budgetFrame()
+	l.Total = 64 << 10
 	f.Goal, f.HandoverBytes = strings.Repeat("x", 23000), 8192
 	if _, err := f.Prompt(l); err != nil {
 		t.Fatalf("base input should fit: %v", err)
@@ -115,7 +116,7 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 	next.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
 	f.Steps = append(f.Steps, next)
-	f.Retrieved = map[int]string{next.Step: strings.Repeat("x", retrievalExpansionLimit(l)-len("Retrieved original evidence:\n")-9)}
+	f.Retrieved = map[int]string{next.Step: strings.Repeat("x", retrievalExpansionReserve()-len("Retrieved original evidence:\n")-9)}
 	next.Step++
 	exit = 1
 	next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &exit,
