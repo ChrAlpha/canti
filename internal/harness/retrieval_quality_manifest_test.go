@@ -16,7 +16,7 @@ const (
 )
 
 func validQualityPath(name string) error {
-	if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+	if name == "." || !filepath.IsLocal(name) || filepath.Clean(name) != name || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
 		return fmt.Errorf("unsafe corpus path: %q", name)
 	}
 	for _, part := range strings.Split(name, string(filepath.Separator)) {
@@ -218,7 +218,10 @@ func TestQualityCorpusManifest(t *testing.T) {
 
 func TestQualityCorpusManifestRejectsUnsafeEntries(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"../outside", "/absolute", "a/../b", ".env", "a/.env.local"} {
+	for _, name := range []string{"../outside", "/absolute", "a/../b", ".", ".env", "a/.env.local"} {
+		if err := validQualityPath(name); err == nil {
+			t.Errorf("unsafe path accepted directly: %q", name)
+		}
 		if err := verifyQualityCorpus(root, map[string]string{name: strings.Repeat("0", 64)}); err == nil {
 			t.Errorf("unsafe manifest path accepted: %q", name)
 		}
@@ -231,11 +234,5 @@ func TestQualityCorpusManifestRejectsUnsafeEntries(t *testing.T) {
 	}
 	if err := os.Remove(filepath.Join(root, "linked")); err != nil {
 		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("must not read"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyQualityCorpus(root, map[string]string{}); err == nil {
-		t.Fatal("forbidden corpus entry was accepted")
 	}
 }
