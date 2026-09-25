@@ -17,13 +17,12 @@ func TestRetrievalTermsCorpusExperiment(t *testing.T) {
 	if filename == "" {
 		t.Skip("external frozen corpus was not supplied")
 	}
-	data, err := os.ReadFile(filename)
+	c, err := readQualityCorpus(filename)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c qualityCorpus
-	if err := json.Unmarshal(data, &c); err != nil {
-		t.Fatal(err)
+	if !validQualityCorpusShape(c) {
+		t.Fatal("invalid quality corpus")
 	}
 	r := qualityReader(t, c)
 	variants := []string{"anchor-literal", "anchor-fold", "terms-literal", "any-sensitive", "any-fold", "all-sensitive", "all-fold"}
@@ -97,7 +96,8 @@ func TestRetrievalTermsCorpusExperiment(t *testing.T) {
 	if len(report) == 0 {
 		t.Fatal("no frozen term queries in corpus")
 	}
-	output := map[string]any{"evidence": "offline candidate generation only; no output budget or ranking; not production or provider evidence", "corpus_sha256": digest(data), "rows": report}
+	corpus, _ := json.Marshal(c)
+	output := map[string]any{"evidence": "offline candidate generation only; no output budget or ranking; not production or provider evidence", "corpus_sha256": digest(corpus), "rows": report}
 	aggregate := map[string][]qualityAggregate{}
 	for variant, rows := range report {
 		aggregate[variant] = qualitySummarize(rows)
@@ -105,6 +105,9 @@ func TestRetrievalTermsCorpusExperiment(t *testing.T) {
 	output["aggregate"] = aggregate
 	encoded, _ := json.MarshalIndent(output, "", "  ")
 	if filename := os.Getenv("CANTI_RETRIEVAL_TERMS_OUTPUT"); filename != "" {
+		if err := validQualityIOPath(filename); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filename, encoded, 0o600); err != nil {
 			t.Fatal(err)
 		}

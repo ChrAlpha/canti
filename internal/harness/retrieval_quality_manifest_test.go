@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,74 @@ const (
 	qualityMaxEntries = 4096
 	qualityMaxBytes   = 64 << 20
 )
+
+func validQualityIOPath(name string) error {
+	for _, part := range strings.Split(name, string(filepath.Separator)) {
+		if forbiddenRetrievalName(part) {
+			return fmt.Errorf("forbidden quality file path: %q", name)
+		}
+	}
+	return nil
+}
+
+func readQualityCorpus(filename string) (qualityCorpus, error) {
+	if err := validQualityIOPath(filename); err != nil {
+		return qualityCorpus{}, err
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return qualityCorpus{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, qualityMaxBytes+1))
+	if err != nil {
+		return qualityCorpus{}, err
+	}
+	if len(data) > qualityMaxBytes {
+		return qualityCorpus{}, fmt.Errorf("quality manifest exceeds %d bytes", qualityMaxBytes)
+	}
+	var c qualityCorpus
+	err = json.Unmarshal(data, &c)
+	return c, err
+}
+
+func validQualityCorpusShape(c qualityCorpus) bool {
+	return c.Format == "retrieval-quality/1" && len(c.Cases) > 0 && len(c.Cases) <= qualityMaxEntries && len(c.Files) <= qualityMaxEntries
+}
+
+func TestQualityCorpusInputBounds(t *testing.T) {
+	for _, name := range []string{".env", "archive/.env.local", "archive/../.env"} {
+		if err := validQualityIOPath(name); err == nil {
+			t.Errorf("forbidden manifest or output path accepted: %q", name)
+		}
+	}
+	filename := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(filename, []byte(`{"format":"retrieval-quality/1","cases":[{"id":"a"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := readQualityCorpus(filename)
+	if err != nil || !validQualityCorpusShape(c) {
+		t.Fatalf("small manifest rejected: %+v %v", c, err)
+	}
+	c.Cases = make([]qualityCase, qualityMaxEntries+1)
+	if validQualityCorpusShape(c) {
+		t.Fatal("unbounded case list accepted")
+	}
+	c.Cases = c.Cases[:1]
+	c.Files = make(map[string]string, qualityMaxEntries+1)
+	for i := range qualityMaxEntries + 1 {
+		c.Files[fmt.Sprint(i)] = ""
+	}
+	if validQualityCorpusShape(c) {
+		t.Fatal("unbounded inline file list accepted")
+	}
+	if err := os.Truncate(filename, qualityMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readQualityCorpus(filename); err == nil {
+		t.Fatal("oversized manifest accepted")
+	}
+}
 
 func validQualityPath(name string) error {
 	if name == "." || !filepath.IsLocal(name) || filepath.Clean(name) != name || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {

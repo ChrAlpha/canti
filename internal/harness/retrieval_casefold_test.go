@@ -79,13 +79,12 @@ func TestRetrievalCasefoldQuality(t *testing.T) {
 	if filename == "" {
 		t.Skip("external frozen corpus was not supplied")
 	}
-	data, err := os.ReadFile(filename)
+	c, err := readQualityCorpus(filename)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c qualityCorpus
-	if err := json.Unmarshal(data, &c); err != nil {
-		t.Fatal(err)
+	if !validQualityCorpusShape(c) {
+		t.Fatal("invalid quality corpus")
 	}
 	r := qualityReader(t, c)
 	var rows []qualityMetrics
@@ -103,6 +102,9 @@ func TestRetrievalCasefoldQuality(t *testing.T) {
 	report := map[string]any{"format": "retrieval-casefold-quality/1", "corpus_sha256": digest(encoded), "rows": rows, "aggregate": qualitySummarize(rows), "ignore_case": true, "evidence_level": "offline Reader; forced case folding includes identifier negatives; no automatic mode selection or provider"}
 	output, _ := json.MarshalIndent(report, "", "  ")
 	if filename := os.Getenv("CANTI_RETRIEVAL_QUALITY_OUTPUT"); filename != "" {
+		if err := validQualityIOPath(filename); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filename, output, 0o600); err != nil {
 			t.Fatal(err)
 		}

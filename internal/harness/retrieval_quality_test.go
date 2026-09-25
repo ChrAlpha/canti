@@ -77,17 +77,15 @@ func TestRetrievalQuality(t *testing.T) {
 	var c qualityCorpus
 	synthetic := os.Getenv("CANTI_RETRIEVAL_QUALITY_CORPUS") == ""
 	if filename := os.Getenv("CANTI_RETRIEVAL_QUALITY_CORPUS"); filename != "" {
-		data, err := os.ReadFile(filename)
+		var err error
+		c, err = readQualityCorpus(filename)
 		if err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(data, &c); err != nil {
 			t.Fatal(err)
 		}
 	} else {
 		c = qualitySynthetic()
 	}
-	if c.Format != "retrieval-quality/1" || len(c.Cases) == 0 {
+	if !validQualityCorpusShape(c) {
 		t.Fatal("invalid quality corpus")
 	}
 	encoded, _ := json.Marshal(c)
@@ -116,6 +114,9 @@ func TestRetrievalQuality(t *testing.T) {
 		t.Fatal(err)
 	}
 	if filename := os.Getenv("CANTI_RETRIEVAL_QUALITY_OUTPUT"); filename != "" {
+		if err := validQualityIOPath(filename); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filename, append(data, '\n'), 0o600); err != nil {
 			t.Fatal(err)
 		}
