@@ -14,31 +14,19 @@ func TestRetrievalSearchCoalescesSelectedFileRanges(t *testing.T) {
 	q := RetrievalQuery{Operation: "search", Path: path, Reason: "find evidence", Query: "needle", Limit: 320}
 	selected := Retrieval{Query: q}
 	searchRetrieval([]byte(body), q.Limit, &selected)
-	if len(selected.Sources) < 2 {
-		t.Fatalf("fixture has no overlapping selected ranges: %+v", selected)
+	if len(selected.Sources) != 1 {
+		t.Fatalf("dense matches did not select one range: %+v", selected)
 	}
 	result := retrieveOK(t, r, q)
 	if result.NextOffset != selected.NextOffset || result.More != (selected.NextOffset < int64(len(body))) {
 		t.Fatalf("selection cursor changed: selected=%+v result=%+v", selected, result)
 	}
-	if len(result.Sources) >= len(selected.Sources) {
-		t.Fatalf("overlapping references were not coalesced: selected=%d result=%d", len(selected.Sources), len(result.Sources))
-	}
-	start, end := selected.Sources[0].Offset, selected.Sources[0].Offset+int64(selected.Sources[0].Length)
-	group := 1
-	for group < len(selected.Sources) && selected.Sources[group].Offset < end {
-		end = max(end, selected.Sources[group].Offset+int64(selected.Sources[group].Length))
-		group++
-	}
-	if group < 2 || len(result.Sources) != len(selected.Sources)-group+1 {
-		t.Fatalf("unexpected coalescing: selected=%+v result=%+v", selected.Sources, result.Sources)
+	if len(result.Sources) != 1 || result.Sources[0] != selected.Sources[0] {
+		t.Fatalf("selection changed after delivery: selected=%+v result=%+v", selected.Sources, result.Sources)
 	}
 	first := result.Sources[0]
-	if first.Offset != start || first.Offset+int64(first.Length) != end {
-		t.Fatalf("merged range does not cover selected bytes: %+v", result.Sources)
-	}
 	content, err := r.Expand(context.Background(), first)
-	if err != nil || content != body[start:end] {
+	if err != nil || content != body[first.Offset:first.Offset+int64(first.Length)] {
 		t.Fatalf("merged bytes or SHA mismatch: %q %v", content, err)
 	}
 }
@@ -57,7 +45,7 @@ func TestRetrievalSearchCoalescesDirectoryWithoutChangingCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := retrieveOK(t, r, q)
-	if result.NextCursor != selected.NextCursor || result.More != selected.More || len(result.Sources) >= len(selected.Sources) {
+	if result.NextCursor != selected.NextCursor || result.More != selected.More || len(result.Sources) != len(selected.Sources) {
 		t.Fatalf("directory selection changed: selected=%+v result=%+v", selected, result)
 	}
 	total := 0
@@ -76,16 +64,14 @@ func TestRetrievalSearchCoalescesDirectoryWithoutChangingCursor(t *testing.T) {
 func TestRetrievalCoalesceFailsClosedOnChangedSource(t *testing.T) {
 	body := strings.Repeat("needle ", 20)
 	r, path := retrievalFixture(t, body)
-	q := RetrievalQuery{Operation: "search", Path: path, Reason: "find evidence", Query: "needle", Limit: 320}
-	selected := Retrieval{Query: q}
-	searchRetrieval([]byte(body), q.Limit, &selected)
-	if len(selected.Sources) < 2 {
-		t.Fatal("fixture has no overlap")
+	selected := []SourceRange{
+		sourceRange(path, 0, []byte(body[:134])),
+		sourceRange(path, 7, []byte(body[7:])),
 	}
 	if err := os.WriteFile(r.Imports+"/evidence", []byte(strings.Repeat("change ", 20)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.coalesceSources(context.Background(), selected.Sources); err == nil {
+	if _, err := r.coalesceSources(context.Background(), selected); err == nil {
 		t.Fatal("changed original source was accepted")
 	}
 	if err := os.Remove(r.Imports + "/evidence"); err != nil {
@@ -94,15 +80,15 @@ func TestRetrievalCoalesceFailsClosedOnChangedSource(t *testing.T) {
 	if err := os.Symlink("/dev/null", r.Imports+"/evidence"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.coalesceSources(context.Background(), selected.Sources); err == nil {
+	if _, err := r.coalesceSources(context.Background(), selected); err == nil {
 		t.Fatal("symlink replacement was accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := r.coalesceSources(ctx, selected.Sources); err != context.Canceled {
+	if _, err := r.coalesceSources(ctx, selected); err != context.Canceled {
 		t.Fatalf("cancellation: %v", err)
 	}
-	if got, err := r.coalesceSources(context.Background(), selected.Sources[:1]); err != nil || len(got) != 1 || got[0] != selected.Sources[0] {
+	if got, err := r.coalesceSources(context.Background(), selected[:1]); err != nil || len(got) != 1 || got[0] != selected[0] {
 		t.Fatalf("singleton was re-read: %+v %v", got, err)
 	}
 }

@@ -28,7 +28,7 @@ func TestRetrievalSearchContinuationSurvivesPromptPreviewLimit(t *testing.T) {
 		t.Fatalf("sent %d requests", len(f.model.sent))
 	}
 	request := string(f.model.sent[1])
-	if !strings.Contains(request, `"next_offset":32`) || !strings.Contains(request, `"more":true`) {
+	if !strings.Contains(request, `"next_offset":8192`) || !strings.Contains(request, `"more":true`) {
 		t.Fatal("search continuation metadata was truncated before reaching the model")
 	}
 }

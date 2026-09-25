@@ -58,12 +58,13 @@ func searchRetrieval(data []byte, limit int, result *Retrieval) {
 
 func searchRanges(data []byte, limit, end, maxSources, references int, result *Retrieval) (int, int) {
 	q := result.Query
+	padding := min(128, (limit-len(q.Query))/2)
 	var folded foldedLiteral
 	if q.IgnoreCase {
 		folded = newFoldedLiteral(q.Query)
 	}
 	pos := 0
-	for pos < end && len(result.Sources) < maxSources {
+	for pos < end {
 		match := bytes.Index(data[pos:], []byte(q.Query))
 		length := len(q.Query)
 		if q.IgnoreCase {
@@ -74,11 +75,6 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 			break
 		}
 		match += pos
-		if limit < length {
-			pos = match
-			break
-		}
-		padding := min(128, (limit-length)/2)
 		start, stop := max(0, match-padding), min(len(data), match+length+padding)
 		for start < match && !utf8.RuneStart(data[start]) {
 			start++
@@ -86,17 +82,62 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 		for stop < len(data) && !utf8.RuneStart(data[stop]) {
 			stop--
 		}
-		source := sourceRange(q.Path, q.Offset+int64(start), data[start:stop])
-		if references >= 0 {
-			encoded, _ := json.Marshal(source)
-			if len(encoded)+1 > references {
+		last := len(result.Sources) - 1
+		merge := last >= 0 && result.Sources[last].Path == q.Path &&
+			q.Offset+int64(start) <= result.Sources[last].Offset+int64(result.Sources[last].Length)
+		if merge {
+			previous := result.Sources[last]
+			start = int(previous.Offset - q.Offset)
+			stop = max(stop, start+previous.Length)
+			allowed := start + previous.Length + limit
+			if stop > allowed {
+				stop = allowed
+				for stop > match && !utf8.RuneStart(data[stop]) {
+					stop--
+				}
+			}
+			if stop < match+length {
 				pos = match
 				break
 			}
-			references -= len(encoded) + 1
+		} else {
+			if len(result.Sources) == maxSources || limit < length {
+				pos = match
+				break
+			}
+			padding := min(128, (limit-length)/2)
+			start, stop = max(0, match-padding), min(len(data), match+length+padding)
+			for start < match && !utf8.RuneStart(data[start]) {
+				start++
+			}
+			for stop < len(data) && !utf8.RuneStart(data[stop]) {
+				stop--
+			}
 		}
-		result.Sources = append(result.Sources, source)
-		limit -= stop - start
+		source := sourceRange(q.Path, q.Offset+int64(start), data[start:stop])
+		added := stop - start
+		if merge {
+			added -= result.Sources[last].Length
+		}
+		if references >= 0 {
+			available := references
+			if merge {
+				old, _ := json.Marshal(result.Sources[last])
+				available += len(old) + 1
+			}
+			encoded, _ := json.Marshal(source)
+			if len(encoded)+1 > available {
+				pos = match
+				break
+			}
+			references = available - len(encoded) - 1
+		}
+		if merge {
+			result.Sources[last] = source
+		} else {
+			result.Sources = append(result.Sources, source)
+		}
+		limit -= added
 		pos = match + length
 		if q.IgnoreCase {
 			_, width := utf8.DecodeRune(data[match:])
