@@ -177,9 +177,11 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	if r := o.Retrieval; r != nil && r.Query.Operation == "list" && r.Error == "" {
 		entries, _ := json.Marshal(r.Entries)
 		b.WriteString("\nEntries: " + string(entries) + "\n")
-	} else {
+	} else if o.Retrieval == nil {
 		b.WriteByte('\n')
 		writeQuote(&b, "Preview", o.Preview, l.Preview)
+		b.WriteByte('\n')
+	} else {
 		b.WriteByte('\n')
 	}
 	if r := o.Retrieval; r != nil {
