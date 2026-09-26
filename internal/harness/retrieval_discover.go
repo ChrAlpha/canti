@@ -61,7 +61,8 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		cursor = discoveryCursor{}
 		if err != nil || decodeAction(string(encoded), &cursor) != nil || cursor.Binding != digest(bound) ||
 			cursor.Through < 1 || cursor.Through > len(names) || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
-			cursor.SkippedCount < 0 || cursor.SkippedCount > 3*retrievalMaxEntries || len(cursor.Skipped) > 2 || len(cursor.Skipped) > cursor.SkippedCount {
+			cursor.SkippedCount < 0 || cursor.SkippedCount > 3*(cursor.Through-cursor.Step)+cursor.Field ||
+			cursor.SkippedCount > 0 && !cursor.Incomplete || len(cursor.Skipped) != min(cursor.SkippedCount, 2) {
 			return errors.New("invalid discovery cursor or changed path/query/history")
 		}
 		for _, skip := range cursor.Skipped {

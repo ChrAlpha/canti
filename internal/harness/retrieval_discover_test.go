@@ -316,6 +316,24 @@ func TestDiscoverySkipIdentifiesArtifactNamedPreview(t *testing.T) {
 	}
 }
 
+func TestDiscoveryThreeTextFieldsSkippedAcrossPage(t *testing.T) {
+	r := discoveryFixture(t)
+	for i := 1; i <= 257; i++ {
+		discoveryStep(t, r, i, "work", "unrelated", "", false)
+	}
+	discoveryStep(t, r, 257, "needle\x00command", "needle\x00preview", "needle\x00artifact", false)
+	q := discoveryQuery()
+	first := retrieveOK(t, r, q)
+	if !first.More || !first.Incomplete || first.SkippedCount != 3 || len(first.Skipped) != 2 || first.Skipped[0].Field != "command" || first.Skipped[1].Field != "artifact" {
+		t.Fatalf("wrong first-page gaps: %+v", first)
+	}
+	q.Cursor = first.NextCursor
+	last := retrieveOK(t, r, q)
+	if last.More || !last.Incomplete || last.SkippedCount != 3 || len(last.Skipped) != 2 {
+		t.Fatalf("lost gaps across page: %+v", last)
+	}
+}
+
 func TestDiscoveryFatalMetadataAfterSkippedText(t *testing.T) {
 	r := discoveryFixture(t)
 	meta := discoveryStep(t, r, 1, "work", "needle older", "", false)
@@ -371,7 +389,7 @@ func TestDiscoveryRejectsMalformedCursorAndMissingSteps(t *testing.T) {
 	if err := json.Unmarshal(data, &original); err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]any{"binding": nil, "step": 0, "through": 3, "field": 3, "offset": -1, "unknown": true} {
+	for key, value := range map[string]any{"binding": nil, "step": 0, "through": 3, "field": 3, "offset": -1, "unknown": true, "skipped_count": 7} {
 		changed := make(map[string]any)
 		for k, v := range original {
 			changed[k] = v
@@ -382,6 +400,30 @@ func TestDiscoveryRejectsMalformedCursorAndMissingSteps(t *testing.T) {
 		got, err := r.Retrieve(t.Context(), q)
 		if err != nil || got.Error == "" || got.More {
 			t.Fatalf("malformed cursor accepted: %s %+v %v", key, got, err)
+		}
+	}
+	for label, mutate := range map[string]func(map[string]any){
+		"false_incomplete": func(c map[string]any) {
+			c["step"], c["field"], c["skipped_count"] = 1, 0, 1
+			c["skipped"] = []DiscoverySkip{{Step: 2, Field: "preview", Reason: "nul"}}
+			c["incomplete"] = false
+		},
+		"missing_sample": func(c map[string]any) {
+			c["step"], c["field"], c["skipped_count"] = 1, 0, 2
+			c["skipped"] = []DiscoverySkip{{Step: 2, Field: "preview", Reason: "nul"}}
+			c["incomplete"] = true
+		},
+	} {
+		changed := make(map[string]any)
+		for k, v := range original {
+			changed[k] = v
+		}
+		mutate(changed)
+		encoded, _ := json.Marshal(changed)
+		q.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+		got, err := r.Retrieve(t.Context(), q)
+		if err != nil || got.Error == "" || got.More {
+			t.Fatalf("malformed cursor accepted: %s %+v %v", label, got, err)
 		}
 	}
 	q.Cursor = ""
