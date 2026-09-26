@@ -42,15 +42,23 @@ type SourceRange struct {
 	SHA256 string `json:"sha256"`
 }
 
+type DiscoverySkip struct {
+	Step   int    `json:"step"`
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
 type Retrieval struct {
-	Query      RetrievalQuery `json:"query"`
-	Sources    []SourceRange  `json:"sources,omitempty"`
-	Entries    []string       `json:"entries,omitempty"`
-	NextOffset int64          `json:"next_offset"`
-	NextCursor string         `json:"next_cursor,omitempty"`
-	More       bool           `json:"more"`
-	Incomplete bool           `json:"incomplete,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	Query        RetrievalQuery  `json:"query"`
+	Sources      []SourceRange   `json:"sources,omitempty"`
+	Entries      []string        `json:"entries,omitempty"`
+	NextOffset   int64           `json:"next_offset"`
+	NextCursor   string          `json:"next_cursor,omitempty"`
+	More         bool            `json:"more"`
+	Incomplete   bool            `json:"incomplete,omitempty"`
+	SkippedCount int             `json:"skipped_count,omitempty"`
+	Skipped      []DiscoverySkip `json:"skipped,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 type Reader struct {

@@ -175,17 +175,22 @@ func decimalDigits(n int64) int {
 	return digits
 }
 
+var (
+	errTextNUL  = errors.New("source contains NUL; only UTF-8 text is supported")
+	errTextUTF8 = errors.New("source is not UTF-8 text or offset splits a character")
+)
+
 func textPrefix(data []byte, partial bool) ([]byte, error) {
 	for i := 0; i < len(data); {
 		if data[i] == 0 {
-			return nil, errors.New("source contains NUL; only UTF-8 text is supported")
+			return nil, errTextNUL
 		}
 		_, size := utf8.DecodeRune(data[i:])
 		if size == 1 && data[i] >= utf8.RuneSelf {
 			if partial && !utf8.FullRune(data[i:]) {
 				return data[:i], nil
 			}
-			return nil, errors.New("source is not UTF-8 text or offset splits a character")
+			return nil, errTextUTF8
 		}
 		i += size
 	}

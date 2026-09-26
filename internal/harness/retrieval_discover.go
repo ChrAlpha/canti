@@ -18,12 +18,14 @@ import (
 const discoveryScanBytes = 8 << 20
 
 type discoveryCursor struct {
-	Binding    string `json:"binding"`
-	Through    int    `json:"through"`
-	Step       int    `json:"step"`
-	Field      int    `json:"field"`
-	Offset     int64  `json:"offset"`
-	Incomplete bool   `json:"incomplete,omitempty"`
+	Binding      string          `json:"binding"`
+	Through      int             `json:"through"`
+	Step         int             `json:"step"`
+	Field        int             `json:"field"`
+	Offset       int64           `json:"offset"`
+	Incomplete   bool            `json:"incomplete,omitempty"`
+	SkippedCount int             `json:"skipped_count,omitempty"`
+	Skipped      []DiscoverySkip `json:"skipped,omitempty"`
 }
 
 func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *Retrieval) error {
@@ -58,11 +60,19 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		encoded, err := base64.RawURLEncoding.DecodeString(q.Cursor)
 		cursor = discoveryCursor{}
 		if err != nil || decodeAction(string(encoded), &cursor) != nil || cursor.Binding != digest(bound) ||
-			cursor.Through < 1 || cursor.Through > len(names) || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 {
+			cursor.Through < 1 || cursor.Through > len(names) || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
+			cursor.SkippedCount < 0 || cursor.SkippedCount > 3*retrievalMaxEntries || len(cursor.Skipped) > 2 || len(cursor.Skipped) > cursor.SkippedCount {
 			return errors.New("invalid discovery cursor or changed path/query/history")
+		}
+		for _, skip := range cursor.Skipped {
+			if skip.Step < 1 || skip.Step > cursor.Through || (skip.Field != "command" && skip.Field != "preview" && skip.Field != "artifact") ||
+				(skip.Reason != "nul" && skip.Reason != "utf8") {
+				return errors.New("invalid discovery cursor or changed path/query/history")
+			}
 		}
 	}
 	result.Incomplete = cursor.Incomplete
+	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]DiscoverySkip(nil), cursor.Skipped...)
 	remaining, references := discoveryScanBytes, RetrievalMaxBytes-2
 	matchBytes := queryMatchBytes(q)
 	for examined := 0; cursor.Step > 0 && examined < 256; examined++ {
@@ -105,6 +115,33 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 			partLimit, partRefs := min(max(matchBytes, limit-metaBytes), max(matchBytes, 512)), max(0, references-metaRefs)
 			left, refs, read, err := r.searchDirectoryFile(ctx, remaining, partLimit, 1, partRefs, &part)
 			if err != nil {
+				if errors.Is(err, errTextNUL) || errors.Is(err, errTextUTF8) {
+					reason := "utf8"
+					if errors.Is(err, errTextNUL) {
+						reason = "nul"
+					}
+					field := "artifact"
+					if strings.HasSuffix(partQuery.Path, "/command") {
+						field = "command"
+					}
+					if strings.HasSuffix(partQuery.Path, "/preview") {
+						field = "preview"
+					}
+					skip := DiscoverySkip{Step: cursor.Step, Field: field, Reason: reason}
+					result.SkippedCount++
+					if len(result.Skipped) == 0 {
+						result.Skipped = append(result.Skipped, skip)
+					} else if len(result.Skipped) == 1 {
+						result.Skipped = append(result.Skipped, skip)
+					} else {
+						result.Skipped[1] = skip
+					}
+					result.Incomplete = true
+					cursor.Field++
+					cursor.Offset = 0
+					remaining -= read
+					continue
+				}
 				return fmt.Errorf("discover %s: %w", partQuery.Path, err)
 			}
 			remaining -= read
@@ -142,6 +179,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 func finishDiscovery(result *Retrieval, cursor discoveryCursor) error {
 	if cursor.Step > 0 {
 		cursor.Incomplete = result.Incomplete
+		cursor.SkippedCount, cursor.Skipped = result.SkippedCount, result.Skipped
 		encoded, _ := json.Marshal(cursor)
 		result.More = true
 		result.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)

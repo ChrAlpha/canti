@@ -215,7 +215,7 @@ func TestDiscoveryScanAndStepBoundaries(t *testing.T) {
 }
 
 func TestDiscoveryFailuresNeverReturnPartialEvidence(t *testing.T) {
-	for _, kind := range []string{"missing", "binary", "size", "meta", "outside", "environment", "symlink"} {
+	for _, kind := range []string{"missing", "size", "meta", "outside", "environment", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			r := discoveryFixture(t)
 			meta := discoveryStep(t, r, 1, "work", "needle", "needle original", true)
@@ -226,8 +226,6 @@ func TestDiscoveryFailuresNeverReturnPartialEvidence(t *testing.T) {
 			switch kind {
 			case "missing":
 				err = os.Remove(artifact)
-			case "binary":
-				err = os.WriteFile(artifact, []byte("needle\x00original"), 0o600)
 			case "size":
 				err = os.WriteFile(artifact, []byte("short"), 0o600)
 			case "meta":
@@ -248,6 +246,42 @@ func TestDiscoveryFailuresNeverReturnPartialEvidence(t *testing.T) {
 			got, err := r.Retrieve(t.Context(), discoveryQuery())
 			if err != nil || got.Error == "" || len(got.Sources) != 0 || got.More || got.NextCursor != "" {
 				t.Fatalf("partial failure looked successful: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDiscoverySkipsNonTextSourcesAcrossPages(t *testing.T) {
+	for _, bad := range []string{"needle\x00noise", "needle\xffnoise"} {
+		t.Run(fmt.Sprintf("%x", bad[len("needle")]), func(t *testing.T) {
+			r := discoveryFixture(t)
+			discoveryStep(t, r, 1, "work", "needle older proof", "", false)
+			for i := 2; i <= 258; i++ {
+				preview := "unrelated"
+				if i == 258 {
+					preview = "needle recent proof"
+				}
+				discoveryStep(t, r, i, "work", preview, "", false)
+			}
+			path := filepath.Join(r.History, "run", "steps", "00000002", "preview")
+			if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(r.History, "run", "steps", "00000257", "preview"), []byte(bad), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			q := discoveryQuery()
+			first := retrieveOK(t, r, q)
+			if !first.More || first.SkippedCount != 1 || len(first.Skipped) != 1 || first.Skipped[0].Step != 257 ||
+				!strings.Contains(discoveryTexts(t, r, first)["/canti/runs/run/steps/00000258/preview"], "recent proof") {
+				t.Fatalf("lost recent source: %+v", first)
+			}
+			q.Cursor = first.NextCursor
+			last := retrieveOK(t, r, q)
+			if last.More || !last.Incomplete || last.SkippedCount != 2 || len(last.Skipped) != 2 ||
+				last.Skipped[0].Step != 257 || last.Skipped[1].Step != 2 || last.Skipped[1].Field != "preview" ||
+				!strings.Contains(discoveryTexts(t, r, last)["/canti/runs/run/steps/00000001/preview"], "older proof") {
+				t.Fatalf("lost valid source or gap: %+v", last)
 			}
 		})
 	}

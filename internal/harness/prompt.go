@@ -158,7 +158,11 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString(", set by explicit resolution")
 	}
 	if r := o.Retrieval; r != nil {
-		fmt.Fprintf(&b, "\nRetrieval: %d original ranges, %d directory entries", len(r.Sources), len(r.Entries))
+		kind := "original ranges"
+		if r.Query.Operation == "discover" {
+			kind = "candidate ranges"
+		}
+		fmt.Fprintf(&b, "\nRetrieval: %d %s, %d directory entries", len(r.Sources), kind, len(r.Entries))
 	} else if o.Handover != nil {
 		b.WriteString("\nHandover proposal recorded")
 	} else {
@@ -186,12 +190,14 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	}
 	if r := o.Retrieval; r != nil {
 		status, _ := json.Marshal(struct {
-			NextOffset int64  `json:"next_offset"`
-			NextCursor string `json:"next_cursor,omitempty"`
-			More       bool   `json:"more"`
-			Incomplete bool   `json:"incomplete,omitempty"`
-			Error      string `json:"error,omitempty"`
-		}{r.NextOffset, r.NextCursor, r.More, r.Incomplete, clip(r.Error, 512)})
+			NextOffset   int64           `json:"next_offset"`
+			NextCursor   string          `json:"next_cursor,omitempty"`
+			More         bool            `json:"more"`
+			Incomplete   bool            `json:"incomplete,omitempty"`
+			SkippedCount int             `json:"skipped_count,omitempty"`
+			Skipped      []DiscoverySkip `json:"skipped,omitempty"`
+			Error        string          `json:"error,omitempty"`
+		}{r.NextOffset, r.NextCursor, r.More, r.Incomplete, r.SkippedCount, r.Skipped, clip(r.Error, 512)})
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
 	if text := f.Retrieved[s.Step]; text != "" {
