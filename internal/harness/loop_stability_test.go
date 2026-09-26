@@ -224,8 +224,8 @@ func TestLoopLongStability(t *testing.T) {
 	sequence := int64(0)
 	windowFirst := 1
 	var pendingHandover *harness.Handover
-	var pendingStep, retrievalStep int
-	var pendingSources []harness.SourceRange
+	var pendingStep int
+	evidenceCounts := map[string]int{}
 	for {
 		page, err := f.store.Transitions(ctx, runID, sequence, 256)
 		if err != nil {
@@ -260,18 +260,15 @@ func TestLoopLongStability(t *testing.T) {
 						}
 						windowFirst = w.FirstStep
 						pendingHandover = nil
+						clear(evidenceCounts)
 					} else if w.FirstStep != windowFirst {
 						t.Fatal("context window advanced without an accepted handover or moved backward")
 					}
-					if len(pendingSources) > 0 && w.FirstStep <= retrievalStep {
-						for _, source := range pendingSources {
-							text, err := reader.Expand(ctx, source)
-							if err != nil || !strings.Contains(string(tr.Facts.Request.Body), text) {
-								t.Fatal("retrieved original evidence missing from next frozen request")
-							}
-						}
+				}
+				for evidence, count := range evidenceCounts {
+					if strings.Count(string(tr.Facts.Request.Body), evidence) != count {
+						t.Fatal("retrieved original evidence missing or duplicated in frozen request")
 					}
-					pendingSources = nil
 				}
 				if w.FirstStep > 1 && (w.SourceStep != w.FirstStep-1 || w.Handover == "") {
 					t.Fatal("handover provenance is discontinuous")
@@ -311,9 +308,13 @@ func TestLoopLongStability(t *testing.T) {
 						if !strings.Contains(payload, o.Retrieval.Query.Path) {
 							t.Fatal("retrieval observed a different source path")
 						}
-						pendingSources = append(pendingSources[:0], o.Retrieval.Sources...)
-						retrievalStep = tr.From.Step
 						for _, source := range o.Retrieval.Sources {
+							text, err := reader.Expand(ctx, source)
+							if err != nil {
+								t.Fatal("cannot verify retrieved original evidence")
+							}
+							evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
+							evidenceCounts[evidence]++
 							unique[source.Path] = true
 							retrievedBytes += source.Length
 						}
