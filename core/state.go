@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // Phase is the last durable boundary a run has reached.
@@ -529,6 +530,14 @@ func (s State) advance() State {
 }
 
 func effectID(runID string, step int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%d", len(runID), runID, step)))
-	return "effect_" + hex.EncodeToString(sum[:])
+	var input [40]byte
+	buf := strconv.AppendInt(input[:0], int64(len(runID)), 10)
+	buf = append(buf, ':')
+	buf = append(buf, runID...)
+	buf = strconv.AppendInt(buf, int64(step), 10)
+	sum := sha256.Sum256(buf)
+	var id [71]byte
+	copy(id[:], "effect_")
+	hex.Encode(id[7:], sum[:])
+	return string(id[:])
 }

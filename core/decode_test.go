@@ -21,6 +21,8 @@ func TestDecodeValidDecisions(t *testing.T) {
 		{name: "empty return", raw: `{"kind":"return","payload":""}`, wantKind: core.Return},
 		{name: "reordered fields", raw: ` { "payload": "one\ntwo", "kind": "exec" } `, wantKind: core.Exec, wantBody: "one\ntwo"},
 		{name: "unicode escapes", raw: `{"kind":"return","payload":"\u4f60\u597d"}`, wantKind: core.Return, wantBody: "\u4f60\u597d"},
+		{name: "escaped field names", raw: `{"\u006b\u0069nd":"exec","\u0070ayload":"x"}`, wantKind: core.Exec, wantBody: "x"},
+		{name: "surrogate pair", raw: `{"kind":"return","payload":"\ud83d\ude00"}`, wantKind: core.Return, wantBody: "😀"},
 	}
 
 	for _, tt := range tests {
@@ -60,6 +62,7 @@ func TestDecodeRejectsInvalidProtocol(t *testing.T) {
 		{name: "unsupported kind", raw: `{"kind":"wait","payload":"x"}`},
 		{name: "duplicate field", raw: `{"kind":"exec","kind":"return","payload":"x"}`},
 		{name: "escaped duplicate field", raw: `{"kind":"exec","payload":"x","\u0070ayload":"y"}`},
+		{name: "escaped duplicate kind", raw: `{"kind":"exec","\u006b\u0069nd":"return","payload":"x"}`},
 		{name: "trailing value", raw: `{"kind":"exec","payload":"x"} {}`},
 		{name: "trailing garbage", raw: `{"kind":"exec","payload":"x"} !`},
 		{name: "truncated", raw: `{"kind":"exec","payload":"x"`},
