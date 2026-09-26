@@ -1,8 +1,10 @@
 package core_test
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
 )
@@ -99,4 +101,40 @@ func TestDecodeIsSafeForConcurrentCalls(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func FuzzDecodeAcceptedDecision(f *testing.F) {
+	for _, raw := range [][]byte{
+		[]byte(`{"kind":"exec","payload":"go test ./..."}`),
+		[]byte(`{"\u006b\u0069nd":"return","payload":"\ud83d\ude00"}`),
+		[]byte(`{"kind":"exec","kind":"return","payload":"x"}`),
+		[]byte(`{"kind":null,"payload":"x"}`),
+		[]byte(`{"kind":"exec","payload":"x"} {}`),
+		[]byte{0xff},
+	} {
+		f.Add(raw)
+	}
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		got, err := core.Decode(raw)
+		if err != nil {
+			return
+		}
+		if !utf8.Valid(raw) || !json.Valid(raw) {
+			t.Fatalf("Decode(%q) accepted invalid input", raw)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 2 {
+			t.Fatalf("Decode(%q) accepted unexpected fields", raw)
+		}
+		var kind, payload *string
+		if err := json.Unmarshal(fields["kind"], &kind); err != nil || kind == nil || string(got.Kind) != *kind {
+			t.Fatalf("Decode(%q) produced invalid kind %q", raw, got.Kind)
+		}
+		if err := json.Unmarshal(fields["payload"], &payload); err != nil || payload == nil || got.Payload != *payload {
+			t.Fatalf("Decode(%q) produced invalid payload %q", raw, got.Payload)
+		}
+		if got.Kind != core.Exec && got.Kind != core.Return {
+			t.Fatalf("Decode(%q) accepted unsupported kind %q", raw, got.Kind)
+		}
+	})
 }
