@@ -1,0 +1,348 @@
+package harness
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func discoveryFixture(t *testing.T) Reader {
+	t.Helper()
+	r := Reader{History: t.TempDir(), Artifacts: t.TempDir()}
+	if err := os.MkdirAll(filepath.Join(r.History, "run", "steps"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func discoveryStep(t *testing.T, r Reader, step int, command, preview, output string, complete bool) string {
+	t.Helper()
+	dir := filepath.Join(r.History, "run", "steps", fmt.Sprintf("%08d", step))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := "unavailable"
+	if output != "" {
+		name := fmt.Sprintf("step-%d", step)
+		if err := os.WriteFile(filepath.Join(r.Artifacts, name), []byte(output), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		artifact = "/canti/artifacts/" + name
+	}
+	meta := fmt.Sprintf("step: %d\nexecution: exited\nexit_code: 0\nresolved: false\noutput: %s\noutput_bytes: %d\noutput_complete: %t\n", step, artifact, len(output), complete)
+	for name, body := range map[string]string{"command": command, "preview": preview, "meta": meta} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return meta
+}
+
+func discoveryQuery() RetrievalQuery {
+	return RetrievalQuery{Operation: "discover", Path: "/canti/runs/run/steps", Query: "needle", Reason: "recover original evidence"}
+}
+
+func discoveryTexts(t *testing.T, r Reader, result Retrieval) map[string]string {
+	t.Helper()
+	texts := map[string]string{}
+	for _, source := range result.Sources {
+		body, err := r.Expand(t.Context(), source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		texts[source.Path] += body
+	}
+	return texts
+}
+
+func TestDiscoveryOriginalSourcesAndEchoExclusion(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "run original job", "needle preview duplicate", "needle original approval", true)
+	discoveryStep(t, r, 2, `canti:retrieve {"query":"needle"}`, "needle retrieval echo", "", false)
+	discoveryStep(t, r, 3, "canti:handover {}", "needle handover echo", "", false)
+	discoveryStep(t, r, 4, "# canti:discovery\nsearch history", "needle shell echo", "needle shell echo", true)
+	result := retrieveOK(t, r, discoveryQuery())
+	texts := discoveryTexts(t, r, result)
+	if result.More || result.Incomplete || len(texts) != 2 || !strings.Contains(texts["/canti/artifacts/step-1"], "original approval") || !strings.Contains(texts["/canti/runs/run/steps/00000001/meta"], "output_complete: true") {
+		t.Fatalf("wrong original candidates: %+v %v", result, texts)
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), "original approval") {
+		t.Fatal("discovery persisted original body")
+	}
+}
+
+func TestDiscoveryPartialArtifactAndTrueTailPreview(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "execute original", "needle true tail beyond retained output", "needle retained head", false)
+	discoveryStep(t, r, 2, "execute other", "needle available preview", "", false)
+	result := retrieveOK(t, r, discoveryQuery())
+	texts := discoveryTexts(t, r, result)
+	for path, want := range map[string]string{
+		"/canti/runs/run/steps/00000001/preview": "true tail",
+		"/canti/artifacts/step-1":                "retained head",
+		"/canti/runs/run/steps/00000002/preview": "available preview",
+	} {
+		if !strings.Contains(texts[path], want) {
+			t.Fatalf("missing %q from %q: %v", want, path, texts)
+		}
+	}
+}
+
+func TestDiscoveryLateArtifactAndFoldedUnicode(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "execute original", "unrelated preview", strings.Repeat("x", 512<<10)+"中文K approval", true)
+	q := discoveryQuery()
+	q.Query, q.IgnoreCase = "中文k", true
+	result := retrieveOK(t, r, q)
+	texts := discoveryTexts(t, r, result)
+	if result.More || !strings.Contains(texts["/canti/artifacts/step-1"], "中文K approval") {
+		t.Fatalf("missed deep folded original: %+v %v", result, texts)
+	}
+}
+
+func TestDiscoveryFrozenCursorAndBudgets(t *testing.T) {
+	r := discoveryFixture(t)
+	meta := discoveryStep(t, r, 1, "work", "needle", "", false)
+	discoveryStep(t, r, 2, "work", "needle", "", false)
+	q := discoveryQuery()
+	q.Limit = len(meta) + len(q.Query)
+	first := retrieveOK(t, r, q)
+	if !first.More || first.NextCursor == "" {
+		t.Fatalf("expected continuation: %+v", first)
+	}
+	discoveryStep(t, r, 3, "work", "needle new history after snapshot", "", false)
+	q.Cursor = first.NextCursor
+	second := retrieveOK(t, r, q)
+	if second.More {
+		t.Fatalf("cursor chased new history: %+v", second)
+	}
+	for _, result := range []Retrieval{first, second} {
+		bytes := 0
+		for _, source := range result.Sources {
+			bytes += source.Length
+			if strings.Contains(source.Path, "00000003") {
+				t.Fatal("included history newer than frozen discovery fence")
+			}
+		}
+		refs, _ := json.Marshal(result.Sources)
+		if bytes > q.Limit || len(refs) > RetrievalMaxBytes || len(result.Sources) > 32 {
+			t.Fatalf("exceeded source or reference bounds: %d %d %+v", bytes, len(refs), result)
+		}
+	}
+	for _, mutate := range []func(*RetrievalQuery){
+		func(q *RetrievalQuery) { q.Query = "changed" },
+		func(q *RetrievalQuery) { q.IgnoreCase = true },
+		func(q *RetrievalQuery) { q.Offset = 1 },
+		func(q *RetrievalQuery) { q.Cursor = "invalid" },
+	} {
+		changed := q
+		mutate(&changed)
+		got, err := r.Retrieve(t.Context(), changed)
+		if err != nil || got.Error == "" || len(got.Sources) != 0 {
+			t.Fatalf("invalid cursor accepted: %+v %v", got, err)
+		}
+	}
+}
+
+func TestDiscoveryScanAndStepBoundaries(t *testing.T) {
+	t.Run("bytes", func(t *testing.T) {
+		r := discoveryFixture(t)
+		discoveryStep(t, r, 1, "work", "irrelevant", strings.Repeat("x", (8<<20)-2)+"中文needle", true)
+		q := discoveryQuery()
+		q.Query = "中文needle"
+		first := retrieveOK(t, r, q)
+		if !first.More || len(first.Sources) != 0 {
+			t.Fatalf("scan exceeded bound: %+v", first)
+		}
+		q.Cursor = first.NextCursor
+		second := retrieveOK(t, r, q)
+		if second.More || !strings.Contains(discoveryTexts(t, r, second)["/canti/artifacts/step-1"], q.Query) {
+			t.Fatalf("lost scan-boundary match: %+v", second)
+		}
+	})
+	t.Run("steps", func(t *testing.T) {
+		r := discoveryFixture(t)
+		for i := 1; i <= 257; i++ {
+			preview := "irrelevant"
+			if i == 1 {
+				preview = "needle"
+			}
+			discoveryStep(t, r, i, "work", preview, "", false)
+		}
+		q := discoveryQuery()
+		first := retrieveOK(t, r, q)
+		if !first.More || len(first.Sources) != 0 {
+			t.Fatalf("step bound: %+v", first)
+		}
+		q.Cursor = first.NextCursor
+		second := retrieveOK(t, r, q)
+		if second.More || len(second.Sources) != 2 {
+			t.Fatalf("step continuation: %+v", second)
+		}
+	})
+}
+
+func TestDiscoveryFailuresNeverReturnPartialEvidence(t *testing.T) {
+	for _, kind := range []string{"missing", "binary", "size", "meta", "outside", "environment", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			r := discoveryFixture(t)
+			meta := discoveryStep(t, r, 1, "work", "needle", "needle original", true)
+			discoveryStep(t, r, 2, "work", "needle valid newer source", "", false)
+			artifact := filepath.Join(r.Artifacts, "step-1")
+			metaPath := filepath.Join(r.History, "run", "steps", "00000001", "meta")
+			var err error
+			switch kind {
+			case "missing":
+				err = os.Remove(artifact)
+			case "binary":
+				err = os.WriteFile(artifact, []byte("needle\x00original"), 0o600)
+			case "size":
+				err = os.WriteFile(artifact, []byte("short"), 0o600)
+			case "meta":
+				err = os.WriteFile(metaPath, []byte(strings.Replace(meta, "output_complete: true", "output_complete: maybe", 1)), 0o600)
+			case "outside":
+				err = os.WriteFile(metaPath, []byte(strings.Replace(meta, "/canti/artifacts/step-1", "/canti/runs/run/goal", 1)), 0o600)
+			case "environment":
+				err = os.WriteFile(metaPath, []byte(strings.Replace(meta, "/canti/artifacts/step-1", "/canti/artifacts/.env", 1)), 0o600)
+			case "symlink":
+				err = os.Remove(artifact)
+				if err == nil {
+					err = os.Symlink(metaPath, artifact)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := r.Retrieve(t.Context(), discoveryQuery())
+			if err != nil || got.Error == "" || len(got.Sources) != 0 || got.More || got.NextCursor != "" {
+				t.Fatalf("partial failure looked successful: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDiscoveryScopeAndCancellation(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "work", "needle", "", false)
+	for _, target := range []string{"/canti/runs", "/canti/runs/run", "/canti/runs/run/steps/00000001", "/canti/artifacts", "/canti/runs/run/steps/../steps"} {
+		q := discoveryQuery()
+		q.Path = target
+		got, err := r.Retrieve(t.Context(), q)
+		if err != nil || got.Error == "" {
+			t.Fatalf("invalid scope accepted: %s %+v %v", target, got, err)
+		}
+	}
+	q := discoveryQuery()
+	q.Limit = len(q.Query)
+	got, err := r.Retrieve(t.Context(), q)
+	if err != nil || got.Error == "" || got.More {
+		t.Fatalf("impossible metadata budget: %+v %v", got, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := r.Retrieve(ctx, discoveryQuery()); err != context.Canceled {
+		t.Fatalf("cancel: %v", err)
+	}
+}
+
+func TestDiscoveryRejectsMalformedCursorAndMissingSteps(t *testing.T) {
+	r := discoveryFixture(t)
+	meta := discoveryStep(t, r, 1, "work", "needle", "", false)
+	discoveryStep(t, r, 2, "work", "needle", "", false)
+	q := discoveryQuery()
+	q.Limit = len(meta) + len(q.Query)
+	first := retrieveOK(t, r, q)
+	data, err := base64.RawURLEncoding.DecodeString(first.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original map[string]any
+	if err := json.Unmarshal(data, &original); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]any{"binding": nil, "step": 0, "through": 3, "field": 3, "offset": -1, "unknown": true} {
+		changed := make(map[string]any)
+		for k, v := range original {
+			changed[k] = v
+		}
+		changed[key] = value
+		encoded, _ := json.Marshal(changed)
+		q.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+		got, err := r.Retrieve(t.Context(), q)
+		if err != nil || got.Error == "" || got.More {
+			t.Fatalf("malformed cursor accepted: %s %+v %v", key, got, err)
+		}
+	}
+	q.Cursor = ""
+	last := filepath.Join(r.History, "run", "steps", "00000002")
+	if err := os.RemoveAll(last); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(r.History, "run", "steps", "00000001"), last); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Retrieve(t.Context(), q)
+	if err != nil || got.Error == "" || got.More || len(got.Sources) != 0 {
+		t.Fatalf("symlink step silently omitted: %+v %v", got, err)
+	}
+	if err := os.Remove(last); err != nil {
+		t.Fatal(err)
+	}
+	discoveryStep(t, r, 3, "work", "needle", "", false)
+	got, err = r.Retrieve(t.Context(), q)
+	if err != nil || got.Error == "" || got.More || len(got.Sources) != 0 {
+		t.Fatalf("missing step silently omitted: %+v %v", got, err)
+	}
+}
+
+func TestDiscoveryNoMatchRetainsIncompleteCoverageAcrossPages(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		t.Run(fmt.Sprint(unavailable), func(t *testing.T) {
+			r := discoveryFixture(t)
+			for step := 1; step <= 257; step++ {
+				output, complete := "retained unrelated output", true
+				if step == 257 {
+					complete = false
+					if unavailable {
+						output = ""
+					}
+				}
+				discoveryStep(t, r, step, "work", "unrelated preview", output, complete)
+			}
+			q := discoveryQuery()
+			first := retrieveOK(t, r, q)
+			if !first.More || !first.Incomplete || len(first.Sources) != 0 {
+				t.Fatalf("no-hit coverage hidden: %+v", first)
+			}
+			q.Cursor = first.NextCursor
+			last := retrieveOK(t, r, q)
+			if last.More || !last.Incomplete || len(last.Sources) != 0 {
+				t.Fatalf("terminal cursor lost earlier output gap: %+v", last)
+			}
+			frame, limits := budgetFrame(), DefaultPromptLimits()
+			step := StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: &last}}
+			if rendered := frame.step(step, limits); !strings.Contains(rendered, `"incomplete":true`) || !strings.Contains(rendered, `"more":false`) {
+				t.Fatalf("coverage not delivered: %s", rendered)
+			}
+		})
+	}
+}
+
+func TestDiscoveryCoverageFitsStepReserve(t *testing.T) {
+	frame, limits := budgetFrame(), DefaultPromptLimits()
+	exit := math.MinInt
+	step := StepRecord{Step: math.MaxInt, Command: strings.Repeat("`", 40000), Resolved: true,
+		Observation: Observation{Execution: "failed_to_start", ExitCode: &exit, Preview: strings.Repeat("`", 40000),
+			Retrieval: &Retrieval{Query: discoveryQuery(), Sources: make([]SourceRange, 32), Incomplete: true,
+				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}}}
+	if actual, bound := len(frame.step(step, limits)), frame.stepShellBytes(limits); actual > bound {
+		t.Fatalf("coverage shell %d exceeds %d", actual, bound)
+	}
+}

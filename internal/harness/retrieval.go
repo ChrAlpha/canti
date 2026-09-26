@@ -49,6 +49,7 @@ type Retrieval struct {
 	NextOffset int64          `json:"next_offset"`
 	NextCursor string         `json:"next_cursor,omitempty"`
 	More       bool           `json:"more"`
+	Incomplete bool           `json:"incomplete,omitempty"`
 	Error      string         `json:"error,omitempty"`
 }
 
@@ -75,28 +76,29 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		result.Error = "offset must be nonnegative; limit must be 1..8192 bytes"
 		return result, nil
 	}
-	if q.Operation != "read" && q.Operation != "list" && q.Operation != "search" {
-		result.Error = "operation must be read, list, or search"
+	search := q.Operation == "search" || q.Operation == "discover"
+	if q.Operation != "read" && q.Operation != "list" && !search {
+		result.Error = "operation must be read, list, search, or discover"
 		return result, nil
 	}
-	if len(q.Query) > RetrievalMaxBytes || !utf8.ValidString(q.Query) || (q.Operation != "search" && q.Query != "") {
-		result.Error = "query must be UTF-8 of at most 8192 bytes and only applies to search"
+	if len(q.Query) > RetrievalMaxBytes || !utf8.ValidString(q.Query) || (!search && q.Query != "") {
+		result.Error = "query must be UTF-8 of at most 8192 bytes and only applies to search or discover"
 		return result, nil
 	}
-	if q.Operation == "search" && (q.Query == "" || len(q.Query) > limit || !utf8.ValidString(q.Query) || strings.ContainsRune(q.Query, 0)) {
+	if search && (q.Query == "" || len(q.Query) > limit || !utf8.ValidString(q.Query) || strings.ContainsRune(q.Query, 0)) {
 		result.Error = "search query must be nonempty UTF-8 and fit within limit"
 		return result, nil
 	}
-	if q.IgnoreCase && q.Operation != "search" {
-		result.Error = "ignore_case only applies to search"
+	if q.IgnoreCase && !search {
+		result.Error = "ignore_case only applies to search or discover"
 		return result, nil
 	}
 	if q.IgnoreCase && queryMatchBytes(q) > limit {
 		result.Error = fmt.Sprintf("ignore_case requires a limit of at least %d bytes for folded matches", queryMatchBytes(q))
 		return result, nil
 	}
-	if len(q.Cursor) > 1024 || (q.Cursor != "" && (q.Operation != "search" || q.Offset != 0)) {
-		result.Error = "cursor is only valid for directory search with offset zero and at most 1024 bytes"
+	if len(q.Cursor) > 1024 || (q.Cursor != "" && (!search || q.Offset != 0)) {
+		result.Error = "cursor is only valid for directory search or discover with offset zero and at most 1024 bytes"
 		return result, nil
 	}
 	f, err := r.open(q.Path)
@@ -106,6 +108,8 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		info, err = f.Stat()
 		if err == nil {
 			switch {
+			case q.Operation == "discover":
+				err = r.discover(ctx, f, limit, &result)
 			case q.Operation == "search" && info.IsDir():
 				err = r.searchDirectory(ctx, f, limit, &result)
 			case q.Operation == "list" && info.IsDir():

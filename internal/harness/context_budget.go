@@ -40,7 +40,7 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 	output := len(f.step(s, l)) + quotes + preview + truncationBytes() +
 		len(inline(f.ArtifactDir)) + 1 + refLimit + truncationBytes() -
 		len(path.Join(inline(f.ArtifactDir), s.Observation.Output.Path))
-	s.Observation.Retrieval = &Retrieval{NextOffset: math.MaxInt64,
+	s.Observation.Retrieval = &Retrieval{NextOffset: math.MaxInt64, Incomplete: true,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
 	retrieval := len(f.step(s, l)) + quotes + preview + truncationBytes() + 2*(len(strconv.Itoa(math.MaxInt))-1)
 	s.Observation.Retrieval = &Retrieval{Query: RetrievalQuery{Operation: "list"}, NextOffset: math.MaxInt64}
