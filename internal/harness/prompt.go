@@ -147,7 +147,10 @@ func (f Frame) progress(hidden int) string {
 func (f Frame) step(s StepRecord, l PromptLimits) string {
 	o := s.Observation
 	var b strings.Builder
-	fmt.Fprintf(&b, "### Step %d\n%sExecution: %s", s.Step, quote("Command", s.Command, l.Command), inline(string(o.Execution)))
+	b.Grow(min(len(s.Command), l.Command) + min(len(o.Preview), l.Preview) + len(f.Retrieved[s.Step]) + 256)
+	fmt.Fprintf(&b, "### Step %d\n", s.Step)
+	writeQuote(&b, "Command", s.Command, l.Command)
+	fmt.Fprintf(&b, "Execution: %s", inline(string(o.Execution)))
 	if o.ExitCode != nil {
 		fmt.Fprintf(&b, ", exit code %d", *o.ExitCode)
 	}
@@ -175,7 +178,9 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		entries, _ := json.Marshal(r.Entries)
 		b.WriteString("\nEntries: " + string(entries) + "\n")
 	} else {
-		b.WriteString("\n" + quote("Preview", o.Preview, l.Preview) + "\n")
+		b.WriteByte('\n')
+		writeQuote(&b, "Preview", o.Preview, l.Preview)
+		b.WriteByte('\n')
 	}
 	if r := o.Retrieval; r != nil {
 		status, _ := json.Marshal(struct {
@@ -187,7 +192,8 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
 	if text := f.Retrieved[s.Step]; text != "" {
-		b.WriteString("Retrieved original evidence:\n" + fullBlock(text))
+		b.WriteString("Retrieved original evidence:\n")
+		writeBlock(&b, text, len(text)+2*max(0, fence(text)-3))
 	}
 	return b.String()
 }
@@ -197,28 +203,56 @@ func fullBlock(s string) string {
 }
 
 func quote(label, s string, limit int) string {
+	var b strings.Builder
+	writeQuote(&b, label, s, limit)
+	return b.String()
+}
+
+func writeQuote(b *strings.Builder, label, s string, limit int) {
+	b.WriteString(label)
 	if s == "" {
-		return label + ": empty\n"
+		b.WriteString(": empty\n")
+		return
 	}
-	return label + ":\n" + block(s, limit)
+	b.WriteString(":\n")
+	writeBlock(b, s, limit)
 }
 
 // block fences s cut to limit, charging fence marks beyond the usual three
 // to the limit, so a backtick-heavy input cannot inflate its block.
 func block(s string, limit int) string {
+	var b strings.Builder
+	writeBlock(&b, s, limit)
+	return b.String()
+}
+
+func writeBlock(b *strings.Builder, s string, limit int) {
 	text := clip(s, limit)
-	if n := fence(text); n > 3 {
+	n := fence(text)
+	if n > 3 {
 		text = clip(s, max(0, limit-2*(n-3)))
+		n = fence(text)
 	}
+	marks := "```"
+	if n > 3 {
+		marks = strings.Repeat("`", n)
+	}
+	b.Grow(len(text) + 2*len(marks) + 3)
+	b.WriteString(marks)
+	b.WriteByte('\n')
+	b.WriteString(text)
 	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
+		b.WriteByte('\n')
 	}
-	marks := strings.Repeat("`", fence(text))
-	return marks + "\n" + text + marks + "\n"
+	b.WriteString(marks)
+	b.WriteByte('\n')
 }
 
 // fence returns a backtick fence length that no line of s can close.
 func fence(s string) int {
+	if !strings.Contains(s, "`") {
+		return 3
+	}
 	longest, run := 2, 0
 	for i := range len(s) {
 		run++
@@ -259,6 +293,7 @@ func cut(s string, limit int) (string, int) {
 		return s[:end], len(s) - end
 	}
 	var b strings.Builder
+	b.Grow(end)
 	i := 0
 	for i < len(s) {
 		r, n := utf8.DecodeRuneInString(s[i:])

@@ -1,10 +1,42 @@
 package harness
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func referenceBlock(s string, limit int) string {
+	clip := func(s string, limit int) string {
+		kept, dropped := referenceCut(s, limit)
+		if dropped == 0 {
+			return kept
+		}
+		return fmt.Sprintf("%s…[truncated %d bytes]", kept, dropped)
+	}
+	fence := func(s string) int {
+		longest, run := 2, 0
+		for i := range len(s) {
+			if s[i] == '`' {
+				run++
+			} else {
+				run = 0
+			}
+			longest = max(longest, run)
+		}
+		return longest + 1
+	}
+	text := clip(s, limit)
+	if n := fence(text); n > 3 {
+		text = clip(s, max(0, limit-2*(n-3)))
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	marks := strings.Repeat("`", fence(text))
+	return marks + "\n" + text + marks + "\n"
+}
 
 func referenceCut(s string, limit int) (string, int) {
 	var out strings.Builder
@@ -49,6 +81,23 @@ func FuzzCutMatchesRunePrefix(f *testing.F) {
 		want, wantDropped := referenceCut(text, limit)
 		if got != want || dropped != wantDropped {
 			t.Fatalf("cut(%q, %d) = (%q, %d), want (%q, %d)", text, limit, got, dropped, want, wantDropped)
+		}
+	})
+}
+
+func FuzzBlockPreservesBytes(f *testing.F) {
+	for _, text := range []string{"", "plain text", "é日🙂", "\xff\x80a", "```", "before\n````\nafter", strings.Repeat("`", 100), "\n"} {
+		for _, limit := range []int{-1, 0, 3, 8, len(text), 1000} {
+			f.Add(text, limit)
+		}
+	}
+	f.Fuzz(func(t *testing.T, text string, limit int) {
+		if len(text) > 8192 {
+			return
+		}
+		limit %= len(text) + 5
+		if got, want := block(text, limit), referenceBlock(text, limit); got != want {
+			t.Fatalf("block(%q, %d) = %q, want %q", text, limit, got, want)
 		}
 	})
 }
