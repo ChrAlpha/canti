@@ -20,79 +20,77 @@ func Decode(raw []byte) (Decision, error) {
 	if !utf8.Valid(raw) {
 		return Decision{}, fmt.Errorf("core: %w: invalid UTF-8", errInvalidDecision)
 	}
-	kind, payload, err := decodeObject(raw)
+	fields, err := decodeObject(raw)
 	if err != nil {
 		return Decision{}, fmt.Errorf("core: %w: %v", errInvalidDecision, err)
 	}
-	decision := Decision{Kind: Kind(kind), Payload: payload}
+	if len(fields) != 2 {
+		return Decision{}, fmt.Errorf("core: %w: expected kind and payload", errInvalidDecision)
+	}
+	for field := range fields {
+		if field != "kind" && field != "payload" {
+			return Decision{}, fmt.Errorf("core: %w: unknown field %q", errInvalidDecision, field)
+		}
+	}
+	kind := fields["kind"]
+	if kind == nil {
+		return Decision{}, fmt.Errorf("core: %w: kind must be a string", errInvalidDecision)
+	}
+	payload := fields["payload"]
+	if payload == nil {
+		return Decision{}, fmt.Errorf("core: %w: payload must be a string", errInvalidDecision)
+	}
+	decision := Decision{Kind: Kind(*kind), Payload: *payload}
 	if decision.Kind != Exec && decision.Kind != Return {
-		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, kind)
+		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, *kind)
 	}
 	return decision, nil
 }
 
-func decodeObject(raw []byte) (string, string, error) {
+func decodeObject(raw []byte) (map[string]*string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	delim, ok := token.(json.Delim)
 	if !ok || delim != '{' {
-		return "", "", errors.New("top-level value must be an object")
+		return nil, errors.New("top-level value must be an object")
 	}
 
-	var kind, payload string
-	var hasKind, hasPayload bool
+	fields := make(map[string]*string, 2)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return "", "", errors.New("object key must be a string")
+			return nil, errors.New("object key must be a string")
 		}
-		switch key {
-		case "kind":
-			if hasKind {
-				return "", "", fmt.Errorf("duplicate field %q", key)
+		if _, exists := fields[key]; exists {
+			return nil, fmt.Errorf("duplicate field %q", key)
+		}
+		var value *string
+		if err := decoder.Decode(&value); err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				return nil, err
 			}
-			hasKind = true
-		case "payload":
-			if hasPayload {
-				return "", "", fmt.Errorf("duplicate field %q", key)
-			}
-			hasPayload = true
-		default:
-			return "", "", fmt.Errorf("unknown field %q", key)
+			value = nil
 		}
-		value, err := decoder.Token()
-		if err != nil {
-			return "", "", err
-		}
-		str, ok := value.(string)
-		if !ok {
-			return "", "", fmt.Errorf("%s must be a string", key)
-		}
-		if key == "kind" {
-			kind = str
-		} else {
-			payload = str
-		}
+		fields[key] = value
 	}
 
 	if _, err := decoder.Token(); err != nil {
-		return "", "", err
+		return nil, err
 	}
 	if token, err := decoder.Token(); err != io.EOF {
 		if err == nil {
-			return "", "", fmt.Errorf("trailing value %v", token)
+			return nil, fmt.Errorf("trailing value %v", token)
 		}
-		return "", "", err
+		return nil, err
 	}
-	if !hasKind || !hasPayload {
-		return "", "", errors.New("expected kind and payload")
-	}
-	return kind, payload, nil
+	return fields, nil
 }

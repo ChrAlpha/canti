@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 var benchmarkDecision Decision
 var benchmarkState State
@@ -14,6 +17,8 @@ func BenchmarkDecode(b *testing.B) {
 		{"small", []byte(`{"kind":"exec","payload":"go test ./..."}`)},
 		{"escaped", []byte(`{"payload":"line\n\u4f60\u597d\t\\","kind":"return"}`)},
 		{"duplicate", []byte(`{"kind":"exec","payload":"x","\u006bind":"return"}`)},
+		{"large_string", []byte(`{"kind":"exec","payload":"` + strings.Repeat("x", 8<<10) + `"}`)},
+		{"invalid_nested", []byte(`{"kind":"exec","payload":[` + strings.Repeat("0,", 16<<10) + `0]}`)},
 	}
 	for _, input := range inputs {
 		b.Run(input.name, func(b *testing.B) {

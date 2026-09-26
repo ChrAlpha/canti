@@ -82,6 +82,26 @@ func TestDecodeRejectsInvalidProtocol(t *testing.T) {
 	}
 }
 
+func TestDecodeDiagnosticPriority(t *testing.T) {
+	for _, tt := range []struct {
+		name, raw, want string
+	}{
+		{"extra field before type errors", `{"kind":1,"payload":false,"extra":true}`, "core: invalid decision: expected kind and payload"},
+		{"unknown field before type errors", `{"kind":1,"other":"x"}`, `core: invalid decision: unknown field "other"`},
+		{"kind type before payload type", `{"kind":1,"payload":false}`, "core: invalid decision: kind must be a string"},
+		{"payload type", `{"kind":"exec","payload":null}`, "core: invalid decision: payload must be a string"},
+		{"escaped duplicate before type errors", `{"kind":1,"\u006b\u0069nd":"return","payload":false}`, `core: invalid decision: duplicate field "kind"`},
+		{"malformed trailing value before type errors", `{"kind":1,"payload":false} !`, "core: invalid decision: invalid character '!' looking for beginning of value"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := core.Decode([]byte(tt.raw))
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("Decode(%q) error = %v, want %q", tt.raw, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDecodeIsSafeForConcurrentCalls(t *testing.T) {
 	t.Parallel()
 
