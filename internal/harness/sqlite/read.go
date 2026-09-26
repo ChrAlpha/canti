@@ -111,12 +111,23 @@ func (s *Store) Transitions(ctx context.Context, runID string, after int64, limi
 }
 
 func (r record) decode() (harness.Transition, error) {
+	t, err := r.decodeEventStates()
+	if err != nil {
+		return t, err
+	}
+	if err := strict(r.facts, &t.Facts); err != nil {
+		return t, err
+	}
+	return t, nil
+}
+
+func (r record) decodeEventStates() (harness.Transition, error) {
 	var t harness.Transition
 	if err := cmp.Or(known(r.kind), current(r.semantics)); err != nil {
 		return t, err
 	}
 	event := reflect.New(events[r.kind])
-	if err := cmp.Or(strict(r.event, event.Interface()), strict(r.from, &t.From), strict(r.to, &t.To), strict(r.facts, &t.Facts)); err != nil {
+	if err := cmp.Or(strict(r.event, event.Interface()), strict(r.from, &t.From), strict(r.to, &t.To)); err != nil {
 		return t, err
 	}
 	t.Event = event.Elem().Interface().(core.Event)

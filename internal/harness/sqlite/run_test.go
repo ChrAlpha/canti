@@ -218,6 +218,7 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 		{"unknown kind", `UPDATE transitions SET kind = 'teleported' WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Commit"}},
 		{"other semantics", `UPDATE transitions SET semantics = semantics + 1 WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Recent", "Commit"}},
 		{"unknown field", `UPDATE transitions SET to_state = json_insert(to_state, '$.Extra', 1) WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Commit"}},
+		{"unknown facts field", `UPDATE transitions SET facts = json_insert(facts, '$.Extra', 1) WHERE run_id = ? AND seq = ?`, []string{"Transitions", "Recent"}},
 	}
 	for _, c := range corruptions {
 		t.Run(c.name, func(t *testing.T) {

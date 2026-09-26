@@ -300,7 +300,7 @@ func encode(t harness.Transition) (record, error) {
 		}
 		*dst = string(data)
 	}
-	back, err := r.decode()
+	back, err := r.decodeEventStates()
 	if err != nil {
 		return r, err
 	}
