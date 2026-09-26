@@ -27,7 +27,7 @@ func BenchmarkEncode(b *testing.B) {
 	}
 }
 
-func BenchmarkCommitDisk(b *testing.B) {
+func BenchmarkCommitFile(b *testing.B) {
 	for _, size := range []int{16, 128 << 10} {
 		b.Run(fmt.Sprintf("request_%dB", size), func(b *testing.B) {
 			ctx := context.Background()
