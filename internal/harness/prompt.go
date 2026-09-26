@@ -147,7 +147,7 @@ func (f Frame) progress(hidden int) string {
 func (f Frame) step(s StepRecord, l PromptLimits) string {
 	o := s.Observation
 	var b strings.Builder
-	b.Grow(min(len(s.Command), l.Command) + min(len(o.Preview), l.Preview) + len(f.Retrieved[s.Step]) + 256)
+	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(o.Preview), l.Preview)) + len(f.Retrieved[s.Step]) + 256)
 	fmt.Fprintf(&b, "### Step %d\n", s.Step)
 	writeQuote(&b, "Command", s.Command, l.Command)
 	fmt.Fprintf(&b, "Execution: %s", inline(string(o.Execution)))

@@ -68,6 +68,24 @@ func TestCutMatchesRunePrefix(t *testing.T) {
 	}
 }
 
+func TestContextValidationRejectsNegativeTextLimits(t *testing.T) {
+	f := testFrame()
+	f.HandoverBytes = 2048
+	for _, field := range []string{"command", "preview"} {
+		t.Run(field, func(t *testing.T) {
+			limits := DefaultPromptLimits()
+			if field == "command" {
+				limits.Command = -1024
+			} else {
+				limits.Preview = -1024
+			}
+			if err := f.ValidateContext(limits); err == nil {
+				t.Fatal("negative text limit accepted")
+			}
+		})
+	}
+}
+
 func FuzzCutMatchesRunePrefix(f *testing.F) {
 	for _, text := range []string{"plain text", "é日🙂", "\xff\x80a", "a日\x80", "\uFFFD\xff", "\xf0\x90\x80"} {
 		f.Add(text, 3)
