@@ -138,6 +138,8 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		result.Sources, result.Entries = nil, nil
 		result.More = false
 		result.NextCursor = ""
+		result.Incomplete = false
+		result.SkippedCount, result.Skipped = 0, nil
 		result.Error = err.Error()
 	}
 	return result, nil

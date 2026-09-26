@@ -283,7 +283,52 @@ func TestDiscoverySkipsNonTextSourcesAcrossPages(t *testing.T) {
 				!strings.Contains(discoveryTexts(t, r, last)["/canti/runs/run/steps/00000001/preview"], "older proof") {
 				t.Fatalf("lost valid source or gap: %+v", last)
 			}
+			encoded, err := json.Marshal(last)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted Retrieval
+			if err := json.Unmarshal(encoded, &persisted); err != nil || persisted.SkippedCount != 2 || len(persisted.Skipped) != 2 {
+				t.Fatalf("lost durable gap: %+v %v", persisted, err)
+			}
+			frame, limits := budgetFrame(), DefaultPromptLimits()
+			rendered := frame.step(StepRecord{Step: 1, Observation: Observation{Retrieval: &persisted}}, limits)
+			if !strings.Contains(rendered, `"skipped_count":2`) || !strings.Contains(rendered, `"field":"preview"`) || !strings.Contains(rendered, "candidate ranges") {
+				t.Fatalf("gap not rendered: %s", rendered)
+			}
 		})
+	}
+}
+
+func TestDiscoverySkipIdentifiesArtifactNamedPreview(t *testing.T) {
+	r := discoveryFixture(t)
+	meta := discoveryStep(t, r, 1, "work", "needle valid preview", "needle\x00artifact", false)
+	if err := os.Rename(filepath.Join(r.Artifacts, "step-1"), filepath.Join(r.Artifacts, "preview")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.History, "run", "steps", "00000001", "meta"), []byte(strings.Replace(meta, "/canti/artifacts/step-1", "/canti/artifacts/preview", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := retrieveOK(t, r, discoveryQuery())
+	if result.More || !result.Incomplete || result.SkippedCount != 1 || len(result.Skipped) != 1 || result.Skipped[0].Field != "artifact" ||
+		!strings.Contains(discoveryTexts(t, r, result)["/canti/runs/run/steps/00000001/preview"], "valid preview") {
+		t.Fatalf("wrong source identity or lost valid preview: %+v", result)
+	}
+}
+
+func TestDiscoveryFatalMetadataAfterSkippedText(t *testing.T) {
+	r := discoveryFixture(t)
+	meta := discoveryStep(t, r, 1, "work", "needle older", "", false)
+	discoveryStep(t, r, 2, "work", "needle recent", "", false)
+	if err := os.WriteFile(filepath.Join(r.History, "run", "steps", "00000002", "preview"), []byte("needle\x00bad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.History, "run", "steps", "00000001", "meta"), []byte(strings.Replace(meta, "output_complete: false", "output_complete: maybe", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Retrieve(t.Context(), discoveryQuery())
+	if err != nil || !strings.Contains(got.Error, "invalid original step metadata") || len(got.Sources) != 0 || got.More || got.NextCursor != "" || got.SkippedCount != 0 || len(got.Skipped) != 0 {
+		t.Fatalf("fatal error lost: %+v %v", got, err)
 	}
 }
 
@@ -400,7 +445,8 @@ func TestDiscoveryCoverageFitsStepReserve(t *testing.T) {
 	step := StepRecord{Step: math.MaxInt, Command: strings.Repeat("`", 40000), Resolved: true,
 		Observation: Observation{Execution: "failed_to_start", ExitCode: &exit, Preview: strings.Repeat("`", 40000),
 			Retrieval: &Retrieval{Query: discoveryQuery(), Sources: make([]SourceRange, 32), Incomplete: true,
-				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}}}
+				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
+				SkippedCount: 3 * retrievalMaxEntries, Skipped: []DiscoverySkip{{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}, {Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}}}}}
 	if actual, bound := len(frame.step(step, limits)), frame.stepShellBytes(limits); actual > bound {
 		t.Fatalf("coverage shell %d exceeds %d", actual, bound)
 	}

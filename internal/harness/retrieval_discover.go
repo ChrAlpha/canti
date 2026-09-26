@@ -121,10 +121,10 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 						reason = "nul"
 					}
 					field := "artifact"
-					if strings.HasSuffix(partQuery.Path, "/command") {
+					if partQuery.Path == stepPath+"/command" {
 						field = "command"
 					}
-					if strings.HasSuffix(partQuery.Path, "/preview") {
+					if partQuery.Path == stepPath+"/preview" {
 						field = "preview"
 					}
 					skip := DiscoverySkip{Step: cursor.Step, Field: field, Reason: reason}
