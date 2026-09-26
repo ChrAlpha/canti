@@ -62,3 +62,20 @@ func TestRetrievalPromptKeepsFailureWithoutPreview(t *testing.T) {
 		t.Fatal("malformed builtin failure was hidden")
 	}
 }
+
+func TestRetrievalPromptKeepsQueryWhenCommandIsClipped(t *testing.T) {
+	for _, query := range []RetrievalQuery{
+		{Operation: "search", Path: "/canti/runs/R/steps/00000001/preview", Query: strings.Repeat("x", 2500), Reason: "check the original scope"},
+		{Operation: "read", Path: "/canti/imports/" + strings.Repeat("segment/", 375) + "evidence", Reason: "check the original scope"},
+		{Operation: "search", Path: "/canti/imports/evidence", Query: strings.Repeat("`", 800), Reason: "check the original scope"},
+	} {
+		r := Retrieval{Query: query}
+		body, _ := json.Marshal(r)
+		command, _ := json.Marshal(query)
+		s := StepRecord{Step: 1, Command: retrievePrefix + string(command), Observation: Observation{Retrieval: &r, Preview: string(body)}}
+		text := testFrame().step(s, DefaultPromptLimits())
+		if !strings.Contains(text, "[truncated") || !strings.Contains(text, string(body)) {
+			t.Fatalf("clipped command lost retrieval query: %s", text)
+		}
+	}
+}
