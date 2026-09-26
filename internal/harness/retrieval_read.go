@@ -59,16 +59,23 @@ func searchRetrieval(data []byte, limit int, result *Retrieval) {
 func searchRanges(data []byte, limit, end, maxSources, references int, result *Retrieval) (int, int) {
 	q := result.Query
 	padding := min(128, (limit-len(q.Query))/2)
+	referenceBase := 0
+	if references >= 0 {
+		encoded, _ := json.Marshal(SourceRange{Path: q.Path, SHA256: digest(nil)})
+		referenceBase = len(encoded) - 2
+	}
 	var folded foldedLiteral
 	if q.IgnoreCase {
 		folded = newFoldedLiteral(q.Query)
 	}
 	pos := 0
+	firstChanged := len(result.Sources)
 	for pos < end {
-		match := bytes.Index(data[pos:], []byte(q.Query))
-		length := len(q.Query)
+		match, length := -1, len(q.Query)
 		if q.IgnoreCase {
 			match, length = folded.index(data[pos:])
+		} else {
+			match = bytes.Index(data[pos:], []byte(q.Query))
 		}
 		if match < 0 || pos+match >= end {
 			pos = end
@@ -114,7 +121,7 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 				stop--
 			}
 		}
-		source := sourceRange(q.Path, q.Offset+int64(start), data[start:stop])
+		source := SourceRange{Path: q.Path, Offset: q.Offset + int64(start), Length: stop - start}
 		added := stop - start
 		if merge {
 			added -= result.Sources[last].Length
@@ -122,18 +129,19 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 		if references >= 0 {
 			available := references
 			if merge {
-				old, _ := json.Marshal(result.Sources[last])
-				available += len(old) + 1
+				previous := result.Sources[last]
+				available += referenceBase + decimalDigits(previous.Offset) + decimalDigits(int64(previous.Length)) + 1
 			}
-			encoded, _ := json.Marshal(source)
-			if len(encoded)+1 > available {
+			encodedLength := referenceBase + decimalDigits(source.Offset) + decimalDigits(int64(source.Length))
+			if encodedLength+1 > available {
 				pos = match
 				break
 			}
-			references = available - len(encoded) - 1
+			references = available - encodedLength - 1
 		}
 		if merge {
 			result.Sources[last] = source
+			firstChanged = min(firstChanged, last)
 		} else {
 			result.Sources = append(result.Sources, source)
 		}
@@ -144,8 +152,27 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 			pos = match + width
 		}
 	}
+	for i := firstChanged; i < len(result.Sources); i++ {
+		source := &result.Sources[i]
+		start := int(source.Offset - q.Offset)
+		source.SHA256 = digest(data[start : start+source.Length])
+	}
 	result.NextOffset = q.Offset + int64(pos)
 	return limit, references
+}
+
+func decimalDigits(n int64) int {
+	digits := 1
+	u := uint64(n)
+	if n < 0 {
+		digits++
+		u = uint64(-(n + 1)) + 1
+	}
+	for u >= 10 {
+		u /= 10
+		digits++
+	}
+	return digits
 }
 
 func textPrefix(data []byte, partial bool) ([]byte, error) {

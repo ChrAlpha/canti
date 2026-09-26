@@ -6,15 +6,19 @@ import (
 )
 
 func BenchmarkRetrievalSearch(b *testing.B) {
-	for _, tc := range []struct{ name, body, query string }{
-		{"dense", strings.Repeat("checkpoint ", 24000), "checkpoint"},
-		{"sparse", strings.Repeat(strings.Repeat("-", 30000)+"checkpoint ", 8), "checkpoint"},
-		{"unicode", strings.Repeat("恢复取消核实证据 ", 12000), "证据"},
+	for _, tc := range []struct {
+		name, body, query string
+		ignoreCase        bool
+	}{
+		{"dense", strings.Repeat("checkpoint ", 24000), "checkpoint", false},
+		{"dense-fold", strings.Repeat("CHECKPOINT ", 24000), "checkpoint", true},
+		{"sparse", strings.Repeat(strings.Repeat("-", 30000)+"checkpoint ", 8), "checkpoint", false},
+		{"unicode", strings.Repeat("恢复取消核实证据 ", 12000), "证据", false},
 	} {
 		for _, mode := range []string{"file", "directory-metadata"} {
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				data := []byte(tc.body)
-				q := RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Query: tc.query}
+				q := RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Query: tc.query, IgnoreCase: tc.ignoreCase}
 				if mode == "directory-metadata" {
 					q.Path = "/canti/imports/" + strings.Repeat("archive/", 100) + "evidence"
 				}

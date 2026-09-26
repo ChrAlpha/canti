@@ -61,35 +61,28 @@ func TestRetrievalSearchCoalescesDirectoryWithoutChangingCursor(t *testing.T) {
 	}
 }
 
-func TestRetrievalCoalesceFailsClosedOnChangedSource(t *testing.T) {
-	body := strings.Repeat("needle ", 20)
-	r, path := retrievalFixture(t, body)
-	selected := []SourceRange{
-		sourceRange(path, 0, []byte(body[:134])),
-		sourceRange(path, 7, []byte(body[7:])),
+func TestRetrievalSearchSelectionAlreadyCoalesced(t *testing.T) {
+	r := directoryFixture(t, map[string]string{
+		"a": strings.Repeat("needle ", 30) + strings.Repeat("x", 400) + "needle",
+		"b": "needle" + strings.Repeat("x", 400) + "needle",
+		"c": strings.Repeat("needle ", 30),
+	})
+	q := RetrievalQuery{Operation: "search", Path: "/canti/imports", Reason: "check selected ranges", Query: "needle", Limit: RetrievalMaxBytes}
+	result := retrieveOK(t, r, q)
+	if len(result.Sources) < 4 {
+		t.Fatalf("fixture did not exercise separate ranges: %+v", result)
 	}
-	if err := os.WriteFile(r.Imports+"/evidence", []byte(strings.Repeat("change ", 20)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.coalesceSources(context.Background(), selected); err == nil {
-		t.Fatal("changed original source was accepted")
-	}
-	if err := os.Remove(r.Imports + "/evidence"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/dev/null", r.Imports+"/evidence"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.coalesceSources(context.Background(), selected); err == nil {
-		t.Fatal("symlink replacement was accepted")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := r.coalesceSources(ctx, selected); err != context.Canceled {
-		t.Fatalf("cancellation: %v", err)
-	}
-	if got, err := r.coalesceSources(context.Background(), selected[:1]); err != nil || len(got) != 1 || got[0] != selected[0] {
-		t.Fatalf("singleton was re-read: %+v %v", got, err)
+	for i, source := range result.Sources {
+		if _, err := r.Expand(context.Background(), source); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			continue
+		}
+		previous := result.Sources[i-1]
+		if previous.Path > source.Path || previous.Path == source.Path && previous.Offset+int64(previous.Length) >= source.Offset {
+			t.Fatalf("ranges are out of order, overlapping, or adjacent: %+v", result.Sources)
+		}
 	}
 }
 
