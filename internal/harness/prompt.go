@@ -243,8 +243,20 @@ func clip(s string, limit int) string {
 // cut returns the longest prefix of s, with invalid bytes replaced, that fits
 // in limit bytes without splitting a rune, and the number of bytes of s left.
 func cut(s string, limit int) (string, int) {
-	if len(s) <= limit && utf8.ValidString(s) {
-		return s, 0
+	end := min(len(s), max(0, limit))
+	if end < len(s) {
+		for i := end - 1; i >= 0 && end-i < utf8.UTFMax; i-- {
+			if utf8.RuneStart(s[i]) {
+				_, size := utf8.DecodeRuneInString(s[i:])
+				if i+size > end {
+					end = i
+				}
+				break
+			}
+		}
+	}
+	if utf8.ValidString(s[:end]) {
+		return s[:end], len(s) - end
 	}
 	var b strings.Builder
 	i := 0
