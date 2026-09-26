@@ -89,6 +89,7 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 		}
 		var b strings.Builder
 		previousPath := ""
+		futureFence := 0
 		for _, source := range r.Sources {
 			if err := ctx.Err(); err != nil {
 				return 0, err
@@ -99,20 +100,21 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 			}
 			header += fmt.Sprintf("Bytes [%d,%d), sha256 %s:\n", source.Offset, source.Offset+int64(source.Length), source.SHA256)
 			text, err := l.cfg.Reader.Expand(ctx, source)
+			futureText := maxError
 			if err != nil {
 				if ctx.Err() != nil {
 					return 0, ctx.Err()
 				}
 				text = "Evidence unavailable: " + clip(err.Error(), 512)
-				growth += max(max(0, maxError-len(text))+2*(maxError+1),
-					max(0, source.Length-len(text))+2*(source.Length+1))
-			} else {
-				growth += max(0, maxError-len(text)) + 2*(maxError+1)
+				futureText = max(futureText, source.Length)
 			}
+			growth += max(0, futureText-len(text))
+			futureFence = max(futureFence, futureText+1)
 			part := header + text + "\n"
 			b.WriteString(part)
 			previousPath = source.Path
 		}
+		growth += 2 * futureFence
 		f.Retrieved[f.Steps[i].Step] = b.String()
 	}
 	return growth, nil
