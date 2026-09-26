@@ -398,6 +398,11 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, err
 		case errors.Is(err, ErrJobLost):
 			why = err.Error()
 		case err != nil:
+			if !stopping {
+				if late := l.late(run); late != "" {
+					return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late + "; " + err.Error()})
+				}
+			}
 			if failures++; failures > l.cfg.InspectRetries {
 				why = fmt.Sprintf("inspect failed %d consecutive times: %v", failures, err)
 			} else {
