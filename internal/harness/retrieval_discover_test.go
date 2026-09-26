@@ -107,6 +107,31 @@ func TestDiscoveryLateArtifactAndFoldedUnicode(t *testing.T) {
 	}
 }
 
+func TestDiscoveryDenseRecentMatchesLeaveRoomForOlderEvidence(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "old work", "unrelated preview", "needle original approval", true)
+	discoveryStep(t, r, 2, "needle new command", "needle new preview", strings.Repeat("needle noise ", 50000), false)
+	result := retrieveOK(t, r, discoveryQuery())
+	texts := discoveryTexts(t, r, result)
+	if result.More || !strings.Contains(texts["/canti/artifacts/step-1"], "original approval") {
+		t.Fatalf("dense recent matches concealed older evidence: %+v", result)
+	}
+	for _, path := range []string{"/canti/runs/run/steps/00000002/command", "/canti/runs/run/steps/00000002/preview", "/canti/artifacts/step-2"} {
+		if !strings.Contains(texts[path], "needle") {
+			t.Fatalf("missing field opportunity %s: %+v", path, result)
+		}
+		count := 0
+		for _, source := range result.Sources {
+			if source.Path == path {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one candidate from %s, got %d", path, count)
+		}
+	}
+}
+
 func TestDiscoveryFrozenCursorAndBudgets(t *testing.T) {
 	r := discoveryFixture(t)
 	meta := discoveryStep(t, r, 1, "work", "needle", "", false)

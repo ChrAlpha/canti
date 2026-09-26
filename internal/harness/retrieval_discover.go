@@ -102,8 +102,8 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 			partQuery := q
 			partQuery.Operation, partQuery.Path, partQuery.Offset, partQuery.Cursor = "search", files[cursor.Field], cursor.Offset, ""
 			part := Retrieval{Query: partQuery}
-			partLimit, partRefs := max(matchBytes, limit-metaBytes), max(0, references-metaRefs)
-			left, refs, read, err := r.searchDirectoryFile(ctx, remaining, partLimit, 32-len(result.Sources)-metaSlots, partRefs, &part)
+			partLimit, partRefs := min(max(matchBytes, limit-metaBytes), max(matchBytes, 512)), max(0, references-metaRefs)
+			left, refs, read, err := r.searchDirectoryFile(ctx, remaining, partLimit, 1, partRefs, &part)
 			if err != nil {
 				return fmt.Errorf("discover %s: %w", partQuery.Path, err)
 			}
@@ -123,7 +123,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 				references = refs
 				metaBytes, metaRefs, metaSlots = 0, 0, 0
 			}
-			if part.More {
+			if part.More && len(part.Sources) == 0 {
 				if len(result.Sources) == 0 && part.NextOffset == cursor.Offset {
 					return errors.New("discover source reference exceeds presentation limit")
 				}
