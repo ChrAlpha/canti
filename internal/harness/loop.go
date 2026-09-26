@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -257,22 +258,26 @@ func (l *Loop) late(run Run) string {
 // and the snapshot sequence. An older page never re-enters the prompt.
 func (l *Loop) windowSteps(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
 	var steps []StepRecord
-	for before := snapshotSeq + 1; ; {
-		page, err := l.journal.Recent(ctx, runID, before, historyPage)
+	n := f.Step - f.Window.FirstStep
+	for before := snapshotSeq + 1; len(steps) < n; {
+		limit := min(historyPage, n-len(steps))
+		page, err := l.journal.Recent(ctx, runID, before, limit)
 		if err != nil {
 			return nil, err
 		}
-		for i, record := range page {
+		for i := len(page) - 1; i >= 0; i-- {
+			record := page[i]
 			if record.Step >= f.Window.FirstStep && record.Step < f.Step {
-				steps = append(append([]StepRecord(nil), page[i:]...), steps...)
-				break
+				steps = append(steps, record)
 			}
 		}
-		if len(page) < historyPage || len(page) == 0 || page[0].Step <= f.Window.FirstStep {
-			return steps, nil
+		if len(page) < limit || len(page) == 0 || page[0].Step <= f.Window.FirstStep {
+			break
 		}
 		before = page[0].Seq
 	}
+	slices.Reverse(steps)
+	return steps, nil
 }
 
 func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {

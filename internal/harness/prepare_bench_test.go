@@ -101,3 +101,30 @@ func BenchmarkPrepareRequest(b *testing.B) {
 		})
 	}
 }
+
+func TestPrepareReadsOnlyActiveWindow(t *testing.T) {
+	for _, tc := range []struct{ completed, window int }{{0, 0}, {128, 5}, {128, 80}} {
+		t.Run(fmt.Sprintf("completed=%d/window=%d", tc.completed, tc.window), func(t *testing.T) {
+			p, l := prepareFixture(t, tc.completed, tc.window)
+			snap, err := l.Step(context.Background(), runID)
+			if err != nil || snap.State.Phase != core.PhaseRequestFrozen || p.frozen == nil {
+				t.Fatalf("prepare: %+v, %v", snap.State, err)
+			}
+			if p.records != tc.window || p.pages != (tc.window+historyPage-1)/historyPage {
+				t.Fatalf("read %d records in %d pages for a %d-step window", p.records, p.pages, tc.window)
+			}
+			body := string(p.frozen.Body)
+			if got := strings.Count(body, "### Step "); got != tc.window {
+				t.Fatalf("request has %d steps, want %d", got, tc.window)
+			}
+			previous := -1
+			for step := tc.completed - tc.window + 1; step <= tc.completed; step++ {
+				at := strings.Index(body, fmt.Sprintf("### Step %d\\n", step))
+				if at <= previous {
+					t.Fatalf("step %d is missing or out of order", step)
+				}
+				previous = at
+			}
+		})
+	}
+}
