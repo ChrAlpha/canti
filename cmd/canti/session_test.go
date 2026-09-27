@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,6 +43,28 @@ func TestSessionDialogueAndInputRetry(t *testing.T) {
 }
 
 func TestSessionCrashReplayAndFrozenRetry(t *testing.T) {
+	t.Run("before admission", func(t *testing.T) {
+		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+		marker := filepath.Join(t.TempDir(), "before-submit")
+		args := []string{"-session", "s", "-input", "one", "-goal", "question"}
+		cmd, wait := f.start([]string{"CANTI_TEST_SETUP=signal", "CANTI_TEST_BLOCKED=" + marker}, "run", args...)
+		waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		if r := wait(); r.code != -1 {
+			t.Fatalf("crash: %+v", r)
+		}
+		if r := f.cli(nil, "status"); r.code != exitError || !strings.Contains(r.stderr, "no runs") {
+			t.Fatalf("orphan before admission: %+v", r)
+		}
+		if r := f.cli(nil, "run", args...); r.code != exitOK {
+			t.Fatalf("retry: %+v", r)
+		}
+		if f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			t.Fatal("pre-admission crash persisted input or duplicated execution")
+		}
+	})
 	for _, boundary := range []string{"before:request_frozen", "after:request_frozen", "after:response_loaded"} {
 		t.Run(boundary, func(t *testing.T) {
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
