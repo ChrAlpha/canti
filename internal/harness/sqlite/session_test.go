@@ -188,6 +188,23 @@ func TestSessionAssociationFailureRollsBackRun(t *testing.T) {
 	}
 }
 
+func TestCheckAdmissionFindsOlderActiveRun(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	older := testRun("older-active")
+	if err := s.CreateRun(ctx, older, fresh(t, older.ID, limits)); err != nil {
+		t.Fatal(err)
+	}
+	newer := testRun("newer-stopped")
+	if err := s.CreateRun(ctx, newer, fresh(t, newer.ID, limits)); err != nil {
+		t.Fatal(err)
+	}
+	stopRun(t, s, newer)
+	if err := s.CheckAdmission(ctx); err == nil {
+		t.Fatal("CheckAdmission missed an older active run")
+	}
+}
+
 func TestSessionRejectsIdentityAndRunIDCollisionWithoutAssociation(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, tempPath(t))
