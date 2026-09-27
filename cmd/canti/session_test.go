@@ -152,6 +152,9 @@ func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
 		if f.status().Run.ID != first {
 			t.Fatal("rejected input persisted")
 		}
+		if r := f.cli(nil, "run", "-goal", "standalone next", "-once"); r.code != exitError || f.status().Run.ID != first {
+			t.Fatalf("%s bypassed through standalone run: %+v", phase, r)
+		}
 		if phase == "needs_resolution" {
 			if r := f.cli(nil, "resolve", "-execution", "unknown", "-note", "abandoned unknown"); r.code != exitStopped {
 				t.Fatalf("resolve: %+v", r)

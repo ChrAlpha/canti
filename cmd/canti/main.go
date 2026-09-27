@@ -374,6 +374,9 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	case err != nil:
 		return err
 	case p == core.PhaseReturned || p == core.PhaseStopped:
+		if err := store.CheckAdmission(ctx); err != nil {
+			return err
+		}
 		if err := harness.PublishHistory(ctx, store, historyRoot(a.state), docker.ArtifactDir, last.ID); err != nil {
 			return fmt.Errorf("publishing the step records of run %s: %w", last.ID, err)
 		}
