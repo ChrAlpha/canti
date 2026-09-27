@@ -84,6 +84,9 @@ func TestSessionSubmitRejectsUnfinishedAndRollsBack(t *testing.T) {
 	if err := s.CreateRun(ctx, legacy, fresh(t, legacy.ID, limits)); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.CheckAdmission(ctx); err == nil {
+		t.Fatal("CheckAdmission accepted an active legacy run")
+	}
 	r := sessionRun("run-1", "input-1")
 	if _, err := s.Submit(ctx, r, fresh(t, r.ID, limits)); err == nil {
 		t.Fatal("Submit over active legacy run succeeded")
@@ -92,6 +95,9 @@ func TestSessionSubmitRejectsUnfinishedAndRollsBack(t *testing.T) {
 		t.Fatalf("input after rollback: %v", err)
 	}
 	stopRun(t, s, legacy)
+	if err := s.CheckAdmission(ctx); err != nil {
+		t.Fatalf("CheckAdmission after known stop: %v", err)
+	}
 	if _, err := s.Submit(ctx, r, fresh(t, r.ID, limits)); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +226,9 @@ func TestSessionAbandonedUnknownEffectBlocksAdmission(t *testing.T) {
 	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionUnknown}, harness.Facts{Observation: observation(core.ExecutionUnknown, 0)})
 	if d.snap.State.Phase != core.PhaseStopped {
 		t.Fatalf("phase = %s", d.snap.State.Phase)
+	}
+	if err := s.CheckAdmission(ctx); err == nil {
+		t.Fatal("CheckAdmission accepted a stopped unknown effect")
 	}
 	next := sessionRun("run-2", "input-2")
 	if _, err := s.Submit(ctx, next, fresh(t, next.ID, limits)); err == nil {

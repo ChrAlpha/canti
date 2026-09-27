@@ -38,6 +38,29 @@ func sessionKey(id string) bool {
 	return true
 }
 
+// CheckAdmission refuses a new run while any workspace run is unfinished or
+// has a stopped effect whose execution outcome remains unknown.
+func (s *Store) CheckAdmission(ctx context.Context) error {
+	return s.checkAdmission(ctx, nil)
+}
+
+func (s *Store) checkAdmission(ctx context.Context, tx *sql.Tx) error {
+	var blocked string
+	var err error
+	if tx == nil {
+		err = s.db.QueryRowContext(ctx, admissionBlockSQL).Scan(&blocked)
+	} else {
+		err = tx.QueryRowContext(ctx, admissionBlockSQL).Scan(&blocked)
+	}
+	if err == nil {
+		return fmt.Errorf("sqlite: run %q is unfinished or has an unknown effect", blocked)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
+}
+
 // Submit creates one durable session input and its run in a single write transaction.
 // Reusing an input ID with the same goal and constraints returns the original run;
 // generated run IDs, creation times, budgets, and host config are ignored on retry.
@@ -64,12 +87,7 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		var blocked string
-		err = tx.QueryRowContext(ctx, admissionBlockSQL).Scan(&blocked)
-		if err == nil {
-			return fmt.Errorf("sqlite: run %q is unfinished or has an unknown effect", blocked)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+		if err := s.checkAdmission(ctx, tx); err != nil {
 			return err
 		}
 		var seq int64
