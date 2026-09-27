@@ -88,7 +88,7 @@ program, so use the binary to inspect its exact exit code.
 | 5 | The run is still active after `-once` |
 | 6 | Another canti process holds the workspace lock |
 
-`run` and `resume` read the credential from `ANTHROPIC_API_KEY`, or else
+`run`, `chat`, and `resume` read the credential from `ANTHROPIC_API_KEY`, or else
 `ANTHROPIC_AUTH_TOKEN`, and the API base URL from `-model-url`, or else
 `ANTHROPIC_BASE_URL`; neither is saved with the run, and the URL must use
 `https` unless it is a loopback address. Every command removes both
@@ -102,6 +102,14 @@ processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
 output tokens per response, structured output and fallbacks on, 256 KiB per
 prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
+
+`chat` takes the flags of `run` except `-goal` and `-once` and reads one input
+per line from standard input. Each input becomes the next run of one session:
+standard error shows each command, the last lines of its output, and its exit
+status, and standard output shows each answer. The first line of standard
+error names the session, which `-session` continues. Ctrl-C stops the current
+run and returns to the prompt; a refused input is reported and the prompt
+continues; end of input exits with status 0. Its log level defaults to `warn`.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's

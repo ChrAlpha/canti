@@ -214,6 +214,12 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 // for its result.
 func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() result) {
 	t.Helper()
+	return startCLIWith(t, nil, env, args...)
+}
+
+// startCLIWith is startCLI with stdin as the standard input of the process.
+func startCLIWith(t *testing.T, stdin io.Reader, env []string, args ...string) (*exec.Cmd, func() result) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +236,7 @@ func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() res
 	}
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
 		t.Fatalf("canti %q: %v", args, err)
@@ -292,11 +298,17 @@ func (f *fixture) cli(env []string, command string, args ...string) result {
 // start starts what cli runs.
 func (f *fixture) start(env []string, command string, args ...string) (*exec.Cmd, func() result) {
 	f.t.Helper()
+	return f.startWith(nil, env, command, args...)
+}
+
+// startWith is start with stdin as the standard input of the process.
+func (f *fixture) startWith(stdin io.Reader, env []string, command string, args ...string) (*exec.Cmd, func() result) {
+	f.t.Helper()
 	all := []string{command, "-workspace", f.workspace, "-state", f.state}
-	if command == "run" || command == "resume" {
+	if command == "run" || command == "resume" || command == "chat" {
 		all = append(all, "-model-url", f.model.URL)
 	}
-	cmd, wait := startCLI(f.t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
+	cmd, wait := startCLIWith(f.t, stdin, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 	return cmd, func() result {
 		r := wait()
 		f.output.WriteString(r.stdout + r.stderr)

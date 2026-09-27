@@ -48,6 +48,7 @@ const usage = `canti drives an agent run in a workspace until it returns or stop
 
 Usage:
   canti run -goal TEXT [-constraints TEXT] [flags]  start a run and drive it until it halts
+  canti chat [-session ID] [flags]                  talk with the agent, one run per input line
   canti resume [-run ID] [flags]                    continue the latest or the named run
   canti stop [-run ID] [-cleanup 30s]               stop a run, cancelling and recording its job;
                                                     an unknown outcome must be resolved first
@@ -57,7 +58,7 @@ Usage:
   canti history [-run ID]                           print the transitions of a run as JSON Lines
   canti version                                     print the version
 
-Run "canti COMMAND -h" for the flags of a command. run and resume read the
+Run "canti COMMAND -h" for the flags of a command. run, chat, and resume read the
 model credential from ANTHROPIC_API_KEY or else ANTHROPIC_AUTH_TOKEN.
 
 Exit status: 0 returned or succeeded, 1 error, 2 usage, 3 stopped,
@@ -69,7 +70,7 @@ func main() { os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stder
 type action func(context.Context) (int, error)
 
 var commands = map[string]func(*flag.FlagSet, *app) action{
-	"run": runCommand, "resume": resumeCommand, "stop": stopCommand,
+	"run": runCommand, "chat": chatCommand, "resume": resumeCommand, "stop": stopCommand,
 	"resolve": resolveCommand, "status": statusCommand, "history": historyCommand,
 }
 
@@ -78,6 +79,7 @@ type app struct {
 	log              *slog.Logger
 	workspace, state string
 	runID            string
+	steps            io.Writer
 	cred             credential
 	credErr          error
 }
@@ -184,14 +186,8 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	var s spec
 	s.register(fs)
 	return func(ctx context.Context) (int, error) {
-		limits, hint := harness.DefaultPromptLimits(), "; put a long specification in a workspace file and reference it from the goal"
-		switch g := strings.TrimSpace(*goal); {
-		case g == "":
-			return exitUsage, errors.New("-goal is required")
-		case len(g) > limits.Goal:
-			return exitUsage, fmt.Errorf("-goal must be at most %d bytes%s", limits.Goal, hint)
-		case len(strings.TrimSpace(*constraints)) > limits.Constraints:
-			return exitUsage, fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
+		if err := checkTask(*goal, *constraints); err != nil {
+			return exitUsage, err
 		}
 		s.config.Workspace = a.workspace
 		if *session != "" || *input != "" {
@@ -242,6 +238,19 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		snap, err := drive(l, run.ID)
 		return a.report(snap, err, exitActive)
 	}
+}
+
+func checkTask(goal, constraints string) error {
+	limits, hint := harness.DefaultPromptLimits(), "; put a long specification in a workspace file and reference it from the goal"
+	switch g := strings.TrimSpace(goal); {
+	case g == "":
+		return errors.New("-goal is required")
+	case len(g) > limits.Goal:
+		return fmt.Errorf("-goal must be at most %d bytes%s", limits.Goal, hint)
+	case len(strings.TrimSpace(constraints)) > limits.Constraints:
+		return fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
+	}
+	return nil
 }
 
 func resumeCommand(fs *flag.FlagSet, a *app) action {
@@ -390,8 +399,12 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 }
 
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
+	j = wrapJournal(j)
+	if a.steps != nil {
+		j = rendering{j.(harness.SessionJournal), a.steps}
+	}
 	reader := &harness.Reader{History: historyRoot(a.state), Artifacts: filepath.Join(a.state, "artifacts"), Imports: c.HistoryImports}
-	return harness.NewLoop(wrapJournal(j), x, m, harness.LoopConfig{
+	return harness.NewLoop(j, x, m, harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir,
 		History: historyRoot(a.state), RunsPath: runsDir,
 		Limits: promptLimits(c), Logger: a.log,
