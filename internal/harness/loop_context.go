@@ -155,6 +155,9 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err := l.contextFrame(ctx, snap, &f); err != nil {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
+	if err := l.sessionContext(ctx, run, &f); err != nil {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	}
 	if s.Step == 1 && s.RequestRev == 0 {
 		if err := f.ValidateContext(l.cfg.Limits); err != nil {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})

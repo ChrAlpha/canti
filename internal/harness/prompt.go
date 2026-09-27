@@ -102,6 +102,9 @@ func (f Frame) head(l PromptLimits) string {
 		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.RunsDir)+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
 		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
 		"Every run of this state directory, including this one, is recorded under "+inline(f.RunsDir)+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
+	if f.SessionContext != "" {
+		section(&b, "Earlier session dialogue", f.SessionContext)
+	}
 	if f.Window != nil {
 		section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
 		if f.Window.Handover != "" {

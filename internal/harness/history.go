@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -71,6 +72,9 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 	if err == nil && run.Constraints != "" {
 		err = putFile(dir, "constraints", run.Constraints)
 	}
+	if err == nil && run.SessionID != "" {
+		err = publishSession(ctx, j, dir, run)
+	}
 	steps, found := filepath.Join(dir, "steps"), false
 	if err == nil {
 		found, err = exists(steps, true)
@@ -90,6 +94,37 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 		err = putFile(dir, "result", result)
 	}
 	return err
+}
+
+func publishSession(ctx context.Context, journal Journal, dir string, run Run) error {
+	j, ok := journal.(SessionJournal)
+	if !ok {
+		return errors.New("harness: session journal is required for a session run")
+	}
+	if run.SessionSeq < 1 {
+		return errors.New("harness: session sequence is required")
+	}
+	prior, err := j.SessionRuns(ctx, run.SessionID, run.SessionSeq, 1)
+	if err != nil {
+		return err
+	}
+	if len(prior) > 1 || len(prior) == 1 && (prior[0].SessionID != run.SessionID || prior[0].SessionSeq < 1 || prior[0].SessionSeq >= run.SessionSeq) {
+		return errors.New("harness: invalid previous session run")
+	}
+	var previous string
+	if len(prior) == 1 {
+		previous = prior[0].ID
+	}
+	data, err := json.Marshal(struct {
+		SessionID     string `json:"session_id"`
+		Sequence      int64  `json:"sequence"`
+		InputID       string `json:"input_id"`
+		PreviousRunID string `json:"previous_run_id,omitempty"`
+	}{run.SessionID, run.SessionSeq, run.InputID, previous})
+	if err != nil {
+		return err
+	}
+	return putFile(dir, "session", string(data)+"\n")
 }
 
 // rebuild publishes the steps directory of the run in dir with every

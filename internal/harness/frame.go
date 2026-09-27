@@ -24,6 +24,7 @@ type Frame struct {
 	ImportsEnabled                       bool
 	HandoverBytes                        int
 	Retrieved                            map[int]string
+	SessionContext                       string
 }
 
 // Rejection is a response of the current step that failed to decode, with
