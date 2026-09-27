@@ -66,6 +66,9 @@ type Journal interface {
 // wiring, such as executor and model settings, that a resume must reuse.
 type Run struct {
 	ID          string
+	SessionID   string `json:",omitempty"`
+	SessionSeq  int64  `json:",omitempty"`
+	InputID     string `json:",omitempty"`
 	Goal        string
 	Constraints string
 	Budget      Budget

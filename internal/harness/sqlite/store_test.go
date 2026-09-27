@@ -76,7 +76,7 @@ func TestOpenConfiguresDurableJournal(t *testing.T) {
 		"foreign_keys": "1",
 		"busy_timeout": "5000",
 		"fullfsync":    "1",
-		"user_version": "1",
+		"user_version": "2",
 	}
 	for pragma, value := range want {
 		var got string
@@ -96,7 +96,7 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("PRAGMA user_version = 2"); err != nil {
+	if _, err := s.db.Exec("PRAGMA user_version = 3"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

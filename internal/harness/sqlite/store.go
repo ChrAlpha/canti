@@ -31,7 +31,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
@@ -65,7 +65,24 @@ CREATE TABLE transitions (
 CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
 CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
 CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
+CREATE TABLE session_runs (
+	session_id TEXT NOT NULL,
+	seq INTEGER NOT NULL CHECK (seq > 0),
+	input_id TEXT NOT NULL,
+	run_id TEXT NOT NULL UNIQUE REFERENCES runs (id),
+	PRIMARY KEY (session_id, seq),
+	UNIQUE (session_id, input_id)
+);
 `
+
+const sessionSchema = `CREATE TABLE session_runs (
+	session_id TEXT NOT NULL,
+	seq INTEGER NOT NULL CHECK (seq > 0),
+	input_id TEXT NOT NULL,
+	run_id TEXT NOT NULL UNIQUE REFERENCES runs (id),
+	PRIMARY KEY (session_id, seq),
+	UNIQUE (session_id, input_id)
+);`
 
 const (
 	sameRunSQL   = `SELECT semantics = ? AND run = ? AND initial = ? FROM runs WHERE id = ?`
@@ -162,6 +179,9 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 	case version == 0 && objects == 0:
 		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
 		return err
+	case version == 1:
+		_, err := tx.ExecContext(ctx, sessionSchema+"PRAGMA user_version = 2;")
+		return err
 	}
 	return fmt.Errorf("%w: schema version %d with %d objects, want %d", ErrIncompatible, version, objects, schemaVersion)
 }
@@ -192,29 +212,16 @@ func (s *Store) stmt(ctx context.Context, tx *sql.Tx, query string) *sql.Stmt {
 // must be the fresh state of the same run. Repeating an identical create
 // succeeds without change; different content under an existing ID fails.
 func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.State) error {
-	if err := initial.Validate(); err != nil {
-		return err
+	if run.SessionID != "" || run.InputID != "" || run.SessionSeq != 0 {
+		return errors.New("sqlite: session runs require Submit")
 	}
-	if want, _ := core.NewState(run.ID, initial.Limits); initial != want {
-		return fmt.Errorf("sqlite: run %q must start from its fresh state", run.ID)
-	}
-	for _, text := range []string{run.ID, run.Goal, run.Constraints} {
-		if !utf8.ValidString(text) {
-			return fmt.Errorf("sqlite: run %q holds invalid UTF-8", run.ID)
-		}
-	}
-	run.Created = run.Created.UTC()
-	data, err := json.Marshal(run)
-	if err != nil {
-		return err
-	}
-	state, err := json.Marshal(initial)
+	data, state, err := encodeRun(run, initial)
 	if err != nil {
 		return err
 	}
 	return s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var same bool
-		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, core.SemanticsVersion, string(data), string(state), run.ID).Scan(&same)
+		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, core.SemanticsVersion, data, state, run.ID).Scan(&same)
 		switch {
 		case err == nil && same:
 			return nil
@@ -223,9 +230,33 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, string(data), string(state))
+		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state)
 		return err
 	})
+}
+
+func encodeRun(run harness.Run, initial core.State) (string, string, error) {
+	if err := initial.Validate(); err != nil {
+		return "", "", err
+	}
+	if want, _ := core.NewState(run.ID, initial.Limits); initial != want {
+		return "", "", fmt.Errorf("sqlite: run %q must start from its fresh state", run.ID)
+	}
+	for _, text := range []string{run.ID, run.Goal, run.Constraints} {
+		if !utf8.ValidString(text) {
+			return "", "", fmt.Errorf("sqlite: run %q holds invalid UTF-8", run.ID)
+		}
+	}
+	run.Created = run.Created.UTC()
+	data, err := json.Marshal(run)
+	if err != nil {
+		return "", "", err
+	}
+	state, err := json.Marshal(initial)
+	if err != nil {
+		return "", "", err
+	}
+	return string(data), string(state), nil
 }
 
 // Commit records t, its facts, and the run totals in one transaction, or
