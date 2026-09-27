@@ -13,17 +13,10 @@ import (
 const admissionBlockSQL = `SELECT r.id FROM runs r
 LEFT JOIN transitions t ON t.run_id = r.id AND t.seq = (SELECT max(seq) FROM transitions WHERE run_id = r.id)
 WHERE COALESCE(json_extract(t.to_state, '$.Phase'), json_extract(r.initial, '$.Phase')) NOT IN ('returned', 'stopped')
-OR EXISTS (
-	SELECT 1 FROM transitions u WHERE u.run_id = r.id AND u.kind = 'resolved'
-	AND json_extract(u.event, '$.Execution') = 'unknown'
-	AND json_extract(u.event, '$.EffectID') = json_extract(t.to_state, '$.EffectID')
-	AND NOT EXISTS (
-		SELECT 1 FROM transitions v WHERE v.run_id = r.id AND v.seq > u.seq
-		AND v.kind IN ('observed', 'resolved')
-		AND json_extract(v.event, '$.EffectID') = json_extract(u.event, '$.EffectID')
-		AND json_extract(v.event, '$.Execution') != 'unknown'
-	)
-) LIMIT 1`
+OR (json_extract(t.to_state, '$.Phase') = 'stopped'
+	AND json_extract(t.to_state, '$.EffectID') != ''
+	AND t.kind = 'resolved'
+	AND json_extract(t.event, '$.Execution') = 'unknown') LIMIT 1`
 
 func sessionKey(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
