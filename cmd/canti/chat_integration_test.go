@@ -46,7 +46,7 @@ func TestChatShowsAllOfACommandWithCarriageReturns(t *testing.T) {
 	})
 	_, wait := f.startWith(strings.NewReader("go\n"), nil, "chat", "-image", image)
 	r := wait()
-	if r.code != exitOK || !strings.Contains(r.stderr, "$ touch hidden # \\r echo shown\n└ exit 0\n") {
+	if r.code != exitOK || !strings.Contains(r.stderr, "$ \"touch hidden # \\r echo shown\"\n└ exit 0\n") {
 		t.Fatalf("chat: %+v", r)
 	}
 	if _, err := os.Stat(filepath.Join(f.workspace, "hidden")); err != nil {

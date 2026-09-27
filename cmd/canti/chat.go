@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -89,10 +90,16 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
 						return code, err
 					case code == exitUsage:
+						if !explicit {
+							var readErr error
+							if fixed, readErr = inherited(ctx, a, id); readErr != nil {
+								return exitError, readErr
+							}
+						}
 						if _, _, fixedErr := newRun("chat", fixed, s, time.Now()); fixedErr != nil {
 							return code, fixedErr
 						}
-						fmt.Fprintf(a.stderr, "canti chat: the input does not fit -context-bytes: %v\n", err)
+						fmt.Fprintf(a.stderr, "canti chat: the input does not fit -context-bytes (%s)\n", strings.TrimPrefix(err.Error(), "-context-bytes: "))
 					case err != nil || code != exitOK && code != exitStopped:
 						return code, err
 					}
@@ -112,9 +119,12 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 
 // inherited returns the constraints the next input of session inherits.
 func inherited(ctx context.Context, a *app, session string) (string, error) {
+	if _, err := os.Stat(filepath.Join(a.state, "canti.db")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	store, done, err := a.open(ctx, false, false)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 	defer done()
 	prior, err := store.SessionRuns(ctx, session, 0, 1)
@@ -128,28 +138,33 @@ func inherited(ctx context.Context, a *app, session string) (string, error) {
 type openerError struct{}
 
 func (*openerError) Error() string {
-	return "start a block with <<WORD or <<'WORD', WORD made of ASCII letters, digits, underscores, or hyphens"
+	return "start a block with <<WORD, <<'WORD', or <<-WORD, WORD made of ASCII letters, digits, underscores, or hyphens; put an input that starts with << in a block"
 }
 
 // readInput reads one input: a line, or after a line <<WORD or <<'WORD' the
-// lines up to a line that is exactly WORD, prompting on prompt for each.
+// lines up to a line that is exactly WORD, prompting on prompt for each. As
+// in a shell, <<-WORD strips leading tabs from those lines.
 func readInput(in *bufio.Reader, prompt io.Writer) (string, error) {
 	line, err := in.ReadString('\n')
 	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "<<")
 	if !ok {
 		return strings.TrimSpace(line), err
 	}
+	rest, tabs := strings.CutPrefix(rest, "-")
 	word := strings.TrimSpace(rest)
 	if len(word) > 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
 		word = word[1 : len(word)-1]
 	}
 	if !sqlite.ValidKey(word) {
-		return "", cmp.Or(err, error(&openerError{}))
+		return "", &openerError{}
 	}
 	var b strings.Builder
 	for err == nil {
 		fmt.Fprint(prompt, "… ")
-		if line, err = in.ReadString('\n'); strings.TrimRight(line, "\r\n") == word {
+		if line, err = in.ReadString('\n'); tabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if strings.TrimRight(line, "\r\n") == word {
 			return strings.TrimSpace(b.String()), nil
 		}
 		b.WriteString(line)
@@ -215,7 +230,7 @@ const excerptLines, excerptWidth = 8, 200
 // excerpt returns at most excerptLines lines of s, each cut to excerptWidth
 // bytes. With tail, it returns the last lines as a terminal shows output:
 // each cut to what follows its last carriage return and cleaned. Otherwise
-// it quotes every character clean would drop.
+// it quotes, as Go does, each line holding a character clean would drop.
 func excerpt(s string, tail bool) []string {
 	if s = strings.TrimRight(s, "\r\n"); s == "" {
 		return nil
@@ -225,8 +240,8 @@ func excerpt(s string, tail bool) []string {
 		if tail {
 			l = strings.TrimSuffix(l, "\r")
 			l = clean(l[strings.LastIndexByte(l, '\r')+1:])
-		} else {
-			l = visible(strings.TrimSuffix(l, "\r"))
+		} else if l = strings.TrimSuffix(l, "\r"); strings.ContainsFunc(l, hidden) {
+			l = strconv.Quote(l)
 		}
 		if len(l) > excerptWidth {
 			l = strings.ToValidUTF8(l[:excerptWidth], "") + "…"
@@ -243,16 +258,5 @@ func excerpt(s string, tail bool) []string {
 	return append(lines[:excerptLines], fmt.Sprintf("… %d more %s", n, map[bool]string{true: "line", false: "lines"}[n == 1]))
 }
 
-// visible quotes, as Go does, every character but tabs and graphic ones.
-func visible(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r == '\t' || unicode.IsGraphic(r) && r != utf8.RuneError {
-			b.WriteRune(r)
-		} else {
-			q := strconv.QuoteRune(r)
-			b.WriteString(q[1 : len(q)-1])
-		}
-	}
-	return b.String()
-}
+// hidden reports a character that is not a tab or a graphic character.
+func hidden(r rune) bool { return r != '\t' && (!unicode.IsGraphic(r) || r == utf8.RuneError) }

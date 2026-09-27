@@ -18,12 +18,13 @@ func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second\u001b]0;t\u0007 ‮answer\r\n"}`})
 	f.model.answer(1, 3, reply{text: `{"kind":"return","payload":"third answer"}`})
 	block := "second\ndef f():\n    \"\"\"doc\"\"\"\n\"\"\"\nEN\n END\nquestion"
+	block += "\n\tEND"
 	_, wait := f.startWith(strings.NewReader("first question\n\n  \n<< 'END'\n"+block+"\nEND\n"), nil, "chat", "-constraints", "Be brief")
 	r := wait()
 	if r.code != exitOK || r.stdout != "first answer\nsecond]0;t answer\n\n" {
 		t.Fatalf("chat: %+v", r)
 	}
-	if strings.Count(r.stderr, "… ") != 8 {
+	if strings.Count(r.stderr, "… ") != 9 {
 		t.Fatalf("block prompts: %s", r.stderr)
 	}
 	if fi, err := os.Stat(f.state); err != nil || fi.Mode().Perm() != 0o700 {
@@ -66,7 +67,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-context-bytes", "100000")
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") ||
-		!strings.Contains(r.stderr, "canti chat: the input does not fit -context-bytes") || !strings.Contains(r.stderr, "start a block with <<WORD") {
+		!strings.Contains(r.stderr, "canti chat: the input does not fit -context-bytes (harness: ") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
 		t.Fatalf("chat: %+v", r)
 	}
 	if s := f.status(); s.Run.SessionSeq != 1 {
@@ -76,8 +77,16 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "input ended inside <<END; it was not submitted") {
 		t.Fatalf("unterminated: %+v", r)
 	}
+	_, wait = f.startWith(strings.NewReader("<<what now"), nil, "chat")
+	if r := wait(); r.code != exitOK || !strings.Contains(r.stderr, "start a block with <<WORD") {
+		t.Fatalf("opener at end of input: %+v", r)
+	}
 	if s := f.status(); s.Run.Goal != "ok" {
 		t.Fatalf("unterminated input was submitted: %+v", s.Run)
+	}
+	_, wait = f.startWith(strings.NewReader("<<-EOF\n\tindented\n\tEOF\n"), nil, "chat")
+	if r := wait(); r.code != exitOK || f.status().Run.Goal != "indented" {
+		t.Fatalf("tab-stripped block: %+v, %q", r, f.status().Run.Goal)
 	}
 	if r := f.cli(nil, "run", "-goal", "busy", "-once"); r.code != exitActive {
 		t.Fatalf("busy: %+v", r)
@@ -96,6 +105,15 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	_, wait = f.startWith(strings.NewReader("with long rules\n"), nil, "chat", "-session", "long", "-constraints", strings.Repeat("c", 16000))
 	if r := wait(); r.code != exitOK {
 		t.Fatalf("long constraints: %+v", r)
+	}
+	if err := os.Chmod(filepath.Join(f.state, "canti.db"), 0); err != nil {
+		t.Fatal(err)
+	}
+	_, wait = f.startWith(strings.NewReader("never\n"), nil, "chat", "-session", "long")
+	r = wait()
+	os.Chmod(filepath.Join(f.state, "canti.db"), 0o600)
+	if r.code != exitError || strings.Contains(r.stderr, "> ") {
+		t.Fatalf("unreadable journal: %+v", r)
 	}
 	for _, args := range [][]string{{"-max-steps", "0"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "90000"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, "chat", args...)
@@ -119,6 +137,23 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 	r := wait()
 	in.Close()
 	if r.code != exitUsage || strings.Count(r.stderr, "history imports") != 1 || f.status().Run.SessionSeq != 1 {
+		t.Fatalf("chat: %+v", r)
+	}
+}
+
+func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	in, w := io.Pipe()
+	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-context-bytes", "90000")
+	io.WriteString(w, "one\n")
+	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
+	if r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000)); r.code != exitOK {
+		t.Fatalf("other process: %+v", r)
+	}
+	go func() { io.WriteString(w, "two\nthree\n"); w.Close() }()
+	r := wait()
+	in.Close()
+	if r.code != exitUsage || strings.Contains(r.stderr, "does not fit") || f.status().Run.SessionSeq != 2 {
 		t.Fatalf("chat: %+v", r)
 	}
 }
@@ -234,15 +269,18 @@ func TestExcerpt(t *testing.T) {
 	}{
 		{"a\nb\n", false, []string{"a", "b"}},
 		{"a\x1b[2Jb\u0085‮\tc", true, []string{"a[2Jb\tc"}},
-		{"a\x1b[2Jb\u0085‮\tc\b", false, []string{`a\x1b[2Jb\u0085\u202e` + "\t" + `c\b`}},
+		{"a\x1b[2Jb\u0085‮\tc\b", false, []string{`"a\x1b[2Jb\u0085\u202e\tc\b"`}},
+		{`printf 'a\x1bb'`, false, []string{`printf 'a\x1bb'`}},
+		{"printf 'a\x1bb'", false, []string{`"printf 'a\x1bb'"`}},
 		{"10%\r20%\rdone\r\nnext\r\n", true, []string{"done", "next"}},
-		{"rm -rf x;\recho hi\r\n", false, []string{`rm -rf x;\recho hi`}},
+		{"rm -rf x;\recho hi\r\n", false, []string{`"rm -rf x;\recho hi"`}},
 		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n", false, []string{"1", "2", "3", "4", "5", "6", "7", "8", "… 1 more line"}},
 		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n", false, []string{"1", "2", "3", "4", "5", "6", "7", "8", "… 2 more lines"}},
 		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n", true, []string{"…", "3", "4", "5", "6", "7", "8", "9", "10"}},
 		{long, false, []string{long[:200] + "…"}},
 		{"é" + long, false, []string{"é" + long[:198] + "…"}},
-		{"\xff", false, []string{"�"}},
+		{"\xff", true, []string{"�"}},
+		{"\xff", false, []string{`"\xff"`}},
 		{"", false, nil},
 	} {
 		if got := excerpt(tc.in, tc.tail); strings.Join(got, "|") != strings.Join(tc.want, "|") {

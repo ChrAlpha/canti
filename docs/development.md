@@ -106,16 +106,21 @@ prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps
 `chat` takes the flags of `run` except `-goal`, `-input`, and `-once`, and
 reads inputs from standard input: one line, or after a line `<<WORD` or
 `<<'WORD'` the lines up to a line that is exactly `WORD`, with `WORD` made of
-ASCII letters, digits, underscores, or hyphens. A Linux terminal passes at
+ASCII letters, digits, underscores, or hyphens; `<<-WORD` also strips leading
+tabs from those lines, and an input that itself starts with `<<` must be sent
+in a block. A Linux terminal passes at
 most 4095 bytes of each line, block lines included, so put longer lines in a
 workspace file. Each input becomes the next run of one session: standard
-error shows each command with its control characters quoted, the last lines
-of its output, and its execution status, and standard output shows each
-answer; output and answers lose their control characters. The first line of
+error shows each command, its first 8 lines of at most 200 bytes each, and a
+line holding a control character quoted as a Go string; the last lines of its
+output; and its execution status. Standard output shows each answer. Output
+and answers lose their control characters, and `canti history` shows every
+command in full. The first line of
 standard error names the session, which `-session` continues. On a terminal,
 Ctrl-C stops the current run and returns to the prompt, and Ctrl-C at the
 prompt exits. SIGTERM, or Ctrl-C with standard input not a terminal, stops
-the current run and exits with status 3. Closing the terminal ends chat
+the current run and ends the chat with the run's status: 3 if it stopped, 0 if
+it had already returned. Closing the terminal ends chat
 without a stop: the run and its job remain for `canti resume` or `canti
 stop`. An empty input is skipped; one that is too long, is not valid UTF-8,
 does not fit `-context-bytes`, or starts with `<<` but opens no block is
