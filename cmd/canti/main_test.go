@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 				return crashing{j, when, kind, os.Getenv("CANTI_TEST_BLOCKED")}
 			}
 		}
+		if os.Getenv("CANTI_TEST_TERMINAL") == "1" {
+			stdinTerminal = func() bool { return true }
+		}
 		if os.Getenv("CANTI_TEST_SETUP") == "signal" {
 			wrap := wrapJournal
 			wrapJournal = func(j harness.Journal) harness.Journal {

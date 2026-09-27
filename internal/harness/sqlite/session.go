@@ -18,7 +18,9 @@ OR (json_extract(t.to_state, '$.Phase') = 'stopped'
 	AND t.kind = 'resolved'
 	AND json_extract(t.event, '$.Execution') = 'unknown') LIMIT 1`
 
-func sessionKey(id string) bool {
+// ValidKey reports whether id can name a session or an input: 1 to 128
+// ASCII letters, digits, underscores, or hyphens.
+func ValidKey(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
 		return false
 	}
@@ -58,7 +60,7 @@ func (s *Store) checkAdmission(ctx context.Context, tx *sql.Tx) error {
 // Reusing an input ID with the same goal and constraints returns the original run;
 // generated run IDs, creation times, budgets, and host config are ignored on retry.
 func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State) (harness.Run, error) {
-	if !sessionKey(run.SessionID) || !sessionKey(run.InputID) || run.SessionSeq != 0 {
+	if !ValidKey(run.SessionID) || !ValidKey(run.InputID) || run.SessionSeq != 0 {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
 	if _, _, err := encodeRun(run, initial); err != nil {
@@ -110,7 +112,7 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 
 // SessionInput returns the run first admitted for this input identity.
 func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (harness.Run, error) {
-	if !sessionKey(sessionID) || !sessionKey(inputID) {
+	if !ValidKey(sessionID) || !ValidKey(inputID) {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
 	return s.run(s.db.QueryRowContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
@@ -118,7 +120,7 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 
 // SessionRuns returns newest-first runs, excluding before when positive.
 func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
-	if !sessionKey(sessionID) || before < 0 || limit <= 0 {
+	if !ValidKey(sessionID) || before < 0 || limit <= 0 {
 		return nil, errors.New("sqlite: invalid session page")
 	}
 	if limit > 32 {

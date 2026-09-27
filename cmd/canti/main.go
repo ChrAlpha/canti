@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -80,6 +81,7 @@ type app struct {
 	workspace, state string
 	runID            string
 	steps            io.Writer
+	signal           os.Signal
 	cred             credential
 	credErr          error
 }
@@ -186,7 +188,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	var s spec
 	s.register(fs)
 	return func(ctx context.Context) (int, error) {
-		if err := checkTask(*goal, *constraints); err != nil {
+		if err := checkTask("-goal", *goal, *constraints); err != nil {
 			return exitUsage, err
 		}
 		s.config.Workspace = a.workspace
@@ -240,13 +242,15 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-func checkTask(goal, constraints string) error {
+func checkTask(label, goal, constraints string) error {
 	limits, hint := harness.DefaultPromptLimits(), "; put a long specification in a workspace file and reference it from the goal"
 	switch g := strings.TrimSpace(goal); {
 	case g == "":
-		return errors.New("-goal is required")
+		return fmt.Errorf("%s is required", label)
+	case !utf8.ValidString(goal) || !utf8.ValidString(constraints):
+		return fmt.Errorf("%s and -constraints must be valid UTF-8", label)
 	case len(g) > limits.Goal:
-		return fmt.Errorf("-goal must be at most %d bytes%s", limits.Goal, hint)
+		return fmt.Errorf("%s must be at most %d bytes%s", label, limits.Goal, hint)
 	case len(strings.TrimSpace(constraints)) > limits.Constraints:
 		return fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
 	}
@@ -443,21 +447,26 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 
 // drive catches SIGINT and SIGTERM until release and returns op, which runs
 // the loop, or one step of it with once. The first signal, also one caught
-// before op, shuts the controller down and then stops the run persistently
-// within the cleanup deadline; the second abandons the cleanup.
+// before op, shuts the controller down, is recorded in a.signal, and then
+// stops the run persistently within the cleanup deadline; the second
+// abandons the cleanup.
 func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
+	first := make(chan os.Signal, 1)
 	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
 		if len(sig) > 0 {
 			shutdown()
 		}
 		go func() {
-			for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+			for i, cancel := range []context.CancelFunc{shutdown, abandon} {
 				select {
-				case <-sig:
+				case s := <-sig:
+					if i == 0 {
+						first <- s
+					}
 					cancel()
 				case <-cleanupCtx.Done():
 					return
@@ -474,6 +483,7 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 			return snap, err
 		}
 		a.log.Warn("stopping the run after a signal", "run_id", id)
+		a.signal = <-first
 		cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
 		defer cancel()
 		return stop(cleanup, l, id)

@@ -103,13 +103,19 @@ output tokens per response, structured output and fallbacks on, 256 KiB per
 prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
 
-`chat` takes the flags of `run` except `-goal` and `-once` and reads one input
-per line from standard input. Each input becomes the next run of one session:
-standard error shows each command, the last lines of its output, and its exit
-status, and standard output shows each answer. The first line of standard
-error names the session, which `-session` continues. Ctrl-C stops the current
-run and returns to the prompt; a refused input is reported and the prompt
-continues; end of input exits with status 0. Its log level defaults to `warn`.
+`chat` takes the flags of `run` except `-goal`, `-input`, and `-once`, and
+reads inputs from standard input: one line, or the lines between two lines of
+`"""`. Each input becomes the next run of one session: standard error shows
+each command, the last lines of its output, and its execution status, and
+standard output shows each answer, both without control characters. The first
+line of standard error names the session, which `-session` continues. On a
+terminal, Ctrl-C stops the current run and returns to the prompt, and Ctrl-C at
+the prompt exits. Any other signal, or Ctrl-C with standard input not a
+terminal, stops the current run and exits with status 3. An empty input is
+skipped; one too long or not valid UTF-8 is reported and the prompt continues. A refused
+input or a run that needs resolution ends the chat with the status and the
+advice `run` would print. End of input exits with status 0. The log level
+defaults to `warn`.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's
