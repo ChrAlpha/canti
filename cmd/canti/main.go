@@ -449,9 +449,9 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 // the loop, or one step of it with once. The first signal, also one caught
 // before op, shuts the controller down and then stops the run persistently
 // within the cleanup deadline; the second abandons the cleanup. release
-// records the first signal in a.signal.
+// records in a.signal SIGTERM if it was caught, else the first signal.
 func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
-	sig, seen := make(chan os.Signal, 2), make(chan os.Signal, 1)
+	sig, seen := make(chan os.Signal, 2), make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	signal.Notify(seen, os.Interrupt, syscall.SIGTERM)
 	loopCtx, shutdown := context.WithCancel(ctx)
@@ -470,6 +470,7 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 				}
 			}
 			signal.Stop(sig)
+			signal.Stop(seen)
 		}()
 		step := l.Run
 		if once {
@@ -489,9 +490,10 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		shutdown()
 		signal.Stop(sig)
 		signal.Stop(seen)
-		select {
-		case a.signal = <-seen:
-		default:
+		for len(seen) > 0 {
+			if s := <-seen; a.signal != syscall.SIGTERM {
+				a.signal = s
+			}
 		}
 	}
 }

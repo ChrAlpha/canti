@@ -18,10 +18,13 @@ func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second\u001b]0;t\u0007 ‮answer\r\n"}`})
 	f.model.answer(1, 3, reply{text: `{"kind":"return","payload":"third answer"}`})
 	block := "second\ndef f():\n    \"\"\"doc\"\"\"\n\"\"\"\nEN\n END\nquestion"
-	_, wait := f.startWith(strings.NewReader("first question\n\n  \n<<END\n"+block+"\nEND\n"), nil, "chat", "-constraints", "Be brief")
+	_, wait := f.startWith(strings.NewReader("first question\n\n  \n<< 'END'\n"+block+"\nEND\n"), nil, "chat", "-constraints", "Be brief")
 	r := wait()
 	if r.code != exitOK || r.stdout != "first answer\nsecond]0;t answer\n\n" {
 		t.Fatalf("chat: %+v", r)
+	}
+	if strings.Count(r.stderr, "… ") != 8 {
+		t.Fatalf("block prompts: %s", r.stderr)
 	}
 	if fi, err := os.Stat(f.state); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("state directory: %v, %v", fi.Mode(), err)
@@ -60,10 +63,14 @@ func TestChatShowsBuiltinSteps(t *testing.T) {
 func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	l := harness.DefaultPromptLimits()
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\nok\n"), nil, "chat", "-context-bytes", "100000")
+	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-context-bytes", "100000")
 	r := wait()
-	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") || !strings.Contains(r.stderr, "canti chat: -context-bytes") {
+	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") ||
+		!strings.Contains(r.stderr, "canti chat: the input does not fit -context-bytes") || !strings.Contains(r.stderr, "start a block with <<WORD") {
 		t.Fatalf("chat: %+v", r)
+	}
+	if s := f.status(); s.Run.SessionSeq != 1 {
+		t.Fatalf("refused inputs were submitted: %+v", s.Run)
 	}
 	_, wait = f.startWith(strings.NewReader("<<END\nhalf of it\nEN"), nil, "chat")
 	if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "input ended inside <<END; it was not submitted") {
@@ -83,11 +90,36 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if f.status().Run.ID != busy || len(f.model.requests()) != calls {
 		t.Fatal("refused input created a run or called the model")
 	}
-	for _, args := range [][]string{{"-max-steps", "0"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}} {
+	if r := f.cli(nil, "resume"); r.code != exitOK {
+		t.Fatalf("resume: %+v", r)
+	}
+	_, wait = f.startWith(strings.NewReader("with long rules\n"), nil, "chat", "-session", "long", "-constraints", strings.Repeat("c", 16000))
+	if r := wait(); r.code != exitOK {
+		t.Fatalf("long constraints: %+v", r)
+	}
+	for _, args := range [][]string{{"-max-steps", "0"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "90000"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, "chat", args...)
 		if r := wait(); r.code != exitUsage && r.code != exitError || strings.Contains(r.stderr, "> ") {
 			t.Fatalf("chat %q: %+v", args, r)
 		}
+	}
+}
+
+func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	imports := t.TempDir()
+	in, w := io.Pipe()
+	_, wait := f.startWith(in, nil, "chat", "-history-imports", imports)
+	io.WriteString(w, "one\n")
+	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
+	if err := os.Remove(imports); err != nil {
+		t.Fatal(err)
+	}
+	go func() { io.WriteString(w, "two\nthree\n"); w.Close() }()
+	r := wait()
+	in.Close()
+	if r.code != exitUsage || strings.Count(r.stderr, "history imports") != 1 || f.status().Run.SessionSeq != 1 {
+		t.Fatalf("chat: %+v", r)
 	}
 }
 
@@ -147,26 +179,34 @@ func TestChatSignals(t *testing.T) {
 			}
 		})
 	}
-	t.Run("terminate while the answer is written", func(t *testing.T) {
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer r.Close()
-		fillPipe(t, w)
-		cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, nil, "chat")
-		w.Close()
-		waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
-		time.Sleep(300 * time.Millisecond)
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			t.Fatal(err)
-		}
-		go io.Copy(io.Discard, r)
-		if res := wait(); res.code != exitOK || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
-			t.Fatalf("chat continued after the signal: %+v", res)
-		}
-	})
+	for name, signals := range map[string][]os.Signal{
+		"terminate while the answer is written":               {syscall.SIGTERM},
+		"interrupt and terminate while the answer is written": {os.Interrupt, syscall.SIGTERM},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			fillPipe(t, w)
+			cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, []string{"CANTI_TEST_TERMINAL=1"}, "chat")
+			w.Close()
+			waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
+			time.Sleep(300 * time.Millisecond)
+			for _, s := range signals {
+				if err := cmd.Process.Signal(s); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			go io.Copy(io.Discard, r)
+			if res := wait(); res.code != exitOK || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+				t.Fatalf("chat continued after the signal: %+v", res)
+			}
+		})
+	}
 	t.Run("interrupt at the prompt", func(t *testing.T) {
 		f := newFixture(t, nil)
 		in, w := io.Pipe()
@@ -185,27 +225,6 @@ func TestChatSignals(t *testing.T) {
 	})
 }
 
-// fillPipe fills the pipe that w writes to, so the next write to it blocks.
-func fillPipe(t *testing.T, w *os.File) {
-	t.Helper()
-	fd := int(w.Fd())
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, chunk := range [][]byte{make([]byte, 4096), {0}} {
-		for {
-			if _, err := syscall.Write(fd, chunk); err == syscall.EAGAIN {
-				break
-			} else if err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if err := syscall.SetNonblock(fd, false); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestExcerpt(t *testing.T) {
 	long := strings.Repeat("x", 300)
 	for _, tc := range []struct {
@@ -214,9 +233,11 @@ func TestExcerpt(t *testing.T) {
 		want []string
 	}{
 		{"a\nb\n", false, []string{"a", "b"}},
-		{"a\x1b[2Jb\u0085‮\tc", false, []string{"a[2Jb\tc"}},
+		{"a\x1b[2Jb\u0085‮\tc", true, []string{"a[2Jb\tc"}},
+		{"a\x1b[2Jb\u0085‮\tc\b", false, []string{`a\x1b[2Jb\u0085\u202e` + "\t" + `c\b`}},
 		{"10%\r20%\rdone\r\nnext\r\n", true, []string{"done", "next"}},
-		{"rm -rf x;\recho hi\r\n", false, []string{"rm -rf x;echo hi"}},
+		{"rm -rf x;\recho hi\r\n", false, []string{`rm -rf x;\recho hi`}},
+		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n", false, []string{"1", "2", "3", "4", "5", "6", "7", "8", "… 1 more line"}},
 		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n", false, []string{"1", "2", "3", "4", "5", "6", "7", "8", "… 2 more lines"}},
 		{"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n", true, []string{"…", "3", "4", "5", "6", "7", "8", "9", "10"}},
 		{long, false, []string{long[:200] + "…"}},

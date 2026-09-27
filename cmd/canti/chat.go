@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -41,10 +43,17 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		if !sqlite.ValidKey(id) {
 			return exitUsage, errors.New("-session must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
 		}
-		if err := checkTask("input", "chat", *constraints); err != nil {
+		fixed := *constraints
+		if !explicit {
+			var err error
+			if fixed, err = inherited(ctx, a, id); err != nil {
+				return exitError, err
+			}
+		}
+		if err := checkTask("input", "chat", fixed); err != nil {
 			return exitUsage, err
 		}
-		if _, _, err := newRun("chat", *constraints, s, time.Now()); err != nil {
+		if _, _, err := newRun("chat", fixed, s, time.Now()); err != nil {
 			return exitUsage, err
 		}
 		if a.credErr != nil {
@@ -65,9 +74,14 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		in := bufio.NewReader(os.Stdin)
 		for {
 			fmt.Fprint(a.stderr, "> ")
-			goal, readErr := readInput(in)
+			goal, readErr := readInput(in, a.stderr)
+			var opener *openerError
+			if errors.As(readErr, &opener) {
+				fmt.Fprintf(a.stderr, "canti chat: %v\n", readErr)
+				continue
+			}
 			if goal != "" {
-				if err := checkTask("input", goal, *constraints); err != nil {
+				if err := checkTask("input", goal, fixed); err != nil {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
@@ -75,34 +89,66 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
 						return code, err
 					case code == exitUsage:
-						fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
+						if _, _, fixedErr := newRun("chat", fixed, s, time.Now()); fixedErr != nil {
+							return code, fixedErr
+						}
+						fmt.Fprintf(a.stderr, "canti chat: the input does not fit -context-bytes: %v\n", err)
 					case err != nil || code != exitOK && code != exitStopped:
 						return code, err
 					}
 					a.signal = nil
 				}
 			}
-			if errors.Is(readErr, io.EOF) {
+			switch {
+			case errors.Is(readErr, io.EOF):
 				fmt.Fprintln(a.stderr)
 				return exitOK, nil
-			}
-			if readErr != nil {
+			case readErr != nil:
 				return exitError, readErr
 			}
 		}
 	}
 }
 
-// readInput reads one input: a line, or after a line <<WORD the lines up to
-// a line that is exactly WORD.
-func readInput(in *bufio.Reader) (string, error) {
+// inherited returns the constraints the next input of session inherits.
+func inherited(ctx context.Context, a *app, session string) (string, error) {
+	store, done, err := a.open(ctx, false, false)
+	if err != nil {
+		return "", nil
+	}
+	defer done()
+	prior, err := store.SessionRuns(ctx, session, 0, 1)
+	if err != nil || len(prior) == 0 {
+		return "", err
+	}
+	return prior[0].Constraints, nil
+}
+
+// openerError reports a line that starts with << but opens no block.
+type openerError struct{}
+
+func (*openerError) Error() string {
+	return "start a block with <<WORD or <<'WORD', WORD made of ASCII letters, digits, underscores, or hyphens"
+}
+
+// readInput reads one input: a line, or after a line <<WORD or <<'WORD' the
+// lines up to a line that is exactly WORD, prompting on prompt for each.
+func readInput(in *bufio.Reader, prompt io.Writer) (string, error) {
 	line, err := in.ReadString('\n')
-	word, ok := strings.CutPrefix(strings.TrimSpace(line), "<<")
-	if !ok || !sqlite.ValidKey(word) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "<<")
+	if !ok {
 		return strings.TrimSpace(line), err
+	}
+	word := strings.TrimSpace(rest)
+	if len(word) > 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
+		word = word[1 : len(word)-1]
+	}
+	if !sqlite.ValidKey(word) {
+		return "", cmp.Or(err, error(&openerError{}))
 	}
 	var b strings.Builder
 	for err == nil {
+		fmt.Fprint(prompt, "… ")
 		if line, err = in.ReadString('\n'); strings.TrimRight(line, "\r\n") == word {
 			return strings.TrimSpace(b.String()), nil
 		}
@@ -166,9 +212,10 @@ func clean(s string) string {
 
 const excerptLines, excerptWidth = 8, 200
 
-// excerpt returns at most excerptLines cleaned lines of s, each cut to
-// excerptWidth bytes. With tail, it returns the last lines, each cut to what
-// follows its last carriage return, as a terminal shows output.
+// excerpt returns at most excerptLines lines of s, each cut to excerptWidth
+// bytes. With tail, it returns the last lines as a terminal shows output:
+// each cut to what follows its last carriage return and cleaned. Otherwise
+// it quotes every character clean would drop.
 func excerpt(s string, tail bool) []string {
 	if s = strings.TrimRight(s, "\r\n"); s == "" {
 		return nil
@@ -177,9 +224,10 @@ func excerpt(s string, tail bool) []string {
 	for i, l := range lines {
 		if tail {
 			l = strings.TrimSuffix(l, "\r")
-			l = l[strings.LastIndexByte(l, '\r')+1:]
+			l = clean(l[strings.LastIndexByte(l, '\r')+1:])
+		} else {
+			l = visible(strings.TrimSuffix(l, "\r"))
 		}
-		l = clean(l)
 		if len(l) > excerptWidth {
 			l = strings.ToValidUTF8(l[:excerptWidth], "") + "…"
 		}
@@ -192,5 +240,19 @@ func excerpt(s string, tail bool) []string {
 	case tail:
 		return append([]string{"…"}, lines[n:]...)
 	}
-	return append(lines[:excerptLines], fmt.Sprintf("… %d more lines", n))
+	return append(lines[:excerptLines], fmt.Sprintf("… %d more %s", n, map[bool]string{true: "line", false: "lines"}[n == 1]))
+}
+
+// visible quotes, as Go does, every character but tabs and graphic ones.
+func visible(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\t' || unicode.IsGraphic(r) && r != utf8.RuneError {
+			b.WriteRune(r)
+		} else {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+	}
+	return b.String()
 }

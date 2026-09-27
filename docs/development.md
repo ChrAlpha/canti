@@ -104,23 +104,26 @@ prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps
 256 MiB of output per run, and 10 min per job.
 
 `chat` takes the flags of `run` except `-goal`, `-input`, and `-once`, and
-reads inputs from standard input: one line, or after a line `<<WORD` the lines
-up to a line that is exactly `WORD`, with `WORD` made of ASCII letters,
-digits, underscores, or hyphens. A terminal passes at most 4095 bytes per
-line, so paste longer text as such a block. Each input becomes the next run
-of one session: standard error shows each command, the last lines of its
-output, and its execution status, and standard output shows each answer,
-both without control characters. The first line of standard error names the
-session, which `-session` continues. On a terminal, Ctrl-C stops the current
-run and returns to the prompt, and Ctrl-C at the prompt exits. SIGTERM, or
-Ctrl-C with standard input not a terminal, stops the current run and exits
-with status 3. Closing the terminal ends chat without a stop: the run and its
-job remain for `canti resume` or `canti stop`. An empty input is skipped; one
-that is too long, is not valid UTF-8, or does not fit `-context-bytes` is
-reported and the prompt continues. A refused input or a run that needs
-resolution ends the chat with the status and the advice `run` would print.
-End of input exits with status 0, or 1 inside an unfinished block, which is
-not submitted. The log level defaults to `warn`.
+reads inputs from standard input: one line, or after a line `<<WORD` or
+`<<'WORD'` the lines up to a line that is exactly `WORD`, with `WORD` made of
+ASCII letters, digits, underscores, or hyphens. A Linux terminal passes at
+most 4095 bytes of each line, block lines included, so put longer lines in a
+workspace file. Each input becomes the next run of one session: standard
+error shows each command with its control characters quoted, the last lines
+of its output, and its execution status, and standard output shows each
+answer; output and answers lose their control characters. The first line of
+standard error names the session, which `-session` continues. On a terminal,
+Ctrl-C stops the current run and returns to the prompt, and Ctrl-C at the
+prompt exits. SIGTERM, or Ctrl-C with standard input not a terminal, stops
+the current run and exits with status 3. Closing the terminal ends chat
+without a stop: the run and its job remain for `canti resume` or `canti
+stop`. An empty input is skipped; one that is too long, is not valid UTF-8,
+does not fit `-context-bytes`, or starts with `<<` but opens no block is
+reported and the prompt continues. A refused input, a run that needs
+resolution, or constraints and flags that leave no room for any input end
+the chat with the status and the advice `run` would print. End of input
+exits with status 0, or 1 inside an unfinished block, which is not
+submitted. The log level defaults to `warn`.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's

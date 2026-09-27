@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -528,6 +529,30 @@ func TestASecondSignalAbandonsTheCleanup(t *testing.T) {
 				t.Errorf("stop = %d\nstderr: %s", r.code, r.stderr)
 			}
 		})
+	}
+}
+
+func TestAThirdSignalEndsTheProcess(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	fillPipe(t, w)
+	cmd, wait := f.startIO(nil, w, nil, "run", "-goal", "g")
+	w.Close()
+	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
+	for range 3 {
+		time.Sleep(200 * time.Millisecond)
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	go io.Copy(io.Discard, r)
+	if res := wait(); res.code != -1 {
+		t.Fatalf("run after three signals: %+v", res)
 	}
 }
 
