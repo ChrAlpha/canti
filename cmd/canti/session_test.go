@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -164,25 +165,45 @@ func TestSessionActiveRejectsNewInputWithoutQueue(t *testing.T) {
 }
 
 func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}, 2: {Kind: core.Return, Payload: "recovered"}})
 	if r := f.cli([]string{"PATH=" + t.TempDir()}, "run", "-session", "s", "-input", "one", "-goal", "act"); r.code != exitResolution {
 		t.Fatalf("unknown: %+v", r)
 	}
-	first := f.status().Run.ID
-	for _, phase := range []string{"needs_resolution", "stopped_unknown"} {
+	first := f.status()
+	history := f.history()
+	for _, phase := range []string{"needs_resolution", "unknown_rejected"} {
 		if r := f.cli(nil, "run", "-session", "other", "-input", "two", "-goal", "next"); r.code != exitError {
 			t.Fatalf("%s admitted: %+v", phase, r)
 		}
-		if f.status().Run.ID != first {
-			t.Fatal("rejected input persisted")
-		}
-		if r := f.cli(nil, "run", "-goal", "standalone next", "-once"); r.code != exitError || f.status().Run.ID != first {
+		if r := f.cli(nil, "run", "-goal", "standalone next", "-once"); r.code != exitError {
 			t.Fatalf("%s bypassed through standalone run: %+v", phase, r)
 		}
-		if phase == "needs_resolution" {
-			if r := f.cli(nil, "resolve", "-execution", "unknown", "-note", "abandoned unknown"); r.code != exitStopped {
-				t.Fatalf("resolve: %+v", r)
-			}
+		if r := f.cli(nil, "resolve", "-execution", "unknown", "-note", "not yet known"); r.code != exitUsage || !strings.Contains(r.stderr, "needs_resolution") {
+			t.Fatalf("unknown resolution: %+v", r)
+		}
+		if !reflect.DeepEqual(f.status(), first) || !reflect.DeepEqual(f.history(), history) || len(f.model.requests()) != 1 {
+			t.Fatal("refused inputs or unknown resolution changed committed state or executed")
+		}
+	}
+	if r := f.cli(nil, "resolve", "-execution", "failed_to_start", "-note", "Docker was unavailable; verified no job started"); r.code != exitOK {
+		t.Fatalf("known resolution: %+v", r)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "recovered\n" {
+		t.Fatalf("recovery: %+v", r)
+	}
+	if len(f.model.prompts(1)) != 1 || len(f.model.prompts(2)) != 1 {
+		t.Fatal("old effect decision was replayed")
+	}
+	for i, args := range [][]string{
+		{"-session", "s", "-input", "two", "-goal", "next"},
+		{"-goal", "standalone next"},
+	} {
+		f.model.answer(1, i+2, reply{text: `{"kind":"return","payload":"next accepted"}`})
+		if r := f.cli(nil, "run", args...); r.code != exitOK || r.stdout != "next accepted\n" {
+			t.Fatalf("next input: %+v", r)
+		}
+		if f.status().Run.ID == first.Run.ID {
+			t.Fatal("new input revived original run")
 		}
 	}
 }

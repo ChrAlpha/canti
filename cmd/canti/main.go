@@ -274,12 +274,12 @@ func stopCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-var resolvable = []core.ExecutionState{core.ExecutionExited, core.ExecutionFailedToStart, core.ExecutionCancelled, core.ExecutionTimedOut, core.ExecutionUnknown}
+var resolvable = []core.ExecutionState{core.ExecutionExited, core.ExecutionFailedToStart, core.ExecutionCancelled, core.ExecutionTimedOut}
 
 func resolveCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	job := fs.Bool("job", false, "record the job the executor finds for the unknown effect")
-	execution := fs.String("execution", "", "record the outcome `state`: exited, failed_to_start, cancelled, timed_out, or unknown")
+	execution := fs.String("execution", "", "record a confirmed outcome `state`: exited, failed_to_start, cancelled, or timed_out")
 	exitCode := fs.Int("exit-code", 0, "exit `code` of an exited effect; required for exited only")
 	note := fs.String("note", "", "operator `text` recorded as the output preview")
 	return func(ctx context.Context) (int, error) {
@@ -291,6 +291,8 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 			return exitUsage, errors.New("give exactly one of -job and -execution")
 		case *job && (set["exit-code"] || set["note"]):
 			return exitUsage, errors.New("-job takes no -exit-code or -note")
+		case !*job && obs.Execution == core.ExecutionUnknown:
+			return exitUsage, errors.New("unknown is not a completed resolution; leave the run in needs_resolution until the outcome is confirmed, then use -job or a known -execution state")
 		case !*job && !slices.Contains(resolvable, obs.Execution):
 			return exitUsage, fmt.Errorf("-execution must be one of %v", resolvable)
 		case !*job && set["exit-code"] != (obs.Execution == core.ExecutionExited):
