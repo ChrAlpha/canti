@@ -177,6 +177,8 @@ func modelURL(fs *flag.FlagSet) *string {
 func runCommand(fs *flag.FlagSet, a *app) action {
 	goal := fs.String("goal", "", "the task of the run; required")
 	constraints := fs.String("constraints", "", "rules the agent must follow")
+	session := fs.String("session", "", "serial conversation ID; requires -input; reuse the same workspace and state")
+	input := fs.String("input", "", "submission ID within the session; reuse only to retry this input")
 	once := fs.Bool("once", false, "perform exactly one step after creating the run")
 	url := modelURL(fs)
 	var s spec
@@ -192,6 +194,15 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 			return exitUsage, fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
 		}
 		s.config.Workspace = a.workspace
+		if *session != "" || *input != "" {
+			setConstraints := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "constraints" {
+					setConstraints = true
+				}
+			})
+			return a.submitSession(ctx, *session, *input, *goal, *constraints, setConstraints, s, *url, *once)
+		}
 		run, initial, err := newRun(*goal, *constraints, s, time.Now())
 		if err != nil {
 			return exitUsage, err

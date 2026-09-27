@@ -60,6 +60,12 @@ type crashing struct {
 	when, kind, marker string
 }
 
+func (c crashing) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
+	return c.Journal.(interface {
+		SessionRuns(context.Context, string, int64, int) ([]harness.Run, error)
+	}).SessionRuns(ctx, sessionID, before, limit)
+}
+
 func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
 	switch {
 	case t.Event.Kind() != c.kind:

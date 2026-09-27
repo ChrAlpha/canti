@@ -307,6 +307,9 @@ func (f *fixture) start(env []string, command string, args ...string) (*exec.Cmd
 // status is the object the status command prints.
 type status struct {
 	Run struct {
+		SessionID   string    `json:"session_id"`
+		SessionSeq  int64     `json:"session_seq"`
+		InputID     string    `json:"input_id"`
 		ID          string    `json:"id"`
 		Goal        string    `json:"goal"`
 		Constraints string    `json:"constraints"`

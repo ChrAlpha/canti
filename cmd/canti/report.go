@@ -30,6 +30,7 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 		}
 		out := map[string]any{
 			"run": map[string]any{"id": run.ID, "goal": run.Goal, "constraints": run.Constraints, "created": run.Created,
+				"session_id": run.SessionID, "session_seq": run.SessionSeq, "input_id": run.InputID,
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
 			"seq": snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
 			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID, "job_id": st.JobID,
