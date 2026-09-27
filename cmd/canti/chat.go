@@ -53,6 +53,9 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		if _, err := newModel(s.config, *url, a.cred); err != nil {
 			return exitError, err
 		}
+		if err := os.MkdirAll(a.state, 0o700); err != nil {
+			return exitError, err
+		}
 		if _, err := newExecutor(s.config, a.state); err != nil {
 			return exitError, err
 		}
@@ -68,8 +71,12 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
-					interrupted := a.signal == os.Interrupt && terminal
-					if err != nil || a.signal != nil && !interrupted || code != exitOK && code != exitStopped {
+					switch {
+					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
+						return code, err
+					case code == exitUsage:
+						fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
+					case err != nil || code != exitOK && code != exitStopped:
 						return code, err
 					}
 					a.signal = nil
@@ -86,20 +93,25 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-// readInput reads one input: a line, or the lines between two lines of """.
+// readInput reads one input: a line, or after a line <<WORD the lines up to
+// a line that is exactly WORD.
 func readInput(in *bufio.Reader) (string, error) {
 	line, err := in.ReadString('\n')
-	if strings.TrimSpace(line) != `"""` {
+	word, ok := strings.CutPrefix(strings.TrimSpace(line), "<<")
+	if !ok || !sqlite.ValidKey(word) {
 		return strings.TrimSpace(line), err
 	}
 	var b strings.Builder
 	for err == nil {
-		if line, err = in.ReadString('\n'); strings.TrimSpace(line) == `"""` {
-			break
+		if line, err = in.ReadString('\n'); strings.TrimRight(line, "\r\n") == word {
+			return strings.TrimSpace(b.String()), nil
 		}
 		b.WriteString(line)
 	}
-	return strings.TrimSpace(b.String()), err
+	if errors.Is(err, io.EOF) {
+		err = fmt.Errorf("input ended inside <<%s; it was not submitted", word)
+	}
+	return "", err
 }
 
 // rendering prints each committed command and observation of the journal's
@@ -154,17 +166,20 @@ func clean(s string) string {
 
 const excerptLines, excerptWidth = 8, 200
 
-// excerpt returns at most excerptLines cleaned lines of s, the last ones when
-// tail is set, each cut to excerptWidth bytes and to what follows its last
-// carriage return.
+// excerpt returns at most excerptLines cleaned lines of s, each cut to
+// excerptWidth bytes. With tail, it returns the last lines, each cut to what
+// follows its last carriage return, as a terminal shows output.
 func excerpt(s string, tail bool) []string {
 	if s = strings.TrimRight(s, "\r\n"); s == "" {
 		return nil
 	}
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		l = strings.TrimSuffix(l, "\r")
-		l = clean(l[strings.LastIndexByte(l, '\r')+1:])
+		if tail {
+			l = strings.TrimSuffix(l, "\r")
+			l = l[strings.LastIndexByte(l, '\r')+1:]
+		}
+		l = clean(l)
 		if len(l) > excerptWidth {
 			l = strings.ToValidUTF8(l[:excerptWidth], "") + "…"
 		}
@@ -177,5 +192,5 @@ func excerpt(s string, tail bool) []string {
 	case tail:
 		return append([]string{"…"}, lines[n:]...)
 	}
-	return append(lines[:excerptLines], "…")
+	return append(lines[:excerptLines], fmt.Sprintf("… %d more lines", n))
 }

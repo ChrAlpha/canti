@@ -214,11 +214,12 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 // for its result.
 func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() result) {
 	t.Helper()
-	return startCLIWith(t, nil, env, args...)
+	return startCLIWith(t, nil, nil, env, args...)
 }
 
-// startCLIWith is startCLI with stdin as the standard input of the process.
-func startCLIWith(t *testing.T, stdin io.Reader, env []string, args ...string) (*exec.Cmd, func() result) {
+// startCLIWith is startCLI with stdin as the standard input of the process
+// and, unless it is nil, stdout as its standard output.
+func startCLIWith(t *testing.T, stdin io.Reader, stdout io.Writer, env []string, args ...string) (*exec.Cmd, func() result) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -235,8 +236,8 @@ func startCLIWith(t *testing.T, stdin io.Reader, env []string, args ...string) (
 		cmd.Env = append(cmd.Env, "GORACE=atexit_sleep_ms=0")
 	}
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, &stderr
+	var out, stderr bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, cmp.Or(stdout, io.Writer(&out)), &stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
 		t.Fatalf("canti %q: %v", args, err)
@@ -248,7 +249,7 @@ func startCLIWith(t *testing.T, stdin io.Reader, env []string, args ...string) (
 		if err := cmd.Wait(); err != nil && !errors.As(err, &exit) {
 			t.Fatalf("canti %q: %v", args, err)
 		}
-		return result{cmd.ProcessState.ExitCode(), stdout.String(), stderr.String()}
+		return result{cmd.ProcessState.ExitCode(), out.String(), stderr.String()}
 	}
 }
 
@@ -304,11 +305,17 @@ func (f *fixture) start(env []string, command string, args ...string) (*exec.Cmd
 // startWith is start with stdin as the standard input of the process.
 func (f *fixture) startWith(stdin io.Reader, env []string, command string, args ...string) (*exec.Cmd, func() result) {
 	f.t.Helper()
+	return f.startIO(stdin, nil, env, command, args...)
+}
+
+// startIO is startWith with stdout as the standard output unless it is nil.
+func (f *fixture) startIO(stdin io.Reader, stdout io.Writer, env []string, command string, args ...string) (*exec.Cmd, func() result) {
+	f.t.Helper()
 	all := []string{command, "-workspace", f.workspace, "-state", f.state}
 	if command == "run" || command == "resume" || command == "chat" {
 		all = append(all, "-model-url", f.model.URL)
 	}
-	cmd, wait := startCLIWith(f.t, stdin, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
+	cmd, wait := startCLIWith(f.t, stdin, stdout, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 	return cmd, func() result {
 		r := wait()
 		f.output.WriteString(r.stdout + r.stderr)

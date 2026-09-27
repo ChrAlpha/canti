@@ -447,26 +447,23 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 
 // drive catches SIGINT and SIGTERM until release and returns op, which runs
 // the loop, or one step of it with once. The first signal, also one caught
-// before op, shuts the controller down, is recorded in a.signal, and then
-// stops the run persistently within the cleanup deadline; the second
-// abandons the cleanup.
+// before op, shuts the controller down and then stops the run persistently
+// within the cleanup deadline; the second abandons the cleanup. release
+// records the first signal in a.signal.
 func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
-	sig := make(chan os.Signal, 2)
+	sig, seen := make(chan os.Signal, 2), make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(seen, os.Interrupt, syscall.SIGTERM)
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
-	first := make(chan os.Signal, 1)
 	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
 		if len(sig) > 0 {
 			shutdown()
 		}
 		go func() {
-			for i, cancel := range []context.CancelFunc{shutdown, abandon} {
+			for _, cancel := range []context.CancelFunc{shutdown, abandon} {
 				select {
-				case s := <-sig:
-					if i == 0 {
-						first <- s
-					}
+				case <-sig:
 					cancel()
 				case <-cleanupCtx.Done():
 					return
@@ -483,12 +480,20 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 			return snap, err
 		}
 		a.log.Warn("stopping the run after a signal", "run_id", id)
-		a.signal = <-first
 		cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
 		defer cancel()
 		return stop(cleanup, l, id)
 	}
-	return op, func() { abandon(); shutdown(); signal.Stop(sig) }
+	return op, func() {
+		abandon()
+		shutdown()
+		signal.Stop(sig)
+		signal.Stop(seen)
+		select {
+		case a.signal = <-seen:
+		default:
+		}
+	}
 }
 
 func stop(ctx context.Context, l *harness.Loop, id string) (harness.Snapshot, error) {
