@@ -133,6 +133,68 @@ func TestConcurrentSessionSubmitOneAdmission(t *testing.T) {
 	}
 }
 
+func TestConcurrentStoresSubmitAndReopen(t *testing.T) {
+	for _, sameInput := range []bool{true, false} {
+		name := "different_inputs"
+		if sameInput {
+			name = "same_input"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			path := tempPath(t)
+			stores := [2]*Store{open(t, path), open(t, path)}
+			runs := [2]harness.Run{sessionRun("run-a", "input-a"), sessionRun("run-b", "input-b")}
+			if sameInput {
+				runs[1].InputID = runs[0].InputID
+			}
+			states := [2]core.State{fresh(t, runs[0].ID, limits), fresh(t, runs[1].ID, limits)}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var got [2]harness.Run
+			var errs [2]error
+			for i := range stores {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					got[i], errs[i] = stores[i].Submit(ctx, runs[i], states[i])
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+			if sameInput {
+				if errs[0] != nil || errs[1] != nil || got[0].ID != got[1].ID || got[0].SessionSeq != 1 {
+					t.Fatalf("same input = %#v, %#v; errors %v, %v", got[0], got[1], errs[0], errs[1])
+				}
+			} else if (errs[0] == nil) == (errs[1] == nil) {
+				t.Fatalf("different inputs = errors %v, %v; want one admission", errs[0], errs[1])
+			}
+			for _, s := range stores {
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened := open(t, path)
+			page, err := reopened.SessionRuns(ctx, runs[0].SessionID, 0, 32)
+			if err != nil || len(page) != 1 || page[0].SessionSeq != 1 {
+				t.Fatalf("reopened page = %#v, %v", page, err)
+			}
+			if sameInput && page[0].ID != got[0].ID {
+				t.Fatalf("reopened run %q, want %q", page[0].ID, got[0].ID)
+			}
+			for i, run := range runs {
+				stored, err := reopened.SessionInput(ctx, run.SessionID, run.InputID)
+				if sameInput && (err != nil || stored.ID != got[0].ID) {
+					t.Fatalf("reopened same input #%d = %#v, %v", i, stored, err)
+				}
+				if !sameInput && ((errs[i] == nil && (err != nil || stored.ID != got[i].ID)) || (errs[i] != nil && !errors.Is(err, harness.ErrNotFound))) {
+					t.Fatalf("reopened input #%d = %#v, %v; submit error %v", i, stored, err, errs[i])
+				}
+			}
+		})
+	}
+}
+
 func TestSessionMigrationFromV1PreservesLegacyRun(t *testing.T) {
 	ctx := context.Background()
 	path := tempPath(t)
