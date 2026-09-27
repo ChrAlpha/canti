@@ -49,7 +49,7 @@ const usage = `canti drives an agent run in a workspace until it returns or stop
 
 Usage:
   canti run -goal TEXT [-constraints TEXT] [flags]  start a run and drive it until it halts
-  canti chat [-session ID] [flags]                  talk with the agent, one run per input line
+  canti chat [-session ID] [flags]                  talk with the agent, one run per input
   canti resume [-run ID] [flags]                    continue the latest or the named run
   canti stop [-run ID] [-cleanup 30s]               stop a run, cancelling and recording its job;
                                                     an unknown outcome must be resolved first

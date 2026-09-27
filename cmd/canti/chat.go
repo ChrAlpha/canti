@@ -230,23 +230,32 @@ const excerptLines, excerptWidth = 8, 200
 // excerpt returns at most excerptLines lines of s, each cut to excerptWidth
 // bytes. With tail, it returns the last lines as a terminal shows output:
 // each cut to what follows its last carriage return and cleaned. Otherwise
-// it quotes, as Go does, each line holding a character clean would drop.
+// it quotes, as Go does and marked (quoted), each line holding a character
+// clean would drop.
 func excerpt(s string, tail bool) []string {
 	if s = strings.TrimRight(s, "\r\n"); s == "" {
 		return nil
 	}
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		if tail {
-			l = strings.TrimSuffix(l, "\r")
+		if l = strings.TrimSuffix(l, "\r"); tail {
 			l = clean(l[strings.LastIndexByte(l, '\r')+1:])
-		} else if l = strings.TrimSuffix(l, "\r"); strings.ContainsFunc(l, hidden) {
-			l = strconv.Quote(l)
 		}
+		short := l
 		if len(l) > excerptWidth {
-			l = strings.ToValidUTF8(l[:excerptWidth], "") + "…"
+			k := excerptWidth
+			for k > 0 && !utf8.RuneStart(l[k]) {
+				k--
+			}
+			short = l[:k]
 		}
-		lines[i] = l
+		if !tail && strings.ContainsFunc(l, hidden) {
+			short = "(quoted) " + strconv.Quote(short)
+		}
+		if len(short) < len(l) {
+			short += "…"
+		}
+		lines[i] = short
 	}
 	n := len(lines) - excerptLines
 	switch {

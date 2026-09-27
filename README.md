@@ -74,7 +74,7 @@ root, such as `$HOME`, needs `-state`.
 | Command | Effect |
 | --- | --- |
 | `canti run -goal TEXT` | Start a run and drive it until it returns or stops |
-| `canti chat [-session ID]` | Talk with the agent: each input line becomes the next run of one session |
+| `canti chat [-session ID]` | Talk with the agent: each input becomes the next run of one session |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print the run state as JSON, or its transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
