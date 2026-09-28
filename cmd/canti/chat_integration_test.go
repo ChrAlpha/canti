@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,4 +53,42 @@ func TestChatShowsAllOfACommandWithCarriageReturns(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.workspace, "hidden")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
+	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "third answer"}})
+	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
+	f.model.answer(1, 2, reply{text: `{"kind":"exec","payload":"echo started > started; sleep 60"}`})
+	in, w := io.Pipe()
+	cmd, wait := f.startWith(in, []string{"CANTI_TEST_TERMINAL=1"}, "chat", "-session", "s", "-image", image)
+	io.WriteString(w, "first request\n")
+	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
+	io.WriteString(w, "interrupted request\n")
+	waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.workspace, "started")); return err == nil })
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return f.status().Phase == core.PhaseStopped })
+	s := f.status()
+	io.WriteString(w, "third request\n")
+	w.Close()
+	r := wait()
+	if r.code != exitOK || r.stdout != "first answer\nthird answer\n" || !strings.Contains(r.stderr, "$ echo started > started; sleep 60\n") || !strings.Contains(r.stderr, "\n└ cancelled (") ||
+		!strings.Contains(r.stderr, "stopped: cancelled") {
+		t.Fatalf("chat: %+v", r)
+	}
+	if s.Reason != core.StopCancelled || s.Totals.Steps != 1 || f.status().Run.SessionSeq != 3 {
+		t.Fatalf("interrupted run: %+v", s)
+	}
+	p := f.model.prompts(1)
+	if len(p) != 3 {
+		t.Fatalf("%d step 1 requests", len(p))
+	}
+	c := p[2]
+	first, answer, interrupted := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request")
+	if first < 0 || !(first < answer && answer < interrupted) ||
+		!strings.Contains(c, s.Run.ID+"/goal, steps, and result): stopped, reason cancelled, completed steps 1; no assistant return.") {
+		t.Fatalf("the input after an interrupted command lost the dialogue:\n%s", c)
+	}
+	checkReleased(t, f, f.history("-run", s.Run.ID))
 }

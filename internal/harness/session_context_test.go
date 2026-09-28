@@ -15,6 +15,7 @@ type sessionFixture struct {
 	Journal
 	runs   []Run
 	states map[string]core.State
+	steps  map[string]int
 	before int64
 	limit  int
 }
@@ -26,6 +27,10 @@ func (j *sessionFixture) SessionRuns(_ context.Context, _ string, before int64, 
 
 func (j *sessionFixture) Latest(_ context.Context, id string) (Snapshot, error) {
 	return Snapshot{State: j.states[id]}, nil
+}
+
+func (j *sessionFixture) Totals(_ context.Context, id string) (Totals, error) {
+	return Totals{Steps: j.steps[id]}, nil
 }
 
 func returned(payload string) core.State {
@@ -83,24 +88,51 @@ func TestSessionContextDropsOversizedPairIntact(t *testing.T) {
 	}
 }
 
-func TestSessionContextStoppedRunIsNotAssistantAnswer(t *testing.T) {
+func TestSessionContextKeepsDialogueAcrossStoppedRuns(t *testing.T) {
 	j := &sessionFixture{
-		runs:   []Run{{ID: "r2", Goal: "stopped request", SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
-		states: map[string]core.State{"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled, Decision: core.Decision{Payload: "stale payload"}}, "r1": returned("older answer")},
+		runs: []Run{{ID: "r3", Goal: "interrupted again", SessionID: "s", SessionSeq: 3}, {ID: "r2", Goal: "stopped request", SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
+		states: map[string]core.State{
+			"r3": {Phase: core.PhaseStopped, Reason: core.StopCancelled},
+			"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled, Decision: core.Decision{Kind: core.Exec, Payload: "stale payload"}},
+			"r1": returned("older answer"),
+		},
+		steps: map[string]int{"r2": 3},
+	}
+	l := &Loop{journal: j, cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+	f := budgetFrame()
+	if err := l.sessionContext(context.Background(), Run{ID: "r4", SessionID: "s", SessionSeq: 4}, &f); err != nil {
+		t.Fatal(err)
+	}
+	c := f.SessionContext
+	if strings.Contains(c, "stale payload") {
+		t.Fatalf("stopped run misrepresented as returned dialogue: %q", c)
+	}
+	for _, part := range []string{"/r2/goal, steps, and result): stopped, reason cancelled, completed steps 3; no assistant return", "/r3/goal, steps, and result): stopped, reason cancelled, completed steps 0; no assistant return"} {
+		if !strings.Contains(c, part) {
+			t.Fatalf("missing stopped status %q: %q", part, c)
+		}
+	}
+	older, answer, stopped, again := strings.Index(c, "older\n"), strings.Index(c, "older answer"), strings.Index(c, "stopped request"), strings.Index(c, "interrupted again")
+	if older < 0 || !(older < answer && answer < stopped && stopped < again) {
+		t.Fatalf("dialogue before or across stopped runs was lost or reordered: %q", c)
+	}
+	if err := f.ValidateContext(l.cfg.Limits); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionContextStoppedRunKeepsItsStatusWhenItsGoalDoesNotFit(t *testing.T) {
+	j := &sessionFixture{
+		runs:   []Run{{ID: "r2", Goal: strings.Repeat("G", 100000), SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
+		states: map[string]core.State{"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled}, "r1": returned("older answer")},
 	}
 	l := &Loop{journal: j, cfg: LoopConfig{Limits: DefaultPromptLimits()}}
 	f := budgetFrame()
 	if err := l.sessionContext(context.Background(), Run{ID: "r3", SessionID: "s", SessionSeq: 3}, &f); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(f.SessionContext, "stale payload") || strings.Contains(f.SessionContext, "older answer") {
-		t.Fatalf("stopped run misrepresented as returned dialogue: %q", f.SessionContext)
-	}
-	if !strings.Contains(f.SessionContext, "/r2/session") {
-		t.Fatalf("missing stopped source: %q", f.SessionContext)
-	}
-	if !strings.Contains(f.SessionContext, "stopped") || !strings.Contains(f.SessionContext, "cancelled") {
-		t.Fatalf("missing stopped status and reason: %q", f.SessionContext)
+	if !strings.Contains(f.SessionContext, "stopped, reason cancelled") || strings.Contains(f.SessionContext, "G") || strings.Contains(f.SessionContext, "older answer") {
+		t.Fatalf("stopped status was not kept alone at the budget boundary: %q", f.SessionContext)
 	}
 }
 

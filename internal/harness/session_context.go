@@ -56,7 +56,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 		return nil
 	}
 	selected := nav
-	var pairs []string
+	var units []string
 	for _, p := range prior {
 		snap, err := l.journal.Latest(ctx, p.ID)
 		if err != nil {
@@ -65,23 +65,26 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 		if snap.State.Phase != core.PhaseReturned && snap.State.Phase != core.PhaseStopped {
 			return fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)
 		}
+		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, inline(f.RunsDir), inline(p.ID))
+		goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
+		status, unit := "", source+"goal and result; returned):\n"+goal+"Earlier assistant return:\n"+fullBlock(snap.State.Decision.Payload)
 		if snap.State.Phase == core.PhaseStopped {
-			status := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/goal and result): stopped, reason %s; no assistant return.\n", inline(p.ID), p.SessionSeq, inline(f.RunsDir), inline(p.ID), inline(string(snap.State.Reason)))
-			if sessionContextFits(base, l.cfg.Limits, nav+status+strings.Join(pairs, "")) {
-				selected = nav + status + strings.Join(pairs, "")
-				goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
-				if sessionContextFits(base, l.cfg.Limits, nav+status+goal+strings.Join(pairs, "")) {
-					selected = nav + status + goal + strings.Join(pairs, "")
-				}
+			totals, err := l.journal.Totals(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+			status = source + fmt.Sprintf("goal, steps, and result): stopped, reason %s, completed steps %d; no assistant return.\n", inline(string(snap.State.Reason)), totals.Steps)
+			unit = status + goal
+		}
+		rest := strings.Join(units, "")
+		if !sessionContextFits(base, l.cfg.Limits, nav+unit+rest) {
+			if status != "" && sessionContextFits(base, l.cfg.Limits, nav+status+rest) {
+				selected = nav + status + rest
 			}
 			break
 		}
-		pair := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/goal and result; returned):\nEarlier user goal:\n%sEarlier assistant return:\n%s", inline(p.ID), p.SessionSeq, inline(f.RunsDir), inline(p.ID), fullBlock(strings.TrimSpace(p.Goal)), fullBlock(snap.State.Decision.Payload))
-		if !sessionContextFits(base, l.cfg.Limits, nav+pair+strings.Join(pairs, "")) {
-			break
-		}
-		pairs = append([]string{pair}, pairs...)
-		selected = nav + strings.Join(pairs, "")
+		units = append([]string{unit}, units...)
+		selected = nav + strings.Join(units, "")
 	}
 	f.SessionContext = selected
 	return nil
