@@ -136,6 +136,56 @@ func TestSessionContextStoppedRunKeepsItsStatusWhenItsGoalDoesNotFit(t *testing.
 	}
 }
 
+func TestSessionContextStoppedRunAtTheBudgetBoundaries(t *testing.T) {
+	l := &Loop{cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+	answer := strings.Repeat("Ω", 10000)
+	regime := func(n int) int {
+		l.journal = &sessionFixture{
+			runs:   []Run{{ID: "r2", Goal: strings.Repeat("Ψ", n), SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
+			states: map[string]core.State{"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled}, "r1": returned(answer)},
+		}
+		f := budgetFrame()
+		if err := l.sessionContext(context.Background(), Run{ID: "r3", SessionID: "s", SessionSeq: 3}, &f); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.ValidateContext(l.cfg.Limits); err != nil {
+			t.Fatalf("goal of %d runes: %v", n, err)
+		}
+		c := f.SessionContext
+		goal, older := strings.Count(c, "Ψ"), strings.Contains(c, answer)
+		switch {
+		case !strings.Contains(c, "stopped, reason cancelled") || goal != 0 && goal != n || older && goal != n || strings.Contains(c, "Ω") && !older:
+			t.Fatalf("goal of %d runes: a unit was cut or skipped over: %q", n, c)
+		case older:
+			return 2
+		case goal == n:
+			return 1
+		}
+		return 0
+	}
+	edge := func(r int) int {
+		lo, hi := 0, 1<<16
+		for lo < hi {
+			if mid := (lo + hi) / 2; regime(mid) < r {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		return lo
+	}
+	whole, alone := edge(2), edge(1)
+	if regime(0) != 2 || whole == 0 || whole >= alone || alone >= 1<<16 {
+		t.Fatalf("edges %d and %d", whole, alone)
+	}
+	for n, want := range map[int]int{whole - 1: 2, whole: 1, alone - 1: 1, alone: 0} {
+		if got := regime(n); got != want {
+			t.Fatalf("goal of %d runes: regime %d, want %d", n, got, want)
+		}
+	}
+	t.Logf("older dialogue fits below a stopped goal of %d runes, the whole stopped unit below %d", whole, alone)
+}
+
 func TestSessionContextRejectsNonterminalEarlierRun(t *testing.T) {
 	j := &sessionFixture{runs: []Run{{ID: "r1", SessionID: "s", SessionSeq: 1}}, states: map[string]core.State{"r1": {Phase: core.PhaseIdle}}}
 	l := &Loop{journal: j, cfg: LoopConfig{Limits: DefaultPromptLimits()}}
