@@ -118,8 +118,9 @@ their control characters, and `canti history` shows every command in full. The
 first line of standard error names the session, which `-session` continues. On
 a terminal, Ctrl-C stops the current run and returns to the prompt, and Ctrl-C
 at the prompt exits. The next input still sees the earlier dialogue as far as
-it fits `-context-bytes`: a stopped run appears with its request, stop reason,
-and number of completed steps, whose records it can read. SIGTERM, or Ctrl-C with standard input not a terminal,
+it fits `-context-bytes`. A stopped run shows its stop reason, the number of
+steps it recorded, which the agent can read, and its request if that fits.
+SIGTERM, or Ctrl-C with standard input not a terminal,
 stops the current run and ends the chat with the run's status: 3 if it
 stopped, 0 if it had already returned. Closing the terminal ends chat without
 a stop: the run and its job remain for `canti resume` or `canti stop`. An

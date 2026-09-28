@@ -107,7 +107,7 @@ func TestSessionContextKeepsDialogueAcrossStoppedRuns(t *testing.T) {
 	if strings.Contains(c, "stale payload") {
 		t.Fatalf("stopped run misrepresented as returned dialogue: %q", c)
 	}
-	for _, part := range []string{"/r2/goal, steps, and result): stopped, reason cancelled, completed steps 3; no assistant return", "/r3/goal, steps, and result): stopped, reason cancelled, completed steps 0; no assistant return"} {
+	for _, part := range []string{"/r2/goal, steps, and result): stopped, reason cancelled, recorded steps 3; no assistant return", "/r3/goal, steps, and result): stopped, reason cancelled, recorded steps 0; no assistant return"} {
 		if !strings.Contains(c, part) {
 			t.Fatalf("missing stopped status %q: %q", part, c)
 		}
@@ -184,6 +184,59 @@ func TestSessionContextStoppedRunAtTheBudgetBoundaries(t *testing.T) {
 		}
 	}
 	t.Logf("older dialogue fits below a stopped goal of %d runes, the whole stopped unit below %d", whole, alone)
+}
+
+func TestSessionContextStoppedStatusFitsWithNewerDialogue(t *testing.T) {
+	l := &Loop{cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+	regime := func(n int) int {
+		answer := strings.Repeat("N", n)
+		l.journal = &sessionFixture{
+			runs: []Run{{ID: "r3", Goal: "newer", SessionID: "s", SessionSeq: 3}, {ID: "r2", Goal: strings.Repeat("G", 30000), SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
+			states: map[string]core.State{
+				"r3": returned(answer),
+				"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled},
+				"r1": returned("older answer"),
+			},
+		}
+		f := budgetFrame()
+		if err := l.sessionContext(context.Background(), Run{ID: "r4", SessionID: "s", SessionSeq: 4}, &f); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.ValidateContext(l.cfg.Limits); err != nil {
+			t.Fatalf("answer of %d bytes: optional history rejected legal current input: %v", n, err)
+		}
+		c := f.SessionContext
+		newer, stopped := strings.Contains(c, answer), strings.Contains(c, "/r2/goal, steps, and result): stopped")
+		switch {
+		case strings.Contains(c, "G") || strings.Contains(c, "older answer") || stopped && !newer || strings.Contains(c, "NNN") && !newer:
+			t.Fatalf("answer of %d bytes: a unit was cut or skipped over: %d bytes", n, len(c))
+		case stopped:
+			return 2
+		case newer:
+			return 1
+		}
+		return 0
+	}
+	edge := func(r int) int {
+		lo, hi := 0, 1<<16
+		for lo < hi {
+			if mid := (lo + hi) / 2; regime(mid) < r {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		return lo
+	}
+	status, newer := edge(2), edge(1)
+	if status < 1000 || status >= newer || newer >= 1<<16 {
+		t.Fatalf("edges %d and %d", status, newer)
+	}
+	for n, want := range map[int]int{status - 1: 2, status: 1, newer - 1: 1, newer: 0} {
+		if got := regime(n); got != want {
+			t.Fatalf("answer of %d bytes: regime %d, want %d", n, got, want)
+		}
+	}
 }
 
 func TestSessionContextRejectsNonterminalEarlierRun(t *testing.T) {

@@ -260,8 +260,8 @@ func TestChatSignals(t *testing.T) {
 	})
 }
 
-func TestChatKeepsTheDialogueAcrossAnInterrupt(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "third answer"}})
+func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "last answer"}})
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
 	terminal := []string{"CANTI_TEST_TERMINAL=1"}
 	in, w := io.Pipe()
@@ -269,32 +269,35 @@ func TestChatKeepsTheDialogueAcrossAnInterrupt(t *testing.T) {
 	io.WriteString(w, "first request\n")
 	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
 	held := f.model.holdRequests()
-	io.WriteString(w, "interrupted request\n")
-	waitFor(t, func() bool { return len(held) > 0 })
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Fatal(err)
+	for i, input := range []string{"interrupted request\n", "interrupted again\n"} {
+		io.WriteString(w, input)
+		waitFor(t, func() bool { return len(held) > 0 })
+		<-held
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, func() bool { s := f.status(); return s.Run.SessionSeq == int64(i+2) && s.Phase == core.PhaseStopped })
 	}
-	waitFor(t, func() bool { return f.status().Phase == core.PhaseStopped })
 	f.model.mu.Lock()
 	f.model.hold = nil
 	f.model.mu.Unlock()
 	w.Close()
-	if r := wait(); r.code != exitOK || !strings.Contains(r.stderr, "stopped: cancelled") {
+	if r := wait(); r.code != exitOK || strings.Count(r.stderr, "stopped: cancelled") != 2 {
 		t.Fatalf("interrupted chat: %+v", r)
 	}
-	_, wait = f.startWith(strings.NewReader("third request\n"), terminal, "chat", "-session", "s")
-	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
+	_, wait = f.startWith(strings.NewReader("last request\n"), terminal, "chat", "-session", "s")
+	if r := wait(); r.code != exitOK || r.stdout != "last answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
 	p := f.model.prompts(1)
-	if len(p) != 3 {
+	if len(p) != 4 {
 		t.Fatalf("%d step 1 requests", len(p))
 	}
-	c := p[2]
-	first, answer, interrupted := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request")
-	if !strings.Contains(c, "## Goal\nthird request\n") || first < 0 || !(first < answer && answer < interrupted) ||
-		!strings.Contains(c, "stopped, reason cancelled, completed steps 0; no assistant return.") {
-		t.Fatalf("the input after an interrupt lost the dialogue:\n%s", c)
+	c := p[3]
+	first, answer, interrupted, again := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request"), strings.Index(c, "interrupted again")
+	if !strings.Contains(c, "## Goal\nlast request\n") || first < 0 || !(first < answer && answer < interrupted && interrupted < again) ||
+		strings.Count(c, "stopped, reason cancelled, recorded steps 0; no assistant return.") != 2 {
+		t.Fatalf("the input after interrupts lost the dialogue:\n%s", c)
 	}
 }
 

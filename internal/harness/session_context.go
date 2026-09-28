@@ -73,7 +73,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 			if err != nil {
 				return err
 			}
-			status = source + fmt.Sprintf("goal, steps, and result): stopped, reason %s, completed steps %d; no assistant return.\n", inline(string(snap.State.Reason)), totals.Steps)
+			status = source + fmt.Sprintf("goal, steps, and result): stopped, reason %s, recorded steps %d; no assistant return.\n", inline(string(snap.State.Reason)), totals.Steps)
 			unit = status + goal
 		}
 		rest := strings.Join(units, "")
