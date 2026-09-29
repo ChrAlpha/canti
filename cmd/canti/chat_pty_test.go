@@ -245,7 +245,7 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 				t.Fatalf("buffered busy input became a run: %+v", s.Run)
 			}
 			p.send(t, "second request\r")
-			p.await(t, "ready", pos)
+			p.await(t, "second answer", pos)
 			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != core.PhaseReturned {
 				t.Fatalf("explicit input did not finish: %+v", s)
 			}
@@ -271,6 +271,7 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
+	writeFD := int(w.Fd())
 	p := startPTYChat(t, f, w)
 	p.awaitRaw(t)
 	p.send(t, "busy request\r")
@@ -279,13 +280,40 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the model did not receive the active run")
 	}
-	fillPipe(t, w)
-	if err := unix.SetNonblock(int(w.Fd()), true); err != nil {
-		t.Fatal(err)
+	flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("chat output is not nonblocking: flags=%x, error=%v", flags, err)
 	}
-	p.send(t, "redraw")
+	for _, chunk := range [][]byte{make([]byte, 4096), {0}} {
+		for {
+			if _, err := unix.Write(writeFD, chunk); errors.Is(err, unix.EAGAIN) {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	p.send(t, "\x03")
 	p.finish(t, exitError)
 	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 {
 		t.Fatalf("output failure left an active or repeated run: %+v", s)
+	}
+}
+
+func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
+	t.Setenv("PATH", t.TempDir())
+	p := startPTYChat(t, f, nil)
+	p.await(t, "ready", 0)
+	p.send(t, "needs inspection\r")
+	p.finish(t, exitResolution)
+	s := f.status()
+	if s.Phase != core.PhaseNeedsResolution || s.Run.SessionSeq != 1 {
+		t.Fatalf("missing durable resolution state: %+v", s)
+	}
+	out := p.text()
+	altEnd := strings.LastIndex(out, "\x1b[?1049l")
+	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti resolve -run "+s.Run.ID) || !strings.Contains(out[altEnd:], "canti chat -session pty") {
+		t.Fatalf("resolution and session guidance absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
 	}
 }
