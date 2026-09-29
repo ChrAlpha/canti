@@ -45,6 +45,10 @@ func startPTYChatWithEnv(t *testing.T, f *fixture, stderr *os.File, env []string
 }
 
 func startPTYChatWithMode(t *testing.T, f *fixture, stderr *os.File, env []string, canonical bool, args ...string) *ptyChat {
+	return startPTYChatWithDeadline(t, f, stderr, env, canonical, 30*time.Second, args...)
+}
+
+func startPTYChatWithDeadline(t *testing.T, f *fixture, stderr *os.File, env []string, canonical bool, deadline time.Duration, args ...string) *ptyChat {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -69,7 +73,7 @@ func startPTYChatWithMode(t *testing.T, f *fixture, stderr *os.File, env []strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), deadline)
 	argv := append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, args...)
 	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {

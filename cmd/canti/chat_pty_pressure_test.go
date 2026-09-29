@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 )
@@ -21,7 +22,7 @@ func TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded(t *test
 		}
 		f.model.answer(1, i, reply{text: string(decision)})
 	}
-	p := startPTYChat(t, f, nil)
+	p := startPTYChatWithDeadline(t, f, nil, nil, true, 120*time.Second)
 	pos := p.await(t, "ready", 0)
 	baseline := ptyFDCount(t, p.cmd.Process.Pid)
 	for i := 1; i <= 32; i++ {
