@@ -103,33 +103,58 @@ output tokens per response, structured output and fallbacks on, 256 KiB per
 prompt (`-context-bytes`, at least 64 KiB, including handover reserve), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
 
-`chat` takes the flags of `run` except `-goal`, `-input`, and `-once`, and
-reads inputs from standard input: one line, or after a line `<<WORD` or
-`<<'WORD'` the lines up to a line that is exactly `WORD`, with `WORD` made of
-ASCII letters, digits, underscores, or hyphens; `<<-WORD` also strips leading
-tabs from those lines, and an input that itself starts with `<<` must be sent
-in a block. A Linux terminal passes at most 4095 bytes of each line, block
-lines included, so put longer lines in a workspace file. Each input becomes
-the next run of one session: standard error shows each command, its first 8
-lines of at most 200 bytes each, and a line holding a control character quoted
-as a Go string after `(quoted)`; the last lines of its output; and its
-execution status. Standard output shows each answer. Output and answers lose
-their control characters, and `canti history` shows every command in full. The
-first line of standard error names the session, which `-session` continues. On
-a terminal, Ctrl-C stops the current run and returns to the prompt, and Ctrl-C
-at the prompt exits. The next input still sees the earlier dialogue as far as
-it fits `-context-bytes`. A stopped run shows its stop reason, the number of
-steps it recorded, which the agent can read, and its request if that fits.
-SIGTERM, or Ctrl-C with standard input not a terminal,
-stops the current run and ends the chat with the run's status: 3 if it
-stopped, 0 if it had already returned. Closing the terminal ends chat without
-a stop: the run and its job remain for `canti resume` or `canti stop`. An
-empty input is skipped; one that is too long, is not valid UTF-8, does not fit
-`-context-bytes`, or starts with `<<` but opens no block is reported and the
-prompt continues. A refused input, a run that needs resolution, or constraints
-and flags that leave no room for any input end the chat with the status and
-the advice `run` would print. End of input exits with status 0, or 1 inside an
-unfinished block, which is not submitted. The log level defaults to `warn`.
+`chat` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
+accepted input becomes the next run of one serial session. `-session ID`
+continues a session; each new run uses the current launch flags. The log level
+defaults to `warn`.
+
+**Terminal input (TTY):** `chat` uses a full-screen TUI on the alternate screen,
+rendered to standard error. There is currently no plain interactive terminal
+mode. Enter submits, Alt+Enter inserts a newline, and PgUp/PgDn scroll the
+retained display, including while a run is running or stopping. Text, paste,
+and Enter received during a run are discarded; they cannot queue another run.
+An incomplete input sequence or paste is drained before editing reopens.
+Ctrl+C stops the current run and waits for cleanup before returning to the
+editor; a second Ctrl+C abandons that cleanup wait, leaving recovery to
+`canti resume` or `canti stop`. Ctrl+C while idle exits.
+
+The TUI combines answers, diagnostics, and committed step output in one
+viewport. Its pending output buffer and transcript each retain at most 64 KiB
+of text, with omission notices when older text is dropped. Only text from this
+process invocation is displayed: reopening with `-session ID` does **not** load
+previous conversation or execution history. On exit, the retained transcript
+is printed to standard error. The alternate screen and this bounded tail do
+not preserve a complete native terminal or tmux scrollback. Use `canti history`
+for a run's full recorded transitions. Display history is separate from the
+session context supplied to the model; the next input still receives earlier
+dialogue as far as it fits `-context-bytes`.
+
+**Pipe or file input (non-TTY):** inputs are read one line at a time, or as a
+block after `<<WORD` or `<<'WORD'`, ending at a line exactly equal to `WORD`.
+`WORD` consists of ASCII letters, digits, underscores, or hyphens. `<<-WORD`
+also strips leading tabs. An input that starts with `<<` must be sent in a
+block. These block markers are not special in the TUI editor. Piped inputs are
+processed sequentially; the TTY busy-input discard rule does not apply.
+Answers go to standard output; prompts, commands, output previews, execution
+status, and diagnostics go to standard error. End of input exits with status
+0, or 1 inside an unfinished block, which is not submitted.
+
+Both modes display command previews of up to 8 lines of 200 bytes each, output
+tails, and execution status. Lines containing control characters are quoted
+as Go strings after `(quoted)`; answers and output are cleaned of control
+characters. A stopped run reports its stop reason and recorded steps. SIGTERM,
+or Ctrl+C with non-TTY input, stops the run and ends chat with the run's status:
+3 if stopped, 0 if it had already returned. A TUI input or output failure
+requests a stop and cleanup, then exits with an error; abrupt process loss may
+still require `canti resume` or `canti stop`.
+
+Empty input is skipped. The TUI editor caps inserted text at its character
+limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted
+input that fails validation (length, UTF-8, or `-context-bytes`) is reported and
+editing continues. A malformed block opener in non-TTY mode is also reported
+without submitting it. A refused input, a run that needs resolution, or
+constraints and flags that leave no room for any input end chat with the status
+and recovery advice `run` would print.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's

@@ -1,17 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
+	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -44,14 +41,19 @@ func openPTY(t *testing.T) (*os.File, *os.File) {
 func TestChatTerminalDiscardsBusyInput(t *testing.T) {
 	for _, tc := range []struct{ interrupted, canonical bool }{{false, true}, {true, true}, {false, false}, {true, false}} {
 		t.Run(fmt.Sprintf("interrupt=%v/canonical=%v", tc.interrupted, tc.canonical), func(t *testing.T) {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
-			entered, release := make(chan struct{}, 4), make(chan struct{})
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+			f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
+			entered := make(chan struct{}, 2)
+			release := make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				r.Body = io.NopCloser(bytes.NewReader(body))
-				entered <- struct{}{}
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
 				select {
 				case <-release:
 					f.model.ServeHTTP(w, r)
@@ -60,183 +62,140 @@ func TestChatTerminalDiscardsBusyInput(t *testing.T) {
 			}))
 			defer server.Close()
 			defer unblock()
-			master, slave := openPTY(t)
-			if !tc.canonical {
-				term, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				term.Lflag &^= unix.ICANON
-				term.Cc[unix.VMIN], term.Cc[unix.VTIME] = 1, 0
-				if err := unix.IoctlSetTermios(int(slave.Fd()), unix.TCSETS, term); err != nil {
-					t.Fatal(err)
-				}
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			exe, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			cmd := exec.CommandContext(ctx, exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", server.URL)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "CANTI_TEST_MAIN=1", "GORACE=atexit_sleep_ms=0", "ANTHROPIC_API_KEY=" + f.key}
-			cmd.Stdin, cmd.Stdout = slave, io.Discard
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := cmd.Start(); err != nil {
-				t.Fatal(err)
-			}
-			defer func() { cmd.Process.Kill(); cmd.Wait() }()
-			prompts := make(chan struct{}, 16)
-			go func() {
-				var b [1]byte
-				var prev byte
-				for {
-					if _, err := stderr.Read(b[:]); err != nil {
-						return
-					}
-					if prev == '>' && b[0] == ' ' {
-						prompts <- struct{}{}
-					}
-					prev = b[0]
-				}
-			}()
-			await := func(ch <-chan struct{}) {
-				t.Helper()
-				select {
-				case <-ch:
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				}
-			}
-			await(prompts)
-			// One write also covers data read ahead alongside the accepted line.
-			io.WriteString(master, "first\nread ahead\n")
-			await(entered)
-			io.WriteString(master, "busy complete\nbusy partial")
-			if tc.interrupted {
-				if _, err := io.WriteString(master, "\x03"); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				unblock()
-			}
-			await(prompts)
+			p := startPTYChatWithMode(t, f, nil, nil, tc.canonical, "-model-url", server.URL)
+			pos := p.await(t, "ready", 0)
+			p.awaitRaw(t)
+			p.send(t, "first\rread ahead\r")
+			pos = p.await(t, "running", pos)
 			select {
 			case <-entered:
-				t.Fatal("input typed while busy started another model request")
-			case <-time.After(150 * time.Millisecond):
+			case <-time.After(5 * time.Second):
+				t.Fatal("first request did not reach provider")
 			}
-			if s := f.status(); s.Run.SessionSeq != 1 {
-				t.Fatalf("busy input created a run: %+v", s.Run)
-			}
+			p.send(t, "busy complete\rbusy partial")
 			if tc.interrupted {
-				unblock()
+				p.send(t, "\x03")
+				deadline := time.Now().Add(5 * time.Second)
+				for f.status().Phase != core.PhaseStopped {
+					if time.Now().After(deadline) {
+						t.Fatal("Ctrl-C did not stop the active run")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
 			}
-			io.WriteString(master, "fresh\n")
-			await(entered)
-			await(prompts)
+			unblock()
+			pos = p.await(t, "ready", pos)
+			time.Sleep(150 * time.Millisecond)
+			wantRequests := 1
+			if tc.interrupted {
+				wantRequests = 0
+			}
+			if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != wantRequests {
+				t.Fatalf("busy or read-ahead input created another run: %+v", s)
+			}
+			p.send(t, "fresh\r")
+			answer := "fresh answer"
+			if tc.interrupted {
+				answer = "first answer"
+			}
+			p.await(t, answer, pos)
 			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || s.Phase != core.PhaseReturned {
 				t.Fatalf("fresh input did not advance cleanly: %+v", s)
 			}
-			if tc.canonical {
-				io.WriteString(master, "\x04")
-			} else {
-				cmd.Process.Signal(syscall.SIGTERM)
+			prompts := f.model.prompts(1)
+			if len(prompts) != wantRequests+1 || strings.Contains(prompts[len(prompts)-1], "busy complete") || strings.Contains(prompts[len(prompts)-1], "read ahead") {
+				t.Fatalf("stale input entered model context: %q", prompts)
 			}
-			if err := cmd.Wait(); err != nil && tc.canonical {
-				t.Fatal(err)
-			}
+			p.send(t, "\x03")
+			p.finish(t, exitOK)
 		})
 	}
 }
 
 func TestChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
-	script := map[int]core.Decision{41: {Kind: core.Return, Payload: "answer"}}
-	for step := 1; step <= 40; step++ {
-		script[step] = core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`}
-	}
-	f := newFixture(t, script)
-	master, slave := openPTY(t)
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-max-steps", "45")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "CANTI_TEST_MAIN=1", "GORACE=atexit_sleep_ms=0", "ANTHROPIC_API_KEY=" + f.key}
-	cmd.Stdin = slave
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	testChatTerminalReopensPromptAfterStderrBackpressure(t)
+}
+
+func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			f.model.ServeHTTP(w, r)
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer unblock()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
 	defer w.Close()
-	deadline, _ := ctx.Deadline()
-	if err := r.SetReadDeadline(deadline); err != nil {
+	writeFD := int(w.Fd())
+	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = w
-	out, err := cmd.StdoutPipe()
-	if err != nil {
+	p := startPTYChat(t, f, w, "-model-url", server.URL)
+	p.awaitRaw(t)
+	p.send(t, "first\r")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach provider")
+	}
+	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	if flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0); err != nil || flags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("stderr pipe not nonblocking: flags=%x err=%v", flags, err)
 	}
-	defer func() { cmd.Process.Kill(); cmd.Wait() }()
-	waitPrompt := func() {
-		t.Helper()
-		var prev byte
-		var b [1]byte
-		for {
-			if _, err := r.Read(b[:]); err != nil {
-				t.Fatal(err)
-			}
-			if prev == '>' && b[0] == ' ' {
-				return
-			}
-			prev = b[0]
+	fillLivePipe(t, writeFD)
+	unblock()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if s := f.status(); s.Phase == core.PhaseReturned {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatal("first run did not return before output pressure was released")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	waitPrompt()
-	fillPipe(t, w)
+	p.send(t, "stale during blocked display\r")
+	time.Sleep(50 * time.Millisecond)
+	drained := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, r); close(drained) }()
+	time.Sleep(150 * time.Millisecond)
+	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+		t.Fatalf("busy input survived output recovery: %+v, requests=%d", s, len(f.model.requests()))
+	}
+	p.send(t, "fresh\r")
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if s := f.status(); s.Run.SessionSeq == 2 && s.Phase == core.PhaseReturned {
+			if s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
+				t.Fatalf("fresh input did not advance cleanly: %+v, requests=%d", s, len(f.model.requests()))
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("TUI did not accept fresh input after output recovery: %+v", f.status())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p.send(t, "\x03")
+	p.finish(t, exitOK)
 	w.Close()
-	if _, err := io.WriteString(master, "first\n"); err != nil {
-		t.Fatal(err)
-	}
-	answer, err := bufio.NewReader(out).ReadString('\n')
-	if err != nil || answer != "answer\n" {
-		t.Fatalf("answer = %q, %v", answer, err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	if _, err := io.WriteString(master, "before reopened prompt\n"); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 41 {
-		t.Fatalf("input admitted before reopening prompt: %+v", s)
-	}
-	waitPrompt()
-	time.Sleep(100 * time.Millisecond)
-	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 41 {
-		t.Fatalf("busy input survived display recovery: %+v", s)
-	}
-	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
-	if _, err := io.WriteString(master, "fresh\n"); err != nil {
-		t.Fatal(err)
-	}
-	waitPrompt()
-	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || s.Phase != core.PhaseReturned {
-		t.Fatalf("fresh input: %+v", s)
-	}
-	io.WriteString(master, "\x04")
-	if err := cmd.Wait(); err != nil {
-		t.Fatal(err)
-	}
+	<-drained
 }

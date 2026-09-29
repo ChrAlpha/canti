@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -16,12 +16,6 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"golang.org/x/sys/unix"
 )
-
-type fillOnAnswer struct {
-	io.Writer
-	t      *testing.T
-	filled bool
-}
 
 func TestPromptFlushBarrierAndImmediateInput(t *testing.T) {
 	master, slave := openPTY(t)
@@ -87,6 +81,114 @@ func TestPromptFlushBarrierAndImmediateInput(t *testing.T) {
 	after, err := os.ReadDir("/proc/self/fd")
 	if err != nil || len(after) != len(before) {
 		t.Fatalf("descriptor count %d -> %d, %v", len(before), len(after), err)
+	}
+}
+
+func TestChatPromptWriteBackpressure(t *testing.T) {
+	t.Run("short congestion recovery", testChatTerminalReopensPromptAfterStderrBackpressure)
+	t.Run("display deadline", testChatPromptDisplayDeadline)
+	for _, signal := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run("returned signal "+signal.String(), func(t *testing.T) {
+			testChatPromptReturnedSignal(t, signal)
+		})
+	}
+}
+
+func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			f.model.ServeHTTP(w, r)
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	writeFD := int(w.Fd())
+	p := startPTYChat(t, f, w, "-model-url", server.URL)
+	p.awaitRaw(t)
+	p.send(t, "first\r")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach provider")
+	}
+	if err := unix.SetNonblock(writeFD, true); err != nil {
+		t.Fatal(err)
+	}
+	fillLivePipe(t, writeFD)
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.status().Phase != core.PhaseReturned {
+		if time.Now().After(deadline) {
+			t.Fatal("first run did not return while output was blocked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := p.cmd.Process.Signal(signal); err != nil {
+		t.Fatal(err)
+	}
+	p.finish(t, exitError)
+	if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+		t.Fatalf("signal changed completed run: %+v, requests=%d", s, len(f.model.requests()))
+	}
+}
+
+func testChatPromptDisplayDeadline(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	held := f.model.holdRequests()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	writeFD := int(w.Fd())
+	if err := unix.SetNonblock(writeFD, true); err != nil {
+		t.Fatal(err)
+	}
+	p := startPTYChat(t, f, w)
+	p.awaitRaw(t)
+	p.send(t, "first\r")
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach provider")
+	}
+	if err := unix.SetNonblock(writeFD, true); err != nil {
+		t.Fatal(err)
+	}
+	if flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0); err != nil || flags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("stderr pipe not nonblocking: flags=%x err=%v", flags, err)
+	}
+	fillLivePipe(t, writeFD)
+	p.send(t, "before visible\rpartial")
+	start := time.Now()
+	p.send(t, "\x03")
+	p.finish(t, exitError)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("full terminal output took %s to terminate", elapsed)
+	}
+	if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || len(f.model.requests()) != 1 {
+		t.Fatalf("output failure replayed busy input or lost cancellation: %+v, requests=%d", s, len(f.model.requests()))
 	}
 }
 
@@ -203,126 +305,6 @@ func TestPromptOutputBoundaries(t *testing.T) {
 				}
 			case <-time.After(time.Second):
 				t.Fatal("socket prompt did not finish")
-			}
-		})
-	}
-}
-
-func (w *fillOnAnswer) Write(p []byte) (int, error) {
-	if !w.filled {
-		fillPipe(w.t, os.Stderr)
-		w.filled = true
-	}
-	return w.Writer.Write(p)
-}
-
-func TestChatPromptWriteBackpressure(t *testing.T) {
-	if os.Getenv("CANTI_TEST_PROMPT_PIPE") == "1" {
-		os.Exit(cli(context.Background(), os.Args[3:], &fillOnAnswer{Writer: os.Stdout, t: t}, os.Stderr))
-	}
-	for _, tc := range []struct {
-		canonical bool
-		signal    syscall.Signal
-	}{{true, 0}, {false, 0}, {true, syscall.SIGINT}, {true, syscall.SIGTERM}} {
-		t.Run("canonical="+strconv.FormatBool(tc.canonical)+"/signal="+strconv.Itoa(int(tc.signal)), func(t *testing.T) {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
-			master, slave := openPTY(t)
-			if !tc.canonical {
-				term, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				term.Lflag &^= unix.ICANON
-				term.Cc[unix.VMIN], term.Cc[unix.VTIME] = 1, 0
-				if err := unix.IoctlSetTermios(int(slave.Fd()), unix.TCSETS, term); err != nil {
-					t.Fatal(err)
-				}
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			exe, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			cmd := exec.CommandContext(ctx, exe, "-test.run=^TestChatPromptWriteBackpressure$", "--", "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "CANTI_TEST_PROMPT_PIPE=1", "GORACE=atexit_sleep_ms=0", "ANTHROPIC_API_KEY=" + f.key}
-			cmd.Stdin = slave
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer r.Close()
-			defer w.Close()
-			deadline, _ := ctx.Deadline()
-			if err := r.SetReadDeadline(deadline); err != nil {
-				t.Fatal(err)
-			}
-			cmd.Stderr = w
-			out, err := cmd.StdoutPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := cmd.Start(); err != nil {
-				t.Fatal(err)
-			}
-			defer func() { cmd.Process.Kill(); cmd.Wait() }()
-			waitPrompt := func() {
-				t.Helper()
-				var prev byte
-				var b [1]byte
-				for {
-					if _, err := r.Read(b[:]); err != nil {
-						t.Fatal(err)
-					}
-					if prev == '>' && b[0] == ' ' {
-						return
-					}
-					prev = b[0]
-				}
-			}
-			waitPrompt()
-			if _, err := io.WriteString(master, "first\n"); err != nil {
-				t.Fatal(err)
-			}
-			if answer, err := bufio.NewReader(out).ReadString('\n'); err != nil || answer != "answer\n" {
-				t.Fatalf("answer = %q, %v", answer, err)
-			}
-			// A return-only run emits no progress. Its stdout sink fills stderr
-			// after the first prompt: the empty Flush succeeds, then '> ' waits.
-			time.Sleep(100 * time.Millisecond)
-			if tc.signal != 0 {
-				start := time.Now()
-				if err := cmd.Process.Signal(tc.signal); err != nil {
-					t.Fatal(err)
-				}
-				if err := cmd.Wait(); err == nil || time.Since(start) > 2*time.Second {
-					t.Fatalf("blocked prompt signal exit: %v after %s", err, time.Since(start))
-				}
-				if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
-					t.Fatalf("signal changed completed run: %+v", s)
-				}
-				return
-			}
-			if _, err := io.WriteString(master, "before visible\npartial"); err != nil {
-				t.Fatal(err)
-			}
-			time.Sleep(100 * time.Millisecond)
-			waitPrompt()
-			if _, err := io.WriteString(master, "fresh\n"); err != nil {
-				t.Fatal(err)
-			}
-			waitPrompt()
-			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || s.Phase != core.PhaseReturned || len(f.model.requests()) != 2 {
-				t.Fatalf("prompt handoff submitted stale input: state=%+v, requests=%d", s, len(f.model.requests()))
-			}
-			if tc.canonical {
-				io.WriteString(master, "\x04")
-			} else {
-				cmd.Process.Signal(syscall.SIGTERM)
-			}
-			if err := cmd.Wait(); err != nil && tc.canonical {
-				t.Fatal(err)
 			}
 		})
 	}
