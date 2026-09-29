@@ -488,10 +488,17 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 	}
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
+	startWatch := make(chan int, 1)
 	handled := make(chan struct{})
 	go func() {
 		defer close(handled)
-		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+		var handledBeforeOp int
+		select {
+		case handledBeforeOp = <-startWatch:
+		case <-cleanupCtx.Done():
+			return
+		}
+		for _, cancel := range []context.CancelFunc{shutdown, abandon}[handledBeforeOp:] {
 			select {
 			case s := <-sig:
 				if a.stopSignals != nil {
@@ -506,6 +513,21 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		signal.Stop(seen)
 	}()
 	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
+		handledBeforeOp := 0
+	preOp:
+		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+			select {
+			case s := <-sig:
+				if a.stopSignals != nil {
+					seen <- s
+				}
+				cancel()
+				handledBeforeOp++
+			default:
+				break preOp
+			}
+		}
+		startWatch <- handledBeforeOp
 		step := l.Run
 		if once {
 			step = l.Step
@@ -524,6 +546,11 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		<-handled
 		signal.Stop(sig)
 		signal.Stop(seen)
+		for len(sig) > 0 {
+			if s := <-sig; a.signal != syscall.SIGTERM {
+				a.signal = s
+			}
+		}
 		for len(seen) > 0 {
 			if s := <-seen; a.signal != syscall.SIGTERM {
 				a.signal = s

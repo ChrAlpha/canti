@@ -484,7 +484,7 @@ func TestASignalDuringSetupStopsTheRunPersistently(t *testing.T) {
 				}
 			}
 			blocked := filepath.Join(t.TempDir(), "blocked")
-			cmd, wait := f.start([]string{"CANTI_TEST_SETUP=signal", "CANTI_TEST_BLOCKED=" + blocked}, tc.command, tc.args...)
+			cmd, wait := f.start([]string{"GOMAXPROCS=1", "CANTI_TEST_SETUP=signal", "CANTI_TEST_BLOCKED=" + blocked}, tc.command, tc.args...)
 			waitFor(t, func() bool { _, err := os.Stat(blocked); return err == nil })
 			if err := cmd.Process.Signal(tc.signal); err != nil {
 				t.Fatal(err)
@@ -499,6 +499,24 @@ func TestASignalDuringSetupStopsTheRunPersistently(t *testing.T) {
 				t.Error("the model was called")
 			}
 		})
+	}
+}
+
+func TestDriveReleaseWithoutOperationKeepsQueuedSignal(t *testing.T) {
+	signals := make(chan os.Signal, 2)
+	a := &app{stopSignals: signals}
+	_, release := a.drive(context.Background(), false)
+	signals <- os.Interrupt
+	signals <- syscall.SIGTERM
+	done := make(chan struct{})
+	go func() { release(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("release without op blocked")
+	}
+	if a.signal != syscall.SIGTERM {
+		t.Fatalf("released signal = %v, want SIGTERM", a.signal)
 	}
 }
 
