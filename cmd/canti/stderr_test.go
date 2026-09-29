@@ -49,14 +49,17 @@ func TestStderrWriterBoundsAndLoss(t *testing.T) {
 	if w.Dropped() == 0 {
 		t.Fatal("saturated queue did not report loss")
 	}
-	w.mu.Lock()
-	for len(w.queue) > 0 {
-		entry := <-w.queue
-		if len(entry.data) > stderrEntryBytes || !utf8.Valid(entry.data) {
-			t.Fatalf("entry bytes = %d, valid UTF-8 = %t", len(entry.data), utf8.Valid(entry.data))
+drain:
+	for {
+		select {
+		case entry := <-w.queue:
+			if len(entry.data) > stderrEntryBytes || !utf8.Valid(entry.data) {
+				t.Errorf("entry bytes = %d, valid UTF-8 = %t", len(entry.data), utf8.Valid(entry.data))
+			}
+		default:
+			break drain
 		}
 	}
-	w.mu.Unlock()
 	w.Close()
 	go io.Copy(io.Discard, r)
 	<-w.done

@@ -110,6 +110,10 @@ func startChatWithBlockedStderr(t *testing.T, f *fixture, image string, env []st
 	}
 	t.Cleanup(func() { r.Close(); w.Close() })
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	deadline, _ := ctx.Deadline()
+	if err := r.SetReadDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.CommandContext(ctx, exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {

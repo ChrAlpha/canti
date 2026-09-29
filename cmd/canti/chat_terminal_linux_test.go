@@ -177,6 +177,10 @@ func TestChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
+	deadline, _ := ctx.Deadline()
+	if err := r.SetReadDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
 	cmd.Stderr = w
 	out, err := cmd.StdoutPipe()
 	if err != nil {
