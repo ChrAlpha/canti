@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestChatOutputBackpressureIsBounded(t *testing.T) {
 	}
 	defer restore()
 	start := time.Now()
-	if _, err := out.Write([]byte("blocked")); err == nil {
+	if _, err := io.WriteString(out, "blocked"); err == nil {
 		t.Fatal("blocked output succeeded")
 	}
 	if time.Since(start) > time.Second {

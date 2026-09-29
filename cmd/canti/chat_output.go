@@ -13,7 +13,7 @@ import (
 const displayTimeout = 250 * time.Millisecond
 
 type chatOutput struct {
-	*os.File
+	file   *os.File
 	mu     sync.Mutex
 	fd     int
 	failed chan<- error
@@ -33,8 +33,12 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 	if err = unix.SetNonblock(fd, true); err != nil {
 		return nil, nil, err
 	}
-	return &chatOutput{File: f, fd: fd, failed: failed}, func() { _, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags) }, nil
+	return &chatOutput{file: f, fd: fd, failed: failed}, func() { _, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags) }, nil
 }
+
+func (w *chatOutput) Read(p []byte) (int, error) { return w.file.Read(p) }
+
+func (w *chatOutput) Close() error { return w.file.Close() }
 
 func (w *chatOutput) Fd() uintptr { return uintptr(w.fd) }
 

@@ -109,7 +109,10 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 				default:
 				}
 			}
-			return runChatTUI(id, submit, interrupt, signals, display, a.displayFailure, os.Stdin, terminalOutput)
+			prepare := func() { a.stopSignals = make(chan os.Signal, 2) }
+			code, err := runChatTUI(id, prepare, submit, interrupt, signals, display, a.displayFailure, os.Stdin, terminalOutput)
+			fmt.Fprintf(terminalOutput, "canti: continue session with \"canti chat -session %s\"; new runs use the current launch flags.\n", id)
+			return code, err
 		}
 		terminal := stdinTerminal()
 		fmt.Fprintf(a.stderr, "canti: session %s; continue it with \"canti chat -session %[1]s\".\n", id)
@@ -128,6 +131,11 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
+					select {
+					case displayErr := <-a.displayFailure:
+						return exitError, fmt.Errorf("chat display: %w", displayErr)
+					default:
+					}
 					switch {
 					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
 						return code, err
@@ -146,11 +154,6 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 						return code, err
 					}
 					a.signal = nil
-					select {
-					case err := <-a.displayFailure:
-						return exitError, fmt.Errorf("chat display: %w", err)
-					default:
-					}
 				}
 			}
 			switch {

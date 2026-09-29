@@ -229,15 +229,13 @@ func TestChatSignals(t *testing.T) {
 			cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, []string{"CANTI_TEST_TERMINAL=1"}, "chat")
 			w.Close()
 			waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
-			time.Sleep(300 * time.Millisecond)
 			for _, s := range signals {
 				if err := cmd.Process.Signal(s); err != nil {
 					t.Fatal(err)
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			go io.Copy(io.Discard, r)
-			if res := wait(); res.code != exitOK || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if res := wait(); res.code != exitError || !strings.Contains(res.stderr, "chat display: i/o timeout") || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("chat continued after the signal: %+v", res)
 			}
 		})
