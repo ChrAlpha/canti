@@ -16,7 +16,13 @@ import (
 )
 
 func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
-	line := func(i int) string { return strings.Repeat(string(rune('A'+i)), 30) }
+	line := func(i int) string {
+		var b [30]byte
+		for j := range b {
+			b[j] = byte('!' + (i*31+j)%94)
+		}
+		return string(b[:])
+	}
 	var history strings.Builder
 	for i := 0; i < 40; i++ {
 		history.WriteString(line(i) + "\n")
@@ -49,7 +55,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	unblockFirst := func() { firstOnce.Do(func() { close(firstRelease) }) }
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(func() { unblockFirst(); unblock(); gate.Close() })
-	p := startPTYChat(t, f, nil, "-model-url", gate.URL)
+	p := startPTYChatWithEnv(t, f, nil, []string{"TERM=tmux-256color"}, "-model-url", gate.URL)
 	pos := p.await(t, "ready", 0)
 	p.send(t, "first request\r")
 	pos = p.await(t, "new input discarded", pos)
