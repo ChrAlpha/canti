@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,10 @@ type ptyChat struct {
 }
 
 func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *ptyChat {
+	return startPTYChatWithEnv(t, f, stderr, nil, args...)
+}
+
+func startPTYChatWithEnv(t *testing.T, f *fixture, stderr *os.File, env []string, args ...string) *ptyChat {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -62,6 +67,7 @@ func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *pt
 		}
 	}
 	cmd.Env = append(cmd.Env, "CANTI_TEST_MAIN=1", "ANTHROPIC_API_KEY="+f.key, "GORACE=atexit_sleep_ms=0")
+	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if stderr != nil {
 		cmd.Stderr = stderr
@@ -286,19 +292,24 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	if err != nil || flags&unix.O_NONBLOCK == 0 {
 		t.Fatalf("chat output is not nonblocking: flags=%x, error=%v", flags, err)
 	}
+	fillLivePipe(t, writeFD)
+	p.send(t, "\x03")
+	p.finish(t, exitError)
+	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 {
+		t.Fatalf("output failure left an active or repeated run: %+v", s)
+	}
+}
+
+func fillLivePipe(t *testing.T, fd int) {
+	t.Helper()
 	for _, chunk := range [][]byte{make([]byte, 4096), {0}} {
 		for {
-			if _, err := unix.Write(writeFD, chunk); errors.Is(err, unix.EAGAIN) {
+			if _, err := unix.Write(fd, chunk); errors.Is(err, unix.EAGAIN) {
 				break
 			} else if err != nil {
 				t.Fatal(err)
 			}
 		}
-	}
-	p.send(t, "\x03")
-	p.finish(t, exitError)
-	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 {
-		t.Fatalf("output failure left an active or repeated run: %+v", s)
 	}
 }
 
@@ -317,5 +328,54 @@ func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
 	altEnd := strings.LastIndex(out, "\x1b[?1049l")
 	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti resolve -run "+s.Run.ID) || !strings.Contains(out[altEnd:], "canti chat -session pty") {
 		t.Fatalf("resolution and session guidance absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
+	}
+}
+
+func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
+	f := newFixture(t, nil)
+	held := f.model.holdRequests()
+	marker := filepath.Join(t.TempDir(), "stopping")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	writeFD := int(w.Fd())
+	p := startPTYChatWithEnv(t, f, w, []string{"CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED=" + marker})
+	p.awaitRaw(t)
+	p.send(t, "request needing cleanup\r")
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach provider")
+	}
+	flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("chat output is not nonblocking: flags=%x, error=%v", flags, err)
+	}
+	fillLivePipe(t, writeFD)
+	p.send(t, "\x03")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first Ctrl-C never entered blocked stop commit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p.send(t, "\x03")
+	p.finish(t, exitError)
+	s := f.status()
+	if s.Run.SessionSeq != 1 || s.Run.Goal != "request needing cleanup" || s.Phase == core.PhaseStopped {
+		t.Fatalf("blocked cleanup unexpectedly committed or started another run: %+v", s)
+	}
+	if result := f.cli(nil, "stop", "-run", s.Run.ID); result.code != exitStopped {
+		t.Fatalf("retrying stop after abandoned cleanup: %+v", result)
+	}
+	if final := f.status(); final.Phase != core.PhaseStopped || final.Reason != core.StopCancelled || final.Run.SessionSeq != 1 {
+		t.Fatalf("manual stop did not finish original run: %+v", final)
 	}
 }
