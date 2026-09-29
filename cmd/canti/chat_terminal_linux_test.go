@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -150,5 +151,88 @@ func TestChatTerminalDiscardsBusyInput(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
+	script := map[int]core.Decision{41: {Kind: core.Return, Payload: "answer"}}
+	for step := 1; step <= 40; step++ {
+		script[step] = core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`}
+	}
+	f := newFixture(t, script)
+	master, slave := openPTY(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-max-steps", "45")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "CANTI_TEST_MAIN=1", "GORACE=atexit_sleep_ms=0", "ANTHROPIC_API_KEY=" + f.key}
+	cmd.Stdin = slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	cmd.Stderr = w
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	waitPrompt := func() {
+		t.Helper()
+		var prev byte
+		var b [1]byte
+		for {
+			if _, err := r.Read(b[:]); err != nil {
+				t.Fatal(err)
+			}
+			if prev == '>' && b[0] == ' ' {
+				return
+			}
+			prev = b[0]
+		}
+	}
+	waitPrompt()
+	fillPipe(t, w)
+	w.Close()
+	if _, err := io.WriteString(master, "first\n"); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || answer != "answer\n" {
+		t.Fatalf("answer = %q, %v", answer, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := io.WriteString(master, "before reopened prompt\n"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 41 {
+		t.Fatalf("input admitted before reopening prompt: %+v", s)
+	}
+	waitPrompt()
+	time.Sleep(100 * time.Millisecond)
+	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 41 {
+		t.Fatalf("busy input survived display recovery: %+v", s)
+	}
+	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
+	if _, err := io.WriteString(master, "fresh\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitPrompt()
+	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || s.Phase != core.PhaseReturned {
+		t.Fatalf("fresh input: %+v", s)
+	}
+	io.WriteString(master, "\x04")
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
 	}
 }
