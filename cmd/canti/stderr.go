@@ -20,8 +20,9 @@ var stderrTruncated = []byte("... [stderr entry truncated]\n")
 var errStderrEntryTooLarge = errors.New("stderr entry exceeds 4096 bytes")
 
 type stderrEntry struct {
-	data []byte
-	ack  chan error
+	data    []byte
+	ack     chan error
+	inputFD *int
 }
 
 type stderrWriter struct {
@@ -42,7 +43,9 @@ func newStderrWriter(out io.Writer) *stderrWriter {
 		defer close(w.done)
 		write := func(entry stderrEntry) bool {
 			var err error
-			if len(entry.data) > 0 {
+			if entry.inputFD != nil {
+				err = writePrompt(out, entry.data, *entry.inputFD, w.closing)
+			} else if len(entry.data) > 0 {
 				_, err = out.Write(entry.data)
 			}
 			if err == nil {
@@ -113,10 +116,18 @@ func (w *stderrWriter) Write(p []byte) (int, error) {
 }
 
 func (w *stderrWriter) WriteSync(p []byte) error {
+	return w.writeSync(p, nil)
+}
+
+func (w *stderrWriter) Prompt(inputFD int) error {
+	return w.writeSync([]byte("> "), &inputFD)
+}
+
+func (w *stderrWriter) writeSync(p []byte, inputFD *int) error {
 	if len(p) > stderrEntryBytes {
 		return errStderrEntryTooLarge
 	}
-	entry := stderrEntry{data: append([]byte(nil), p...), ack: make(chan error, 1)}
+	entry := stderrEntry{data: append([]byte(nil), p...), ack: make(chan error, 1), inputFD: inputFD}
 	select {
 	case <-w.closing:
 		return io.ErrClosedPipe

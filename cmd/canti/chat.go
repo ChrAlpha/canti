@@ -20,7 +20,6 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
-	"golang.org/x/sys/unix"
 )
 
 var stdinTerminal = func() bool {
@@ -90,13 +89,16 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 			}
 			if discardInput {
 				in.Reset(os.Stdin)
-				if err := flushInput(int(os.Stdin.Fd())); err != nil && !errors.Is(err, unix.ENOTTY) {
-					return exitError, fmt.Errorf("discarding busy terminal input: %w", err)
-				}
 				discardInput = false
 			}
-			if _, err := fmt.Fprint(prompt, "> "); err != nil {
-				return exitError, fmt.Errorf("showing chat prompt: %w", err)
+			var promptErr error
+			if terminal {
+				promptErr = a.display.Prompt(int(os.Stdin.Fd()))
+			} else {
+				_, promptErr = fmt.Fprint(prompt, "> ")
+			}
+			if promptErr != nil {
+				return exitError, fmt.Errorf("showing chat prompt: %w", promptErr)
 			}
 			goal, readErr := readInput(in, prompt)
 			var opener *openerError
