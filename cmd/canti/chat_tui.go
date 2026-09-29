@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -27,15 +28,21 @@ type chatDisplay struct {
 }
 
 func (d *chatDisplay) Write(p []byte) (int, error) {
+	n := len(p)
+	omitted := n > chatDisplayLimit
+	if omitted {
+		p = p[n-chatDisplayLimit:]
+	}
 	s := clean(ansi.Strip(string(p)))
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.omitted = d.omitted || omitted
 	d.text += s
 	if len(d.text) > chatDisplayLimit {
 		d.text = boundedTail(d.text, chatDisplayLimit)
 		d.omitted = true
 	}
-	return len(p), nil
+	return n, nil
 }
 
 func (d *chatDisplay) Snapshot() string {
@@ -80,25 +87,27 @@ type chatOutputFailure struct{ err error }
 type chatTick time.Time
 
 type chatTUI struct {
-	session       string
-	submit        func(string) (int, error, os.Signal)
-	interrupt     func(os.Signal)
-	signals       <-chan os.Signal
-	outputFailure <-chan error
-	display       *chatDisplay
-	editor        textarea.Model
-	steps         viewport.Model
-	transcript    string
-	width, height int
-	busy          bool
-	stopping      bool
-	stopCount     int
-	exitAfterRun  bool
-	code          int
-	err           error
+	session           string
+	prepare           func()
+	submit            func(string) (int, error, os.Signal)
+	interrupt         func(os.Signal)
+	signals           <-chan os.Signal
+	outputFailure     <-chan error
+	display           *chatDisplay
+	editor            textarea.Model
+	steps             viewport.Model
+	transcript        string
+	transcriptOmitted bool
+	width, height     int
+	busy              bool
+	stopping          bool
+	stopCount         int
+	exitAfterRun      bool
+	code              int
+	err               error
 }
 
-func newChatTUI(session string, submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, outputFailure <-chan error, display *chatDisplay) chatTUI {
+func newChatTUI(session string, prepare func(), submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, outputFailure <-chan error, display *chatDisplay) chatTUI {
 	editor := textarea.New()
 	editor.Placeholder = "Write a message"
 	editor.Prompt = "› "
@@ -107,7 +116,7 @@ func newChatTUI(session string, submit func(string) (int, error, os.Signal), int
 	editor.SetWidth(76)
 	editor.Focus()
 	return chatTUI{
-		session: session, submit: submit, interrupt: interrupt,
+		session: session, prepare: prepare, submit: submit, interrupt: interrupt,
 		signals: signals, outputFailure: outputFailure, display: display,
 		editor: editor, steps: viewport.New(viewport.WithWidth(80), viewport.WithHeight(12)),
 		width: 80, height: 24,
@@ -202,6 +211,9 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if goal == "" {
 				return m, nil
 			}
+			if m.prepare != nil {
+				m.prepare()
+			}
 			m.addTranscript("\n› " + goal + "\n")
 			m.editor.SetValue("")
 			m.busy = true
@@ -255,8 +267,20 @@ func (m *chatTUI) addTranscript(s string) {
 		return
 	}
 	atBottom := m.steps.AtBottom()
-	m.transcript = boundedTail(m.transcript+clean(ansi.Strip(s)), chatTranscriptLimit)
-	m.steps.SetContent(m.transcript)
+	if len(s) > chatTranscriptLimit {
+		s = boundedTail(s, chatTranscriptLimit)
+		m.transcriptOmitted = true
+	}
+	m.transcript += clean(ansi.Strip(s))
+	if len(m.transcript) > chatTranscriptLimit {
+		m.transcript = boundedTail(m.transcript, chatTranscriptLimit)
+		m.transcriptOmitted = true
+	}
+	content := m.transcript
+	if m.transcriptOmitted {
+		content = "… earlier transcript omitted\n" + content
+	}
+	m.steps.SetContent(content)
 	if atBottom {
 		m.steps.GotoBottom()
 	}
@@ -276,7 +300,7 @@ func (m chatTUI) View() tea.View {
 	return v
 }
 
-func runChatTUI(session string, submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, display *chatDisplay, outputFailure <-chan error, input io.Reader, terminal io.Writer) (int, error) {
+func runChatTUI(session string, prepare func(), submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, display *chatDisplay, outputFailure <-chan error, input io.Reader, terminal io.Writer) (int, error) {
 	var gate sync.Mutex
 	var active sync.WaitGroup
 	closed := false
@@ -298,7 +322,7 @@ func runChatTUI(session string, submit func(string) (int, error, os.Signal), int
 		}()
 		return submit(goal)
 	}
-	p := tea.NewProgram(newChatTUI(session, wrappedSubmit, interrupt, signals, outputFailure, display), tea.WithInput(input), tea.WithOutput(terminal), tea.WithoutSignalHandler())
+	p := tea.NewProgram(newChatTUI(session, prepare, wrappedSubmit, interrupt, signals, outputFailure, display), tea.WithInput(input), tea.WithOutput(terminal), tea.WithoutSignalHandler())
 	final, err := p.Run()
 	gate.Lock()
 	closed = true
@@ -312,5 +336,15 @@ func runChatTUI(session string, submit func(string) (int, error, os.Signal), int
 		return exitError, err
 	}
 	m := final.(chatTUI)
+	m.drainOutput()
+	transcript := m.transcript
+	if m.transcriptOmitted {
+		transcript = "… earlier transcript omitted\n" + transcript
+	}
+	if transcript != "" {
+		if _, err := fmt.Fprint(terminal, transcript); err != nil {
+			return exitError, err
+		}
+	}
 	return m.code, m.err
 }
