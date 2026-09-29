@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 )
 
 const chatDisplayLimit = 64 << 10
@@ -43,15 +44,6 @@ func (d *chatDisplay) Write(p []byte) (int, error) {
 		d.omitted = true
 	}
 	return n, nil
-}
-
-func (d *chatDisplay) Snapshot() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.omitted {
-		return "… earlier output omitted\n" + d.text
-	}
-	return d.text
 }
 
 func (d *chatDisplay) Drain() string {
@@ -94,6 +86,7 @@ type chatTUI struct {
 	signals           <-chan os.Signal
 	outputFailure     <-chan error
 	display           *chatDisplay
+	inputGate         *chatInputGate
 	editor            textarea.Model
 	steps             viewport.Model
 	transcript        string
@@ -177,6 +170,15 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, chatPoll()
 		}
 		return m, tea.Quit
+	case chatInputFailure:
+		m.err = fmt.Errorf("terminal input: %w", msg.err)
+		m.code = exitError
+		if m.busy {
+			m.exitAfterRun = true
+			m.stop(os.Interrupt)
+			return m, chatPoll()
+		}
+		return m, tea.Quit
 	case chatDone:
 		m.drainOutput()
 		m.busy, m.stopping = false, false
@@ -194,6 +196,39 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.code = exitOK
+		if m.inputGate != nil {
+			if err := m.inputGate.reopen(); err != nil {
+				m.err = fmt.Errorf("resetting terminal input: %w", err)
+				m.code = exitError
+				return m, tea.Quit
+			}
+		}
+		m.busy = false
+		return m, nil
+	case chatKeys:
+		if m.inputGate != nil && msg.epoch != m.inputGate.currentEpoch() {
+			return m, nil
+		}
+		var cmds []tea.Cmd
+		for _, event := range msg.events {
+			idleQuit := false
+			if key, ok := event.(tea.KeyPressMsg); ok {
+				idleQuit = !m.busy && key.String() == "ctrl+c"
+			}
+			next, cmd := m.Update(event)
+			m = next.(chatTUI)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if idleQuit {
+				break
+			}
+		}
+		return m, tea.Batch(cmds...)
+	case chatPasteOverflow:
+		if !m.busy {
+			m.addTranscript("\nerror: pasted input exceeds the goal limit\n")
+		}
 		return m, nil
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -216,6 +251,9 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addTranscript("\n› " + goal + "\n")
 			m.editor.SetValue("")
+			if m.inputGate != nil {
+				m.inputGate.enterBusy()
+			}
 			m.busy = true
 			m.stopCount = 0
 			return m, func() tea.Msg {
@@ -294,6 +332,9 @@ func (m chatTUI) View() tea.View {
 	if m.stopping {
 		status = "stopping · waiting for cleanup"
 	}
+	if m.inputGate != nil && m.inputGate.discarding() {
+		status = "discarding incomplete terminal input"
+	}
 	content := "canti chat · session " + m.session + "\n" + status + " · current launch flags apply to each new input\n\n" + m.steps.View() + "\n\n" + m.editor.View() + "\nEnter send · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C stop/exit"
 	v := tea.NewView(content)
 	v.AltScreen = true
@@ -301,6 +342,10 @@ func (m chatTUI) View() tea.View {
 }
 
 func runChatTUI(session string, prepare func(), submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, display *chatDisplay, outputFailure <-chan error, input io.Reader, terminal io.Writer) (int, error) {
+	f, ok := input.(*os.File)
+	if !ok || !term.IsTerminal(f.Fd()) {
+		return exitError, errors.New("chat terminal input is unavailable")
+	}
 	var gate sync.Mutex
 	var active sync.WaitGroup
 	closed := false
@@ -322,8 +367,21 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 		}()
 		return submit(goal)
 	}
-	p := tea.NewProgram(newChatTUI(session, prepare, wrappedSubmit, interrupt, signals, outputFailure, display), tea.WithInput(input), tea.WithOutput(terminal), tea.WithoutSignalHandler())
+	m := newChatTUI(session, prepare, wrappedSubmit, interrupt, signals, outputFailure, display)
+	var p *tea.Program
+	ready := make(chan struct{})
+	gateInput, stopInput, err := startChatInput(f, func(msg tea.Msg) {
+		<-ready
+		p.Send(msg)
+	})
+	if err != nil {
+		return exitError, err
+	}
+	m.inputGate = gateInput
+	p = tea.NewProgram(m, tea.WithInput(nil), tea.WithOutput(terminal), tea.WithWindowSize(80, 24), tea.WithoutSignalHandler())
+	close(ready)
 	final, err := p.Run()
+	inputErr := stopInput()
 	gate.Lock()
 	closed = true
 	needsStop := running
@@ -335,7 +393,10 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 	if err != nil {
 		return exitError, err
 	}
-	m := final.(chatTUI)
+	if inputErr != nil {
+		return exitError, inputErr
+	}
+	m = final.(chatTUI)
 	m.drainOutput()
 	transcript := m.transcript
 	if m.transcriptOmitted {

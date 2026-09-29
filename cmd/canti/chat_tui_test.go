@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 func tuiKey(s string) tea.KeyPressMsg { return tea.KeyPressMsg(tea.Key{Text: s, Code: []rune(s)[0]}) }
@@ -99,5 +101,126 @@ func TestChatTUIPreparesEachAcceptedInputBeforeSubmit(t *testing.T) {
 	m = updated.(chatTUI)
 	if prepared.Load() != 2 {
 		t.Fatalf("second submit reused control channel: %d", prepared.Load())
+	}
+}
+
+func TestChatTUIRejectsQueuedPreviousEpoch(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	fd := int(slave.Fd())
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	g := &chatInputGate{fd: fd}
+	first := g.decode([]byte("first\r"))
+	queued := g.decode([]byte("stale\r"))
+	m := newChatTUI("session", nil, nil, nil, nil, nil, new(chatDisplay))
+	m.inputGate = g
+	updated, _ := m.Update(first)
+	m = updated.(chatTUI)
+	if !m.busy || !strings.Contains(m.transcript, "first") {
+		t.Fatalf("first input not submitted: %+v", m)
+	}
+	updated, _ = m.Update(chatDone{code: exitOK})
+	m = updated.(chatTUI)
+	if m.busy || g.currentEpoch() != 1 {
+		t.Fatalf("input not reopened: %+v", m)
+	}
+	updated, _ = m.Update(queued)
+	m = updated.(chatTUI)
+	if m.editor.Value() != "" || m.busy || strings.Contains(m.transcript, "stale") {
+		t.Fatalf("old batch became new input: %+v", m)
+	}
+	updated, _ = m.Update(g.decode([]byte("fresh\r")))
+	m = updated.(chatTUI)
+	if !m.busy || !strings.Contains(m.transcript, "fresh") {
+		t.Fatalf("new epoch did not advance: %+v", m)
+	}
+}
+
+func TestChatInputDecoderKeepsSplitSequencesAndRejectsLongPaste(t *testing.T) {
+	g := new(chatInputGate)
+	if got := g.decode([]byte("\xe4")); len(got.events) != 0 {
+		t.Fatalf("partial UTF-8 emitted: %+v", got.events)
+	}
+	if got := g.decode([]byte("\xbd\xa0")); len(got.events) != 1 || got.events[0].(tea.KeyPressMsg).Key().Text != "你" {
+		t.Fatalf("UTF-8 split: %+v", got.events)
+	}
+	if got := g.decode([]byte("\x1b")); len(got.events) != 0 {
+		t.Fatalf("partial Alt emitted: %+v", got.events)
+	}
+	if got := g.decode([]byte("\r")); len(got.events) != 1 || got.events[0].(tea.KeyPressMsg).String() != "alt+enter" {
+		t.Fatalf("Alt+Enter split: %+v", got.events)
+	}
+	if got := g.decode([]byte("\x1b[")); len(got.events) != 0 {
+		t.Fatalf("partial CSI emitted: %+v", got.events)
+	}
+	if got := g.decode([]byte("A")); len(got.events) != 1 || got.events[0].(tea.KeyPressMsg).String() != "up" {
+		t.Fatalf("arrow split: %+v", got.events)
+	}
+	g.decode([]byte("\x1b[200~"))
+	for i := 0; i < 12; i++ {
+		g.decode([]byte(strings.Repeat("x", 4096)))
+	}
+	if got := g.decode([]byte("\x1b[201~")); len(got.events) != 1 {
+		t.Fatalf("long paste result: %+v", got.events)
+	} else if _, ok := got.events[0].(chatPasteOverflow); !ok {
+		t.Fatalf("long paste was silently truncated: %T", got.events[0])
+	}
+}
+
+func TestChatInputSplitPasteAndControlC(t *testing.T) {
+	for split := 1; split < len("\x1b[200~"); split++ {
+		g := new(chatInputGate)
+		input := "\x1b[200~line one\nline two\r\x1b[201~"
+		events := g.decode([]byte(input[:split])).events
+		for i := split; i < len(input); i++ {
+			events = append(events, g.decode([]byte{input[i]}).events...)
+		}
+		if len(events) != 1 {
+			t.Fatalf("paste opener split at %d emitted %d events: %v", split, len(events), events)
+		}
+		paste, ok := events[0].(tea.PasteMsg)
+		if !ok || paste.Content != "line one\nline two\r" {
+			t.Fatalf("paste opener split at %d: %#v", split, events[0])
+		}
+	}
+	for _, prefix := range []string{"\x1b", "\x1b["} {
+		g := new(chatInputGate)
+		g.enterBusy()
+		g.decode([]byte(prefix))
+		got := g.decode([]byte{3})
+		if len(got.events) != 1 || got.events[0].(tea.KeyPressMsg).String() != "ctrl+c" {
+			t.Fatalf("busy Ctrl-C after %q: %+v", prefix, got.events)
+		}
+	}
+}
+
+func TestChatInputContinuesDroppingPasteAcrossRunCompletion(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	fd := int(slave.Fd())
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	g := &chatInputGate{fd: fd}
+	g.enterBusy()
+	g.decode([]byte("\x1b[200~old paste"))
+	if err := g.reopen(); err != nil || !g.discarding() {
+		t.Fatalf("did not preserve paste boundary: %v", err)
+	}
+	if got := g.decode([]byte(" tail\n\x1b[201~stale\r")); len(got.events) != 0 || g.discarding() {
+		t.Fatalf("paste tail leaked into new input: %+v", got)
+	}
+	if got := g.decode([]byte("fresh\r")); len(got.events) != 6 {
+		t.Fatalf("fresh input unavailable: %+v", got.events)
 	}
 }
