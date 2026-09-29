@@ -20,6 +20,7 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"golang.org/x/sys/unix"
 )
 
 var stdinTerminal = func() bool {
@@ -71,9 +72,20 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		}
 		terminal := stdinTerminal()
 		fmt.Fprintf(a.stderr, "canti: session %s; continue it with \"canti chat -session %[1]s\".\n", id)
+		if terminal {
+			fmt.Fprintln(a.stderr, "canti: input typed during a run is discarded; wait for the next prompt.")
+		}
 		a.steps, a.stdout = a.stderr, cleaned{a.stdout}
 		in := bufio.NewReader(os.Stdin)
+		discardInput := false
 		for {
+			if discardInput {
+				in.Reset(os.Stdin)
+				if err := flushInput(int(os.Stdin.Fd())); err != nil && !errors.Is(err, unix.ENOTTY) {
+					return exitError, fmt.Errorf("discarding busy terminal input: %w", err)
+				}
+				discardInput = false
+			}
 			fmt.Fprint(a.stderr, "> ")
 			goal, readErr := readInput(in, a.stderr)
 			var opener *openerError
@@ -86,6 +98,7 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
+					discardInput = terminal
 					switch {
 					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
 						return code, err
