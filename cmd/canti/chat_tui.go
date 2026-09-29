@@ -270,13 +270,13 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if m.busy {
-		return m, nil
-	}
 	if key, ok := msg.(tea.KeyPressMsg); ok && (key.String() == "pgup" || key.String() == "pgdown") {
 		var cmd tea.Cmd
 		m.steps, cmd = m.steps.Update(msg)
 		return m, cmd
+	}
+	if m.busy {
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)

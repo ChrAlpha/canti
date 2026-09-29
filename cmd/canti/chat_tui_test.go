@@ -14,6 +14,64 @@ import (
 
 func tuiKey(s string) tea.KeyPressMsg { return tea.KeyPressMsg(tea.Key{Text: s, Code: []rune(s)[0]}) }
 
+func TestChatTUIBusyReadOnlyScroll(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		for _, decoded := range []bool{false, true} {
+			g := new(chatInputGate)
+			g.enterBusy()
+			m := newChatTUI("session", func() { t.Fatal("busy input prepared a run") }, func(string) (int, error, os.Signal) {
+				t.Fatal("busy input submitted a run")
+				return exitError, nil, nil
+			}, nil, nil, nil, new(chatDisplay))
+			m.inputGate, m.busy, m.stopping = g, true, stopping
+			m.editor.SetValue("unchanged")
+			m.addTranscript(strings.Repeat("history\n", 80))
+			bottom := m.steps.YOffset()
+			update := func(msg tea.Msg) {
+				updated, cmd := m.Update(msg)
+				m = updated.(chatTUI)
+				if cmd != nil {
+					t.Fatal("read-only navigation or discarded input produced a command")
+				}
+			}
+			send := func(code rune, raw string) {
+				if decoded {
+					for _, b := range []byte(raw) {
+						update(g.decode([]byte{b}))
+					}
+				} else {
+					update(tea.KeyPressMsg(tea.Key{Code: code}))
+				}
+			}
+			send(tea.KeyPgUp, "\x1b[5~")
+			if m.steps.YOffset() >= bottom {
+				t.Fatalf("busy PgUp did not scroll: decoded=%v stopping=%v", decoded, stopping)
+			}
+			scrolled := m.steps.YOffset()
+			m.display.Write([]byte("new output\n"))
+			m.drainOutput()
+			if m.steps.YOffset() != scrolled {
+				t.Fatal("new output moved the reader to the bottom")
+			}
+			for _, msg := range []tea.Msg{tuiKey("x"), tea.PasteMsg{Content: "queued\x1b[6~"}, tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}), tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModAlt})} {
+				update(msg)
+			}
+			update(g.decode([]byte("discard\r\x1b[200~paste\x1b[6~\x1b[201~")))
+			if m.editor.Value() != "unchanged" || m.steps.YOffset() != scrolled || !m.busy || m.stopping != stopping {
+				t.Fatal("busy input changed the editor, viewport, or run state")
+			}
+			update(chatKeys{epoch: g.currentEpoch() + 1, events: []tea.Msg{tea.KeyPressMsg(tea.Key{Code: tea.KeyPgDown})}})
+			if m.steps.YOffset() != scrolled {
+				t.Fatal("stale navigation changed the viewport")
+			}
+			send(tea.KeyPgDown, "\x1b[6~")
+			if m.steps.YOffset() <= scrolled {
+				t.Fatalf("busy PgDown did not scroll: decoded=%v stopping=%v", decoded, stopping)
+			}
+		}
+	}
+}
+
 func TestChatTUIBusyDiscardsInputAndStopsOnce(t *testing.T) {
 	var stopped atomic.Int32
 	m := newChatTUI("session", nil, nil, func(os.Signal) { stopped.Add(1) }, nil, nil, new(chatDisplay))
@@ -222,6 +280,36 @@ func TestChatInputContinuesDroppingPasteAcrossRunCompletion(t *testing.T) {
 	}
 	if got := g.decode([]byte("fresh\r")); len(got.events) != 6 {
 		t.Fatalf("fresh input unavailable: %+v", got.events)
+	}
+}
+
+func TestChatInputContinuesDroppingPageKeyAcrossRunCompletion(t *testing.T) {
+	for _, page := range []string{"\x1b[5~", "\x1b[6~"} {
+		for split := 1; split < len(page); split++ {
+			master, slave, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { master.Close(); slave.Close() })
+			fd := int(slave.Fd())
+			if err := unix.SetNonblock(fd, true); err != nil {
+				t.Fatal(err)
+			}
+			g := &chatInputGate{fd: fd}
+			g.enterBusy()
+			if got := g.decode([]byte(page[:split])); len(got.events) != 0 {
+				t.Fatalf("partial page key emitted: %+v", got)
+			}
+			if err := g.reopen(); err != nil || !g.discarding() {
+				t.Fatalf("did not preserve page key boundary: %v", err)
+			}
+			if got := g.decode([]byte(page[split:] + "stale\r")); len(got.events) != 0 || g.discarding() {
+				t.Fatalf("old page key or batch tail crossed reopening: %+v", got)
+			}
+			if got := g.decode([]byte("fresh\r")); len(got.events) != 6 {
+				t.Fatalf("fresh input unavailable: %+v", got)
+			}
+		}
 	}
 }
 

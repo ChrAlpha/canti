@@ -201,7 +201,7 @@ func (g *chatInputGate) decodeLocked(read []byte) chatKeys {
 			g.inPaste = true
 		case uv.KeyPressEvent:
 			key := tea.KeyPressMsg(e)
-			if !g.busy || key.String() == "ctrl+c" {
+			if !g.busy || key.String() == "ctrl+c" || key.String() == "pgup" || key.String() == "pgdown" {
 				batch.events = append(batch.events, key)
 			}
 		case uv.KeyReleaseEvent:
