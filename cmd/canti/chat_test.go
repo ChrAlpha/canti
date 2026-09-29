@@ -314,6 +314,7 @@ func TestExcerpt(t *testing.T) {
 		{`printf 'a\x1bb'`, false, []string{`printf 'a\x1bb'`}},
 		{`"printf 'a\x1bb'"`, false, []string{`"printf 'a\x1bb'"`}},
 		{"printf 'a\x1bb'", false, []string{`(quoted) "printf 'a\x1bb'"`}},
+		{"\b" + strings.Repeat("x", 199) + "TAIL", false, []string{`(quoted) "\b` + strings.Repeat("x", 199) + `"…`}},
 		{"\b" + long, false, []string{`(quoted) "\b` + long[:199] + `"…`}},
 		{"10%\r20%\rdone\r\nnext\r\n", true, []string{"done", "next"}},
 		{"rm -rf x;\recho hi\r\n", false, []string{`(quoted) "rm -rf x;\recho hi"`}},

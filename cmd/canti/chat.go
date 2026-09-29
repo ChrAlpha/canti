@@ -242,7 +242,8 @@ func excerpt(s string, tail bool) []string {
 			l = clean(l[strings.LastIndexByte(l, '\r')+1:])
 		}
 		short := l
-		if len(l) > excerptWidth {
+		clipped := len(l) > excerptWidth
+		if clipped {
 			k := excerptWidth
 			for k > 0 && !utf8.RuneStart(l[k]) {
 				k--
@@ -252,7 +253,7 @@ func excerpt(s string, tail bool) []string {
 		if !tail && strings.ContainsFunc(l, hidden) {
 			short = "(quoted) " + strconv.Quote(short)
 		}
-		if len(short) < len(l) {
+		if clipped {
 			short += "…"
 		}
 		lines[i] = short
