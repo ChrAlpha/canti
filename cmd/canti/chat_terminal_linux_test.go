@@ -7,12 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 )
 
@@ -148,11 +152,80 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	}
 	p := startPTYChat(t, f, w, "-model-url", server.URL)
 	p.awaitRaw(t)
+	readFD := int(r.Fd())
+	if err := unix.SetNonblock(readFD, true); err != nil {
+		t.Fatal(err)
+	}
+	var initial bytes.Buffer
+	var chunk [4096]byte
+	until := time.Now().Add(5 * time.Second)
+	for !strings.Contains(ansi.Strip(initial.String()), "ready") {
+		n, readErr := unix.Read(readFD, chunk[:])
+		if n > 0 {
+			initial.Write(chunk[:n])
+		}
+		if readErr != nil && readErr != unix.EAGAIN {
+			t.Fatal(readErr)
+		}
+		if time.Now().After(until) {
+			t.Fatalf("initial TUI ready frame missing: %q", initial.String())
+		}
+		if n <= 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	for {
+		n, readErr := unix.Read(readFD, chunk[:])
+		if readErr == unix.EAGAIN {
+			break
+		}
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if n == 0 {
+			t.Fatal("terminal output closed before pressure test")
+		}
+	}
 	p.send(t, "first\r")
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not reach provider")
+	}
+	store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	run, err := store.LastRun(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.Reset()
+	until = time.Now().Add(5 * time.Second)
+	for !strings.Contains(ansi.Strip(initial.String()), "running") {
+		n, readErr := unix.Read(readFD, chunk[:])
+		if n > 0 {
+			initial.Write(chunk[:n])
+		}
+		if readErr != nil && readErr != unix.EAGAIN {
+			t.Fatal(readErr)
+		}
+		if time.Now().After(until) {
+			t.Fatalf("TUI running frame missing before pressure: %q", initial.String())
+		}
+		if n <= 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	for {
+		n, readErr := unix.Read(readFD, chunk[:])
+		if readErr == unix.EAGAIN {
+			break
+		}
+		if readErr != nil || n == 0 {
+			t.Fatalf("terminal output closed before pressure: n=%d err=%v", n, readErr)
+		}
 	}
 	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
@@ -164,7 +237,11 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	unblock()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if s := f.status(); s.Phase == core.PhaseReturned {
+		s, err := store.Latest(t.Context(), run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State.Phase == core.PhaseReturned {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -172,13 +249,48 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	time.Sleep(50 * time.Millisecond)
 	p.send(t, "stale during blocked display\r")
 	time.Sleep(50 * time.Millisecond)
 	drained := make(chan struct{})
-	go func() { _, _ = io.Copy(io.Discard, r); close(drained) }()
-	time.Sleep(150 * time.Millisecond)
+	go func() {
+		defer close(drained)
+		for {
+			n, readErr := unix.Read(readFD, chunk[:])
+			if n > 0 {
+				p.mu.Lock()
+				p.output.Write(chunk[:n])
+				p.mu.Unlock()
+				select {
+				case p.wake <- struct{}{}:
+				default:
+				}
+			}
+			if readErr == nil && n == 0 || readErr != nil && readErr != unix.EAGAIN {
+				return
+			}
+			if n <= 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+	defer func() {
+		r.Close()
+		<-drained
+	}()
+	deadline = time.Now().Add(5 * time.Second)
+	for !strings.Contains(ansi.Strip(p.text()), "ready") {
+		if time.Now().After(deadline) {
+			err := p.cmd.Process.Signal(syscall.Signal(0))
+			t.Fatalf("TUI did not redraw ready after stderr recovered: child signal(0)=%v, output tail=%q", err, p.text()[max(0, len(p.text())-500):])
+		}
+		select {
+		case <-p.wake:
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
-		t.Fatalf("busy input survived output recovery: %+v, requests=%d", s, len(f.model.requests()))
+		t.Fatalf("busy input survived output recovery: %+v, requests=%d, output tail=%q", s, len(f.model.requests()), p.text()[max(0, len(p.text())-500):])
 	}
 	p.send(t, "fresh\r")
 	deadline = time.Now().Add(5 * time.Second)
@@ -190,12 +302,12 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("TUI did not accept fresh input after output recovery: %+v", f.status())
+			err := p.cmd.Process.Signal(syscall.Signal(0))
+			t.Fatalf("TUI did not accept fresh input after output recovery: %+v, child signal(0)=%v, output tail=%q", f.status(), err, p.text()[max(0, len(p.text())-500):])
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
 	w.Close()
-	<-drained
 }
