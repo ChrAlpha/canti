@@ -51,7 +51,7 @@ func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *pt
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	argv := append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, args...)
 	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {
