@@ -71,6 +71,10 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 			return exitError, err
 		}
 		terminal := stdinTerminal()
+		prompt := a.stderr
+		if terminal {
+			prompt = syncStderr{a.display}
+		}
 		fmt.Fprintf(a.stderr, "canti: session %s; continue it with \"canti chat -session %[1]s\".\n", id)
 		if terminal {
 			fmt.Fprintln(a.stderr, "canti: input typed during a run is discarded; wait for the next prompt.")
@@ -79,6 +83,11 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		in := bufio.NewReader(os.Stdin)
 		discardInput := false
 		for {
+			if terminal {
+				if err := a.display.Flush(); err != nil {
+					return exitError, fmt.Errorf("showing chat prompt: %w", err)
+				}
+			}
 			if discardInput {
 				in.Reset(os.Stdin)
 				if err := flushInput(int(os.Stdin.Fd())); err != nil && !errors.Is(err, unix.ENOTTY) {
@@ -86,8 +95,10 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 				}
 				discardInput = false
 			}
-			fmt.Fprint(a.stderr, "> ")
-			goal, readErr := readInput(in, a.stderr)
+			if _, err := fmt.Fprint(prompt, "> "); err != nil {
+				return exitError, fmt.Errorf("showing chat prompt: %w", err)
+			}
+			goal, readErr := readInput(in, prompt)
 			var opener *openerError
 			if errors.As(readErr, &opener) {
 				fmt.Fprintf(a.stderr, "canti chat: %v\n", readErr)
@@ -173,7 +184,9 @@ func readInput(in *bufio.Reader, prompt io.Writer) (string, error) {
 	}
 	var b strings.Builder
 	for err == nil {
-		fmt.Fprint(prompt, "… ")
+		if _, writeErr := fmt.Fprint(prompt, "… "); writeErr != nil {
+			return "", fmt.Errorf("showing chat prompt: %w", writeErr)
+		}
 		if line, err = in.ReadString('\n'); tabs {
 			line = strings.TrimLeft(line, "\t")
 		}

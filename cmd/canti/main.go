@@ -77,6 +77,7 @@ var commands = map[string]func(*flag.FlagSet, *app) action{
 
 type app struct {
 	stdout, stderr   io.Writer
+	display          *stderrWriter
 	log              *slog.Logger
 	workspace, state string
 	runID            string
@@ -130,6 +131,9 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		help(stderr)
 		return exitUsage
 	}
+	asyncStderr := newStderrWriter(stderr)
+	defer asyncStderr.Close()
+	stderr, a.stderr, a.display = asyncStderr, asyncStderr, asyncStderr
 	var lv slog.Level
 	code, err := exitUsage, lv.UnmarshalText([]byte(*level))
 	if err == nil {
