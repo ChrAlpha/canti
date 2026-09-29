@@ -224,3 +224,44 @@ func TestChatInputContinuesDroppingPasteAcrossRunCompletion(t *testing.T) {
 		t.Fatalf("fresh input unavailable: %+v", got.events)
 	}
 }
+
+func TestChatInputPasteControlByteDoesNotStopRun(t *testing.T) {
+	for _, parts := range [][]string{
+		{"\x1b[200~a\x03b\n\x1b[201~"},
+		{"\x1b[20", "0~a\x03b\n\x1b[201~"},
+	} {
+		g := new(chatInputGate)
+		var events []tea.Msg
+		for _, part := range parts {
+			events = append(events, g.decode([]byte(part)).events...)
+		}
+		if len(events) != 1 {
+			t.Fatalf("paste emitted %d events: %v", len(events), events)
+		}
+		paste, ok := events[0].(tea.PasteMsg)
+		if !ok || paste.Content != "a\x03b\n" {
+			t.Fatalf("paste control byte changed meaning: %#v", events[0])
+		}
+	}
+}
+
+func TestChatInputOverflowCannotBeLostAtRunCompletion(t *testing.T) {
+	g := new(chatInputGate)
+	g.enterBusy()
+	g.decode([]byte("\x1b["))
+	var failure chatKeys
+	for i := 0; i < 20; i++ {
+		failure = g.decode([]byte(strings.Repeat("1", 4096)))
+	}
+	if !g.failed || len(failure.events) != 0 {
+		t.Fatalf("overflow state or subsequent data: failed=%v events=%v", g.failed, failure.events)
+	}
+	m := newChatTUI("session", nil, nil, nil, nil, nil, new(chatDisplay))
+	m.inputGate = g
+	m.busy = true
+	updated, cmd := m.Update(chatDone{code: exitOK})
+	m = updated.(chatTUI)
+	if m.code != exitError || m.err == nil || cmd == nil || !strings.Contains(m.err.Error(), "exceeds limit") {
+		t.Fatalf("overflow lost after completion: code=%d err=%v cmd=%v", m.code, m.err, cmd)
+	}
+}

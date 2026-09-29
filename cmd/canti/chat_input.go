@@ -67,6 +67,9 @@ func (g *chatInputGate) discarding() bool {
 func (g *chatInputGate) reopen() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.failed {
+		return errors.New("terminal input sequence exceeds limit")
+	}
 	g.busy = true
 	g.draining = false
 	if err := g.drainAvailableLocked(); err != nil {
@@ -167,12 +170,10 @@ func (g *chatInputGate) decodeLocked(read []byte) chatKeys {
 			g.paste, g.inPaste, g.pasteOverflow = nil, false, false
 			continue
 		}
-		if g.pending[0] == '\x1b' {
-			if i := bytes.IndexByte(g.pending, 3); i >= 0 {
-				g.pending = g.pending[i+1:]
-				batch.events = append(batch.events, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
-				continue
-			}
+		if len(g.pending) > 1 && g.pending[0] == '\x1b' && g.pending[1] == 3 {
+			g.pending = g.pending[2:]
+			batch.events = append(batch.events, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+			continue
 		}
 		n := g.frameLength(g.pending)
 		if n == 0 {
