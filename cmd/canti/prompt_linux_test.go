@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 )
 
@@ -125,11 +128,56 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 	writeFD := int(w.Fd())
 	p := startPTYChat(t, f, w, "-model-url", server.URL)
 	p.awaitRaw(t)
+	readFD := int(r.Fd())
+	if err := unix.SetNonblock(readFD, true); err != nil {
+		t.Fatal(err)
+	}
+	awaitFrame := func(needle string) {
+		t.Helper()
+		var output []byte
+		var chunk [4096]byte
+		deadline := time.Now().Add(5 * time.Second)
+		for !bytes.Contains([]byte(ansi.Strip(string(output))), []byte(needle)) {
+			n, readErr := unix.Read(readFD, chunk[:])
+			if n > 0 {
+				output = append(output, chunk[:n]...)
+			}
+			if readErr != nil && readErr != unix.EAGAIN {
+				t.Fatal(readErr)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("TUI never showed %q before pressure: %q", needle, output)
+			}
+			if n <= 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		for {
+			n, readErr := unix.Read(readFD, chunk[:])
+			if readErr == unix.EAGAIN {
+				return
+			}
+			if readErr != nil || n == 0 {
+				t.Fatalf("terminal output closed before pressure: n=%d err=%v", n, readErr)
+			}
+		}
+	}
+	awaitFrame("ready")
 	p.send(t, "first\r")
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not reach provider")
+	}
+	awaitFrame("running")
+	store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	run, err := store.LastRun(t.Context())
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
@@ -137,7 +185,14 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 	fillLivePipe(t, writeFD)
 	close(release)
 	deadline := time.Now().Add(5 * time.Second)
-	for f.status().Phase != core.PhaseReturned {
+	for {
+		snapshot, err := store.Latest(t.Context(), run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.State.Phase == core.PhaseReturned {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("first run did not return while output was blocked")
 		}

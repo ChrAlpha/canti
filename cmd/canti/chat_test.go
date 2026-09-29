@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
@@ -220,6 +222,14 @@ func TestChatSignals(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+			if err := os.MkdirAll(f.state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
 			r, w, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -228,7 +238,26 @@ func TestChatSignals(t *testing.T) {
 			fillPipe(t, w)
 			cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, []string{"CANTI_TEST_TERMINAL=1"}, "chat")
 			w.Close()
-			waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				run, err := store.LastRun(t.Context())
+				if err != nil && !errors.Is(err, harness.ErrNotFound) {
+					t.Fatal(err)
+				}
+				if err == nil {
+					snapshot, err := store.Latest(t.Context(), run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if snapshot.State.Phase == core.PhaseReturned {
+						break
+					}
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("first run did not return while stdout was blocked")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 			for _, s := range signals {
 				if err := cmd.Process.Signal(s); err != nil {
 					t.Fatal(err)
