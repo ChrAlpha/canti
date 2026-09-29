@@ -9,13 +9,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -23,8 +28,7 @@ import (
 )
 
 var stdinTerminal = func() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return isatty.IsTerminal(os.Stdin.Fd())
 }
 
 func chatCommand(fs *flag.FlagSet, a *app) action {
@@ -69,6 +73,44 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		if _, err := newExecutor(s.config, a.state); err != nil {
 			return exitError, err
 		}
+		if isatty.IsTerminal(os.Stdin.Fd()) {
+			display := &chatDisplay{}
+			terminalOutput := a.stderr
+			a.stdout, a.stderr, a.steps = display, display, display
+			var lv slog.Level
+			_ = lv.UnmarshalText([]byte(level.Value.String()))
+			a.log = slog.New(slog.NewTextHandler(display, &slog.HandlerOptions{Level: lv}))
+			a.stopSignals = make(chan os.Signal, 2)
+			signals := make(chan os.Signal, 2)
+			signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(signals)
+			submit := func(goal string) (int, error, os.Signal) {
+				a.signal = nil
+				if err := checkTask("input", goal, fixed); err != nil {
+					return exitUsage, err, nil
+				}
+				code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
+				if code == exitUsage {
+					if !explicit {
+						var readErr error
+						if fixed, readErr = inherited(ctx, a, id); readErr != nil {
+							return exitError, readErr, a.signal
+						}
+					}
+					if _, _, fixedErr := newRun("chat", fixed, s, time.Now()); fixedErr != nil {
+						return exitError, fixedErr, a.signal
+					}
+				}
+				return code, err, a.signal
+			}
+			interrupt := func(sig os.Signal) {
+				select {
+				case a.stopSignals <- sig:
+				default:
+				}
+			}
+			return runChatTUI(id, submit, interrupt, signals, display, a.displayFailure, os.Stdin, terminalOutput)
+		}
 		terminal := stdinTerminal()
 		fmt.Fprintf(a.stderr, "canti: session %s; continue it with \"canti chat -session %[1]s\".\n", id)
 		a.steps, a.stdout = a.stderr, cleaned{a.stdout}
@@ -104,6 +146,11 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 						return code, err
 					}
 					a.signal = nil
+					select {
+					case err := <-a.displayFailure:
+						return exitError, fmt.Errorf("chat display: %w", err)
+					default:
+					}
 				}
 			}
 			switch {

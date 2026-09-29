@@ -82,6 +82,8 @@ type app struct {
 	runID            string
 	steps            io.Writer
 	signal           os.Signal
+	stopSignals      chan os.Signal
+	displayFailure   <-chan error
 	cred             credential
 	credErr          error
 }
@@ -105,7 +107,22 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "canti: unknown command %q\n\n%s", name, usage)
 		return exitUsage
 	}
-	a := &app{stdout: stdout, stderr: stderr}
+	var displayFailure chan error
+	if name == "chat" {
+		displayFailure = make(chan error, 2)
+		out, restoreOut, err := newChatOutput(stdout, displayFailure)
+		if err != nil {
+			return exitError
+		}
+		defer restoreOut()
+		diagnostic, restoreErr, err := newChatOutput(stderr, displayFailure)
+		if err != nil {
+			return exitError
+		}
+		defer restoreErr()
+		stdout, stderr = out, diagnostic
+	}
+	a := &app{stdout: stdout, stderr: stderr, displayFailure: displayFailure}
 	fs := flag.NewFlagSet("canti "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {}
@@ -452,26 +469,32 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 // records in a.signal SIGTERM if it was caught, else the first signal.
 func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
 	sig, seen := make(chan os.Signal, 2), make(chan os.Signal, 2)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	signal.Notify(seen, os.Interrupt, syscall.SIGTERM)
+	if a.stopSignals == nil {
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(seen, os.Interrupt, syscall.SIGTERM)
+	} else {
+		sig = a.stopSignals
+	}
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
-	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
-		if len(sig) > 0 {
-			shutdown()
-		}
-		go func() {
-			for _, cancel := range []context.CancelFunc{shutdown, abandon} {
-				select {
-				case <-sig:
-					cancel()
-				case <-cleanupCtx.Done():
-					return
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
+			select {
+			case s := <-sig:
+				if a.stopSignals != nil {
+					seen <- s
 				}
+				cancel()
+			case <-cleanupCtx.Done():
+				return
 			}
-			signal.Stop(sig)
-			signal.Stop(seen)
-		}()
+		}
+		signal.Stop(sig)
+		signal.Stop(seen)
+	}()
+	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
 		step := l.Run
 		if once {
 			step = l.Step
@@ -480,7 +503,6 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		if loopCtx.Err() == nil || ctx.Err() != nil {
 			return snap, err
 		}
-		a.log.Warn("stopping the run after a signal", "run_id", id)
 		cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
 		defer cancel()
 		return stop(cleanup, l, id)
@@ -488,6 +510,7 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 	return op, func() {
 		abandon()
 		shutdown()
+		<-handled
 		signal.Stop(sig)
 		signal.Stop(seen)
 		for len(seen) > 0 {
