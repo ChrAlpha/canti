@@ -23,15 +23,16 @@ import (
 )
 
 type ptyChat struct {
-	cmd    *exec.Cmd
-	master *os.File
-	slave  *os.File
-	base   *unix.Termios
-	mu     sync.Mutex
-	output bytes.Buffer
-	wake   chan struct{}
-	done   chan struct{}
-	waited bool
+	cmd     *exec.Cmd
+	master  *os.File
+	slave   *os.File
+	slaveFD int
+	base    *unix.Termios
+	mu      sync.Mutex
+	output  bytes.Buffer
+	wake    chan struct{}
+	done    chan struct{}
+	waited  bool
 }
 
 func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *ptyChat {
@@ -43,7 +44,8 @@ func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *pt
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 100}); err != nil {
 		t.Fatal(err)
 	}
-	base, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
+	slaveFD := int(slave.Fd())
+	base, err := unix.IoctlGetTermios(slaveFD, unix.TCGETS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +66,7 @@ func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *pt
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}
-	p := &ptyChat{cmd: cmd, master: master, slave: slave, base: base, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	p := &ptyChat{cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		master.Close()
@@ -147,7 +149,7 @@ func (p *ptyChat) awaitRaw(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		flags, err := unix.IoctlGetTermios(int(p.slave.Fd()), unix.TCGETS)
+		flags, err := unix.IoctlGetTermios(p.slaveFD, unix.TCGETS)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +183,7 @@ func (p *ptyChat) finish(t *testing.T, want int) {
 		}
 		t.Fatal("chat did not exit within five seconds")
 	}
-	got, err := unix.IoctlGetTermios(int(p.slave.Fd()), unix.TCGETS)
+	got, err := unix.IoctlGetTermios(p.slaveFD, unix.TCGETS)
 	if err != nil {
 		t.Fatal(err)
 	}
