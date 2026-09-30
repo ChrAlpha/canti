@@ -11,14 +11,17 @@ import (
 )
 
 type ContextPage struct {
-	AsOfSeq  int64
-	Run      harness.Run
-	Request  harness.Transition
-	Previous *harness.Transition
-	Next     *harness.Transition
-	Events   []harness.Transition
-	More     bool
+	AsOfSeq    int64
+	Run        harness.Run
+	Request    harness.Transition
+	Previous   *harness.Transition
+	Next       *harness.Transition
+	Events     []harness.Transition
+	More       bool
+	EventBytes int64
 }
+
+const ContextEventPageBytes = 16 << 20
 
 const contextColumns = `seq, event_id, kind, semantics, event, from_state, to_state, facts`
 
@@ -113,14 +116,36 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 	if page.Next != nil {
 		before = page.Next.Seq - 1
 	}
-	page.Events, err = contextEvents(ctx, tx, runID, max(after, request.Seq), before, limit+1)
+	end, size, more, err := contextEventPage(ctx, tx, runID, max(after, request.Seq), before, limit)
 	if err != nil {
 		return page, err
 	}
-	if len(page.Events) > limit {
-		page.Events, page.More = page.Events[:limit], true
+	page.EventBytes, page.More = size, more
+	page.Events, err = contextEvents(ctx, tx, runID, max(after, request.Seq), end, limit)
+	return page, err
+}
+
+func contextEventPage(ctx context.Context, tx *sql.Tx, runID string, after, before int64, limit int) (int64, int64, bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT seq,
+		octet_length(event) + octet_length(from_state) + octet_length(to_state) + octet_length(facts)
+		FROM transitions WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`, runID, after, before, limit+1)
+	if err != nil {
+		return 0, 0, false, err
 	}
-	return page, nil
+	defer rows.Close()
+	end, size, count := after, int64(0), 0
+	for rows.Next() {
+		var seq, n int64
+		if err := rows.Scan(&seq, &n); err != nil {
+			return 0, 0, false, err
+		}
+		if count == limit || count > 0 && size+n > ContextEventPageBytes {
+			return end, size, true, nil
+		}
+		// A single oversized event advances intact; later rows use the next page.
+		end, size, count = seq, size+n, count+1
+	}
+	return end, size, false, rows.Err()
 }
 
 func selectContextRequest(ctx context.Context, tx *sql.Tx, runID string, step, revision int) (*harness.Transition, error) {

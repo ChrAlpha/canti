@@ -13,17 +13,19 @@ import (
 )
 
 type contextReport struct {
-	RunID      string                  `json:"run_id"`
-	SessionID  string                  `json:"session_id,omitempty"`
-	SessionSeq int64                   `json:"session_seq,omitempty"`
-	AsOfSeq    int64                   `json:"as_of_seq"`
-	Request    harness.ContextRequest  `json:"request"`
-	Previous   *harness.ContextRequest `json:"previous,omitempty"`
-	Next       *harness.ContextRequest `json:"next,omitempty"`
-	Delta      *harness.ContextDelta   `json:"delta,omitempty"`
-	Events     []harness.ContextEvent  `json:"events"`
-	More       bool                    `json:"more"`
-	NextAfter  int64                   `json:"next_after,omitempty"`
+	RunID          string                  `json:"run_id"`
+	SessionID      string                  `json:"session_id,omitempty"`
+	SessionSeq     int64                   `json:"session_seq,omitempty"`
+	AsOfSeq        int64                   `json:"as_of_seq"`
+	Request        harness.ContextRequest  `json:"request"`
+	Previous       *harness.ContextRequest `json:"previous,omitempty"`
+	Next           *harness.ContextRequest `json:"next,omitempty"`
+	Delta          *harness.ContextDelta   `json:"delta,omitempty"`
+	Events         []harness.ContextEvent  `json:"events"`
+	More           bool                    `json:"more"`
+	NextAfter      int64                   `json:"next_after,omitempty"`
+	EventBytes     int64                   `json:"event_bytes"`
+	EventByteLimit int                     `json:"event_byte_limit"`
 }
 
 func contextCommand(fs *flag.FlagSet, a *app) action {
@@ -31,7 +33,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 	step := fs.Int("step", 0, "request `step`; 0 selects the latest frozen request")
 	revision := fs.Int("revision", 0, "request `revision` at -step; 0 selects its latest revision")
 	after := fs.Int64("after", 0, "read events after this journal `sequence`; requires explicit -run, -step and -revision")
-	limit := fs.Int("limit", 20, "maximum event `count` per page (1..100)")
+	limit := fs.Int("limit", 20, "maximum event `count` per page (1..100); also capped at 16 MiB persisted event JSON, except one oversized event")
 	raw := fs.Bool("raw", false, "write exact frozen request bytes without an added newline")
 	text := fs.Bool("text", false, "print a short text report instead of JSON")
 	bodies := fs.Bool("responses", false, "include recorded response bodies as base64 in JSON")
@@ -86,7 +88,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 }
 
 func describeContext(p sqlite.ContextPage, bodies bool) (contextReport, error) {
-	r := contextReport{RunID: p.Run.ID, SessionID: p.Run.SessionID, SessionSeq: p.Run.SessionSeq, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}}
+	r := contextReport{RunID: p.Run.ID, SessionID: p.Run.SessionID, SessionSeq: p.Run.SessionSeq, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}, EventBytes: p.EventBytes, EventByteLimit: sqlite.ContextEventPageBytes}
 	var err error
 	if r.Request, err = harness.DescribeContextRequest(p.Request); err != nil {
 		return r, err
@@ -173,6 +175,7 @@ func (r contextReport) writeText(w io.Writer) error {
 	if r.Next != nil {
 		line("Next: step %d revision %d (seq %d)", r.Next.Step, r.Next.Revision, r.Next.Seq)
 	}
+	line("Event page: %d persisted JSON bytes (limit %d; a single oversized event is returned intact)", r.EventBytes, r.EventByteLimit)
 	for _, e := range r.Events {
 		line("Event %d: step %d revision %d attempt %d %s; phase %s", e.Seq, e.Step, e.Revision, e.Attempt, e.Outcome, e.Phase)
 		if e.Reason != "" {
