@@ -115,8 +115,9 @@ var queries = []string{
 // Store is a harness.Journal backed by one SQLite database file. It is safe
 // for concurrent use, including by several Stores on the same file.
 type Store struct {
-	db    *sql.DB
-	stmts map[string]*sql.Stmt
+	db       *sql.DB
+	stmts    map[string]*sql.Stmt
+	readOnly bool
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -190,6 +191,12 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) write(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
