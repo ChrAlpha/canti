@@ -71,7 +71,8 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if n := len(strings.TrimSpace(f.Constraints)); n > l.Constraints {
 		return Prompt{}, fmt.Errorf("harness: constraints exceed their %d-byte limit by %d bytes", l.Constraints, n-l.Constraints)
 	}
-	head := f.head(l)
+	capture := ContextBytes{System: len(system), Limit: l.Total}
+	head := f.headContext(l, &capture)
 	blocks := make([]string, 0, len(f.Steps)+2)
 	blocks = append(blocks, head)
 	used := len(system) + len(head)
@@ -79,61 +80,81 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 		b := f.step(step, l)
 		blocks = append(blocks, b)
 		used += len(b)
+		if f.capture != nil {
+			capture.Steps = append(capture.Steps, ContextStepBytes{Step: step.Step, Bytes: len(b)})
+		}
 	}
-	tail := f.tail(l, f.progress(f.Earlier))
+	tail := f.tailContext(l, f.progress(f.Earlier), &capture)
 	if len(f.Steps) == 0 {
 		tail = "None.\n\n" + tail
+		capture.EmptySteps = len("None.\n\n")
 	}
 	used += len(tail)
 	if used > l.Total {
 		return Prompt{}, fmt.Errorf("harness: current context page exceeds its %d-byte total by %d bytes", l.Total, used-l.Total)
 	}
+	if f.capture != nil {
+		capture.Total = used
+		f.capture.Bytes = capture
+	}
 	return Prompt{System: system, Blocks: append(blocks, tail), Stable: 1 + len(f.Steps)}, nil
 }
 
 func (f Frame) head(l PromptLimits) string {
+	var capture ContextBytes
+	return f.headContext(l, &capture)
+}
+
+func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
 	var b strings.Builder
-	section(&b, "Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
+	capture.Goal = section(&b, "Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
 	if c := strings.TrimSpace(f.Constraints); c != "" {
-		section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
+		capture.Constraints = section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
 	}
-	section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
+	capture.Environment = section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
 		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n"+
 		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.RunsDir)+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
 		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
 		"Every run of this state directory, including this one, is recorded under "+inline(f.RunsDir)+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
 	if f.SessionContext != "" {
-		section(&b, "Earlier session dialogue", f.SessionContext)
+		capture.Session = section(&b, "Earlier session dialogue", f.SessionContext)
 	}
 	if f.Window != nil {
-		section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
+		capture.Window = section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
 		if f.Window.Handover != "" {
-			section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+fullBlock(f.Window.Handover))
+			capture.Handover = section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+fullBlock(f.Window.Handover))
 		}
 	}
-	section(&b, "Current window steps", "")
+	capture.StepHeader = section(&b, "Current window steps", "")
 	return b.String()
 }
 
 func (f Frame) tail(l PromptLimits, progress string) string {
+	var capture ContextBytes
+	return f.tailContext(l, progress, &capture)
+}
+
+func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextBytes) string {
 	var b strings.Builder
-	section(&b, "Progress", progress)
+	capture.Progress = section(&b, "Progress", progress)
 	if f.Window != nil && f.Window.Requested {
-		section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
+		capture.HandoverRequired = section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
 	}
 	if r := f.Rejected; r != nil {
-		section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
+		capture.Repair = section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
 			"Your reply must be exactly one decision object, as the system message describes.\n"+
 			quote("Error", r.Error, l.Rejected)+quote("Rejected reply", r.Response, l.Rejected))
 	}
 	return b.String()
 }
 
-func section(b *strings.Builder, title, body string) {
+func section(b *strings.Builder, title, body string) int {
+	before := b.Len()
 	if b.Len() > 0 {
 		b.WriteString("\n")
 	}
 	b.WriteString("## " + title + "\n" + body)
+	return b.Len() - before
 }
 
 func (f Frame) progress(hidden int) string {

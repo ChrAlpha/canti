@@ -47,6 +47,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 	}
 
 	base := *f
+	base.capture = nil
 	base.Step, base.Attempt, base.Earlier = 1, 1, 0
 	base.Steps, base.Rejected = nil, nil
 	base.Window = &Window{FirstStep: 1}
@@ -56,7 +57,9 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 		return nil
 	}
 	selected := nav
+	f.sessionNavigation = prior[0].ID
 	var units []string
+	var sources []ContextSessionSource
 	for _, p := range prior {
 		snap, err := l.journal.Latest(ctx, p.ID)
 		if err != nil {
@@ -77,16 +80,21 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 			unit = status + goal
 		}
 		rest := strings.Join(units, "")
+		provenance := ContextSessionSource{RunID: p.ID, SessionSeq: p.SessionSeq, Status: string(snap.State.Phase), IncludedGoal: true}
 		if !sessionContextFits(base, l.cfg.Limits, nav+unit+rest) {
 			if status != "" && sessionContextFits(base, l.cfg.Limits, nav+status+rest) {
 				selected = nav + status + rest
+				provenance.IncludedGoal = false
+				sources = append([]ContextSessionSource{provenance}, sources...)
 			}
 			break
 		}
 		units = append([]string{unit}, units...)
+		sources = append([]ContextSessionSource{provenance}, sources...)
 		selected = nav + strings.Join(units, "")
 	}
 	f.SessionContext = selected
+	f.sessionSources = sources
 	return nil
 }
 

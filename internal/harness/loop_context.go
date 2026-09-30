@@ -87,6 +87,11 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 		if r == nil {
 			continue
 		}
+		if f.capture != nil {
+			f.capture.Retrievals = append(f.capture.Retrievals, ContextRetrieval{
+				Step: f.Steps[i].Step, Query: r.Query, More: r.More, Incomplete: r.Incomplete, Error: clip(r.Error, 512),
+			})
+		}
 		var b strings.Builder
 		previousPath := ""
 		futureFence := 0
@@ -100,13 +105,18 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 			}
 			header += fmt.Sprintf("Bytes [%d,%d), sha256 %s:\n", source.Offset, source.Offset+int64(source.Length), source.SHA256)
 			text, err := l.cfg.Reader.Expand(ctx, source)
+			observed := ContextSource{Step: f.Steps[i].Step, Source: source, Available: err == nil}
 			futureText := maxError
 			if err != nil {
 				if ctx.Err() != nil {
 					return 0, ctx.Err()
 				}
-				text = "Evidence unavailable: " + clip(err.Error(), 512)
+				observed.Error = clip(err.Error(), 512)
+				text = "Evidence unavailable: " + observed.Error
 				futureText = max(futureText, source.Length)
+			}
+			if f.capture != nil {
+				f.capture.Sources = append(f.capture.Sources, observed)
 			}
 			growth += max(0, futureText-len(text))
 			futureFence = max(futureFence, futureText+1)
@@ -122,6 +132,9 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 
 func (l *Loop) requestHandover(f *Frame, growth int) error {
 	if f.Window == nil || f.Window.Requested {
+		if f.capture != nil && f.Window != nil {
+			f.capture.Handover = HandoverCheck{Status: "already_requested"}
+		}
 		return nil
 	}
 	capacity, err := f.workCapacity(l.cfg.Limits)
@@ -132,8 +145,22 @@ func (l *Loop) requestHandover(f *Frame, growth int) error {
 	for _, step := range f.Steps {
 		used += len(f.step(step, l.cfg.Limits))
 	}
-	if (l.cfg.WindowSteps > 0 && f.Step-f.Window.FirstStep >= l.cfg.WindowSteps) || (l.cfg.WindowBytes > 0 && used >= l.cfg.WindowBytes) || used+growth >= capacity {
+	check := HandoverCheck{Status: "evaluated", Used: used, Capacity: capacity, Growth: growth,
+		Steps: f.Step - f.Window.FirstStep, WindowSteps: l.cfg.WindowSteps, WindowBytes: l.cfg.WindowBytes}
+	if l.cfg.WindowSteps > 0 && check.Steps >= l.cfg.WindowSteps {
+		check.Reasons = append(check.Reasons, "window_steps")
+	}
+	if l.cfg.WindowBytes > 0 && used >= l.cfg.WindowBytes {
+		check.Reasons = append(check.Reasons, "window_bytes")
+	}
+	if used+growth >= capacity {
+		check.Reasons = append(check.Reasons, "capacity")
+	}
+	if len(check.Reasons) > 0 {
 		f.Window.Requested = true
+	}
+	if f.capture != nil {
+		f.capture.Handover = check
 	}
 	return nil
 }
@@ -163,6 +190,8 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 		}
 	}
+	f.capture = &ContextCapture{Session: f.sessionSources, SessionNavigation: f.sessionNavigation,
+		Handover: HandoverCheck{Status: "request_revision"}}
 	if f.Steps, err = l.windowSteps(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}
@@ -201,5 +230,6 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	req.Window = f.Window
+	req.Context = f.capture
 	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
 }

@@ -25,6 +25,9 @@ type Frame struct {
 	HandoverBytes                        int
 	Retrieved                            map[int]string
 	SessionContext                       string
+	capture                              *ContextCapture
+	sessionSources                       []ContextSessionSource
+	sessionNavigation                    string
 }
 
 // Rejection is a response of the current step that failed to decode, with
