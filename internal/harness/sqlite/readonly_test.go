@@ -138,6 +138,33 @@ func TestOpenReadOnlySeesLiveWALAndDoesNotBlockWriter(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyReadsWALWithReadonlyDirectoryAndExistingSidecars(t *testing.T) {
+	path := tempPath(t)
+	w := open(t, path)
+	d := newDriver(t, w, createRun(t, w, "run-1", limits))
+	d.freeze()
+	files := []string{path, path + "-wal", path + "-shm"}
+	t.Cleanup(func() {
+		os.Chmod(filepath.Dir(path), 0700)
+		for _, name := range files {
+			os.Chmod(name, 0600)
+		}
+	})
+	for _, name := range files {
+		if err := os.Chmod(name, 0400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Dir(path), 0500); err != nil {
+		t.Fatal(err)
+	}
+	s := readOnly(t, path)
+	page, err := s.ContextRecords(context.Background(), "run-1", 0, 0, 0, 1)
+	if err != nil || page.AsOfSeq != d.snap.Seq || !bytes.Equal(page.Request.Facts.Request.Body, d.commits[0].Facts.Request.Body) {
+		t.Fatalf("read-only WAL context: %#v, %v", page, err)
+	}
+}
+
 func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
