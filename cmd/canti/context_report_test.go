@@ -79,7 +79,7 @@ func TestContextRetryRepairAndPagination(t *testing.T) {
 	if !page.More || page.NextAfter == 0 || len(page.Events) != 2 || page.Events[1].Kind != "response_incomplete" || page.Events[1].Attempt != 1 || page.Next == nil || page.Next.Revision != 2 {
 		t.Fatalf("retry page: %+v", page)
 	}
-	next := f.cli(nil, "context", "-step", "1", "-revision", "1", "-after", fmt.Sprint(page.NextAfter), "-limit", "100", "-responses")
+	next := f.cli(nil, "context", "-run", page.RunID, "-step", "1", "-revision", "1", "-after", fmt.Sprint(page.NextAfter), "-limit", "100", "-responses")
 	if err := json.Unmarshal([]byte(next.stdout), &page); next.code != exitOK || err != nil {
 		t.Fatalf("next: %+v, %v", next, err)
 	}
@@ -90,7 +90,7 @@ func TestContextRetryRepairAndPagination(t *testing.T) {
 	if err := json.Unmarshal([]byte(last.stdout), &page); last.code != exitOK || err != nil {
 		t.Fatalf("last: %+v, %v", last, err)
 	}
-	if page.Request.Revision != 2 || page.Previous == nil || page.Previous.Revision != 1 || page.Delta == nil || page.Delta.PromptBytes == nil || page.Delta.WindowChanged || page.Events[0].Attempt != 3 || page.Request.Capture.Handover.Status != "request_revision" {
+	if page.Request.Revision != 2 || page.Previous == nil || page.Previous.Revision != 1 || page.Delta == nil || page.Delta.PromptBytes == nil || page.Delta.WindowChanged == nil || *page.Delta.WindowChanged || page.Events[0].Attempt != 3 || page.Request.Capture.Handover.Status != "request_revision" {
 		t.Fatalf("revision report: %+v", page)
 	}
 }
@@ -133,5 +133,36 @@ func TestContextInterruptedAttemptIsNotInvented(t *testing.T) {
 	last := report.Events[len(report.Events)-1]
 	if last.Outcome != "attempt_not_started" || last.Attempt != 1 || last.RequestedAttempt != 2 || last.LostAttempt != 1 || len(f.model.requests()) != 0 {
 		t.Fatalf("invented sent attempt: %+v", last)
+	}
+}
+
+func TestContextContinuationRequiresPinnedRequest(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-goal", "first request"); r.code != exitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	runID := f.status().Run.ID
+	for _, args := range [][]string{
+		{"-after", "1"},
+		{"-after", "1", "-run", runID},
+		{"-after", "1", "-step", "1", "-revision", "1"},
+		{"-after", "1", "-run", runID, "-step", "1"},
+	} {
+		if r := f.cli(nil, "context", args...); r.code != exitUsage {
+			t.Fatalf("unpinned continuation %v: %+v", args, r)
+		}
+	}
+}
+
+func TestContextTextPreservesStopReason(t *testing.T) {
+	f := newFixture(t, nil)
+	if r := f.cli(nil, "run", "-once", "-goal", "stop before model call"); r.code != exitActive {
+		t.Fatalf("run: %+v", r)
+	}
+	if r := f.cli(nil, "stop"); r.code != exitStopped {
+		t.Fatalf("stop: %+v", r)
+	}
+	if r := f.cli(nil, "context", "-text"); r.code != exitOK || !strings.Contains(r.stdout, "cancelled") {
+		t.Fatalf("missing durable stop reason: %+v", r)
 	}
 }

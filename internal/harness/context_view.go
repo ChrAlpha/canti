@@ -22,9 +22,9 @@ type ContextRequest struct {
 }
 
 type ContextDelta struct {
-	BodyBytes     int  `json:"body_bytes"`
-	PromptBytes   *int `json:"prompt_bytes,omitempty"`
-	WindowChanged bool `json:"window_changed"`
+	BodyBytes     int   `json:"body_bytes"`
+	PromptBytes   *int  `json:"prompt_bytes,omitempty"`
+	WindowChanged *bool `json:"window_changed"`
 }
 
 type ContextResponse struct {
@@ -70,9 +70,8 @@ func CompareContextRequests(previous, current ContextRequest) ContextDelta {
 		d.PromptBytes = &delta
 	}
 	if previous.Window != nil && current.Window != nil {
-		d.WindowChanged = previous.Window.FirstStep != current.Window.FirstStep
-	} else {
-		d.WindowChanged = previous.Window != current.Window
+		changed := previous.Window.FirstStep != current.Window.FirstStep
+		d.WindowChanged = &changed
 	}
 	return d
 }

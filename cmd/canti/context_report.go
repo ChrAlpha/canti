@@ -30,7 +30,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	step := fs.Int("step", 0, "request `step`; 0 selects the latest frozen request")
 	revision := fs.Int("revision", 0, "request `revision` at -step; 0 selects its latest revision")
-	after := fs.Int64("after", 0, "read events after this journal `sequence` (next_after from the previous page)")
+	after := fs.Int64("after", 0, "read events after this journal `sequence`; requires explicit -run, -step and -revision")
 	limit := fs.Int("limit", 20, "maximum event `count` per page (1..100)")
 	raw := fs.Bool("raw", false, "write exact frozen request bytes without an added newline")
 	text := fs.Bool("text", false, "print a short text report instead of JSON")
@@ -38,6 +38,9 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 	return func(ctx context.Context) (int, error) {
 		if *step < 0 || *revision < 0 || *revision > 0 && *step == 0 || *after < 0 || *limit < 1 || *limit > 100 {
 			return exitUsage, errors.New("step/revision/after must be nonnegative, revision requires step, and limit must be 1..100")
+		}
+		if *after > 0 && (a.runID == "" || *step == 0 || *revision == 0) {
+			return exitUsage, errors.New("after requires explicit -run, -step and -revision to keep pagination on the same request")
 		}
 		if *raw && (*text || *bodies || *after != 0) || *text && *bodies {
 			return exitUsage, errors.New("raw cannot be combined with text/responses/after; responses requires JSON")
@@ -153,7 +156,12 @@ func (r contextReport) writeText(w io.Writer) error {
 		}
 	}
 	if r.Previous != nil {
-		line("Previous: step %d revision %d (seq %d); request bytes delta %+d; window changed %t", r.Previous.Step, r.Previous.Revision, r.Previous.Seq, r.Delta.BodyBytes, r.Delta.WindowChanged)
+		line("Previous: step %d revision %d (seq %d); request bytes delta %+d", r.Previous.Step, r.Previous.Revision, r.Previous.Seq, r.Delta.BodyBytes)
+		if r.Delta.WindowChanged == nil {
+			line("Window change unavailable: historical window metadata is missing.")
+		} else {
+			line("Window changed: %t", *r.Delta.WindowChanged)
+		}
 		if r.Delta.PromptBytes != nil {
 			line("Rendered prompt bytes delta: %+d", *r.Delta.PromptBytes)
 		}
@@ -162,7 +170,13 @@ func (r contextReport) writeText(w io.Writer) error {
 		line("Next: step %d revision %d (seq %d)", r.Next.Step, r.Next.Revision, r.Next.Seq)
 	}
 	for _, e := range r.Events {
-		line("Event %d: attempt %d %s; phase %s", e.Seq, e.Attempt, e.Outcome, e.Phase)
+		line("Event %d: step %d revision %d attempt %d %s; phase %s", e.Seq, e.Step, e.Revision, e.Attempt, e.Outcome, e.Phase)
+		if e.Reason != "" {
+			line("  stop reason: %s", e.Reason)
+		}
+		if e.RequestedAttempt != 0 {
+			line("  requested attempt %d was not started", e.RequestedAttempt)
+		}
 		if e.Failure != "" {
 			line("  failure: %s", e.Failure)
 		}

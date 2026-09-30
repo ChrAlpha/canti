@@ -107,7 +107,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	if !slices.Contains(requested.Handover.Reasons, "window_steps") || len(requested.Sources) != 1 || !requested.Sources[0].Available || requested.Retrievals[0].Query.Reason != "verify original evidence" {
 		t.Fatalf("handover/evidence: %+v", requested)
 	}
-	if reports[3].Request.Capture.Handover.Status != "request_revision" || reports[4].Request.Window.FirstStep != 4 || !reports[4].Delta.WindowChanged || len(reports[4].Request.Capture.Sources) != 0 {
+	if reports[3].Request.Capture.Handover.Status != "request_revision" || reports[4].Request.Window.FirstStep != 4 || reports[4].Delta.WindowChanged == nil || !*reports[4].Delta.WindowChanged || len(reports[4].Request.Capture.Sources) != 0 {
 		t.Fatal("repair or next window was misrepresented")
 	}
 	if after := f.history(); !reflect.DeepEqual(before, after) || len(f.model.requests()) != calls {
