@@ -59,6 +59,7 @@ Usage:
                                                     record the outcome of a run's unknown effect
   canti status [-run ID]                            print the state of a run as JSON
   canti history [-run ID]                           print the transitions of a run as JSON Lines
+  canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
   canti version                                     print the version
 
 Run "canti COMMAND -h" for the flags of a command. run, chat, and resume read the
@@ -75,6 +76,7 @@ type action func(context.Context) (int, error)
 var commands = map[string]func(*flag.FlagSet, *app) action{
 	"run": runCommand, "chat": chatCommand, "resume": resumeCommand, "stop": stopCommand,
 	"resolve": resolveCommand, "status": statusCommand, "history": historyCommand,
+	"context": contextCommand,
 }
 
 type app struct {
@@ -165,7 +167,9 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		code, err = exitError, a.locate(*workspace, *state)
 	}
 	if err == nil {
-		a.cred, a.credErr = credentials()
+		if name != "context" {
+			a.cred, a.credErr = credentials()
+		}
 		code, err = act(ctx)
 	}
 	if err != nil {
