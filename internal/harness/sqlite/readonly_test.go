@@ -70,6 +70,10 @@ func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
 	if err != nil || !bytes.Equal(got.Body, d.commits[0].Facts.Request.Body) {
 		t.Fatalf("Request = %#v, %v", got, err)
 	}
+	page, err := s.ContextRecords(context.Background(), "run-1", 0, 0, 0, 1)
+	if err != nil || page.AsOfSeq != 1 || page.Request.Seq != 1 || len(page.Events) != 0 {
+		t.Fatalf("legacy context = %#v, %v", page, err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
