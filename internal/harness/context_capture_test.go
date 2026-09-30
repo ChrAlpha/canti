@@ -91,7 +91,7 @@ func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
 	if err != nil || c.Sources[0].Source != steps[0].Observation.Retrieval.Sources[0] {
 		t.Fatalf("source lost provenance: %v", err)
 	}
-	if len(c.Retrievals) != 1 || !c.Retrievals[0].More || c.Retrievals[0].Query.Reason != "verify original" || c.Retrievals[0].Step != 1 {
+	if len(c.Retrievals) != 1 || !c.Retrievals[0].More || c.Retrievals[0].Operation != "read" || c.Retrievals[0].Query != nil || c.Retrievals[0].Step != 1 || steps[0].Observation.Retrieval.Query.Reason != "verify original" {
 		t.Fatalf("retrieval = %+v", c.Retrievals)
 	}
 	if len(f.model.sent) != 4 || !bytes.Equal(f.model.sent[1], f.model.sent[2]) || !strings.Contains(string(originalReq.Body), "ORIGINAL") {

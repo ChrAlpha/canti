@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,7 +11,32 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
+
+func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
+	for _, operation := range []string{"read", "list", "search", "discover", strings.Repeat("\"\\\n界", 1<<17)} {
+		for _, legacy := range []bool{false, true} {
+			r := harness.ContextRetrieval{Step: 7, Operation: operation, More: true, Incomplete: true}
+			if legacy {
+				r.Operation = ""
+				r.Query = &harness.RetrievalQuery{Operation: operation, Path: "/canti/imports/legacy", Reason: strings.Repeat("REASON", 1<<17)}
+			}
+			report := contextReport{RunID: "original-run", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Retrievals: []harness.ContextRetrieval{r}}}}
+			var out bytes.Buffer
+			if err := report.writeText(&out); err != nil {
+				t.Fatal(err)
+			}
+			want := operation
+			if len(want) > 8 {
+				want = "invalid"
+			}
+			if out.Len() > 1024 || !strings.Contains(out.String(), "Retrieval at step 7: "+want+"; original query in observation; more true; incomplete true") || strings.Contains(out.String(), "REASON") || strings.Contains(out.String(), "/canti/imports/legacy") {
+				t.Fatalf("legacy %t retrieval text = %q", legacy, out.String())
+			}
+		}
+	}
+}
 
 func TestContextInspectFrozenRequest(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})

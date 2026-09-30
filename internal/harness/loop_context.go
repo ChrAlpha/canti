@@ -88,9 +88,11 @@ func (l *Loop) expandRetrieval(ctx context.Context, f *Frame) (int, error) {
 			continue
 		}
 		if f.capture != nil {
-			f.capture.Retrievals = append(f.capture.Retrievals, ContextRetrieval{
-				Step: f.Steps[i].Step, Query: r.Query, More: r.More, Incomplete: r.Incomplete, Error: clip(r.Error, 512),
-			})
+			observed := ContextRetrieval{
+				Step: f.Steps[i].Step, Operation: r.Query.Operation, More: r.More, Incomplete: r.Incomplete, Error: clip(r.Error, 512),
+			}
+			observed.Operation = observed.OperationName()
+			f.capture.Retrievals = append(f.capture.Retrievals, observed)
 		}
 		var b strings.Builder
 		previousPath := ""

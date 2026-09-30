@@ -147,7 +147,7 @@ func (r contextReport) writeText(w io.Writer) error {
 			line("Earlier dialogue: run %s sequence %d, %s, goal included %t", s.RunID, s.SessionSeq, s.Status, s.IncludedGoal)
 		}
 		for _, retrieval := range c.Retrievals {
-			line("Retrieval at step %d: %s %s; reason %q; more %t; incomplete %t", retrieval.Step, retrieval.Query.Operation, retrieval.Query.Path, retrieval.Query.Reason, retrieval.More, retrieval.Incomplete)
+			line("Retrieval at step %d: %s; original query in observation; more %t; incomplete %t", retrieval.Step, retrieval.OperationName(), retrieval.More, retrieval.Incomplete)
 			if retrieval.Error != "" {
 				line("  error: %s", retrieval.Error)
 			}

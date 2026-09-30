@@ -29,10 +29,24 @@ type ContextSessionSource struct {
 
 type ContextRetrieval struct {
 	Step       int
-	Query      RetrievalQuery
+	Operation  string          `json:",omitempty"`
+	Query      *RetrievalQuery `json:",omitempty"` // Legacy frozen captures only.
 	More       bool
 	Incomplete bool
 	Error      string `json:",omitempty"`
+}
+
+func (r ContextRetrieval) OperationName() string {
+	operation := r.Operation
+	if operation == "" && r.Query != nil {
+		operation = r.Query.Operation
+	}
+	switch operation {
+	case "read", "list", "search", "discover":
+		return operation
+	default:
+		return "invalid"
+	}
 }
 
 type ContextSource struct {
