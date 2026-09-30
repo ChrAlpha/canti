@@ -58,17 +58,21 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 			}
 			id = run.ID
 		}
-		page, err := store.ContextRecords(ctx, id, *step, *revision, *after, *limit)
-		if err != nil {
-			return exitError, err
-		}
 		if *raw {
-			body := page.Request.Facts.Request.Body
+			request, err := store.ContextRequest(ctx, id, *step, *revision)
+			if err != nil {
+				return exitError, err
+			}
+			body := request.Facts.Request.Body
 			n, err := a.stdout.Write(body)
 			if err == nil && n != len(body) {
 				err = io.ErrShortWrite
 			}
 			return exitOK, err
+		}
+		page, err := store.ContextRecords(ctx, id, *step, *revision, *after, *limit)
+		if err != nil {
+			return exitError, err
 		}
 		report, err := describeContext(page, *bodies)
 		if err != nil {

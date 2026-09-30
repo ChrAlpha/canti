@@ -25,6 +25,27 @@ const contextColumns = `seq, event_id, kind, semantics, event, from_state, to_st
 const contextFrozenSQL = `SELECT ` + contextColumns + `, step, rev
 	FROM transitions INDEXED BY transitions_request WHERE run_id = ? AND kind = 'request_frozen'`
 
+// ContextRequest reads only the selected frozen request in one snapshot.
+// Zero step or revision selects the latest; a revision needs a step.
+func (s *Store) ContextRequest(ctx context.Context, runID string, step, revision int) (harness.Transition, error) {
+	if step < 0 || revision < 0 || step == 0 && revision != 0 {
+		return harness.Transition{}, errors.New("sqlite: invalid context selection")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return harness.Transition{}, err
+	}
+	defer tx.Rollback()
+	request, err := selectContextRequest(ctx, tx, runID, step, revision)
+	if err != nil {
+		return harness.Transition{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return harness.Transition{}, err
+	}
+	return *request, nil
+}
+
 // ContextRecords reads one snapshot. Zero step or revision selects the latest;
 // a revision needs a step. Events follow the selected request and precede the
 // next frozen revision, with sequences above after. Limit must be 1 through 100.
@@ -66,20 +87,13 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 	if page.Run.ID != runID {
 		return page, fmt.Errorf("%w: run identity differs from its key", ErrIncompatible)
 	}
-	selection, args := " ORDER BY step DESC, rev DESC LIMIT 1", []any{runID}
-	if step > 0 {
-		selection, args = " AND step = ? ORDER BY rev DESC LIMIT 1", append(args, step)
-		if revision > 0 {
-			selection, args = " AND step = ? AND rev = ?", append(args, revision)
-		}
-	}
-	request, err := contextFrozen(ctx, tx, runID, selection, args)
+	request, err := selectContextRequest(ctx, tx, runID, step, revision)
 	if err != nil {
-		return page, missing(err, "frozen request")
+		return page, err
 	}
 	page.Request = *request
 	state := request.To
-	args = []any{runID, state.Step, state.RequestRev}
+	args := []any{runID, state.Step, state.RequestRev}
 	page.Previous, err = contextFrozen(ctx, tx, runID,
 		" AND (step, rev) < (?, ?) ORDER BY step DESC, rev DESC LIMIT 1", args)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -107,6 +121,18 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 		page.Events, page.More = page.Events[:limit], true
 	}
 	return page, nil
+}
+
+func selectContextRequest(ctx context.Context, tx *sql.Tx, runID string, step, revision int) (*harness.Transition, error) {
+	selection, args := " ORDER BY step DESC, rev DESC LIMIT 1", []any{runID}
+	if step > 0 {
+		selection, args = " AND step = ? ORDER BY rev DESC LIMIT 1", append(args, step)
+		if revision > 0 {
+			selection, args = " AND step = ? AND rev = ?", append(args, revision)
+		}
+	}
+	request, err := contextFrozen(ctx, tx, runID, selection, args)
+	return request, missing(err, "frozen request")
 }
 
 func contextFrozen(ctx context.Context, tx *sql.Tx, runID, selection string, args []any) (*harness.Transition, error) {
