@@ -138,6 +138,48 @@ func TestChatTUIFailureStopsThenExits(t *testing.T) {
 	}
 }
 
+func TestChatTUIFailuresDoNotEscalateCancellation(t *testing.T) {
+	key := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl})
+	output := chatOutputFailure{err: errors.New("terminal output failed")}
+	input := chatInputFailure{err: errors.New("terminal input failed")}
+	for _, tc := range []struct {
+		name   string
+		events []tea.Msg
+	}{
+		{"interrupt first", []tea.Msg{key, output, input, output}},
+		{"output first", []tea.Msg{output, input, key, output}},
+		{"input first", []tea.Msg{input, output, key, input}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stopped int
+			m := newChatTUI("session", nil, nil, func(os.Signal) { stopped++ }, nil, nil, new(chatDisplay))
+			m.busy = true
+			for _, event := range tc.events {
+				updated, _ := m.Update(event)
+				m = updated.(chatTUI)
+				if stopped != 1 || !m.busy || !m.stopping {
+					t.Fatalf("%T escalated cleanup: calls=%d busy=%v stopping=%v", event, stopped, m.busy, m.stopping)
+				}
+			}
+			updated, _ := m.Update(key)
+			m = updated.(chatTUI)
+			if stopped != 2 {
+				t.Fatalf("second user interrupt did not abandon cleanup: calls=%d", stopped)
+			}
+			updated, _ = m.Update(key)
+			m = updated.(chatTUI)
+			if stopped != 2 {
+				t.Fatalf("more than two stop signals: %d", stopped)
+			}
+			updated, cmd := m.Update(chatDone{code: exitStopped})
+			m = updated.(chatTUI)
+			if cmd == nil || m.err == nil || m.code != exitError || m.busy || m.stopping {
+				t.Fatalf("failed display did not exit after cleanup: %+v", m)
+			}
+		})
+	}
+}
+
 func TestChatTUIPreparesEachAcceptedInputBeforeSubmit(t *testing.T) {
 	var prepared atomic.Int32
 	m := newChatTUI("session", func() { prepared.Add(1) }, nil, nil, nil, nil, new(chatDisplay))

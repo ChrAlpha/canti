@@ -166,7 +166,7 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.code = exitError
 		if m.busy {
 			m.exitAfterRun = true
-			m.stop(os.Interrupt)
+			m.cancel()
 			return m, chatPoll()
 		}
 		return m, tea.Quit
@@ -175,7 +175,7 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.code = exitError
 		if m.busy {
 			m.exitAfterRun = true
-			m.stop(os.Interrupt)
+			m.cancel()
 			return m, chatPoll()
 		}
 		return m, tea.Quit
@@ -292,9 +292,21 @@ func (m *chatTUI) stop(sig os.Signal) {
 		return
 	}
 	m.stopCount++
+	if m.stopCount == 1 && m.stopping {
+		return
+	}
 	m.stopping = true
 	if m.interrupt != nil {
 		m.interrupt(sig)
+	}
+}
+
+func (m *chatTUI) cancel() {
+	if !m.stopping {
+		m.stopping = true
+		if m.interrupt != nil {
+			m.interrupt(os.Interrupt)
+		}
 	}
 }
 
@@ -354,6 +366,23 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 	var active sync.WaitGroup
 	closed := false
 	running := false
+	interrupted := false
+	wrappedPrepare := func() {
+		gate.Lock()
+		interrupted = false
+		gate.Unlock()
+		if prepare != nil {
+			prepare()
+		}
+	}
+	wrappedInterrupt := func(sig os.Signal) {
+		gate.Lock()
+		interrupted = true
+		gate.Unlock()
+		if interrupt != nil {
+			interrupt(sig)
+		}
+	}
 	wrappedSubmit := func(goal string) (int, error, os.Signal) {
 		gate.Lock()
 		if closed {
@@ -371,7 +400,7 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 		}()
 		return submit(goal)
 	}
-	m := newChatTUI(session, prepare, wrappedSubmit, interrupt, signals, outputFailure, display)
+	m := newChatTUI(session, wrappedPrepare, wrappedSubmit, wrappedInterrupt, signals, outputFailure, display)
 	var p *tea.Program
 	ready := make(chan struct{})
 	gateInput, stopInput, err := startChatInput(f, func(msg tea.Msg) {
@@ -394,7 +423,7 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 	inputErr := stopInput()
 	gate.Lock()
 	closed = true
-	needsStop := running
+	needsStop := running && !interrupted
 	gate.Unlock()
 	if needsStop && interrupt != nil {
 		interrupt(os.Interrupt)
