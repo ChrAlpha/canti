@@ -72,7 +72,7 @@ func newScriptedModel(t *testing.T, key string, script map[int]core.Decision) *s
 	return m
 }
 
-var progressLine = regexp.MustCompile(`(?m)^Step (\d+) of at most \d+, attempt \d+ of \d+\.$`)
+var progressLine = regexp.MustCompile(`(?m)^Step (\d+)(?: of at most \d+| \(unlimited steps\)), attempt \d+ of \d+\.$`)
 
 func promptOf(body []byte) (step int, prompt string, err error) {
 	var req struct {

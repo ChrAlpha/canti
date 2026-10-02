@@ -124,7 +124,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"status", "extra"}, exitUsage, "", `unexpected argument "extra"`},
 		{[]string{"status", "-log-level", "loud"}, exitUsage, "", "loud"},
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
-		{[]string{"run", "-goal", "g", "-max-steps", "0"}, exitUsage, "", "-max-steps"},
+		{[]string{"run", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
 		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "-context-bytes must be at least 65536"},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},

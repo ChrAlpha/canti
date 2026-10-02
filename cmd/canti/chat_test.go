@@ -117,7 +117,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if r.code != exitError || strings.Contains(r.stderr, "> ") {
 		t.Fatalf("unreadable journal: %+v", r)
 	}
-	for _, args := range [][]string{{"-max-steps", "0"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "90000"}} {
+	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "90000"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, "chat", args...)
 		if r := wait(); r.code != exitUsage && r.code != exitError || strings.Contains(r.stderr, "> ") {
 			t.Fatalf("chat %q: %+v", args, r)

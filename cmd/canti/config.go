@@ -71,7 +71,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
 	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
 	fs.IntVar(&c.HandoverBytes, "handover-bytes", 2048, "maximum handover UTF-8 `bytes` (1..8192)")
-	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run")
+	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run; 0 is unlimited")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")
 	fs.Int64Var(&b.Tokens, "token-budget", 0, "model `tokens` per run; 0 is unlimited")
@@ -115,7 +115,7 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	run := harness.Run{ID: "run_" + hex.EncodeToString(id[:]), Goal: goal, Constraints: constraints, Budget: b, Created: now}
 	initial, err := core.NewState(run.ID, s.limits)
 	if err != nil {
-		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps and -max-attempts must be positive")
+		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
 	}
 	f := harness.Frame{
 		Goal: goal, Constraints: constraints, Environment: environment(c, b),
