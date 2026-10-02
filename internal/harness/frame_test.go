@@ -2,6 +2,7 @@ package harness
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,11 @@ func TestFrameValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid", edit: func(*Frame) {}},
+		{name: "unlimited steps", edit: func(f *Frame) { f.MaxSteps = 0 }},
+		{name: "unlimited late step", edit: func(f *Frame) {
+			f.Step, f.MaxSteps, f.Earlier, f.Window = math.MaxInt, 0, math.MaxInt-1, &Window{FirstStep: math.MaxInt, SourceStep: math.MaxInt - 1, Handover: "continue"}
+		}},
+		{name: "negative step limit", edit: func(f *Frame) { f.MaxSteps = -1 }, wantErr: true},
 		{name: "last step and attempt", edit: func(f *Frame) {
 			f.Step, f.Attempt, f.Earlier, f.Window = 10, 3, 9, &Window{FirstStep: 10, SourceStep: 9, Handover: "continue"}
 		}},
@@ -55,5 +61,17 @@ func TestFrameValidate(t *testing.T) {
 				t.Fatalf("Frame.Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestUnlimitedProgress(t *testing.T) {
+	f := testFrame()
+	f.MaxSteps = 0
+	p, err := f.Prompt(DefaultPromptLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.User(), "Step 1 (unlimited steps), attempt 1 of 3.") || strings.Contains(p.User(), "of at most 0") {
+		t.Fatalf("unlimited progress missing: %s", p.User())
 	}
 }

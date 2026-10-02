@@ -159,6 +159,9 @@ func section(b *strings.Builder, title, body string) int {
 
 func (f Frame) progress(hidden int) string {
 	s := fmt.Sprintf("Step %d of at most %d, attempt %d of %d.\n", f.Step, f.MaxSteps, f.Attempt, f.MaxAttempts)
+	if f.MaxSteps == 0 {
+		s = fmt.Sprintf("Step %d (unlimited steps), attempt %d of %d.\n", f.Step, f.Attempt, f.MaxAttempts)
+	}
 	switch {
 	case hidden == 1:
 		s += "1 earlier step is not shown.\n"

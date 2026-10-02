@@ -47,7 +47,9 @@ func (f Frame) Validate() error {
 		return errors.New("harness: frame artifact directory is required")
 	case strings.TrimSpace(f.RunsDir) == "" || strings.TrimSpace(f.RunID) == "":
 		return errors.New("harness: frame runs directory and run ID are required")
-	case f.Step < 1 || f.Step > f.MaxSteps:
+	case f.MaxSteps < 0:
+		return errors.New("harness: frame max steps must be nonnegative")
+	case f.Step < 1 || f.MaxSteps > 0 && f.Step > f.MaxSteps:
 		return fmt.Errorf("harness: frame step %d is outside 1..%d", f.Step, f.MaxSteps)
 	case f.Attempt < 1 || f.Attempt > f.MaxAttempts:
 		return fmt.Errorf("harness: frame attempt %d is outside 1..%d", f.Attempt, f.MaxAttempts)

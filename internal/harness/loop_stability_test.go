@@ -62,7 +62,17 @@ func TestLoopLongStability(t *testing.T) {
 		}
 	}
 	reader, sources, manifestSHA := stabilityCorpus(ctx, t)
-	f := newFixture(t, core.Limits{MaxSteps: steps, MaxAttempts: 5}, harness.Budget{})
+	maxSteps := steps
+	if raw := os.Getenv("CANTI_STABILITY_UNLIMITED_STEPS"); raw != "" {
+		unlimited, err := strconv.ParseBool(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unlimited {
+			maxSteps = 0
+		}
+	}
+	f := newFixture(t, core.Limits{MaxSteps: maxSteps, MaxAttempts: 5}, harness.Budget{})
 	f.cfg.Reader = &reader
 	f.cfg.WindowSteps = windowSteps
 	f.cfg.Limits = harness.DefaultPromptLimits()

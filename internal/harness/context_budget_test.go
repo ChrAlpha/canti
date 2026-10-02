@@ -80,7 +80,11 @@ func TestContextStepAndTailBounds(t *testing.T) {
 		if actual, bound := len(f.step(s, l)), f.stepShellBytes(l); actual > bound {
 			t.Fatalf("case %d: shell %d exceeds %d", i, actual, bound)
 		}
-		f.Step, f.Attempt, f.Earlier = math.MaxInt, math.MaxInt, math.MaxInt
+		f.Step, f.Attempt, f.MaxAttempts, f.Earlier = math.MaxInt, math.MaxInt, math.MaxInt, math.MaxInt
+		f.MaxSteps = math.MaxInt
+		if i%2 == 0 {
+			f.MaxSteps = 0
+		}
 		f.Window = &Window{FirstStep: math.MaxInt, Requested: true}
 		f.Rejected = &Rejection{Error: pick(), Response: pick()}
 		if actual, bound := len(f.tail(l, f.progress(f.Earlier))), f.tailBytes(l); actual > bound {
