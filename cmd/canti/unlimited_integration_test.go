@@ -70,11 +70,26 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 			if !extends(h, prefix) {
 				t.Fatal("restart changed committed facts")
 			}
-			requests, handovers := 0, 0
+			requests, handovers, startedAttempts := 0, 0, 0
 			builtin := map[string]bool{}
 			for _, e := range h {
 				if e.State.Limits.MaxSteps != tc.limit {
 					t.Fatalf("stored step limit changed: %+v", e.State)
+				}
+				if e.State.Step == 1 && e.Kind == "response_saved" {
+					wantAttempt := 1
+					if tc.crash == "attempt_started" {
+						wantAttempt = 2
+					}
+					if e.State.Attempt != wantAttempt {
+						t.Fatalf("saved response attempt = %d, want %d", e.State.Attempt, wantAttempt)
+					}
+				}
+				if e.State.Step == 1 && e.Kind == "attempt_started" {
+					startedAttempts++
+					if e.State.Attempt != startedAttempts {
+						t.Fatalf("attempt started out of order: %+v", e.State)
+					}
 				}
 				if req := e.Facts.Request; req != nil {
 					requests++
@@ -94,6 +109,13 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 						builtin[evEvent[core.Observed](t, e).EffectID] = true
 					}
 				}
+			}
+			wantStarted := 1
+			if tc.crash == "attempt_started" {
+				wantStarted = 2
+			}
+			if startedAttempts != wantStarted {
+				t.Fatalf("started attempts = %d, want %d", startedAttempts, wantStarted)
 			}
 			sent := f.model.requests()
 			if requests != 23 || handovers != 5 || len(sent) != 24 || !bytes.Equal(sent[0], prefix[0].Facts.Request.Body) || !bytes.Equal(sent[1], sent[2]) {
