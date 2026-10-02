@@ -35,6 +35,7 @@ type config struct {
 	Model          string `json:"model"`
 	MaxTokens      int    `json:"max_tokens"`
 	Structured     bool   `json:"structured"`
+	DecisionFormat string `json:"decision_format,omitempty"`
 	Fallbacks      bool   `json:"fallbacks"`
 	ContextBytes   int    `json:"context_bytes"`
 	ContextVersion int    `json:"context_version"`
@@ -64,7 +65,8 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "output `bytes` retained per job")
 	fs.StringVar(&c.Model, "model", "claude-opus-5", "Anthropic `model`")
 	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
-	fs.BoolVar(&c.Structured, "structured", true, "constrain responses to the decision schema")
+	fs.BoolVar(&c.Structured, "structured", true, "constrain text responses to the decision schema")
+	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
 	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window; at least 65536")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under /canti/imports")
@@ -88,6 +90,8 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
+	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
+		return harness.Run{}, core.State{}, errors.New("-decision-format must be text or tool")
 	case c.Image == "" || c.Network == "" || c.Model == "":
 		return harness.Run{}, core.State{}, errors.New("-image, -network, and -model must not be empty")
 	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
@@ -142,6 +146,9 @@ func decodeConfig(run harness.Run, workspace string) (config, error) {
 	}
 	if c.ContextVersion != contextVersion {
 		return c, fmt.Errorf("run %s uses an unsupported context version; use a fresh -state", run.ID)
+	}
+	if c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool" {
+		return c, fmt.Errorf("run %s has an unsupported decision format %q", run.ID, c.DecisionFormat)
 	}
 	if c.Workspace != workspace {
 		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)
@@ -202,7 +209,7 @@ func newModel(c config, url string, cred credential) (harness.Model, error) {
 func modelConfig(c config, url string, cred credential) anthropic.Config {
 	return anthropic.Config{
 		BaseURL: url, APIKey: cred.apiKey, AuthToken: cred.authToken, Model: c.Model,
-		MaxTokens: c.MaxTokens, StructuredOutput: c.Structured, Fallbacks: c.Fallbacks,
+		MaxTokens: c.MaxTokens, StructuredOutput: c.Structured, DecisionFormat: c.DecisionFormat, Fallbacks: c.Fallbacks,
 	}
 }
 

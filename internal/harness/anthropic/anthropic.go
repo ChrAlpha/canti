@@ -29,6 +29,7 @@ const (
 	protocol       = "anthropic-messages/" + version
 	fallbackBeta   = "server-side-fallback-2026-07-01"
 	adapter        = "canti-anthropic/2"
+	toolAdapter    = "canti-anthropic/3-tool"
 	decisionFormat = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{` +
 		`"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},` +
 		`"required":["kind","payload"],"additionalProperties":false}}}`
@@ -41,7 +42,8 @@ type Config struct {
 	AuthToken        string        // sent as Authorization: Bearer; exactly one of APIKey/AuthToken is required
 	Model            string        // required, e.g. "claude-opus-5"
 	MaxTokens        int           // default 16000
-	StructuredOutput bool          // constrain the answer to the decision object schema
+	StructuredOutput bool          // constrain text answers to the decision object schema
+	DecisionFormat   string        // "text" (default) or "tool"
 	Fallbacks        bool          // enable server-side refusal fallbacks
 	Timeout          time.Duration // per-attempt HTTP timeout; default 10m
 	MaxResponseBytes int64         // default 8 MiB; larger bodies are incomplete
@@ -67,6 +69,12 @@ func New(cfg Config) (*Model, error) {
 	}
 	if cfg.MaxTokens < 0 || cfg.Timeout < 0 || cfg.MaxResponseBytes < 0 {
 		return nil, errors.New("anthropic: limits must not be negative")
+	}
+	if cfg.DecisionFormat == "" {
+		cfg.DecisionFormat = "text"
+	}
+	if cfg.DecisionFormat != "text" && cfg.DecisionFormat != "tool" {
+		return nil, fmt.Errorf("anthropic: unsupported decision format %q", cfg.DecisionFormat)
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.anthropic.com"
@@ -131,10 +139,17 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 		System       string          `json:"system,omitempty"`
 		Messages     []userMessage   `json:"messages"`
 		OutputConfig json.RawMessage `json:"output_config,omitempty"`
+		Tools        json.RawMessage `json:"tools,omitempty"`
+		ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
 		Fallbacks    string          `json:"fallbacks,omitempty"`
 	}{Model: m.cfg.Model, MaxTokens: m.cfg.MaxTokens, System: p.System, Messages: []userMessage{{"user", content}}}
 	proto := protocol
-	if m.cfg.StructuredOutput {
+	requestAdapter := adapter
+	if m.cfg.DecisionFormat == "tool" {
+		requestAdapter = toolAdapter
+		body.Tools = json.RawMessage(decisionTool)
+		body.ToolChoice = json.RawMessage(decisionToolChoice)
+	} else if m.cfg.StructuredOutput {
 		body.OutputConfig = json.RawMessage(decisionFormat)
 	}
 	if m.cfg.Fallbacks {
@@ -144,7 +159,7 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if err != nil {
 		return harness.Request{}, fmt.Errorf("anthropic: %w", err)
 	}
-	return harness.Request{Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: adapter}, nil
+	return harness.Request{Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: requestAdapter}, nil
 }
 
 type message struct {
@@ -171,7 +186,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	}
 	var beta string
 	switch {
-	case req.Adapter != adapter:
+	case req.Adapter != adapter && req.Adapter != toolAdapter:
 		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
 		beta = fallbackBeta
@@ -223,10 +238,22 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	}
 	u := msg.Usage
 	resp.Usage = harness.Usage{InputTokens: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, OutputTokens: u.OutputTokens}
+	if req.Adapter == toolAdapter {
+		fields, ok := exactObject(resp.Body)
+		if !ok {
+			return resp, errors.New("anthropic: malformed tool response")
+		}
+		msg.StopReason = exactString(fields, "stop_reason")
+	}
 	switch msg.StopReason {
 	case "end_turn", "stop_sequence", "refusal":
 		resp.Complete = true
 		return resp, nil
+	case "tool_use":
+		if req.Adapter == toolAdapter {
+			resp.Complete = true
+			return resp, nil
+		}
 	}
 	return resp, fmt.Errorf("anthropic: incomplete response: stop_reason %q", msg.StopReason)
 }
@@ -234,6 +261,12 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 // Decision concatenates the text blocks of a saved response. A body without
 // text is returned unchanged so the strict decoder rejects it.
 func (m *Model) Decision(resp harness.Response) []byte {
+	if resp.Adapter == toolAdapter {
+		return toolDecision(resp)
+	}
+	if resp.Adapter != "" && resp.Adapter != adapter {
+		return nil
+	}
 	var msg message
 	if json.Unmarshal(resp.Body, &msg) != nil {
 		return resp.Body
