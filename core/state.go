@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 )
 
@@ -39,7 +40,7 @@ const (
 	IntentHalt           Intent = "halt"
 )
 
-// Limits are the finite budgets the core can count by itself.
+// Limits are the budgets the core can count by itself. MaxSteps zero is unlimited.
 type Limits struct {
 	MaxSteps    int
 	MaxAttempts int
@@ -65,7 +66,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 1
+const SemanticsVersion = 2
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -84,8 +85,8 @@ func NewState(runID string, limits Limits) (State, error) {
 	if runID == "" {
 		return State{}, errors.New("core: run ID is required")
 	}
-	if limits.MaxSteps < 1 || limits.MaxAttempts < 1 {
-		return State{}, errors.New("core: limits must be positive")
+	if limits.MaxSteps < 0 || limits.MaxAttempts < 1 {
+		return State{}, errors.New("core: max steps must be nonnegative and max attempts must be positive")
 	}
 	return State{RunID: runID, Step: 1, Attempt: 1, Phase: PhaseIdle, Limits: limits}, nil
 }
@@ -123,10 +124,10 @@ func (s State) Validate() error {
 	if s.RunID == "" {
 		return fail("run ID is required")
 	}
-	if s.Limits.MaxSteps < 1 || s.Limits.MaxAttempts < 1 {
-		return fail("limits must be positive")
+	if s.Limits.MaxSteps < 0 || s.Limits.MaxAttempts < 1 {
+		return fail("max steps must be nonnegative and max attempts must be positive")
 	}
-	if s.Step < 1 || s.Step > s.Limits.MaxSteps {
+	if s.Step < 1 || s.Limits.MaxSteps > 0 && s.Step > s.Limits.MaxSteps {
 		return fail("step %d is outside the budget", s.Step)
 	}
 	if s.Attempt < 1 || s.Attempt > s.Limits.MaxAttempts {
@@ -513,9 +514,14 @@ func (s State) decide(body []byte) State {
 }
 
 func (s State) advance() State {
-	if s.Step >= s.Limits.MaxSteps {
+	if s.Limits.MaxSteps > 0 && s.Step >= s.Limits.MaxSteps {
 		s.Phase = PhaseStopped
 		s.Reason = StopStepsExhausted
+		return s
+	}
+	if s.Step == math.MaxInt {
+		s.Phase = PhaseStopped
+		s.Reason = StopUnrecoverable
 		return s
 	}
 	s.Step++

@@ -72,7 +72,7 @@ func TestNewState(t *testing.T) {
 		limits core.Limits
 	}{
 		{name: "missing run", runID: "", limits: core.Limits{MaxSteps: 1, MaxAttempts: 1}},
-		{name: "zero steps", runID: "run-1", limits: core.Limits{MaxSteps: 0, MaxAttempts: 1}},
+		{name: "negative steps", runID: "run-1", limits: core.Limits{MaxSteps: -1, MaxAttempts: 1}},
 		{name: "zero attempts", runID: "run-1", limits: core.Limits{MaxSteps: 1, MaxAttempts: 0}},
 	}
 	for _, tt := range invalid {
@@ -254,8 +254,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 1 {
-		t.Errorf("SemanticsVersion = %d, want 1", core.SemanticsVersion)
+	if core.SemanticsVersion != 2 {
+		t.Errorf("SemanticsVersion = %d, want 2", core.SemanticsVersion)
 	}
 }
 
