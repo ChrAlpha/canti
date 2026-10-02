@@ -67,10 +67,7 @@ func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.S
 		err = known(kind)
 	}
 	if err == nil {
-		err = current(semantics)
-	}
-	if err == nil {
-		err = strict(state, &snap.State)
+		err = decodeState(semantics, state, &snap.State)
 	}
 	if err != nil {
 		return harness.Snapshot{}, err
@@ -127,7 +124,7 @@ func (r record) decodeEventStates() (harness.Transition, error) {
 		return t, err
 	}
 	event := reflect.New(events[r.kind])
-	if err := cmp.Or(strict(r.event, event.Interface()), strict(r.from, &t.From), strict(r.to, &t.To)); err != nil {
+	if err := cmp.Or(strict(r.event, event.Interface()), decodeState(r.semantics, r.from, &t.From), decodeState(r.semantics, r.to, &t.To)); err != nil {
 		return t, err
 	}
 	t.Event = event.Elem().Interface().(core.Event)
@@ -159,17 +156,23 @@ func (s *Store) Response(ctx context.Context, runID string, step, attempt int) (
 }
 
 func (s *Store) facts(ctx context.Context, query, runID string, step, n int) (harness.Facts, error) {
+	return decodeFacts(s.stmts[query].QueryRowContext(ctx, runID, step, n))
+}
+
+func decodeFacts(row *sql.Row) (harness.Facts, error) {
 	var facts harness.Facts
 	var semantics int
-	var data string
-	err := missing(s.stmts[query].QueryRowContext(ctx, runID, step, n).Scan(&semantics, &data), "record")
-	if err == nil {
-		err = current(semantics)
+	var from, to, data string
+	if err := row.Scan(&semantics, &from, &to, &data); err != nil {
+		return facts, missing(err, "record")
 	}
-	if err == nil {
-		err = strict(data, &facts)
+	var state core.State
+	for _, data := range []string{from, to} {
+		if err := decodeState(semantics, data, &state); err != nil {
+			return facts, err
+		}
 	}
-	return facts, err
+	return facts, strict(data, &facts)
 }
 
 // Recent returns at most limit of the latest observed or resolved steps
@@ -190,7 +193,7 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 		if err := rows.Scan(&seq, &kind, &semantics, &from, &data); err != nil {
 			return err
 		}
-		if err := cmp.Or(current(semantics), strict(from, &state), strict(data, &facts)); err != nil {
+		if err := cmp.Or(decodeState(semantics, from, &state), strict(data, &facts)); err != nil {
 			return err
 		}
 		if facts.Observation == nil {
@@ -228,7 +231,11 @@ func (s *Store) each(ctx context.Context, runID string, limit int, query string,
 	}
 	var semantics int
 	var state string
-	return missing(s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
+	if err := s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state); err != nil {
+		return missing(err, "run")
+	}
+	var initial core.State
+	return decodeState(semantics, state, &initial)
 }
 
 func known(kind string) error {
@@ -239,8 +246,22 @@ func known(kind string) error {
 }
 
 func current(semantics int) error {
-	if semantics != core.SemanticsVersion {
-		return fmt.Errorf("%w: semantics version %d, want %d", ErrIncompatible, semantics, core.SemanticsVersion)
+	if semantics != 1 && semantics != core.SemanticsVersion {
+		return fmt.Errorf("%w: semantics version %d, want 1 or %d", ErrIncompatible, semantics, core.SemanticsVersion)
+	}
+	return nil
+}
+
+func decodeState(semantics int, data string, state *core.State) error {
+	if err := current(semantics); err != nil {
+		return err
+	}
+	*state = core.State{}
+	if err := strict(data, state); err != nil {
+		return err
+	}
+	if semantics == 1 && state.Limits.MaxSteps <= 0 {
+		return fmt.Errorf("%w: semantics version 1 requires positive max steps", ErrIncompatible)
 	}
 	return nil
 }

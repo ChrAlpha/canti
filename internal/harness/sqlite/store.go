@@ -85,7 +85,7 @@ const sessionSchema = `CREATE TABLE session_runs (
 );`
 
 const (
-	sameRunSQL   = `SELECT semantics = ? AND run = ? AND initial = ? FROM runs WHERE id = ?`
+	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? FROM runs WHERE id = ?`
 	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`
 	runSQL       = `SELECT run FROM runs WHERE id = ?`
 	lastRunSQL   = `SELECT run FROM runs ORDER BY n DESC LIMIT 1`
@@ -94,15 +94,15 @@ const (
 	addSQL       = `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
 		output_bytes = output_bytes + ?, steps = steps + ? WHERE id = ?`
 	latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
-	sameSQL   = `SELECT event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
+	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
 		FROM transitions WHERE run_id = ? AND seq = ?`
 	insertSQL = `INSERT INTO transitions
 		(run_id, seq, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	transitionsSQL = `SELECT seq, event_id, kind, semantics, event, from_state, to_state, facts
 		FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
-	requestSQL  = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
-	responseSQL = `SELECT semantics, facts FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
+	requestSQL  = `SELECT semantics, from_state, to_state, facts FROM transitions WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
+	responseSQL = `SELECT semantics, from_state, to_state, facts FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	recentSQL   = `SELECT seq, kind, semantics, from_state, facts FROM transitions
 		WHERE run_id = ? AND kind IN ('observed', 'resolved') AND seq < ? ORDER BY seq DESC LIMIT ?`
 )
@@ -228,7 +228,15 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	}
 	return s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var same bool
-		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, core.SemanticsVersion, data, state, run.ID).Scan(&same)
+		var semantics int
+		var stored string
+		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, data, state, run.ID).Scan(&semantics, &stored, &same)
+		if err == nil {
+			var initial core.State
+			if err := decodeState(semantics, stored, &initial); err != nil {
+				return err
+			}
+		}
 		switch {
 		case err == nil && same:
 			return nil
@@ -287,9 +295,17 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	}
 	if t.Seq > 0 && t.Seq <= last.Seq {
 		var same bool
-		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind, r.semantics,
-			r.event, r.from, r.to, r.facts, r.run, t.Seq).Scan(&same); err != nil {
+		var semantics int
+		var from, to string
+		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind,
+			r.event, r.from, r.to, r.facts, r.run, t.Seq).Scan(&semantics, &from, &to, &same); err != nil {
 			return err
+		}
+		var state core.State
+		for _, data := range []string{from, to} {
+			if err := decodeState(semantics, data, &state); err != nil {
+				return err
+			}
 		}
 		if same {
 			return nil

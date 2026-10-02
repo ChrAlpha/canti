@@ -74,14 +74,15 @@ func (s *Store) ContextRecords(ctx context.Context, runID string, step, revision
 func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revision int, after int64, limit int) (ContextPage, error) {
 	var page ContextPage
 	var semantics int
-	var data string
-	err := tx.QueryRowContext(ctx, `SELECT semantics, run,
+	var data, initial string
+	err := tx.QueryRowContext(ctx, `SELECT semantics, run, initial,
 		COALESCE((SELECT max(seq) FROM transitions WHERE run_id = runs.id), 0)
-		FROM runs WHERE id = ?`, runID).Scan(&semantics, &data, &page.AsOfSeq)
+		FROM runs WHERE id = ?`, runID).Scan(&semantics, &data, &initial, &page.AsOfSeq)
 	if err != nil {
 		return page, missing(err, "run")
 	}
-	if err := current(semantics); err != nil {
+	var state core.State
+	if err := decodeState(semantics, initial, &state); err != nil {
 		return page, err
 	}
 	if err := strict(data, &page.Run); err != nil {
@@ -95,7 +96,7 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 		return page, err
 	}
 	page.Request = *request
-	state := request.To
+	state = request.To
 	args := []any{runID, state.Step, state.RequestRev}
 	page.Previous, err = contextFrozen(ctx, tx, runID,
 		" AND (step, rev) < (?, ?) ORDER BY step DESC, rev DESC LIMIT 1", args)
