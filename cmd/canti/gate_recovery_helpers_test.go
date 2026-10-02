@@ -224,7 +224,10 @@ var eventDecoders = map[string]func(string) (core.Event, error){
 // transition in an unbroken sequence.
 func checkReplay(t *testing.T, runID string, h []entry) {
 	t.Helper()
-	s, err := core.NewState(runID, parseSpec(t).limits)
+	if len(h) == 0 {
+		t.Fatal("no transitions to replay")
+	}
+	s, err := core.NewState(runID, h[0].State.Limits)
 	if err != nil {
 		t.Fatal(err)
 	}
