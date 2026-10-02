@@ -34,6 +34,7 @@ type scriptedModel struct {
 	*httptest.Server
 	key     string
 	script  map[int]core.Decision
+	decide  func(int, string) (core.Decision, error)
 	hold    chan struct{}
 	mu      sync.Mutex
 	bodies  [][]byte
@@ -119,7 +120,7 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"unexpected credentials"}}`)
 		return
 	}
-	step, _, err := promptOf(body)
+	step, prompt, err := promptOf(body)
 	var re reply
 	if err == nil {
 		m.mu.Lock()
@@ -136,6 +137,10 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, ok := m.script[step]
+	if err == nil && m.decide != nil {
+		d, err = m.decide(step, prompt)
+		ok = err == nil
+	}
 	if err != nil || !ok && re.text == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"no scripted decision"}}`)
