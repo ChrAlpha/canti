@@ -458,7 +458,7 @@ echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, d
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "proxy:3128", "artifacts-writable", "records-writable", "state-visible"} {
+	for _, leak := range []string{"CANTI_TRUST_PROBE", "secret", "proxy:3128", "TINI_", "artifacts-writable", "records-writable", "state-visible"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("output contains %q:\n%s", leak, out)
 		}

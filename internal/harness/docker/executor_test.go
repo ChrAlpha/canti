@@ -145,6 +145,8 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 		{"--label", "canti.effect=effect_1"},
 		{"--label", "canti.state=" + x.cfg.State},
 		{"--label", "canti.spec=" + specHash(run)},
+		{"--label", "canti.exit=" + exitFile},
+		{"-e", "TINI_KILL_PROCESS_GROUP=1"},
 		{"--entrypoint", "/bin/sh"},
 		{"--workdir", WorkDir},
 		{"--user", "1234:5678"},
@@ -165,10 +167,13 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 	if args[0] != "create" || !slices.Contains(args, "--init") {
 		t.Errorf("create args = %q", args)
 	}
-	if tail := args[len(args)-3:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", "exec 2>&1\necho hi"}) {
+	if tail := args[len(args)-5:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", wrapper, "canti", "exec 2>&1\necho hi"}) {
 		t.Errorf("create args end with %q", tail)
 	}
-	blanked := map[string]bool{}
+	if tail := run[len(run)-3:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", "exec 2>&1\necho hi"}) {
+		t.Errorf("the hashed spec ends with %q, want the shape of earlier revisions", tail)
+	}
+	blanked := map[string]bool{"TINI_KILL_PROCESS_GROUP=1": true}
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		blanked[k+"="], blanked[strings.ToLower(k)+"="] = true, true
 	}

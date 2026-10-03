@@ -9,6 +9,8 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -16,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -79,8 +82,10 @@ type Mount struct{ Source, Target string }
 // labelled with the hash of its full execution spec. The start latch, cancel
 // marker, and final record live under Config.State and every operation holds
 // the effect's file lock, so callers in any goroutine or process never
-// observe a half-done start. Once recorded, a finished job is reported from
-// its record alone. Host environment variables never reach a job.
+// observe a half-done start. A container that exits without the exit status
+// its shell records, as when it is killed outside canti, reports JobUnknown.
+// Once recorded, a finished job is reported from its record alone. Host
+// environment variables never reach a job.
 type Executor struct {
 	cfg      Config
 	timeouts timeouts
@@ -199,6 +204,21 @@ func (x *Executor) runArgs(command string) []string {
 	return append(args, c.Image, "-c", "exec 2>&1\n"+command)
 }
 
+// wrapper runs the job's script in a child shell exactly as an earlier
+// revision ran it and records the child's exit status in the container's
+// writable layer, which outlives a container killed outside canti. It
+// discards its own diagnostics, survives the stop signals that tini sends the
+// whole process group, and unsets the variables it adds to the environment.
+const wrapper = `exec 3>&2 2>/dev/null
+unset TINI_KILL_PROCESS_GROUP SHLVL
+trap : HUP INT QUIT TERM USR1 USR2
+(exec /bin/sh -c "$1" 2>&3 3>&-)
+s=$?
+rm -f ` + exitFile + `
+set -C
+echo $s >` + exitFile + `
+exit $s`
+
 func specHash(run []string) string {
 	h := sha256.New()
 	for _, a := range append([]string{"canti.docker/v1"}, run...) {
@@ -207,9 +227,14 @@ func specHash(run []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// createArgs creates the job of run under wrapper. The spec hash covers run
+// alone, so a container of an earlier revision, which ran run directly and
+// has no exitLabel, still binds and is derived from Docker's exit code.
 func (x *Executor) createArgs(id string, run []string) []string {
-	return append([]string{"create", "--name", "canti-" + id, "--label", "canti.effect=" + id,
-		"--label", "canti.state=" + x.cfg.State, "--label", "canti.spec=" + specHash(run)}, run...)
+	args := []string{"create", "--name", "canti-" + id, "--label", "canti.effect=" + id, "--label", "canti.state=" + x.cfg.State,
+		"--label", "canti.spec=" + specHash(run), "--label", exitLabel + "=" + exitFile, "-e", "TINI_KILL_PROCESS_GROUP=1"}
+	n := len(run) - 1
+	return append(append(args, run[:n]...), wrapper, "canti", run[n])
 }
 
 func (x *Executor) dir(id string) string { return filepath.Join(x.cfg.State, "jobs", id) }
@@ -251,9 +276,15 @@ func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	call, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	out, err := x.command(call, args...).Output()
+	cmd := x.command(call, args...)
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if args[0] == "cp" {
+		cmd.Stdout = capped{&out}
+	}
+	err := cmd.Run()
 	if err == nil {
-		return out, nil
+		return out.Bytes(), nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, cerr
@@ -261,14 +292,44 @@ func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
 	if call.Err() != nil {
 		return nil, fmt.Errorf("docker %s: no response within %v", args[0], limit)
 	}
-	var stderr string
-	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
-		stderr = strings.TrimSpace(string(ee.Stderr))
-	}
+	stderr := strings.TrimSpace(errOut.String())
 	if s := strings.ToLower(stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
 		err = errMissing
 	}
 	return nil, fmt.Errorf("docker %s: %w: %s", args[0], err, stderr)
+}
+
+// capped bounds the output of docker cp, which a job controls.
+type capped struct{ b *bytes.Buffer }
+
+func (c capped) Write(p []byte) (int, error) {
+	if c.b.Len()+len(p) > 64<<10 {
+		return 0, errors.New("output exceeds 64 KiB")
+	}
+	return c.b.Write(p)
+}
+
+// exitStatus reads the exit status that wrapper wrote to file in the
+// container; it is nil when the file holds none.
+func (x *Executor) exitStatus(ctx context.Context, containerID, file string) (*int, error) {
+	out, err := x.docker(ctx, "cp", containerID+":"+file, "-")
+	if err != nil {
+		if s := strings.ToLower(err.Error()); strings.Contains(s, "could not find the file") || strings.Contains(s, "no such container:path") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r := tar.NewReader(bytes.NewReader(out))
+	if h, err := r.Next(); err != nil || h.Typeflag != tar.TypeReg || h.Size > 4 {
+		return nil, nil
+	}
+	b, err := io.ReadAll(r)
+	s, ok := strings.CutSuffix(string(b), "\n")
+	code, cerr := strconv.Atoi(s)
+	if err != nil || !ok || cerr != nil || strconv.Itoa(code) != s || code < 0 || code > 255 {
+		return nil, nil
+	}
+	return &code, nil
 }
 
 func (x *Executor) inspect(ctx context.Context, id string) (container, bool, error) {
@@ -319,7 +380,13 @@ func (x *Executor) report(ctx context.Context, id string, c container) (harness.
 	if err != nil {
 		return harness.Job{}, err
 	}
-	job := derive(latch, c, marked)
+	var recorded *int
+	if file := c.Config.Labels[exitLabel]; file != "" && latch == latchStart && !marked && (c.State.Status == "exited" || c.State.Status == "dead") {
+		if recorded, err = x.exitStatus(ctx, c.ID, file); err != nil {
+			return harness.Job{}, err
+		}
+	}
+	job := derive(latch, c, marked, recorded)
 	if terminal(job.Status) {
 		return x.finish(ctx, id, job, c.Config.Labels["canti.spec"])
 	}
@@ -363,7 +430,10 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 // unless the latch was already set, in which case it only reports the job.
 // Once the latch is set the launch finishes even if ctx is done, each of its
 // calls within its own deadline. A start the daemon rejected before the job's
-// process began reports the job, failed to start, rather than the error.
+// process began reports the job, failed to start, rather than the error. A
+// report that fails after the start, such as an unreadable exit record of a
+// job that already exited, reports the job as unknown and leaves its result
+// to Inspect, which the loop retries.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -394,14 +464,18 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 		launch := context.WithoutCancel(ctx)
 		_, started := x.docker(launch, "start", c.ID)
 		c, err = x.bound(launch, effectID)
-		if started != nil && (err != nil || derive(latchStart, c, false).Status != harness.JobFailedToStart) {
+		if started != nil && (err != nil || derive(latchStart, c, false, nil).Status != harness.JobFailedToStart) {
 			return harness.Job{}, started
 		}
 		if err != nil {
 			return harness.Job{}, err
 		}
 	}
-	return x.report(ctx, effectID, c)
+	job, err := x.report(ctx, effectID, c)
+	if err != nil && ctx.Err() == nil {
+		return harness.Job{ID: c.ID, Status: harness.JobUnknown}, nil
+	}
+	return job, err
 }
 
 // Inspect reports the effect's job; found is false only when Docker reports
@@ -443,7 +517,7 @@ func (x *Executor) Cancel(ctx context.Context, effectID string) error {
 		return err
 	}
 	c, found, err := x.inspect(ctx, effectID)
-	if err != nil || !found || derive(latch, c, false).Status != harness.JobRunning {
+	if err != nil || !found || derive(latch, c, false, nil).Status != harness.JobRunning {
 		return err
 	}
 	if err := mark(dir); err != nil {

@@ -144,6 +144,9 @@ func TestLoopHaltsOnUnknownOutcomes(t *testing.T) {
 		{"unknown status", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobUnknown}, true, nil
 		}, "unknown", 1},
+		{"unknown status with a reason", func(id string) (harness.Job, bool, error) {
+			return harness.Job{ID: jobID(id), Status: harness.JobUnknown, Output: harness.ArtifactRef{Detail: "exit status not recorded"}}, true, nil
+		}, "reports unknown: exit status not recorded", 1},
 		{"pending status", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobPending}, true, nil
 		}, "pending", 1},

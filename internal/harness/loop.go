@@ -427,6 +427,9 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, err
 			return l.observe(ctx, snap, job, core.ExecutionFailedToStart)
 		case job.Status != JobRunning:
 			why = fmt.Sprintf("job %s reports %s", job.ID, job.Status)
+			if job.Output.Detail != "" {
+				why += ": " + job.Output.Detail
+			}
 		case !stopping:
 			failures = 0
 			if !timedOut && limit > 0 && !job.StartedAt.IsZero() && l.cfg.Now().Sub(job.StartedAt) >= limit {

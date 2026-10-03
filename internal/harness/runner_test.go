@@ -665,22 +665,26 @@ func TestBindHonoursCancellation(t *testing.T) {
 }
 
 func TestStartCommitsIssuedStart(t *testing.T) {
-	rec := &recorder{startJob: Job{ID: "job-1", Status: JobRunning}}
-	from := jobBound(t, effectSaved(t), "job-1")
-	got, err := newRunner(t, rec).Start(context.Background(), from)
-	if err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	if got.State.Phase != core.PhaseAwaitingObservation || got.State.JobID != "job-1" {
-		t.Fatalf("Start() = %#v, want awaiting_observation job-1", got)
-	}
-	wantLog := []string{"start", "commit:awaiting_observation"}
-	if !reflect.DeepEqual(rec.log, wantLog) {
-		t.Fatalf("log = %v, want %v", rec.log, wantLog)
-	}
-	c := rec.commits
-	if len(c) != 1 || c[0].Event != (core.JobStarted{EffectID: from.State.EffectID, JobID: "job-1"}) || c[0].From != from.State || c[0].To != got.State {
-		t.Fatalf("commits = %#v", c)
+	for _, status := range []JobStatus{JobRunning, JobUnknown, JobSucceeded} {
+		t.Run(string(status), func(t *testing.T) {
+			rec := &recorder{startJob: Job{ID: "job-1", Status: status}}
+			from := jobBound(t, effectSaved(t), "job-1")
+			got, err := newRunner(t, rec).Start(context.Background(), from)
+			if err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			if got.State.Phase != core.PhaseAwaitingObservation || got.State.JobID != "job-1" {
+				t.Fatalf("Start() = %#v, want awaiting_observation job-1", got)
+			}
+			wantLog := []string{"start", "commit:awaiting_observation"}
+			if !reflect.DeepEqual(rec.log, wantLog) {
+				t.Fatalf("log = %v, want %v", rec.log, wantLog)
+			}
+			c := rec.commits
+			if len(c) != 1 || c[0].Event != (core.JobStarted{EffectID: from.State.EffectID, JobID: "job-1"}) || c[0].From != from.State || c[0].To != got.State {
+				t.Fatalf("commits = %#v", c)
+			}
+		})
 	}
 }
 

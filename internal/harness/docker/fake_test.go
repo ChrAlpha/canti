@@ -19,7 +19,7 @@ const fakeDocker = `#!/bin/sh
 ctl=%q
 cmd=$1
 [ "$cmd" = container ] && cmd=$2
-echo "$cmd $*" >> "$ctl/calls"
+echo "$cmd $*" | paste -sd ' ' - >> "$ctl/calls"
 [ -f "$ctl/$cmd.sh" ] && . "$ctl/$cmd.sh"
 [ -f "$ctl/$cmd.out" ] && cat "$ctl/$cmd.out"
 [ -f "$ctl/$cmd.err" ] && cat "$ctl/$cmd.err" >&2

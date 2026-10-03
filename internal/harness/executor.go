@@ -20,9 +20,9 @@ var ErrJobLost = errors.New("harness: job of a started effect is lost")
 // executing anything, never replace it, create nothing once its context is
 // done, and reject a changed command under an existing identity. A job
 // reports JobPending exactly until its latch is set; a latched job whose
-// launch is uncertain reports JobUnknown. A job reported succeeded, failed,
-// cancelled, or failed to start keeps that status and never begins running
-// afterwards.
+// launch or exit is uncertain reports JobUnknown. A job reported succeeded,
+// failed, cancelled, or failed to start keeps that status and never begins
+// running afterwards.
 //
 // Start must fail for an unbound effect and start nothing but the bound job;
 // once the latch is set it is a no-op reporting the job as-is, even for a

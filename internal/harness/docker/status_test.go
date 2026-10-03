@@ -44,7 +44,7 @@ func TestDeriveStatus(t *testing.T) {
 			c.State.ExitCode = tt.exit
 			c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
-			job := derive(tt.latch, c, tt.marked)
+			job := derive(tt.latch, c, tt.marked, nil)
 			if job.ID != "c1" || job.Status != tt.want {
 				t.Fatalf("derive() = %q %q, want c1 %q", job.ID, job.Status, tt.want)
 			}
@@ -80,7 +80,7 @@ func TestDeriveFailedStart(t *testing.T) {
 			if tt.started {
 				c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			}
-			job := derive(tt.latch, c, tt.marked)
+			job := derive(tt.latch, c, tt.marked, nil)
 			if job.Status != tt.want || job.ExitCode != nil {
 				t.Fatalf("derive() = %q with exit code %v, want %q without one", job.Status, job.ExitCode, tt.want)
 			}
@@ -94,8 +94,61 @@ func TestDeriveFailedStart(t *testing.T) {
 func TestDeriveKeepsZeroTimes(t *testing.T) {
 	var c container
 	c.State.Status = "created"
-	job := derive("", c, false)
+	job := derive("", c, false, nil)
 	if !job.StartedAt.IsZero() || !job.FinishedAt.IsZero() {
 		t.Fatalf("times = %v %v, want zero", job.StartedAt, job.FinishedAt)
+	}
+}
+
+func TestDeriveTrustsOnlyARecordedExit(t *testing.T) {
+	code := func(n int) *int { return &n }
+	const (
+		noRecord = "no exit record at /tmp/.canti-exit: the process was killed before it could record, or the record could not be written"
+		oomKill  = noRecord + "; Docker observed an out-of-memory kill in the container"
+	)
+	for _, tt := range []struct {
+		name     string
+		labeled  bool
+		state    string
+		exit     int
+		oom      bool
+		marked   bool
+		recorded *int
+		want     harness.JobStatus
+		detail   string
+	}{
+		{"recorded success", true, "exited", 0, false, false, code(0), harness.JobSucceeded, ""},
+		{"recorded failure", true, "exited", 3, false, false, code(3), harness.JobFailed, ""},
+		{"recorded signal", true, "exited", 137, false, false, code(137), harness.JobFailed, ""},
+		{"recorded out of memory", true, "exited", 137, true, false, code(137), harness.JobFailed, ""},
+		{"recorded after a child ran out of memory", true, "exited", 0, true, false, code(0), harness.JobSucceeded, ""},
+		{"recorded dead", true, "dead", 3, false, false, code(3), harness.JobFailed, ""},
+		{"killed by a host restart", true, "exited", 255, false, false, nil, harness.JobUnknown, noRecord},
+		{"killed from outside", true, "exited", 137, false, false, nil, harness.JobUnknown, noRecord},
+		{"dead unrecorded", true, "dead", 137, false, false, nil, harness.JobUnknown, noRecord},
+		{"killed after a child ran out of memory", true, "exited", 137, true, false, nil, harness.JobUnknown, oomKill},
+		{"out of memory flag after a host restart", true, "exited", 255, true, false, nil, harness.JobUnknown, oomKill},
+		{"record contradicts the container", true, "exited", 137, false, false, code(0), harness.JobUnknown,
+			"recorded exit status 0 differs from the container's exit code 137"},
+		{"cancelled", true, "exited", 143, false, true, nil, harness.JobCancelled, ""},
+		{"cancelled after a recorded exit", true, "exited", 0, false, true, code(0), harness.JobCancelled, ""},
+		{"earlier revision", false, "exited", 255, false, false, nil, harness.JobFailed, ""},
+		{"earlier revision succeeded", false, "exited", 0, false, false, nil, harness.JobSucceeded, ""},
+		{"earlier revision dead", false, "dead", 137, false, false, nil, harness.JobFailed, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var c container
+			if tt.labeled {
+				c.Config.Labels = map[string]string{exitLabel: exitFile}
+			}
+			c.State.Status, c.State.ExitCode, c.State.OOMKilled = tt.state, tt.exit, tt.oom
+			job := derive(latchStart, c, tt.marked, tt.recorded)
+			if job.Status != tt.want || job.Output.Detail != tt.detail {
+				t.Fatalf("derive() = %q with detail %q, want %q with %q", job.Status, job.Output.Detail, tt.want, tt.detail)
+			}
+			if known := tt.want != harness.JobUnknown; known != (job.ExitCode != nil) || known && *job.ExitCode != tt.exit {
+				t.Fatalf("exit code = %v, want %d only for a known result", job.ExitCode, tt.exit)
+			}
+		})
 	}
 }

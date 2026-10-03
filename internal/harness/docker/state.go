@@ -28,12 +28,22 @@ type container struct {
 		Status     string
 		ExitCode   int
 		Error      string
+		OOMKilled  bool
 		StartedAt  time.Time
 		FinishedAt time.Time
 	}
 }
 
-func derive(latch string, c container, marked bool) harness.Job {
+// A container labelled exitLabel runs wrapper, which writes the exit status
+// of the job's command to exitFile just before it exits. Only that record,
+// read as recorded, makes such a job's exit final.
+const (
+	exitLabel  = "canti.exit"
+	exitFile   = "/tmp/.canti-exit"
+	unrecorded = "no exit record at " + exitFile + ": the process was killed before it could record, or the record could not be written"
+)
+
+func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 	job := harness.Job{ID: c.ID, Status: harness.JobUnknown, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt}
 	switch c.State.Status {
 	case "created":
@@ -55,6 +65,19 @@ func derive(latch string, c container, marked bool) harness.Job {
 			break
 		}
 		code := c.State.ExitCode
+		if !marked && c.Config.Labels[exitLabel] != "" {
+			switch {
+			case recorded == nil:
+				job.Output.Detail = unrecorded
+				if c.State.OOMKilled {
+					job.Output.Detail += "; Docker observed an out-of-memory kill in the container"
+				}
+				return job
+			case *recorded != code:
+				job.Output.Detail = fmt.Sprintf("recorded exit status %d differs from the container's exit code %d", *recorded, code)
+				return job
+			}
+		}
 		job.ExitCode = &code
 		switch {
 		case marked:
