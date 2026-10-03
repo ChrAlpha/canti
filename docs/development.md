@@ -9,8 +9,9 @@
   Linux has been verified.
 - For `make integration` and for running agents, a Docker daemon the `docker`
   CLI can reach. The integration tests run the image `alpine:3.23`;
-  `CANTI_TEST_IMAGE` selects another image, which must provide `/bin/sh` and
-  the common shell tools the tests call, including `wget`.
+  `CANTI_TEST_IMAGE` selects another image, which must provide `/bin/sh`, a
+  `/tmp` the test uid can write, and the common shell tools the tests call,
+  including `wget`.
 
 The module depends on `modernc.org/sqlite`, a cgo-free SQLite, pinned by the
 committed `go.sum`. `make check` needs no credentials, `.env` file, database

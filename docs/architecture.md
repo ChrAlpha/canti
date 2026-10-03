@@ -594,9 +594,12 @@ independent of the already-cancelled execution context.
 `docker.Executor` implements the contract through the docker CLI. The job of
 an effect is the container `canti-<effect ID>`, created by `Bind` with labels
 naming the effect, the executor's state directory, and a SHA-256 hash of the
-complete create arguments: image, user, network, resource limits, mounts,
-log options, and command. `Bind` looks for the container before creating one
-and rejects a different spec hash; a container whose labels name another
+execution spec: image, user, network, resource limits, mounts, log options,
+and command. The hash leaves out the exit-recording wrapper described under
+Output, so a container that an earlier revision created, which lacks the
+`canti.exit` label, still binds and is derived from Docker's exit code.
+`Bind` looks for the container before creating one and rejects a different
+spec hash; a container whose labels name another
 effect or state directory is an error, never adopted. `Config.Mounts` adds
 read-only mounts in order: `New` requires each source to be an existing
 absolute directory that neither overlaps the workspace nor contains the
@@ -626,11 +629,34 @@ state directory, and each target a clean absolute path that overlaps neither
   missing, and is
   otherwise unknown, because the launch may or may not have happened; the
   loop observes a failed start as `failed_to_start`. An exited container is cancelled with
-  the marker, otherwise succeeded for exit status 0 and failed for any other.
-  A started effect whose container Docker reports missing, with no final
+  the marker. Otherwise its exit is final only when the exit status the
+  job's shell recorded agrees with Docker's exit code: succeeded for 0 and
+  failed for any other. A child killed for memory while the shell survives
+  is recorded as 137. A container that exited without that record — killed
+  by `docker kill`, or reaped by the daemon after a host restart with exit
+  status 255 — reports unknown with the detail `no exit record at
+  /tmp/.canti-exit: the process was killed before it could record, or the
+  record could not be written`, extended when Docker observed an
+  out-of-memory kill, a flag that stays set once any process of the
+  container was killed; one whose record differs from Docker's exit code
+  is unknown as well. A signal the script observes, such as the SIGTERM of
+  a `docker stop` or of a graceful daemon shutdown, is reported as its exit
+  status; only deaths the wrapper cannot record are unknown. An unknown job
+  is never recorded or released: the loop commits `outcome_unknown` with the
+  detail, and its container stays for inspection with
+  `docker logs canti-<effect ID>` until it is removed by hand. A started effect whose container Docker reports missing, with no final
   record, is `ErrJobLost`, never "not found".
 - **Output.** Jobs run `/bin/sh -c` with standard error merged into standard
-  output, under Docker's json-file log driver with rotation disabled
+  output, as a child of a wrapper shell that, once the child returns, writes
+  its exit status to `/tmp/.canti-exit` in the container's writable layer,
+  which outlives the container's processes. The image must give the job's
+  uid a writable `/tmp`; without one every job is unknown, so the first
+  step shows it. The wrapper discards its own diagnostics and leaves the job's
+  environment unchanged; tini signals the whole process group, which the
+  wrapper survives, so a stop signal still reaches the job's processes. The
+  record is read with `docker cp`, at most 64 KiB. A job can forge it, but a
+  forged record that differs from Docker's exit code is not final. Jobs run
+  under Docker's json-file log driver with rotation disabled
   (`max-size=1p`) and `mode=blocking`, so no output is dropped. On the first
   report of a finished job the executor copies `docker logs` through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
@@ -698,7 +724,8 @@ see only the artifacts and the step records, read-only. Within that
 assumption, container ownership is proven only by the name and the
 `canti.effect`, `canti.state`, and `canti.spec` labels, so a principal with
 daemon access could plant a matching container that `Bind` adopts; docker
-CLI output and final job records are read without a size cap.
+CLI output other than a job's exit record, and final job records, are read
+without a size cap.
 
 ## Budgets
 

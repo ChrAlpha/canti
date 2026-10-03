@@ -65,11 +65,13 @@ no network, and the host user's uid. It can read, but not change, earlier
 outputs under `/canti/artifacts` and a record of every completed step of
 every run of the state directory, its own included, under
 `/canti/runs/<run ID>/`.
-`canti run -h` lists the image, limit, model, and budget flags. Every canti
-command takes `-workspace` (default: the current directory). The journal
-lives in a state directory that must not overlap the workspace, neither
-inside it nor containing it; a workspace that contains the default state
-root, such as `$HOME`, needs `-state`.
+An image must provide `/bin/sh` and a `/tmp` that the job's uid can write,
+where each job's shell records its exit status; without it the first step
+already ends with an unknown outcome. `canti run -h` lists the image, limit,
+model, and budget flags. Every canti command takes `-workspace` (default:
+the current directory). The journal lives in a state directory that must
+not overlap the workspace, neither inside it nor containing it; a workspace
+that contains the default state root, such as `$HOME`, needs `-state`.
 
 | Command | Effect |
 | --- | --- |
@@ -119,12 +121,16 @@ Live provider evidence is three manual samples with the earlier adapter
 `canti-anthropic/1`; a live evaluation in 50 runs, 44 of them with
 `canti-anthropic/2`, whose decisions passed a proxy that enforces the decision
 schema; and a feedback-round evaluation in nine sessions with
-`canti-anthropic/3-tool` and no proxy. Each used one model through an
-Anthropic Messages-compatible gateway; the last one reported cache reads for
-most input tokens, not checked against its billing. SIGKILL tests do not establish durability
-across power loss or OS crashes. Docker daemon restarts are not tested; of
-two host reboots met live, a job killed by one was recorded with Docker's exit
-code 255 instead of an unknown outcome. Several hosts are out of scope.
+`canti-anthropic/3-tool` and no proxy. Each used one model through an Anthropic
+Messages-compatible gateway; the last one reported cache reads for most input
+tokens, not checked against its billing. SIGKILL tests do not establish
+durability across power loss or OS crashes. Docker daemon restarts are not
+tested. Of two host reboots met live, a job killed by one was recorded with
+Docker's exit code 255; canti now reports a job killed before its shell records
+an exit status unknown rather than exited, tested with `docker kill`, while a
+signal the job observes, as from a graceful daemon shutdown, is reported as its
+exit status. The container of an unknown job is kept for `docker logs
+canti-<effect ID>` and must be removed by hand. Several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and
 per run; workspace writes, the journal, and a running job's Docker log and
 container layer are not, and there is no filesystem quota.
