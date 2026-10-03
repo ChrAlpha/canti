@@ -133,3 +133,70 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 		t.Fatalf("accepted near-capacity page could not render next step, failed handover, and repair: %v", err)
 	}
 }
+
+func TestFailedHandoverReserveCoversDecoderErrors(t *testing.T) {
+	l, f := DefaultPromptLimits(), budgetFrame()
+	exit := 1
+	for _, backtick := range []string{"`", `\u0060`} {
+		for n := 0; n <= 2*actionFailureBytes; n++ {
+			payload := `{"` + strings.Repeat(backtick, n) + `":1}`
+			var h Handover
+			err := decodeAction(payload, &h)
+			if err == nil {
+				t.Fatal("handover with an unknown field was accepted")
+			}
+			s := StepRecord{Step: 7, Command: handoverPrefix + payload, Observation: Observation{Execution: core.ExecutionExited,
+				ExitCode: &exit, Preview: actionFailure + clip(err.Error(), actionFailureBytes)}}
+			if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
+				t.Fatalf("%d %s: failed handover %d exceeds reserve %d at a %d-byte preview", n, backtick, actual, bound, l.Preview)
+			}
+		}
+	}
+}
+
+func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
+	for _, total := range []int{128 << 10, 256 << 10} {
+		l, f := DefaultPromptLimits(), budgetFrame()
+		l.Total = total
+		f.Window = &Window{FirstStep: 2, SourceStep: 1, Handover: strings.Repeat("`", f.HandoverBytes)}
+		f.Step, f.Earlier = 2, 1
+		capacity, err := f.workCapacity(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, failed := 0, 1
+		next := StepRecord{Step: 2, Command: "true", Observation: Observation{Execution: core.ExecutionExited, ExitCode: &ok}}
+		used := 0
+		for used+len(f.step(next, l)) < capacity {
+			used += len(f.step(next, l))
+			f.Steps = append(f.Steps, next)
+			next.Step++
+		}
+		path, sum := "/canti/runs/run-1/steps/00000002/preview", strings.Repeat("a", 64)
+		query := RetrievalQuery{Operation: "read", Path: path, Reason: "check earlier evidence", Limit: RetrievalMaxBytes}
+		read := Retrieval{Query: query, Sources: []SourceRange{{Path: path, Length: RetrievalMaxBytes, SHA256: sum}},
+			NextOffset: RetrievalMaxBytes, More: true}
+		command, _ := json.Marshal(query)
+		body, _ := json.Marshal(read)
+		next.Command = retrievePrefix + string(command)
+		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: string(body), Retrieval: &read}
+		f.Steps = append(f.Steps, next)
+		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", RetrievalMaxBytes) + "\n"}
+		next.Step++
+		payload := `{"` + strings.Repeat(`\u0060`, 1352) + `":1}`
+		var h Handover
+		decoded := decodeAction(payload, &h)
+		if decoded == nil {
+			t.Fatal("handover with an unknown field was accepted")
+		}
+		next.Command = handoverPrefix + payload
+		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: actionFailure + clip(decoded.Error(), actionFailureBytes)}
+		f.Steps = append(f.Steps, next)
+		f.Step, f.Attempt = next.Step+1, 2
+		f.Window.Requested, f.Window.Failures = true, 1
+		f.Rejected = &Rejection{Error: strings.Repeat("x", 40000), Response: strings.Repeat("x", 40000)}
+		if _, err := f.Prompt(l); err != nil {
+			t.Fatalf("%d-byte total: a full window could not render a read, the failed handover, and the retry: %v", total, err)
+		}
+	}
+}

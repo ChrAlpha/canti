@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -13,6 +12,7 @@ import (
 
 const retrievePrefix = "canti:retrieve "
 const handoverPrefix = "canti:handover "
+const actionFailure, actionFailureBytes = "Context action failed: ", 2048
 
 func (l *Loop) isBuiltin(ctx context.Context, snap Snapshot) (bool, error) {
 	s := snap.State
@@ -123,7 +123,7 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	}
 	if err != nil {
 		code = 1
-		obs.Preview = fmt.Sprintf("Context action failed: %s", clip(err.Error(), 2048))
+		obs.Preview = actionFailure + clip(err.Error(), actionFailureBytes)
 	}
 	return obs, nil
 }

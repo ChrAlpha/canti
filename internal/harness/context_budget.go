@@ -57,7 +57,7 @@ func (f Frame) failedHandoverShellBytes(l PromptLimits) int {
 	f.Retrieved = nil
 	exit := 1
 	s := StepRecord{Step: math.MaxInt, Observation: Observation{Execution: core.ExecutionExited, ExitCode: &exit}}
-	preview := min(l.Preview, len("Context action failed: ")+2048+truncationBytes())
+	preview := min(l.Preview, 3*(len(actionFailure)+actionFailureBytes+truncationBytes()))
 	return len(f.step(s, l)) +
 		quoteBytes("Command", l.Command) - len(quote("Command", "", l.Command)) +
 		quoteBytes("Preview", preview) - len(quote("Preview", "", l.Preview))
