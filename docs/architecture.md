@@ -486,7 +486,9 @@ a job that wrote a large output needs a longer `-cleanup`. A stop that is
 abandoned or misses its deadline leaves the run for a later `canti stop`. A
 stop of a run in `needs_resolution` records its reason and exits with status
 4: the job may still run until `canti resolve -job` records it, after which
-`canti stop` cancels it.
+`canti stop` cancels it. A job whose container exited without an exit record
+inspects the same way every time, so only `canti resolve -execution`, after
+reading `docker logs canti-<effect ID>`, moves its run on.
 `run` refuses to start a run while the latest run of its state directory is
 open or needs resolution, and publishes the step records of that run first,
 refusing when it cannot.
@@ -632,7 +634,8 @@ state directory, and each target a clean absolute path that overlaps neither
   the marker. Otherwise its exit is final only when the exit status the
   job's shell recorded agrees with Docker's exit code: succeeded for 0 and
   failed for any other. A child killed for memory while the shell survives
-  is recorded as 137. A container that exited without that record — killed
+  leaves the shell's own exit status, which is 137 only when that child's
+  status is the shell's. A container that exited without that record — killed
   by `docker kill`, or reaped by the daemon after a host restart with exit
   status 255 — reports unknown with the detail `no exit record at
   /tmp/.canti-exit: the process was killed before it could record, or the
