@@ -169,6 +169,10 @@ at `/canti/runs/<run ID>/`.
 Each run is bound to the workspace it was created in. Handover windows are
 always enabled; `-window-steps` and `-window-bytes` optionally request an
 earlier handover, while zero leaves the automatic capacity trigger active.
+Each handover drops what the window read, and the next window rereads it: in
+one live coding task with one model, `-window-steps 12` runs used 11 to 34
+windows, and with failing cases fed back they took three to six times the steps
+of capacity-triggered runs, so keep zero for long work.
 `-handover-bytes` bounds the continuation text (2048 bytes by default).
 History retrieval is always available; `-history-imports` adds a read-only
 archive. Workspace notes are ordinary files and are not automatically read.

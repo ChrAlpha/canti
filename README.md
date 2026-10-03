@@ -116,13 +116,15 @@ is a scripted local HTTP server speaking the Messages format.
 limits; three gates are partial.
 
 Live provider evidence is three manual samples with the earlier adapter
-`canti-anthropic/1` and a live evaluation in 50 runs, 44 of them with
-`canti-anthropic/2`, both with one model through an Anthropic
-Messages-compatible gateway; the
-evaluation's decisions passed a proxy that enforces the decision schema, and
-no provider cache hit is measured. SIGKILL tests
-do not establish durability across power loss or OS crashes. Docker daemon
-restarts and host reboots are not tested, and several hosts are out of scope.
+`canti-anthropic/1`; a live evaluation in 50 runs, 44 of them with
+`canti-anthropic/2`, whose decisions passed a proxy that enforces the decision
+schema; and a feedback-round evaluation in nine sessions with
+`canti-anthropic/3-tool` and no proxy. Each used one model through an
+Anthropic Messages-compatible gateway; the last one reported cache reads for
+most input tokens, not checked against its billing. SIGKILL tests do not establish durability
+across power loss or OS crashes. Docker daemon restarts are not tested; of
+two host reboots met live, a job killed by one was recorded with Docker's exit
+code 255 instead of an unknown outcome. Several hosts are out of scope.
 Cost is not measured. Only retained job output is bounded on disk, per job and
 per run; workspace writes, the journal, and a running job's Docker log and
 container layer are not, and there is no filesystem quota.
