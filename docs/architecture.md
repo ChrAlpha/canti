@@ -576,6 +576,16 @@ adapter is `StopError{unrecoverable}`. Usage is the provider-reported input
 tokens, including cache creation and reads, plus output tokens. `Decision`
 concatenates the text blocks.
 
+With `-decision-format tool` the adapter is `canti-anthropic/3-tool`: the body
+forces one `canti_decision` tool call whose input schema is the decision
+object, instead of the output format; `tool_use` also completes a response,
+and `Decision` returns the input of its single `canti_decision` call. Both
+schemas require `kind`, `payload`, and `purpose`. The adapter identifiers
+name how a frozen request is sent and its decision extracted, which the
+purpose did not change, so a request frozen with the earlier two-field schema
+keeps its identifier, is still sent verbatim, and its decision without a
+purpose decodes.
+
 A resend reuses the frozen bytes; changing the input requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code

@@ -8,7 +8,8 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-const decisionTool = `[{"name":"canti_decision","description":"Submit the next canti decision as tool input instead of replying with JSON text.","input_schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}}]`
+const decisionTool = `[{"name":"canti_decision","description":"Submit the next canti decision as tool input instead of replying with JSON text.","input_schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},` +
+	purposeSchema + `,"payload":{"type":"string"}},"required":["kind","payload","purpose"],"additionalProperties":false}}]`
 const decisionToolChoice = `{"type":"tool","name":"canti_decision","disable_parallel_tool_use":true}`
 
 func toolDecision(resp harness.Response) []byte {

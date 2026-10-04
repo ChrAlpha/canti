@@ -129,12 +129,16 @@ func TestFreezeToolRequest(t *testing.T) {
 		t.Fatalf("tools = %+v", tools)
 	}
 	schema := tools[0].InputSchema
-	if schema["type"] != "object" || schema["additionalProperties"] != false || !reflect.DeepEqual(schema["required"], []any{"kind", "payload"}) {
+	if schema["type"] != "object" || schema["additionalProperties"] != false || !reflect.DeepEqual(schema["required"], []any{"kind", "payload", "purpose"}) {
 		t.Fatalf("schema = %+v", schema)
 	}
 	props, ok := schema["properties"].(map[string]any)
-	if !ok || len(props) != 2 || props["payload"].(map[string]any)["type"] != "string" || !reflect.DeepEqual(props["kind"].(map[string]any)["enum"], []any{"exec", "return"}) {
+	if !ok || len(props) != 3 || props["payload"].(map[string]any)["type"] != "string" || !reflect.DeepEqual(props["kind"].(map[string]any)["enum"], []any{"exec", "return"}) ||
+		!reflect.DeepEqual(props["purpose"], map[string]any{"type": "string", "description": "One short line: what this step is for and what you will do next with its result."}) {
 		t.Fatalf("schema properties = %+v", props)
+	}
+	if !strings.Contains(string(body["tools"]), `"properties":{"kind":{"type":"string","enum":["exec","return"]},`+purposeField+`,"payload":{"type":"string"}}`) {
+		t.Fatalf("tool schema does not order kind, purpose, payload: %s", body["tools"])
 	}
 	var choice map[string]any
 	if err := json.Unmarshal(body["tool_choice"], &choice); err != nil {
@@ -194,5 +198,48 @@ func TestNewRejectsUnknownDecisionFormat(t *testing.T) {
 	_, err := anthropic.New(anthropic.Config{APIKey: apiKey, Model: "claude-opus-5", DecisionFormat: "unknown"})
 	if err == nil {
 		t.Fatal("unknown decision format accepted")
+	}
+}
+
+func TestCompleteSendsRequestsFrozenBeforePurpose(t *testing.T) {
+	const earlierSchema = `{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}`
+	messages := `"messages":[{"role":"user","content":[{"type":"text","text":"head"` + cached + `},{"type":"text","text":"tail"}]}]`
+	for _, tc := range []struct {
+		name, adapter, body string
+		replies             map[string]string
+	}{
+		{"tool", toolAdapter,
+			`{"model":"claude-opus-5","max_tokens":16000,"system":"sys",` + messages +
+				`,"tools":[{"name":"canti_decision","description":"Submit the next canti decision as tool input instead of replying with JSON text.","input_schema":` + earlierSchema + `}],` +
+				`"tool_choice":{"type":"tool","name":"canti_decision","disable_parallel_tool_use":true}}`,
+			map[string]string{
+				"":      toolMessage(`"tool_use"`, `[{"type":"tool_use","id":"toolu_1","name":"canti_decision","input":{"kind":"exec","payload":"ls"}}]`),
+				"check": toolMessage(`"tool_use"`, `[{"type":"tool_use","id":"toolu_1","name":"canti_decision","input":{"kind":"exec","purpose":"check","payload":"ls"}}]`),
+			}},
+		{"text", adapter,
+			`{"model":"claude-opus-5","max_tokens":16000,"system":"sys",` + messages + `,"output_config":{"format":{"type":"json_schema","schema":` + earlierSchema + `}}}`,
+			map[string]string{
+				"":      message(`"end_turn"`, `[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"ls\"}"}]`),
+				"check": message(`"end_turn"`, `[{"type":"text","text":"{\"kind\":\"exec\",\"purpose\":\"check\",\"payload\":\"ls\"}"}]`),
+			}},
+	} {
+		for purpose, answer := range tc.replies {
+			t.Run(tc.name+"/"+purpose, func(t *testing.T) {
+				srv, got := recorder(t, http.StatusOK, answer)
+				m := newModel(t, srv.URL, func(c *anthropic.Config) { c.DecisionFormat, c.StructuredOutput = "text", true })
+				req := harness.Request{Body: []byte(tc.body), Model: "claude-opus-5", Protocol: protocol, Adapter: tc.adapter}
+				resp, err := m.Complete(context.Background(), req)
+				if err != nil || !resp.Complete || resp.Adapter != tc.adapter {
+					t.Fatalf("Complete = %+v, %v", resp, err)
+				}
+				if sent := (<-got).body; string(sent) != tc.body {
+					t.Fatalf("sent %s, want the frozen %s", sent, tc.body)
+				}
+				d, err := core.Decode(m.Decision(resp))
+				if err != nil || d != (core.Decision{Kind: core.Exec, Purpose: purpose, Payload: "ls"}) {
+					t.Fatalf("decision = %#v, %v", d, err)
+				}
+			})
+		}
 	}
 }

@@ -30,9 +30,10 @@ const (
 	fallbackBeta   = "server-side-fallback-2026-07-01"
 	adapter        = "canti-anthropic/2"
 	toolAdapter    = "canti-anthropic/3-tool"
+	purposeSchema  = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
 	decisionFormat = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{` +
-		`"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},` +
-		`"required":["kind","payload"],"additionalProperties":false}}}`
+		`"kind":{"type":"string","enum":["exec","return"]},` + purposeSchema + `,"payload":{"type":"string"}},` +
+		`"required":["kind","payload","purpose"],"additionalProperties":false}}}`
 )
 
 // Config configures a Model. Zero values select the documented defaults.
