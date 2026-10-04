@@ -49,11 +49,11 @@ The public entry point is:
 func Decode(raw []byte) (Decision, error)
 ```
 
-It accepts exactly one UTF-8 JSON object with two required, case-sensitive,
-non-null string fields:
+It accepts exactly one UTF-8 JSON object with two required and one optional
+case-sensitive, non-null string fields, `kind`, `payload`, and `purpose`:
 
 ```json
-{"kind":"exec","payload":"go test ./..."}
+{"kind":"exec","purpose":"Run the tests, then fix the first failure.","payload":"go test ./..."}
 ```
 
 ```json
@@ -64,13 +64,15 @@ non-null string fields:
 executes nor authorizes the payload. Empty strings are permitted by the
 protocol; execution policy belongs to the harness. `return` hands back control
 and may contain a result, question, or unresolved blocker. It is not a success
-flag.
+flag. `purpose` is the model's note on what the step is for and what it will
+do next; it is advisory text, never executed or authorized, and the harness
+shows it with the step in later requests.
 
-The decoder rejects unknown or duplicate fields, wrong types, missing fields,
-unsupported kinds, invalid UTF-8, malformed or incomplete JSON, and trailing
-values. It does not extract JSON from Markdown. Transport completeness is a
-separate adapter responsibility: valid JSON alone does not prove that a model
-response completed.
+The decoder rejects unknown or duplicate fields, wrong types, missing
+`kind` or `payload`, a null `purpose`, unsupported kinds, invalid UTF-8,
+malformed or incomplete JSON, and trailing values. It does not extract JSON
+from Markdown. Transport completeness is a separate adapter responsibility:
+valid JSON alone does not prove that a model response completed.
 
 A raw provider response and the decision payload are different layers. The
 adapter records the complete raw response with its provenance
@@ -346,7 +348,10 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
   of observed or resolved steps to the run's totals in the same transaction.
   It writes nothing once its context is done.
 - Every read decodes strictly: an unknown field, trailing data, an unknown
-  kind, or another semantics version fails with `ErrIncompatible`.
+  kind, or a semantics version other than 1, 2, and the current 3 fails with
+  `ErrIncompatible`, as does a version 1 state without positive max steps or
+  a state before version 3 with a decision purpose. New records are written
+  with the current version, so a resumed run may mix versions.
 - Each recovery read is an index search bounded by its limit, never a scan
   of the history. `Latest` and `Transitions` search the primary key; `Request`, `Response`, and `Recent`
   search partial indexes over `request_frozen` rows (run, step, revision),

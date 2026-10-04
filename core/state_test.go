@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -254,8 +255,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 2 {
-		t.Errorf("SemanticsVersion = %d, want 2", core.SemanticsVersion)
+	if core.SemanticsVersion != 3 {
+		t.Errorf("SemanticsVersion = %d, want 3", core.SemanticsVersion)
 	}
 }
 
@@ -275,6 +276,32 @@ func TestNextDerivesEffectFromExecDecision(t *testing.T) {
 	want.EffectID = got.EffectID
 	if got != want {
 		t.Fatalf("Next() = %#v, want %#v", got, want)
+	}
+}
+
+func TestNextKeepsTheDecisionPurpose(t *testing.T) {
+	t.Parallel()
+
+	from := at(core.PhaseResponseSaved, withRev(1))
+	got, err := from.Next(core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(`{"kind":"exec","purpose":"list, then read go.mod","payload":"ls"}`)})
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if got.Phase != core.PhaseEffectSaved || got.Decision != (core.Decision{Kind: core.Exec, Purpose: "list, then read go.mod", Payload: "ls"}) {
+		t.Fatalf("Next() = %#v, want the exec decision with its purpose", got)
+	}
+	for _, d := range []core.Decision{{Kind: core.Exec, Payload: "ls"}, got.Decision} {
+		data, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `{"kind":"exec","payload":"ls"}`
+		if d.Purpose != "" {
+			want = `{"kind":"exec","purpose":"list, then read go.mod","payload":"ls"}`
+		}
+		if string(data) != want {
+			t.Fatalf("Decision JSON = %s, want %s", data, want)
+		}
 	}
 }
 

@@ -246,8 +246,8 @@ func known(kind string) error {
 }
 
 func current(semantics int) error {
-	if semantics != 1 && semantics != core.SemanticsVersion {
-		return fmt.Errorf("%w: semantics version %d, want 1 or %d", ErrIncompatible, semantics, core.SemanticsVersion)
+	if semantics != 1 && semantics != 2 && semantics != core.SemanticsVersion {
+		return fmt.Errorf("%w: semantics version %d, want 1, 2, or %d", ErrIncompatible, semantics, core.SemanticsVersion)
 	}
 	return nil
 }
@@ -262,6 +262,9 @@ func decodeState(semantics int, data string, state *core.State) error {
 	}
 	if semantics == 1 && state.Limits.MaxSteps <= 0 {
 		return fmt.Errorf("%w: semantics version 1 requires positive max steps", ErrIncompatible)
+	}
+	if semantics < 3 && state.Decision.Purpose != "" {
+		return fmt.Errorf("%w: semantics version %d has no decision purpose", ErrIncompatible, semantics)
 	}
 	return nil
 }

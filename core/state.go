@@ -66,7 +66,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 2
+const SemanticsVersion = 3
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
