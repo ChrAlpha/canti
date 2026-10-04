@@ -513,7 +513,10 @@ locations, window state, and any rejected response for protocol repair.
 `Frame.Validate` checks the window boundary and contiguous step coverage.
 Workspace notes are not automatically read or injected.
 
-`Frame.Prompt` renders a system message and user content blocks. The first
+`Frame.Prompt` renders a system message and user content blocks. The system
+message states the decision protocol of the run's transport: one JSON object
+as the reply text, or exactly one `canti_decision` tool call, set by
+`-decision-format`. The prompt budget charges that system message. The first
 block holds Goal, Constraints, Environment, Context window, and the short
 Handover when present. One block follows per current-page step, oldest first,
 starting with the committed decision's purpose on one line when it has one;

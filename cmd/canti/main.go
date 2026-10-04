@@ -443,7 +443,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 	return harness.NewLoop(j, x, m, harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir,
 		History: historyRoot(a.state), RunsPath: runsDir,
-		Limits: promptLimits(c), Logger: a.log,
+		Limits: promptLimits(c), Logger: a.log, DecisionTool: c.DecisionFormat == "tool",
 		Reader: reader, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
 	})
 }

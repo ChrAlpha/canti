@@ -31,6 +31,7 @@ type LoopConfig struct {
 	Now            func() time.Time // clock of the wall-time and job budgets; time.Now
 	Logger         *slog.Logger     // discards
 	Reader         *Reader
+	DecisionTool   bool // Frame.DecisionTool
 	WindowSteps    int
 	WindowBytes    int
 	HandoverBytes  int

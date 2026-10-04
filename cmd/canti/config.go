@@ -125,7 +125,7 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 		Goal: goal, Constraints: constraints, Environment: environment(c, b),
 		Step: 1, MaxSteps: s.limits.MaxSteps, Attempt: 1, MaxAttempts: s.limits.MaxAttempts,
 		RunID: run.ID, ArtifactDir: docker.ArtifactDir, RunsDir: runsDir,
-		Window: &harness.Window{FirstStep: 1}, HandoverBytes: c.HandoverBytes,
+		Window: &harness.Window{FirstStep: 1}, HandoverBytes: c.HandoverBytes, DecisionTool: c.DecisionFormat == "tool",
 		RetrievalEnabled: true, ImportsEnabled: c.HistoryImports != "",
 	}
 	if err := f.ValidateContext(promptLimits(c)); err != nil {

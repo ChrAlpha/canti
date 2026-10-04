@@ -20,6 +20,7 @@ type Frame struct {
 	RunID                                string       // the run, whose step records are under RunsDir/RunID
 	Rejected                             *Rejection   // set when the previous response of this step failed to decode
 	Window                               *Window
+	DecisionTool                         bool // decisions arrive as canti_decision tool input instead of reply text
 	RetrievalEnabled                     bool
 	ImportsEnabled                       bool
 	HandoverBytes                        int
