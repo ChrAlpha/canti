@@ -227,8 +227,13 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			var releaseOnce sync.Once
 			releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
 			var once sync.Once
+			served := make(chan struct{})
 			gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				first := false
 				once.Do(func() {
+					first = true
 					entered <- struct{}{}
 					select {
 					case <-release:
@@ -236,6 +241,9 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 					}
 				})
 				f.model.ServeHTTP(w, r)
+				if first {
+					close(served)
+				}
 			}))
 			t.Cleanup(func() { releaseGate(); gate.Close() })
 			p := startPTYChat(t, f, nil, "-model-url", gate.URL)
@@ -266,6 +274,11 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 			if s := f.status(); s.Run.SessionSeq != 1 {
 				t.Fatalf("buffered busy input became a run: %+v", s.Run)
+			}
+			select {
+			case <-served:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the model did not answer the first run")
 			}
 			p.send(t, "second request\r")
 			p.await(t, "second answer", pos)
