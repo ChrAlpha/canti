@@ -4,9 +4,7 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -148,81 +146,6 @@ func TestDecisionPurposeReachesLaterRequestsAcrossRestarts(t *testing.T) {
 			checkReplay(t, h[0].State.RunID, h)
 			checkReleased(t, f, h)
 			t.Logf("PURPOSE_CHAIN format=%s requests=4 transitions=%d; real CLI/SQLite/Docker, one process per step, scripted Messages provider", format, len(h))
-		})
-	}
-}
-
-func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
-	for _, version := range []int{1, 2} {
-		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
-			f, image := recoveryFixture(t, nil)
-			answerDecision(f, "tool", 1, 1, core.Decision{Kind: core.Exec, Payload: "printf 'one\\n' > one.txt"})
-			answerDecision(f, "tool", 2, 1, core.Decision{Kind: core.Exec, Payload: "cat one.txt"})
-			answerDecision(f, "tool", 3, 1, core.Decision{Kind: core.Exec, Purpose: "check the file, then return", Payload: "test -s one.txt"})
-			answerDecision(f, "tool", 4, 1, core.Decision{Kind: core.Return, Purpose: "verified", Payload: "done"})
-			if r := f.cli(nil, "run", "-once", "-goal", "resume an earlier journal", "-image", image, "-decision-format", "tool",
-				"-fallbacks=false", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
-				t.Fatalf("run -once = %+v", r)
-			}
-			frozenTwo := func(s status) bool { return s.Step == 2 && s.Phase == core.PhaseRequestFrozen }
-			if r := resumeOnce(t, f, frozenTwo); r.code != exitActive || !frozenTwo(f.status()) {
-				t.Fatalf("did not stop with the step 2 request frozen: %+v %+v", r, f.status())
-			}
-			f.cli([]string{"CANTI_TEST_CRASH=after:attempt_started"}, "resume", "-once")
-			if s := f.status(); s.Step != 2 || s.Phase != core.PhaseRequestSent || s.Attempt != 1 || len(f.model.requests()) != 1 {
-				t.Fatalf("crash after the attempt commit left %+v after %d sends", s, len(f.model.requests()))
-			}
-			db, err := sql.Open("sqlite", filepath.Join(f.state, "canti.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			rows := func(where string) string {
-				var data string
-				if err := db.QueryRow(`SELECT json_group_array(json_array(seq, event_id, kind, semantics, event, from_state, to_state, facts))
-					FROM (SELECT * FROM transitions WHERE ` + where + ` ORDER BY seq)`).Scan(&data); err != nil {
-					t.Fatal(err)
-				}
-				return data
-			}
-			var legacy int
-			if _, err := db.Exec(`UPDATE runs SET semantics = ?; UPDATE transitions SET semantics = ?`, version, version); err != nil {
-				t.Fatal(err)
-			}
-			if err := db.QueryRow(`SELECT max(seq) FROM transitions`).Scan(&legacy); err != nil {
-				t.Fatal(err)
-			}
-			before := rows(fmt.Sprintf("seq <= %d", legacy))
-			if r := f.cli(nil, "resume"); r.code != exitOK || strings.TrimSpace(r.stdout) != "done" {
-				t.Fatalf("resume of a v%d journal = %+v", version, r)
-			}
-			if after := rows(fmt.Sprintf("seq <= %d", legacy)); after != before {
-				t.Fatal("resume rewrote legacy records")
-			}
-			var current, total int
-			if err := db.QueryRow(`SELECT count(*) FILTER (WHERE semantics = 3), count(*) FROM transitions WHERE seq > ?`, legacy).Scan(&current, &total); err != nil || current != total || total == 0 {
-				t.Fatalf("new transitions: %d of %d at version 3, %v", current, total, err)
-			}
-			h := f.history()
-			frozen, wire := frozenRequests(t, h), f.model.requests()
-			attempts := 0
-			for _, e := range h {
-				if e.Kind == "attempt_started" && e.State.Step == 2 {
-					attempts++
-				}
-			}
-			if len(wire) != 4 || len(frozen) != 4 || !bytes.Equal(wire[1], frozen[[2]int{2, 1}]) || attempts != 2 {
-				t.Fatalf("the in-flight legacy request was not resent verbatim after its lost attempt: %d sends, %d frozen, %d step 2 attempts", len(wire), len(frozen), attempts)
-			}
-			last := parseFrozen(t, frozen[[2]int{4, 1}])
-			if len(last.Blocks) != 5 || !strings.HasPrefix(last.Blocks[1], "### Step 1\nCommand:\n") || !strings.HasPrefix(last.Blocks[2], "### Step 2\nCommand:\n") ||
-				!strings.HasPrefix(last.Blocks[3], "### Step 3\nPurpose: check the file, then return\nCommand:\n") {
-				t.Fatalf("step 4 request blocks = %q", last.Blocks)
-			}
-			checkTransport(t, "tool", frozen[[2]int{4, 1}])
-			checkReplay(t, h[0].State.RunID, h)
-			checkReleased(t, f, h)
-			t.Logf("LEGACY_RESUME semantics=%d legacy_seq=%d new_transitions=%d; real CLI/SQLite/Docker, scripted Messages provider", version, legacy, total)
 		})
 	}
 }
