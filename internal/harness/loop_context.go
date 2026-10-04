@@ -11,6 +11,9 @@ import (
 
 func (f Frame) contextSystem() string {
 	s := system
+	if f.DecisionTool {
+		s = toolSystem
+	}
 	if f.RetrievalEnabled {
 		s += `
 
@@ -176,7 +179,7 @@ func (l *Loop) frame(run Run, s core.State) Frame {
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
 		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID,
-		RetrievalEnabled: l.cfg.Reader != nil, ImportsEnabled: l.cfg.Reader != nil && l.cfg.Reader.Imports != "",
+		DecisionTool: l.cfg.DecisionTool, RetrievalEnabled: l.cfg.Reader != nil, ImportsEnabled: l.cfg.Reader != nil && l.cfg.Reader.Imports != "",
 		HandoverBytes: l.cfg.HandoverBytes,
 	}
 }

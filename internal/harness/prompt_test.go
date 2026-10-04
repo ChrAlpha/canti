@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -225,8 +226,8 @@ func TestPromptSystemStatesTheProtocol(t *testing.T) {
 	for _, text := range []string{
 		"exactly one JSON object and nothing else",
 		"no Markdown, no code fences",
-		`{"kind":"exec","payload":"<one POSIX shell command>"}`,
-		`{"kind":"return","payload":"<final answer, question, or blocker for the user>"}`,
+		`{"kind":"exec","purpose":"<what this step is for and what you will do next with its result>","payload":"<one POSIX shell command>"}`,
+		`{"kind":"return","purpose":"<why the run ends here>","payload":"<final answer, question, or blocker for the user>"}`,
 		"/bin/sh -c in /workspace",
 		"fresh process",
 		"only files under /workspace persist",
@@ -497,5 +498,88 @@ func TestPromptRendersStepPurposeOnOneLine(t *testing.T) {
 				t.Fatalf("step block =\n%q\nwant\n%q", p.Blocks[1], want)
 			}
 		})
+	}
+}
+
+func TestPromptSystemMatchesTheDecisionTransport(t *testing.T) {
+	forms := ` in one of these forms:
+
+{"kind":"exec","purpose":"<what this step is for and what you will do next with its result>","payload":"<one POSIX shell command>"}
+Runs the command with /bin/sh -c in /workspace. Each step runs in a fresh process, and only files under /workspace persist between steps: the working directory, environment variables, and anything outside /workspace do not. Standard output and standard error are captured and reported in the next request.
+
+{"kind":"return","purpose":"<why the run ends here>","payload":"<final answer, question, or blocker for the user>"}
+Ends the run and hands the payload to the user. It does not claim success: use it to deliver a result, ask a question, or report a blocker.
+
+Keep purpose to one short line. It is shown with the step in later requests, so state the next action you intend once you see the result.`
+	want := map[bool]string{
+		false: `
+
+Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has three string fields, "kind", "purpose", and "payload",` + forms + `
+
+The purpose and payload are JSON strings, so escape quotes, backslashes, and newlines.
+
+`,
+		true: `
+
+Call the canti_decision tool exactly once per reply; never reply with text. Its input has three string fields, "kind", "purpose", and "payload",` + forms + `
+
+`,
+	}
+	for _, retrieval := range []bool{false, true} {
+		systems := map[bool]string{}
+		for _, tool := range []bool{false, true} {
+			f := fullFrame()
+			f.RetrievalEnabled, f.DecisionTool = retrieval, tool
+			systems[tool] = mustPrompt(t, f, DefaultPromptLimits()).System
+			if strings.Count(systems[tool], want[tool]) != 1 {
+				t.Fatalf("retrieval %v, tool %v: system lacks its decision instructions:\n%s", retrieval, tool, systems[tool])
+			}
+		}
+		if strings.Replace(systems[false], want[false], "", 1) != strings.Replace(systems[true], want[true], "", 1) {
+			t.Fatalf("retrieval %v: the transports differ outside the decision instructions", retrieval)
+		}
+		if strings.Contains(systems[true], "Reply with") || strings.Contains(systems[true], "escape quotes") || strings.Contains(systems[false], "canti_decision") {
+			t.Fatalf("retrieval %v: one transport carries the other's instructions", retrieval)
+		}
+	}
+}
+
+func TestContextBudgetChargesTheTransportSystem(t *testing.T) {
+	l := DefaultPromptLimits()
+	text, tool := budgetFrame(), budgetFrame()
+	tool.DecisionTool = true
+	textCapacity, err := text.workCapacity(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCapacity, err := tool.workCapacity(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	textSystem, toolSystem := mustPrompt(t, text, l).System, mustPrompt(t, tool, l).System
+	if len(toolSystem) >= len(textSystem) || toolCapacity-textCapacity != len(textSystem)-len(toolSystem) {
+		t.Fatalf("capacity text %d tool %d; system text %d tool %d bytes", textCapacity, toolCapacity, len(textSystem), len(toolSystem))
+	}
+	for _, f := range []Frame{text, tool} {
+		f.capture = &ContextCapture{}
+		p := mustPrompt(t, f, l)
+		if f.capture.Bytes.System != len(p.System) || f.capture.Bytes.Total != len(p.System)+len(p.User()) {
+			t.Fatalf("tool %v: captured %+v for a %d-byte system and %d-byte user", f.DecisionTool, f.capture.Bytes, len(p.System), len(p.User()))
+		}
+	}
+	admission := func(f Frame) int {
+		f.Window = &Window{FirstStep: math.MaxInt, Handover: strings.Repeat("`", f.HandoverBytes)}
+		capacity, err := f.workCapacity(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return capacity
+	}
+	l.Total -= admission(text)
+	if err := text.ValidateContext(l); err == nil {
+		t.Fatal("text transport admitted a total without working capacity")
+	}
+	if err := tool.ValidateContext(l); err != nil {
+		t.Fatalf("tool transport refused a total its shorter system leaves room in: %v", err)
 	}
 }

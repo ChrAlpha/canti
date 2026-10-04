@@ -34,23 +34,33 @@ const refLimit = 1 << 10
 
 var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
 
-const system = `You are an autonomous agent working in a shell workspace. Each request stands alone: the user message holds everything known about the task, and your reply chooses the next step.
+const (
+	systemRole = `You are an autonomous agent working in a shell workspace. Each request stands alone: the user message holds everything known about the task, and your reply chooses the next step.
 
-Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has exactly two string fields, "kind" and "payload", in one of these forms:
+`
+	systemForms = ` in one of these forms:
 
-{"kind":"exec","payload":"<one POSIX shell command>"}
+{"kind":"exec","purpose":"<what this step is for and what you will do next with its result>","payload":"<one POSIX shell command>"}
 Runs the command with /bin/sh -c in /workspace. Each step runs in a fresh process, and only files under /workspace persist between steps: the working directory, environment variables, and anything outside /workspace do not. Standard output and standard error are captured and reported in the next request.
 
-{"kind":"return","payload":"<final answer, question, or blocker for the user>"}
+{"kind":"return","purpose":"<why the run ends here>","payload":"<final answer, question, or blocker for the user>"}
 Ends the run and hands the payload to the user. It does not claim success: use it to deliver a result, ask a question, or report a blocker.
 
-The payload is a JSON string, so escape quotes, backslashes, and newlines.
+Keep purpose to one short line. It is shown with the step in later requests, so state the next action you intend once you see the result.`
+	systemContext = `
 
 The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including steps no longer shown.
 
 Work continues across bounded context windows. The handover is the only automatically carried working state. Current goal and constraints remain authoritative. When asked to hand over, use the exact canti:handover action specified in the request; this records guidance and continues the same run.`
 
-// Prompt renders the frame within l. System is the same for every frame.
+	system = systemRole + `Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has three string fields, "kind", "purpose", and "payload",` + systemForms + `
+
+The purpose and payload are JSON strings, so escape quotes, backslashes, and newlines.` + systemContext
+	toolSystem = systemRole + `Call the canti_decision tool exactly once per reply; never reply with text. Its input has three string fields, "kind", "purpose", and "payload",` + systemForms + systemContext
+)
+
+// Prompt renders the frame within l. System depends only on the decision
+// transport and the enabled retrieval of the frame.
 // The stable blocks are one with the goal, constraints, and environment and
 // one per current-page step, oldest first; the last block holds the progress
 // and any rejected response. An oversized page fails visibly. Equal frames

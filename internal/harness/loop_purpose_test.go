@@ -53,3 +53,19 @@ func TestLoopShowsCommittedPurposesAcrossRestart(t *testing.T) {
 		t.Fatal("frozen request of step 3 lacks the clipped step 2 purpose")
 	}
 }
+
+func TestLoopFreezesTheSystemOfItsDecisionTransport(t *testing.T) {
+	for _, tool := range []bool{false, true} {
+		f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
+		f.cfg.DecisionTool = tool
+		wantState(t, f.run(f.loop()), core.PhaseReturned, "")
+		p := f.model.prompts[0]
+		if strings.Contains(p.System, "Call the canti_decision tool exactly once per reply") != tool || strings.Contains(p.System, "escape quotes") == tool {
+			t.Fatalf("tool %v: system =\n%s", tool, p.System)
+		}
+		req, err := f.store.Request(t.Context(), runID, 1, 1)
+		if err != nil || req.Context == nil || req.Context.Bytes.System != len(p.System) || string(req.Body) != p.System+"\n\n"+p.User() {
+			t.Fatalf("tool %v: frozen request does not match the rendered system: %v", tool, err)
+		}
+	}
+}

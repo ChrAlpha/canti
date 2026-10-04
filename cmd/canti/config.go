@@ -137,6 +137,7 @@ func contextConfig(c config, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Limits: promptLimits(c),
 		Reader: &harness.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+		DecisionTool: c.DecisionFormat == "tool",
 	}
 }
 
