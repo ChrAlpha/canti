@@ -74,7 +74,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
-	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Rejected, p.Total) <= 0 {
+	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Rejected, p.Total, p.Purpose) <= 0 {
 		return nil, fmt.Errorf("harness: prompt limits %+v must be positive", p)
 	}
 	cfg.Poll = cmp.Or(cfg.Poll, 500*time.Millisecond)

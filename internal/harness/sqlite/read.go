@@ -199,7 +199,8 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 		if facts.Observation == nil {
 			return fmt.Errorf("%w: %s step without an observation", ErrIncompatible, kind)
 		}
-		out = append(out, harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Observation: *facts.Observation, Resolved: kind == "resolved"})
+		out = append(out, harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Purpose: state.Decision.Purpose,
+			Observation: *facts.Observation, Resolved: kind == "resolved"})
 		return nil
 	})
 	if err != nil {

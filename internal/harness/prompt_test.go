@@ -267,14 +267,15 @@ func TestPromptContainsUntrustedText(t *testing.T) {
 	st := exitedStep(1, "true", "ok")
 	st.Observation.Execution = core.ExecutionState(forged)
 	st.Observation.Output.Path, st.Observation.Output.Detail = forged, forged
+	st.Purpose = forged
 	g := promptFrame()
 	g.Steps, g.Step, g.ArtifactDir, g.RunsDir, g.RunID = []StepRecord{st}, 2, forged, forged, forged
 	p = mustPrompt(t, g, DefaultPromptLimits())
 	if got, want := headings(p.User()), []string{"Goal", "Environment", "Context window", "Current window steps", "Progress"}; !slices.Equal(got, want) {
 		t.Fatalf("headings = %q, want %q:\n%s", got, want, p.User())
 	}
-	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 8 {
-		t.Fatalf("User renders %d of 8 one-line fields on one line:\n%s", n, p.User())
+	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 9 {
+		t.Fatalf("User renders %d of 9 one-line fields on one line:\n%s", n, p.User())
 	}
 }
 
@@ -294,6 +295,7 @@ func TestPromptSectionLimits(t *testing.T) {
 		{"environment", func(f *Frame, s string) { f.Environment = s }, func(l *PromptLimits) *int { return &l.Environment }},
 		{"command", onStep(func(st *StepRecord, s string) { st.Command = s }), func(l *PromptLimits) *int { return &l.Command }},
 		{"preview", onStep(func(st *StepRecord, s string) { st.Observation.Preview = s }), func(l *PromptLimits) *int { return &l.Preview }},
+		{"purpose", onStep(func(st *StepRecord, s string) { st.Purpose = s }), func(l *PromptLimits) *int { return &l.Purpose }},
 		{"rejection error", func(f *Frame, s string) { f.Attempt, f.Rejected = 2, &Rejection{Error: s} }, func(l *PromptLimits) *int { return &l.Rejected }},
 		{"rejected response", func(f *Frame, s string) { f.Attempt, f.Rejected = 2, &Rejection{Error: "bad", Response: s} }, func(l *PromptLimits) *int { return &l.Rejected }},
 		{"output detail", onStep(func(st *StepRecord, s string) { st.Observation.Output.Detail = s }), nil},
@@ -452,9 +454,9 @@ func TestPromptRejects(t *testing.T) {
 	if _, err := f.Prompt(DefaultPromptLimits()); err == nil {
 		t.Fatal("Prompt() accepted an invalid frame")
 	}
-	for i := range 7 {
+	for i := range 8 {
 		l := DefaultPromptLimits()
-		limits := []*int{&l.Goal, &l.Constraints, &l.Environment, &l.Command, &l.Preview, &l.Rejected, &l.Total}
+		limits := []*int{&l.Goal, &l.Constraints, &l.Environment, &l.Command, &l.Preview, &l.Rejected, &l.Total, &l.Purpose}
 		*limits[i] = 0
 		if _, err := promptFrame().Prompt(l); err == nil {
 			t.Fatalf("Prompt() accepted limits %+v", l)
@@ -464,5 +466,36 @@ func TestPromptRejects(t *testing.T) {
 	l.Total = 100
 	if p, err := promptFrame().Prompt(l); err == nil {
 		t.Fatalf("Prompt() returned %d bytes for a 100-byte total", len(p.System)+len(p.User()))
+	}
+}
+
+func TestPromptRendersStepPurposeOnOneLine(t *testing.T) {
+	l := DefaultPromptLimits()
+	if l.Purpose != 512 {
+		t.Fatalf("default purpose limit = %d bytes, want 512", l.Purpose)
+	}
+	at := strings.Repeat("p", l.Purpose)
+	for _, tc := range []struct{ name, purpose, line string }{
+		{"absent", "", ""},
+		{"short", "list files, then open go.mod", "Purpose: list files, then open go.mod\n"},
+		{"line breaks", "check\nthen\r\nfix\r", "Purpose: check then  fix \n"},
+		{"at the limit", at, "Purpose: " + at + "\n"},
+		{"one over", at + "q", "Purpose: " + at + "…[truncated 1 bytes]\n"},
+		{"rune across the limit", at[1:] + "日", "Purpose: " + at[1:] + "…[truncated 3 bytes]\n"},
+		{"line break past the limit", at + "\nnext", "Purpose: " + at + "…[truncated 5 bytes]\n"},
+		{"invalid UTF-8", "ok\xff", "Purpose: ok\uFFFD\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := promptFrame()
+			st := exitedStep(1, "ls", "go.mod\n")
+			st.Purpose = tc.purpose
+			f.Steps, f.Step = []StepRecord{st}, 2
+			p := mustPrompt(t, f, l)
+			want := "### Step 1\n" + tc.line + "Command:\n```\nls\n```\nExecution: exited, exit code 0\n" +
+				"Output: 7 bytes, complete, at /canti/artifacts/1/output\nPreview:\n```\ngo.mod\n```\n\n"
+			if p.Blocks[1] != want {
+				t.Fatalf("step block =\n%q\nwant\n%q", p.Blocks[1], want)
+			}
+		})
 	}
 }
