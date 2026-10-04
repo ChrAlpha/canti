@@ -12,8 +12,11 @@ const (
 	Return Kind = "return"
 )
 
-// Decision is the complete result of decoding one model response.
+// Decision is the complete result of decoding one model response. Purpose
+// is the model's optional note on what the step is for; it is advisory text
+// and never executed.
 type Decision struct {
 	Kind    Kind   `json:"kind"`
+	Purpose string `json:"purpose,omitempty"`
 	Payload string `json:"payload"`
 }

@@ -40,13 +40,13 @@ func recordBytes(t *testing.T, s *Store, through int64) string {
 
 func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct{ version, maxSteps int }{{1, 3}, {2, 3}, {2, 0}} {
+	for _, tc := range []struct{ version, maxSteps int }{{1, 3}, {2, 3}, {2, 0}, {3, 0}} {
 		t.Run(fmt.Sprintf("v%d/steps%d", tc.version, tc.maxSteps), func(t *testing.T) {
 			path := tempPath(t)
 			s := open(t, path)
 			initial := createRun(t, s, "run-1", core.Limits{MaxSteps: tc.maxSteps, MaxAttempts: 2})
 			var version int
-			if err := s.db.QueryRow(`SELECT semantics FROM runs`).Scan(&version); err != nil || version != 2 {
+			if err := s.db.QueryRow(`SELECT semantics FROM runs`).Scan(&version); err != nil || version != core.SemanticsVersion {
 				t.Fatalf("new run semantics = %d, %v", version, err)
 			}
 			if _, err := s.db.Exec(`UPDATE runs SET semantics = ?`, tc.version); err != nil {
@@ -88,7 +88,13 @@ func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 				t.Fatal("CreateRun accepted different content")
 			}
 			resumed := newDriver(t, s, latestOf(t, s, "run-1"))
-			resumed.step("printf second", harness.Usage{InputTokens: 7, OutputTokens: 2}, 20)
+			resumed.decide([]byte(`{"kind":"exec","purpose":"write, then read it back","payload":"printf second"}`), harness.Usage{InputTokens: 7, OutputTokens: 2})
+			if got := latestOf(t, s, "run-1").State.Decision; got != (core.Decision{Kind: core.Exec, Purpose: "write, then read it back", Payload: "printf second"}) {
+				t.Fatalf("resumed decision = %#v", got)
+			}
+			resumed.call(harness.Runner.Bind)
+			resumed.call(harness.Runner.Start)
+			resumed.observe(core.ExecutionExited, 20)
 			wantTotals := harness.Totals{Usage: harness.Usage{InputTokens: 12, OutputTokens: 5}, OutputBytes: 30, Steps: 2}
 			for _, tr := range append(d.commits, resumed.commits...) {
 				if err := s.Commit(ctx, tr); err != nil {
@@ -112,8 +118,8 @@ func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 			}
 			unchanged(t, s, "run-1", append(d.commits, resumed.commits...), wantTotals)
 			var nonCurrent int
-			if err := s.db.QueryRow(`SELECT count(*) FROM transitions WHERE seq > ? AND semantics != 2`, oldSeq).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
-				t.Fatalf("new transitions with non-v2 semantics = %d, %v", nonCurrent, err)
+			if err := s.db.QueryRow(`SELECT count(*) FROM transitions WHERE seq > ? AND semantics != ?`, oldSeq, core.SemanticsVersion).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
+				t.Fatalf("new transitions with non-current semantics = %d, %v", nonCurrent, err)
 			}
 			if got := replay(t, initial.State, history(t, s, "run-1")); got != resumed.snap.State {
 				t.Fatalf("replayed state = %#v, want %#v", got, resumed.snap.State)
@@ -122,7 +128,7 @@ func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 	}
 }
 
-func TestSemanticsNewWritesUseVersionTwo(t *testing.T) {
+func TestSemanticsNewWritesUseCurrentVersion(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, tempPath(t))
 	run := testRun("run-1")
@@ -134,8 +140,8 @@ func TestSemanticsNewWritesUseVersionTwo(t *testing.T) {
 	d := newDriver(t, s, harness.Snapshot{State: initial})
 	d.freeze()
 	var nonCurrent int
-	if err := s.db.QueryRow(`SELECT count(*) FROM (SELECT semantics FROM runs UNION ALL SELECT semantics FROM transitions) WHERE semantics != 2`).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
-		t.Fatalf("new records with non-v2 semantics = %d, %v", nonCurrent, err)
+	if err := s.db.QueryRow(`SELECT count(*) FROM (SELECT semantics FROM runs UNION ALL SELECT semantics FROM transitions) WHERE semantics != 3`).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
+		t.Fatalf("new records with non-v3 semantics = %d, %v", nonCurrent, err)
 	}
 }
 
@@ -165,7 +171,7 @@ func TestSemanticsRejectVersionOneNonpositiveSteps(t *testing.T) {
 
 func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct{ version, maxSteps int }{{1, 0}, {1, -1}, {0, 3}, {3, 3}} {
+	for _, tc := range []struct{ version, maxSteps int }{{1, 0}, {1, -1}, {0, 3}, {4, 3}} {
 		t.Run(fmt.Sprintf("v%d/steps%d", tc.version, tc.maxSteps), func(t *testing.T) {
 			path := tempPath(t)
 			s := open(t, path)
@@ -182,7 +188,7 @@ func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 			}
 		})
 	}
-	for _, version := range []int{0, 3} {
+	for _, version := range []int{0, 4} {
 		t.Run(fmt.Sprintf("transitions/v%d", version), func(t *testing.T) {
 			s := open(t, tempPath(t))
 			d := newDriver(t, s, createRun(t, s, "run-1", limits))
@@ -201,7 +207,7 @@ func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 
 func TestSemanticsRetryRejectsIncompatibleHistoricalRecord(t *testing.T) {
 	for _, mutation := range []string{
-		`semantics = 3`,
+		`semantics = 4`,
 		`semantics = 1, from_state = json_set(from_state, '$.Limits.MaxSteps', 0)`,
 		`semantics = 1, to_state = json_set(to_state, '$.Limits.MaxSteps', 0)`,
 	} {
@@ -247,5 +253,38 @@ func TestSemanticsLegacyContextRequestKeepsSelectedRecordIsolated(t *testing.T) 
 	got, err := s.ContextRequest(context.Background(), "run-1", 1, 2)
 	if err != nil || !reflect.DeepEqual(got, d.commits[4]) {
 		t.Fatalf("selected v1 request = %#v, %v", got, err)
+	}
+}
+
+func TestSemanticsBeforeThreeRejectDecisionPurpose(t *testing.T) {
+	body := []byte(`{"kind":"exec","purpose":"check","payload":"printf ok"}`)
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			path := tempPath(t)
+			s := open(t, path)
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(body, harness.Usage{})
+			d.call(harness.Runner.Bind)
+			d.call(harness.Runner.Start)
+			d.observe(core.ExecutionExited, 1)
+			d.decide(body, harness.Usage{})
+			if _, err := s.db.Exec(`UPDATE runs SET semantics = ?; UPDATE transitions SET semantics = ?`, version, version); err != nil {
+				t.Fatal(err)
+			}
+			reads := semanticsReads(readOnly(t, path))
+			for _, name := range []string{"Latest", "Transitions", "Recent"} {
+				if err := reads[name](); !errors.Is(err, ErrIncompatible) {
+					t.Errorf("%s error = %v, want ErrIncompatible", name, err)
+				}
+			}
+			if _, err := s.db.Exec(`UPDATE transitions SET semantics = 3 WHERE to_state LIKE '%"purpose"%' OR from_state LIKE '%"purpose"%'`); err != nil {
+				t.Fatal(err)
+			}
+			for name, read := range semanticsReads(readOnly(t, path)) {
+				if err := read(); err != nil {
+					t.Errorf("%s with only purpose-free legacy records: %v", name, err)
+				}
+			}
+		})
 	}
 }

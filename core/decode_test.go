@@ -13,10 +13,11 @@ func TestDecodeValidDecisions(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		raw      string
-		wantKind core.Kind
-		wantBody string
+		name        string
+		raw         string
+		wantKind    core.Kind
+		wantBody    string
+		wantPurpose string
 	}{
 		{name: "exec", raw: `{"kind":"exec","payload":"go test ./..."}`, wantKind: core.Exec, wantBody: "go test ./..."},
 		{name: "return", raw: `{"kind":"return","payload":"done"}`, wantKind: core.Return, wantBody: "done"},
@@ -25,6 +26,10 @@ func TestDecodeValidDecisions(t *testing.T) {
 		{name: "unicode escapes", raw: `{"kind":"return","payload":"\u4f60\u597d"}`, wantKind: core.Return, wantBody: "\u4f60\u597d"},
 		{name: "escaped field names", raw: `{"\u006b\u0069nd":"exec","\u0070ayload":"x"}`, wantKind: core.Exec, wantBody: "x"},
 		{name: "surrogate pair", raw: `{"kind":"return","payload":"\ud83d\ude00"}`, wantKind: core.Return, wantBody: "😀"},
+		{name: "purpose", raw: `{"kind":"exec","purpose":"list files, then open go.mod","payload":"ls"}`, wantKind: core.Exec, wantBody: "ls", wantPurpose: "list files, then open go.mod"},
+		{name: "empty purpose", raw: `{"kind":"return","purpose":"","payload":"done"}`, wantKind: core.Return, wantBody: "done"},
+		{name: "purpose last with line break", raw: `{"payload":"x","kind":"exec","purpose":"one\ntwo 雪"}`, wantKind: core.Exec, wantBody: "x", wantPurpose: "one\ntwo 雪"},
+		{name: "escaped purpose name", raw: `{"kind":"exec","payload":"x","\u0070urpose":"p"}`, wantKind: core.Exec, wantBody: "x", wantPurpose: "p"},
 	}
 
 	for _, tt := range tests {
@@ -34,8 +39,8 @@ func TestDecodeValidDecisions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decode() error = %v", err)
 			}
-			if got.Kind != tt.wantKind || got.Payload != tt.wantBody {
-				t.Fatalf("Decode() = %#v, want kind %q payload %q", got, tt.wantKind, tt.wantBody)
+			if got.Kind != tt.wantKind || got.Payload != tt.wantBody || got.Purpose != tt.wantPurpose {
+				t.Fatalf("Decode() = %#v, want kind %q payload %q purpose %q", got, tt.wantKind, tt.wantBody, tt.wantPurpose)
 			}
 		})
 	}
@@ -70,6 +75,20 @@ func TestDecodeRejectsInvalidProtocol(t *testing.T) {
 		{name: "truncated", raw: `{"kind":"exec","payload":"x"`},
 		{name: "markdown wrapper", raw: "```json\n{\"kind\":\"exec\",\"payload\":\"x\"}\n```"},
 		{name: "invalid UTF-8", raw: "{\"kind\":\"exec\",\"payload\":\"\xff\"}"},
+		{name: "null purpose", raw: `{"kind":"exec","payload":"x","purpose":null}`},
+		{name: "number purpose", raw: `{"kind":"exec","payload":"x","purpose":1}`},
+		{name: "object purpose", raw: `{"kind":"exec","payload":"x","purpose":{}}`},
+		{name: "array purpose", raw: `{"kind":"exec","payload":"x","purpose":["x"]}`},
+		{name: "purpose without kind", raw: `{"purpose":"x","payload":"x"}`},
+		{name: "purpose without payload", raw: `{"kind":"exec","purpose":"x"}`},
+		{name: "purpose only", raw: `{"purpose":"x"}`},
+		{name: "purpose and unknown field", raw: `{"kind":"exec","payload":"x","purpose":"p","extra":"y"}`},
+		{name: "purpose replacing payload", raw: `{"kind":"exec","purpose":"p","other":"x"}`},
+		{name: "duplicate purpose", raw: `{"kind":"exec","payload":"x","purpose":"a","purpose":"b"}`},
+		{name: "escaped duplicate purpose", raw: `{"kind":"exec","payload":"x","purpose":"a","\u0070urpose":"b"}`},
+		{name: "case sensitive purpose", raw: `{"kind":"exec","payload":"x","Purpose":"p"}`},
+		{name: "invalid UTF-8 purpose", raw: "{\"kind\":\"exec\",\"payload\":\"x\",\"purpose\":\"\xff\"}"},
+		{name: "trailing value after purpose", raw: `{"kind":"exec","payload":"x","purpose":"p"} {}`},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +111,12 @@ func TestDecodeDiagnosticPriority(t *testing.T) {
 		{"payload type", `{"kind":"exec","payload":null}`, "core: invalid decision: payload must be a string"},
 		{"escaped duplicate before type errors", `{"kind":1,"\u006b\u0069nd":"return","payload":false}`, `core: invalid decision: duplicate field "kind"`},
 		{"malformed trailing value before type errors", `{"kind":1,"payload":false} !`, "core: invalid decision: invalid character '!' looking for beginning of value"},
+		{"purpose type", `{"kind":"exec","payload":"x","purpose":null}`, "core: invalid decision: purpose must be a string"},
+		{"payload type before purpose type", `{"kind":"exec","payload":1,"purpose":1}`, "core: invalid decision: payload must be a string"},
+		{"purpose type before unsupported kind", `{"kind":"wait","payload":"x","purpose":1}`, "core: invalid decision: purpose must be a string"},
+		{"purpose does not replace a required field", `{"kind":"exec","purpose":"x"}`, "core: invalid decision: expected kind and payload"},
+		{"extra field beside purpose", `{"kind":"exec","payload":"x","purpose":"p","extra":true}`, "core: invalid decision: expected kind and payload"},
+		{"unknown field beside purpose", `{"kind":"exec","purpose":"p","other":"x"}`, `core: invalid decision: unknown field "other"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := core.Decode([]byte(tt.raw))
@@ -126,6 +151,8 @@ func TestDecodeIsSafeForConcurrentCalls(t *testing.T) {
 func FuzzDecodeAcceptedDecision(f *testing.F) {
 	for _, raw := range [][]byte{
 		[]byte(`{"kind":"exec","payload":"go test ./..."}`),
+		[]byte(`{"kind":"exec","purpose":"run the tests","payload":"go test ./..."}`),
+		[]byte(`{"kind":"exec","purpose":null,"payload":"x"}`),
 		[]byte(`{"\u006b\u0069nd":"return","payload":"\ud83d\ude00"}`),
 		[]byte(`{"kind":"exec","kind":"return","payload":"x"}`),
 		[]byte(`{"kind":null,"payload":"x"}`),
@@ -143,8 +170,16 @@ func FuzzDecodeAcceptedDecision(f *testing.F) {
 			t.Fatalf("Decode(%q) accepted invalid input", raw)
 		}
 		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 2 {
+		if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 2 && len(fields) != 3 {
 			t.Fatalf("Decode(%q) accepted unexpected fields", raw)
+		}
+		var purpose *string
+		if rawPurpose, ok := fields["purpose"]; ok {
+			if err := json.Unmarshal(rawPurpose, &purpose); err != nil || purpose == nil || got.Purpose != *purpose {
+				t.Fatalf("Decode(%q) produced invalid purpose %q", raw, got.Purpose)
+			}
+		} else if len(fields) != 2 || got.Purpose != "" {
+			t.Fatalf("Decode(%q) accepted unexpected fields or purpose %q", raw, got.Purpose)
 		}
 		var kind, payload *string
 		if err := json.Unmarshal(fields["kind"], &kind); err != nil || kind == nil || string(got.Kind) != *kind {

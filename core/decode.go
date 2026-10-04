@@ -15,7 +15,8 @@ var errInvalidDecision = errors.New("invalid decision")
 //
 // The parser is intentionally strict: it rejects malformed JSON, trailing
 // values, duplicate fields, unknown fields, missing fields, and invalid field
-// types. It performs no I/O and keeps no state between calls.
+// types. Kind and payload are required; purpose is optional. It performs no
+// I/O and keeps no state between calls.
 func Decode(raw []byte) (Decision, error) {
 	if !utf8.Valid(raw) {
 		return Decision{}, fmt.Errorf("core: %w: invalid UTF-8", errInvalidDecision)
@@ -24,11 +25,16 @@ func Decode(raw []byte) (Decision, error) {
 	if err != nil {
 		return Decision{}, fmt.Errorf("core: %w: %v", errInvalidDecision, err)
 	}
-	if len(fields) != 2 {
+	purpose, hasPurpose := fields["purpose"]
+	required := len(fields)
+	if hasPurpose {
+		required--
+	}
+	if required != 2 {
 		return Decision{}, fmt.Errorf("core: %w: expected kind and payload", errInvalidDecision)
 	}
 	for field := range fields {
-		if field != "kind" && field != "payload" {
+		if field != "kind" && field != "payload" && field != "purpose" {
 			return Decision{}, fmt.Errorf("core: %w: unknown field %q", errInvalidDecision, field)
 		}
 	}
@@ -40,7 +46,13 @@ func Decode(raw []byte) (Decision, error) {
 	if payload == nil {
 		return Decision{}, fmt.Errorf("core: %w: payload must be a string", errInvalidDecision)
 	}
+	if hasPurpose && purpose == nil {
+		return Decision{}, fmt.Errorf("core: %w: purpose must be a string", errInvalidDecision)
+	}
 	decision := Decision{Kind: Kind(*kind), Payload: *payload}
+	if purpose != nil {
+		decision.Purpose = *purpose
+	}
 	if decision.Kind != Exec && decision.Kind != Return {
 		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, *kind)
 	}
