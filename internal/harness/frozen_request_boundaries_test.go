@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -120,6 +121,20 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "decision-purpose", limits: stepLimits, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n", "cat go.mod": "module example\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Name the module in /workspace.", replies: []string{
+				corpusPurpose(core.Exec, "List the workspace, then read go.mod.", "ls /workspace"),
+				corpusPurpose(core.Exec, "Read the module file\r\nthen name it. "+strings.Repeat("é", 300), "cat go.mod"),
+				corpusPurpose(core.Exec, "Check the listing again.", `canti:retrieve {"operation":"read","path":"`+corpusSteps+`/00000001/preview","reason":"Recheck."}`),
+				corpusPurpose(core.Return, "The module is named.", "The module is example."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 exited 0 retrieval 1 sources 0 entries"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then read go.mod.\nCommand:\n"},
+				"run1-step03-rev1.json": {"### Step 2\nPurpose: Read the module file  then name it. " + strings.Repeat("é", 238) + "…[truncated 124 bytes]\nCommand:\n"},
+				"run1-step04-rev1.json": {"### Step 3\nPurpose: Check the listing again.\nCommand:\n"},
+			},
+		},
+		{
 			name: "symlinked-evidence", limits: stepLimits, imports: map[string]string{"sub/note": "same original evidence\n"},
 			changes: map[string]func(*os.Root) error{"relink": func(r *os.Root) error {
 				if err := r.Rename("sub", "target"); err != nil {
@@ -192,6 +207,14 @@ func boundaryScenarios() []frozenScenario {
 
 // envelope is a raw response of content blocks, complete by its stop
 // reason.
+func corpusPurpose(kind core.Kind, purpose, payload string) string {
+	b, err := json.Marshal(core.Decision{Kind: kind, Purpose: purpose, Payload: payload})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func envelope(id, stop, blocks string) string {
 	return `raw:{"id":"msg_` + id + `","type":"message","role":"assistant","model":"claude-opus-5","content":[` + blocks +
 		`],"stop_reason":"` + stop + `","usage":{"input_tokens":1000,"output_tokens":20}}`
@@ -223,7 +246,7 @@ func handoverThresholds() []frozenScenario {
 		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
 		sc := frozenScenario{
 			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 87344, windowBytes: 4937, outputs: map[string]string{"go test ./...": output},
+			contextBytes: 88468, windowBytes: 4937, outputs: map[string]string{"go test ./...": output},
 			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
 				corpusDecision(core.Exec, "go test ./..."),
 				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":64`, "Check the first result."),
@@ -273,12 +296,12 @@ func sessionBoundaries() []frozenScenario {
 	}
 	var out []frozenScenario
 	for _, b := range []boundary{
-		{"session-stopped-goal", 92138, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 92137, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 90231, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 90230, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 90015, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 90014, []frozenRun{small, stopped, current}, "none"},
+		{"session-stopped-goal", 93262, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
+		{"session-stopped-status", 93261, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-status-only", 91355, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-navigation-only", 91354, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-navigation", 91139, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-without-dialogue", 91138, []frozenRun{small, stopped, current}, "none"},
 	} {
 		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
 		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,

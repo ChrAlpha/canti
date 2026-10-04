@@ -55,11 +55,11 @@ func TestContextStepAndTailBounds(t *testing.T) {
 	l, f := DefaultPromptLimits(), budgetFrame()
 	rng := rand.New(rand.NewSource(1))
 	texts := []string{"", strings.Repeat("`", 40000), strings.Repeat("\xff", 40000),
-		strings.Repeat("\x00", 40000), strings.Repeat("x", 40000)}
+		strings.Repeat("\x00", 40000), strings.Repeat("x", 40000), strings.Repeat("\n", 40000), strings.Repeat("日", 40000)}
 	for i := range 300 {
 		pick := func() string { return texts[rng.Intn(len(texts))] }
 		exit := math.MinInt
-		s := StepRecord{Step: math.MaxInt, Command: pick(), Resolved: true, Observation: Observation{
+		s := StepRecord{Step: math.MaxInt, Command: pick(), Purpose: pick(), Resolved: true, Observation: Observation{
 			Execution: core.ExecutionFailedToStart, ExitCode: &exit, Preview: pick(),
 			Output: ArtifactRef{Available: true, Bytes: math.MaxInt64, Path: pick(), Detail: pick()},
 		}}
@@ -117,7 +117,7 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 		f.Steps = append(f.Steps, next)
 		next.Step++
 	}
-	next.Command, next.Observation.Preview = strings.Repeat("x", 40000), strings.Repeat("`", 40000)
+	next.Command, next.Observation.Preview, next.Purpose = strings.Repeat("x", 40000), strings.Repeat("`", 40000), strings.Repeat("\n", 40000)
 	next.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
 	f.Steps = append(f.Steps, next)
@@ -126,6 +126,7 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 	exit = 1
 	next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &exit,
 		Preview: "Context action failed: " + clip(strings.Repeat("x", 40000), 2048)}
+	next.Purpose = strings.Repeat("日", 40000)
 	f.Steps = append(f.Steps, next)
 	f.Step, f.Attempt = next.Step+1, 2
 	f.Window.Requested = true
@@ -146,7 +147,7 @@ func TestFailedHandoverReserveCoversDecoderErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("handover with an unknown field was accepted")
 			}
-			s := StepRecord{Step: 7, Command: HandoverPrefix + payload, Observation: Observation{Execution: core.ExecutionExited,
+			s := StepRecord{Step: 7, Command: HandoverPrefix + payload, Purpose: strings.Repeat("`", 1<<20), Observation: Observation{Execution: core.ExecutionExited,
 				ExitCode: &exit, Preview: actionFailure + clip(err.Error(), actionFailureBytes)}}
 			if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
 				t.Fatalf("%d %s: failed handover %d exceeds reserve %d at a %d-byte preview", n, backtick, actual, bound, l.Preview)
@@ -180,6 +181,7 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		command, _ := json.Marshal(query)
 		body, _ := json.Marshal(read)
 		next.Command = RetrievePrefix + string(command)
+		next.Purpose = strings.Repeat("x", 40000)
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: string(body), Retrieval: &read}
 		f.Steps = append(f.Steps, next)
 		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", RetrievalMaxBytes) + "\n"}
@@ -190,7 +192,7 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		if decoded == nil {
 			t.Fatal("handover with an unknown field was accepted")
 		}
-		next.Command = HandoverPrefix + payload
+		next.Command, next.Purpose = HandoverPrefix+payload, strings.Repeat("\xff", 40000)
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: actionFailure + clip(decoded.Error(), actionFailureBytes)}
 		f.Steps = append(f.Steps, next)
 		f.Step, f.Attempt = next.Step+1, 2
@@ -241,6 +243,24 @@ func TestContextFitRequiresTheLargestHandoverWindow(t *testing.T) {
 					t.Errorf("%s, %d-byte handover, imports %v: an ordinary handover leaves %d bytes at %d: %v", name, handover, imports, capacity, l.Total, err)
 				}
 			}
+		}
+	}
+}
+
+func TestContextReservesCoverPurposeAtTheLimit(t *testing.T) {
+	l, f := DefaultPromptLimits(), budgetFrame()
+	at := strings.Repeat("p", l.Purpose)
+	exit := math.MinInt
+	for _, purpose := range []string{at, at + "q", at[1:] + "日", at[2:] + "日", "\n" + at, at + strings.Repeat("\n", 1<<20),
+		strings.Repeat("\xff", l.Purpose+1), strings.Repeat("日", 1<<20)} {
+		s := StepRecord{Step: math.MaxInt, Command: strings.Repeat("x", 40000), Purpose: purpose, Resolved: true, Observation: Observation{
+			Execution: core.ExecutionFailedToStart, ExitCode: &exit, Preview: strings.Repeat("x", 40000),
+			Retrieval: &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024),
+				Error: strings.Repeat("\x00", 40000), Incomplete: true, SkippedCount: 3 * retrievalMaxEntries, Skipped: []DiscoverySkip{
+					{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}, {Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}}},
+		}}
+		if actual, bound := len(f.step(s, l)), f.stepShellBytes(l); actual > bound {
+			t.Fatalf("purpose of %d bytes: step %d exceeds reserve %d", len(purpose), actual, bound)
 		}
 	}
 }

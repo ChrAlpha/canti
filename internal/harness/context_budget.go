@@ -28,6 +28,10 @@ func quoteBytes(label string, limit int) int {
 	return len(label+":\n```\n\n```\n") + limit + truncationBytes()
 }
 
+func purposeBytes(l PromptLimits) int {
+	return len("Purpose: \n") + l.Purpose + truncationBytes()
+}
+
 func (f Frame) stepShellBytes(l PromptLimits) int {
 	f.Retrieved = nil
 	exit := math.MinInt
@@ -51,7 +55,7 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 	s.Observation.Retrieval = &Retrieval{Query: RetrievalQuery{Operation: "list"}, NextOffset: math.MaxInt64}
 	list := len(f.step(s, l)) + quotes + RetrievalMaxBytes - len("null") +
 		2*(len(strconv.Itoa(math.MaxInt))-1)
-	return max(output, retrieval, list)
+	return max(output, retrieval, list) + purposeBytes(l)
 }
 
 func (f Frame) failedHandoverShellBytes(l PromptLimits) int {
@@ -59,7 +63,7 @@ func (f Frame) failedHandoverShellBytes(l PromptLimits) int {
 	exit := 1
 	s := StepRecord{Step: math.MaxInt, Observation: Observation{Execution: core.ExecutionExited, ExitCode: &exit}}
 	preview := min(l.Preview, 3*(len(actionFailure)+actionFailureBytes+truncationBytes()))
-	return len(f.step(s, l)) +
+	return len(f.step(s, l)) + purposeBytes(l) +
 		quoteBytes("Command", l.Command) - len(quote("Command", "", l.Command)) +
 		quoteBytes("Preview", preview) - len(quote("Preview", "", l.Preview))
 }

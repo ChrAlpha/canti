@@ -12,19 +12,19 @@ import (
 
 // PromptLimits bounds a prompt in bytes. Goal and Constraints cap the
 // trimmed goal and constraints, which are refused rather than cut. Every
-// other field but Total caps the bytes kept from one input: Command and
-// Preview apply to each step, Rejected to both the error and the response. A
-// cut input ends with a marker counting the bytes removed. Total caps System
-// plus the blocks.
+// other field but Total caps the bytes kept from one input: Command,
+// Purpose, and Preview apply to each step, Rejected to both the error and
+// the response. A cut input ends with a marker counting the bytes removed.
+// Total caps System plus the blocks.
 type PromptLimits struct {
-	Goal, Constraints, Environment, Command, Preview, Rejected, Total int
+	Goal, Constraints, Environment, Command, Preview, Rejected, Total, Purpose int
 }
 
 // DefaultPromptLimits returns limits for a 128 KiB prompt.
 func DefaultPromptLimits() PromptLimits {
 	return PromptLimits{
 		Goal: 32 << 10, Constraints: 16 << 10, Environment: 2 << 10, Command: 2 << 10,
-		Preview: 4 << 10, Rejected: 2 << 10, Total: 128 << 10,
+		Preview: 4 << 10, Rejected: 2 << 10, Total: 128 << 10, Purpose: 512,
 	}
 }
 
@@ -62,7 +62,7 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
 	}
-	if min(l.Goal, l.Constraints, l.Environment, l.Command, l.Preview, l.Rejected, l.Total) <= 0 {
+	if min(l.Goal, l.Constraints, l.Environment, l.Command, l.Preview, l.Rejected, l.Total, l.Purpose) <= 0 {
 		return Prompt{}, fmt.Errorf("harness: prompt limits %+v must be positive", l)
 	}
 	if n := len(strings.TrimSpace(f.Goal)); n > l.Goal {
@@ -174,8 +174,11 @@ func (f Frame) progress(hidden int) string {
 func (f Frame) step(s StepRecord, l PromptLimits) string {
 	o := s.Observation
 	var b strings.Builder
-	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(o.Preview), l.Preview)) + len(f.Retrieved[s.Step]) + 256)
+	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(s.Purpose), l.Purpose)) + max(0, min(len(o.Preview), l.Preview)) + len(f.Retrieved[s.Step]) + 256)
 	fmt.Fprintf(&b, "### Step %d\n", s.Step)
+	if s.Purpose != "" {
+		b.WriteString("Purpose: " + lineBreaks.Replace(clip(s.Purpose, l.Purpose)) + "\n")
+	}
 	writeQuote(&b, "Command", s.Command, l.Command)
 	fmt.Fprintf(&b, "Execution: %s", inline(string(o.Execution)))
 	if o.ExitCode != nil {

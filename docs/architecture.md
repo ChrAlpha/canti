@@ -518,18 +518,20 @@ Workspace notes are not automatically read or injected.
 
 `Frame.Prompt` renders a system message and user content blocks. The first
 block holds Goal, Constraints, Environment, Context window, and the short
-Handover when present. One block follows per current-page step, oldest first;
+Handover when present. One block follows per current-page step, oldest first,
+starting with the committed decision's purpose on one line when it has one;
 the tail holds Progress, any required handover instruction, and a rejected
 response. Appending a completed step preserves the prefix within a window,
 subject to active retrieval expansion. A new window changes the first block.
 
 `PromptLimits` bounds bytes, not provider tokens: defaults are 32 KiB for the
 goal, 16 KiB for constraints, 2 KiB for the environment and each command,
-4 KiB per output preview, 2 KiB each for a rejected response and its error,
-and 128 KiB total. The CLI defaults the total to 256 KiB. Goal and constraints
-are never truncated. Other bounded inputs use explicit truncation markers,
-valid UTF-8, and fences longer than embedded backtick runs. An oversized page
-fails visibly rather than dropping older steps.
+512 bytes per step purpose, 4 KiB per output preview, 2 KiB each for a
+rejected response and its error, and 128 KiB total. The CLI defaults the total
+to 256 KiB. Goal and constraints are never truncated. Other bounded inputs use
+explicit truncation markers, valid UTF-8, and fences longer than embedded
+backtick runs. An oversized page fails visibly rather than dropping older
+steps.
 
 The loop reserves space before the window reaches its prompt capacity and
 requests a bounded `canti:handover` action. Optional step and byte thresholds

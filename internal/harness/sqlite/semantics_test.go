@@ -95,6 +95,11 @@ func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 			resumed.call(harness.Runner.Bind)
 			resumed.call(harness.Runner.Start)
 			resumed.observe(core.ExecutionExited, 20)
+			steps, err := s.Recent(ctx, "run-1", 0, 10)
+			if err != nil || len(steps) != 2 || steps[0].Purpose != "" || steps[0].Command != "printf first" ||
+				steps[1].Purpose != "write, then read it back" || steps[1].Command != "printf second" {
+				t.Fatalf("Recent = %+v, %v; want the legacy step without a purpose and the new one with it", steps, err)
+			}
 			wantTotals := harness.Totals{Usage: harness.Usage{InputTokens: 12, OutputTokens: 5}, OutputBytes: 30, Steps: 2}
 			for _, tr := range append(d.commits, resumed.commits...) {
 				if err := s.Commit(ctx, tr); err != nil {

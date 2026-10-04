@@ -91,6 +91,7 @@ type StepRecord struct {
 	Seq         int64
 	Step        int
 	Command     string
+	Purpose     string
 	Observation Observation
 	Resolved    bool
 }
