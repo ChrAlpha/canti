@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"math"
 	"math/rand"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -199,6 +201,38 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		f.Rejected = &Rejection{Error: strings.Repeat("x", 40000), Response: strings.Repeat("x", 40000)}
 		if _, err := f.Prompt(l); err != nil {
 			t.Fatalf("%d-byte total: a full window could not render a read, the failed handover, and the retry: %v", total, err)
+		}
+	}
+}
+
+func TestPurposeReserveIsTheWidestPurposeLine(t *testing.T) {
+	f, exit := budgetFrame(), 0
+	bare := StepRecord{Step: 7, Command: "true", Observation: Observation{Execution: core.ExecutionExited, ExitCode: &exit}}
+	marker := regexp.MustCompile(`^Purpose: .*…\[truncated (\d+) bytes\]$`)
+	widestCount := len(strconv.Itoa(math.MaxInt))
+	for _, limit := range []int{3, 4, 512, 4096} {
+		l := DefaultPromptLimits()
+		l.Purpose = limit
+		at := strings.Repeat("p", limit)
+		widest := 0
+		for _, purpose := range []string{"p", at, at + "q", strings.Repeat("\xff", limit+1), at[1:] + "日", at[2:] + "日",
+			strings.Repeat("日", 1<<20), "\n" + at, strings.Repeat("\n", 1<<20), strings.Repeat("\r\n", 1<<19),
+			strings.Repeat("`", 1<<20), strings.Repeat("\xff", 1<<20)} {
+			s := bare
+			s.Purpose = purpose
+			step := f.step(s, l)
+			growth := len(step) - len(f.step(bare, l))
+			if growth > purposeBytes(l) {
+				t.Fatalf("limit %d, purpose of %d bytes: line of %d bytes exceeds the reserve %d", limit, len(purpose), growth, purposeBytes(l))
+			}
+			line, _, _ := strings.Cut(strings.TrimPrefix(step, "### Step 7\n"), "\n")
+			if m := marker.FindStringSubmatch(line); m != nil {
+				growth += widestCount - len(m[1])
+			}
+			widest = max(widest, growth)
+		}
+		if widest != purposeBytes(l) {
+			t.Fatalf("limit %d: widest purpose line, counting %d-digit truncations, is %d bytes; reserve %d", limit, widestCount, widest, purposeBytes(l))
 		}
 	}
 }
