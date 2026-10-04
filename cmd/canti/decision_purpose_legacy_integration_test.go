@@ -46,23 +46,33 @@ var legacySchemas = map[string]string{
 }
 
 // legacyFloor is the smallest -context-bytes 7624f85 admits for a one-byte
-// goal with the default flags, in either decision format.
+// goal with floorFlags, its defaults, in either decision format.
 const legacyFloor = 86940
+
+var floorFlags = []string{"-image", "debian:bookworm-slim", "-network", "none", "-memory", "2g", "-cpus", "",
+	"-pids", "512", "-job-timeout", "10m", "-handover-bytes", "2048"}
 
 // admittedFloor is legacyFloor for the current binary and format. Their
 // difference is what the system prompt and the reserves grew by.
 func admittedFloor(t *testing.T, format string) int {
 	t.Helper()
+	admits := func(n int) bool {
+		s := parseSpec(t, append([]string{"-decision-format", format, "-context-bytes", strconv.Itoa(n)}, floorFlags...)...)
+		_, _, err := newRun("g", "", s, time.Time{})
+		return err == nil
+	}
 	lo, hi := minContextBytes, 1<<20
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if _, _, err := newRun("g", "", parseSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(mid)), time.Time{}); err == nil {
+	if admits(lo) || !admits(hi) {
+		t.Fatalf("format %s: no admission boundary in %d..%d", format, lo, hi)
+	}
+	for lo+1 < hi {
+		if mid := (lo + hi) / 2; admits(mid) {
 			hi = mid
 		} else {
-			lo = mid + 1
+			lo = mid
 		}
 	}
-	return lo
+	return hi
 }
 
 func openJournal(t *testing.T, f *fixture) *sql.DB {
@@ -410,6 +420,9 @@ func TestDecisionPurposeOfALegacyRejectionNeedsNoRepair(t *testing.T) {
 			}
 			checkFile(t, filepath.Join(f.workspace, "log.txt"), "one\ntwo\n")
 			i := slices.IndexFunc(h, func(e entry) bool { return e.Kind == "response_loaded" && e.State.Step == 2 })
+			if i < 1 {
+				t.Fatal("no response_loaded for step 2")
+			}
 			checkReplay(t, h[0].State.RunID, h[:i])
 			event, err := decodeEvent[core.ResponseLoaded](string(h[i].Event))
 			if err != nil {
@@ -418,13 +431,15 @@ func TestDecisionPurposeOfALegacyRejectionNeedsNoRepair(t *testing.T) {
 			if next, err := h[i-1].State.Next(event); err != nil || next.Phase != core.PhaseEffectSaved || h[i].State.Phase != core.PhaseIdle {
 				t.Fatalf("recorded %+v; the current core makes %+v, %v of the rejected reply", h[i].State, next, err)
 			}
-			for s, e := h[i].State, h[i+1:]; len(e) > 0; e = e[1:] {
-				event, err := eventDecoders[e[0].Kind](string(e[0].Event))
+			for j := i + 1; j < len(h); j++ {
+				prev, e := h[j-1], h[j]
+				event, err := eventDecoders[e.Kind](string(e.Event))
+				next := prev.State
 				if err == nil {
-					s, err = s.Next(event)
+					next, err = prev.State.Next(event)
 				}
-				if err != nil || s != e[0].State {
-					t.Fatalf("replay from the recorded rejection diverges at seq %d: %+v, %v", e[0].Seq, s, err)
+				if err != nil || e.Seq != prev.Seq+1 || e.From != prev.State.Phase || next != e.State {
+					t.Fatalf("replay from the recorded rejection diverges at seq %d: %+v, %v", e.Seq, next, err)
 				}
 			}
 			checkReleased(t, f, h)
