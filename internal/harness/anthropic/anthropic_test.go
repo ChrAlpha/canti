@@ -27,7 +27,8 @@ const (
 	fallbackBeta = "server-side-fallback-2026-07-01"
 	adapter      = "canti-anthropic/2"
 	cached       = `,"cache_control":{"type":"ephemeral"}`
-	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}}}`
+	purposeField = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
+	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},` + purposeField + `,"payload":{"type":"string"}},"required":["kind","payload","purpose"],"additionalProperties":false}}}`
 	decision     = `[{"type":"text","text":"{\"kind\":\"return\",\"payload\":\"done\"}"}]`
 )
 
