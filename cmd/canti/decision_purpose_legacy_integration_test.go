@@ -4,7 +4,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -106,6 +108,63 @@ func freezeLegacy(t *testing.T, db *sql.DB, format string, step, rev int) []byte
 		t.Fatal(err)
 	}
 	return req.Body
+}
+
+// rewriteResponse replaces old by new once in the decision of the response
+// saved for attempt of step: in its raw body, where a text reply holds it
+// JSON-escaped, and in the body its response_loaded event decoded, whose
+// event ID it derives again. It returns the new decision body.
+func rewriteResponse(t *testing.T, db *sql.DB, step, attempt int, old, new string) []byte {
+	t.Helper()
+	escaped := func(s string) string { b, _ := json.Marshal(s); return string(b[1 : len(b)-1]) }
+	replace := func(b []byte) []byte {
+		for _, r := range [][2]string{{old, new}, {escaped(old), escaped(new)}} {
+			if bytes.Count(b, []byte(r[0])) == 1 {
+				return bytes.Replace(b, []byte(r[0]), []byte(r[1]), 1)
+			}
+		}
+		t.Fatalf("%s is not once in %s", old, b)
+		return nil
+	}
+	var data string
+	saved := `kind = 'response_saved' AND step = ? AND attempt = ?`
+	if err := db.QueryRow(`SELECT facts FROM transitions WHERE `+saved, step, attempt).Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	var facts harness.Facts
+	if err := strict(data, &facts); err != nil || facts.Response == nil {
+		t.Fatalf("response %d/%d: %v", step, attempt, err)
+	}
+	facts.Response.Body = replace(facts.Response.Body)
+	var run, id string
+	var seq int64
+	loaded := `kind = 'response_loaded' AND step = ? AND json_extract(event, '$.Attempt') = ?`
+	if err := db.QueryRow(`SELECT run_id, seq, event_id, event FROM transitions WHERE `+loaded, step, attempt).Scan(&run, &seq, &id, &data); err != nil {
+		t.Fatal(err)
+	}
+	eventID := func(payload string) string {
+		sum := sha256.Sum256(fmt.Appendf(nil, "%d:%s:%d:response_loaded:%s", len(run), run, seq, payload))
+		return "event_" + hex.EncodeToString(sum[:])
+	}
+	var event core.ResponseLoaded
+	if err := strict(data, &event); err != nil || eventID(data) != id {
+		t.Fatalf("response_loaded %d/%d: %v, or its event ID is not derived from it", step, attempt, err)
+	}
+	event.Body = replace(event.Body)
+	out, err := json.Marshal(facts)
+	if err == nil {
+		_, err = db.Exec(`UPDATE transitions SET facts = ? WHERE `+saved, string(out), step, attempt)
+	}
+	if err == nil {
+		out, err = json.Marshal(event)
+	}
+	if err == nil {
+		_, err = db.Exec(`UPDATE transitions SET event = ?, event_id = ? WHERE `+loaded, string(out), eventID(string(out)), step, attempt)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event.Body
 }
 
 // relabel marks the run and every transition as written under semantics
@@ -240,5 +299,88 @@ func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestDecisionPurposeOfALegacyRejectionNeedsNoRepair(t *testing.T) {
+	for _, format := range []string{"tool", "text"} {
+		t.Run(format, func(t *testing.T) {
+			f, image := recoveryFixture(t, nil)
+			rejected := core.Decision{Kind: core.Exec, Purpose: "append a line version 2 rejected", Payload: "printf 'rejected\\n' >> log.txt"}
+			unsupported := rejected
+			unsupported.Kind = "wait"
+			two := core.Decision{Kind: core.Exec, Purpose: "append two, then return", Payload: "printf 'two\\n' >> log.txt"}
+			answerDecision(f, format, 1, 1, core.Decision{Kind: core.Exec, Payload: "printf 'one\\n' >> log.txt"})
+			answerDecision(f, format, 2, 1, unsupported)
+			answerDecision(f, format, 2, 2, two)
+			answerDecision(f, format, 3, 1, core.Decision{Kind: core.Return, Purpose: "both lines are written", Payload: "done"})
+			if r := f.cli(nil, "run", "-once", "-goal", "repair an earlier rejection", "-image", image, "-decision-format", format,
+				"-fallbacks=false", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
+				t.Fatalf("run -once = %+v", r)
+			}
+			db := openJournal(t, f)
+			legacy := map[[2]int][]byte{{1, 1}: freezeLegacy(t, db, format, 1, 1)}
+			frozenTwo := func(s status) bool { return s.Step == 2 && s.Phase == core.PhaseRequestFrozen }
+			if r := resumeOnce(t, f, frozenTwo); r.code != exitActive || !frozenTwo(f.status()) {
+				t.Fatalf("did not stop with the step 2 request frozen: %+v %+v", r, f.status())
+			}
+			legacy[[2]int{2, 1}] = freezeLegacy(t, db, format, 2, 1)
+			repair := func(s status) bool { return s.Step == 2 && s.Phase == core.PhaseIdle }
+			if r := resumeOnce(t, f, repair); r.code != exitActive {
+				t.Fatalf("resume -once to the repair point = %+v", r)
+			}
+			if s := f.status(); !repair(s) || s.Attempt != 2 || s.RequestRev != 1 || len(f.model.requests()) != 2 {
+				t.Fatalf("not idle at the repair of step 2: %+v after %d sends", s, len(f.model.requests()))
+			}
+			body := rewriteResponse(t, db, 2, 1, `"kind":"wait"`, `"kind":"exec"`)
+			var fields map[string]json.RawMessage
+			if d, err := core.Decode(body); err != nil || d != rejected || json.Unmarshal(body, &fields) != nil || len(fields) != 3 {
+				t.Fatalf("saved reply %s is not a three-field decision the current decoder accepts: %+v, %v", body, d, err)
+			}
+			seq := relabel(t, db, 2)
+			before := journalRows(t, db, seq)
+			if r := f.cli(nil, "resume"); r.code != exitOK || strings.TrimSpace(r.stdout) != "done" {
+				t.Fatalf("resume at the repair of a v2 rejection = %+v", r)
+			}
+			if journalRows(t, db, seq) != before {
+				t.Fatal("resume rewrote legacy records")
+			}
+			total := checkCurrent(t, db, seq)
+			h := f.history()
+			frozen, wire := frozenRequests(t, h), f.model.requests()
+			keys := [][2]int{{1, 1}, {2, 1}, {2, 2}, {3, 1}}
+			if len(wire) != len(keys) || len(frozen) != len(keys) {
+				t.Fatalf("%d sends, %d frozen requests; want %d each", len(wire), len(frozen), len(keys))
+			}
+			for i, key := range keys {
+				if !bytes.Equal(frozen[key], wire[i]) || i < 2 && !bytes.Equal(wire[i], legacy[key]) {
+					t.Fatalf("request %v sent other bytes than the journal froze", key)
+				}
+			}
+			rev1, rev2 := parseFrozen(t, frozen[[2]int{2, 1}]), parseFrozen(t, frozen[[2]int{2, 2}])
+			if len(rev2.Blocks) != 3 || rev2.Blocks[0] != rev1.Blocks[0] || rev2.Blocks[1] != rev1.Blocks[1] ||
+				rev2.Blocks[2] != strings.Replace(rev1.Blocks[2], ", attempt 1 of ", ", attempt 2 of ", 1) {
+				t.Fatalf("repair revision blocks =\n%q\nwant the revision 1 blocks at attempt 2\n%q", rev2.Blocks, rev1.Blocks)
+			}
+			checkTransport(t, format, frozen[[2]int{2, 2}])
+			for _, key := range [][2]int{{2, 2}, {3, 1}} {
+				if body := frozen[key]; bytes.Contains(body, []byte("Rejected response")) || bytes.Contains(body, []byte(rejected.Purpose)) {
+					t.Fatalf("request %v shows the rejected reply:\n%s", key, body)
+				}
+			}
+			stepTwo := "### Step 2\nPurpose: " + two.Purpose + "\nCommand:\n```\n" + two.Payload + "\n```\n"
+			if last := parseFrozen(t, frozen[[2]int{3, 1}]); len(last.Blocks) != 4 || !strings.HasPrefix(last.Blocks[2], stepTwo) {
+				t.Fatalf("step 3 request blocks = %q, want step 2 starting\n%q", last.Blocks, stepTwo)
+			}
+			for step := range 2 {
+				if eventCount(h, "job_started", step+1) != 1 {
+					t.Fatalf("step %d started %d jobs", step+1, eventCount(h, "job_started", step+1))
+				}
+			}
+			checkFile(t, filepath.Join(f.workspace, "log.txt"), "one\ntwo\n")
+			checkReleased(t, f, h)
+			t.Logf("LEGACY_REPAIR format=%s legacy_seq=%d new_transitions=%d requests=%d; real CLI/SQLite/Docker, scripted Messages provider",
+				format, seq, total, len(wire))
+		})
 	}
 }
