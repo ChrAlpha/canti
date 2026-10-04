@@ -10,8 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -42,9 +45,25 @@ var legacySchemas = map[string]string{
 	"text": `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},"payload":{"type":"string"}},"required":["kind","payload"],"additionalProperties":false}}}`,
 }
 
-// purposeReserves is what the purpose added to the step and the failed
-// handover reserves of the work capacity at the default limits.
-const purposeReserves = 2 * 562
+// legacyFloor is the smallest -context-bytes 7624f85 admits for a one-byte
+// goal with the default flags, in either decision format.
+const legacyFloor = 86940
+
+// admittedFloor is legacyFloor for the current binary and format. Their
+// difference is what the system prompt and the reserves grew by.
+func admittedFloor(t *testing.T, format string) int {
+	t.Helper()
+	lo, hi := minContextBytes, 1<<20
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if _, _, err := newRun("g", "", parseSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(mid)), time.Time{}); err == nil {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
 
 func openJournal(t *testing.T, f *fixture) *sql.DB {
 	t.Helper()
@@ -98,7 +117,10 @@ func freezeLegacy(t *testing.T, db *sql.DB, format string, step, rev int) []byte
 	req.Context.Bytes.System -= shrink
 	req.Context.Bytes.Total -= shrink
 	if req.Context.Handover.Status == "evaluated" {
-		req.Context.Handover.Capacity += shrink + purposeReserves
+		req.Context.Handover.Capacity += admittedFloor(t, format) - legacyFloor
+	}
+	if p := parseFrozen(t, req.Body); req.Context.Bytes.System != len(system) || req.Context.Bytes.Total != len(system)+len(strings.Join(p.Blocks, "")) {
+		t.Fatalf("request %d/%d: captured %+v for a %d-byte system", step, rev, req.Context.Bytes, len(system))
 	}
 	out, err := json.Marshal(facts)
 	if err == nil {
@@ -227,11 +249,16 @@ func eventCount(h []entry, kind string, step int) int {
 func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
 	for _, format := range []string{"tool", "text"} {
 		for _, version := range []int{1, 2} {
-			for _, crash := range []string{"attempt_started", "response_saved"} {
-				t.Run(fmt.Sprintf("%s/v%d/%s", format, version, crash), func(t *testing.T) {
+			for _, c := range []struct{ crash, purpose string }{{"attempt_started", ""}, {"response_saved", ""}, {"response_saved", "read the file back"}} {
+				crash, name := c.crash, fmt.Sprintf("%s/v%d/%s", format, version, c.crash)
+				if c.purpose != "" {
+					name += "_with_purpose"
+				}
+				t.Run(name, func(t *testing.T) {
 					f, image := recoveryFixture(t, nil)
 					answerDecision(f, format, 1, 1, core.Decision{Kind: core.Exec, Payload: "printf 'one\\n' > one.txt"})
-					answerDecision(f, format, 2, 1, core.Decision{Kind: core.Exec, Payload: "cat one.txt"})
+					two := core.Decision{Kind: core.Exec, Purpose: c.purpose, Payload: "cat one.txt"}
+					answerDecision(f, format, 2, 1, two)
 					answerDecision(f, format, 3, 1, core.Decision{Kind: core.Exec, Purpose: "check the file, then return", Payload: "test -s one.txt"})
 					answerDecision(f, format, 4, 1, core.Decision{Kind: core.Return, Purpose: "verified", Payload: "done"})
 					if r := f.cli(nil, "run", "-once", "-goal", "resume an earlier journal", "-image", image, "-decision-format", format,
@@ -275,7 +302,7 @@ func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
 						t.Fatalf("step 2 has %d attempts, want %d", eventCount(h, "attempt_started", 2), n)
 					}
 					for _, e := range h {
-						if e.Kind == "response_loaded" && e.State.Step == 2 && e.State.Decision != (core.Decision{Kind: core.Exec, Payload: "cat one.txt"}) {
+						if e.Kind == "response_loaded" && e.State.Step == 2 && e.State.Decision != two {
 							t.Fatalf("the new binary decoded the legacy step 2 response as %+v", e.State.Decision)
 						}
 					}
@@ -284,8 +311,12 @@ func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
 							t.Fatalf("step %d started %d jobs", step+1, eventCount(h, "job_started", step+1))
 						}
 					}
+					stepTwo := "### Step 2\nCommand:\n"
+					if two.Purpose != "" {
+						stepTwo = "### Step 2\nPurpose: " + two.Purpose + "\nCommand:\n"
+					}
 					last := parseFrozen(t, frozen[[2]int{4, 1}])
-					if len(last.Blocks) != 5 || !strings.HasPrefix(last.Blocks[1], "### Step 1\nCommand:\n") || !strings.HasPrefix(last.Blocks[2], "### Step 2\nCommand:\n") ||
+					if len(last.Blocks) != 5 || !strings.HasPrefix(last.Blocks[1], "### Step 1\nCommand:\n") || !strings.HasPrefix(last.Blocks[2], stepTwo) ||
 						!strings.HasPrefix(last.Blocks[3], "### Step 3\nPurpose: check the file, then return\nCommand:\n") {
 						t.Fatalf("step 4 request blocks = %q", last.Blocks)
 					}
@@ -294,8 +325,8 @@ func TestDecisionPurposeResumesLegacyJournals(t *testing.T) {
 					checkFile(t, filepath.Join(f.workspace, "one.txt"), "one\n")
 					checkReplay(t, h[0].State.RunID, h)
 					checkReleased(t, f, h)
-					t.Logf("LEGACY_RESUME format=%s semantics=%d crash=after:%s legacy_seq=%d new_transitions=%d; real CLI/SQLite/Docker, scripted Messages provider",
-						format, version, crash, seq, total)
+					t.Logf("LEGACY_RESUME format=%s semantics=%d crash=after:%s saved_purpose=%q legacy_seq=%d new_transitions=%d; real CLI/SQLite/Docker, scripted Messages provider",
+						format, version, crash, c.purpose, seq, total)
 				})
 			}
 		}
@@ -378,6 +409,24 @@ func TestDecisionPurposeOfALegacyRejectionNeedsNoRepair(t *testing.T) {
 				}
 			}
 			checkFile(t, filepath.Join(f.workspace, "log.txt"), "one\ntwo\n")
+			i := slices.IndexFunc(h, func(e entry) bool { return e.Kind == "response_loaded" && e.State.Step == 2 })
+			checkReplay(t, h[0].State.RunID, h[:i])
+			event, err := decodeEvent[core.ResponseLoaded](string(h[i].Event))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next, err := h[i-1].State.Next(event); err != nil || next.Phase != core.PhaseEffectSaved || h[i].State.Phase != core.PhaseIdle {
+				t.Fatalf("recorded %+v; the current core makes %+v, %v of the rejected reply", h[i].State, next, err)
+			}
+			for s, e := h[i].State, h[i+1:]; len(e) > 0; e = e[1:] {
+				event, err := eventDecoders[e[0].Kind](string(e[0].Event))
+				if err == nil {
+					s, err = s.Next(event)
+				}
+				if err != nil || s != e[0].State {
+					t.Fatalf("replay from the recorded rejection diverges at seq %d: %+v, %v", e[0].Seq, s, err)
+				}
+			}
 			checkReleased(t, f, h)
 			t.Logf("LEGACY_REPAIR format=%s legacy_seq=%d new_transitions=%d requests=%d; real CLI/SQLite/Docker, scripted Messages provider",
 				format, seq, total, len(wire))
