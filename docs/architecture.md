@@ -70,9 +70,9 @@ shows it with the step in later requests.
 
 The decoder rejects unknown or duplicate fields, wrong types, missing
 `kind` or `payload`, a null `purpose`, unsupported kinds, invalid UTF-8,
-malformed or incomplete JSON, and trailing values. It does not extract JSON from Markdown. Transport completeness is a
-separate adapter responsibility: valid JSON alone does not prove that a model
-response completed.
+malformed or incomplete JSON, and trailing values. It does not extract JSON
+from Markdown. Transport completeness is a separate adapter responsibility:
+valid JSON alone does not prove that a model response completed.
 
 A raw provider response and the decision payload are different layers. The
 adapter records the complete raw response with its provenance
@@ -528,9 +528,10 @@ subject to active retrieval expansion. A new window changes the first block.
 goal, 16 KiB for constraints, 2 KiB for the environment and each command,
 512 bytes per step purpose, 4 KiB per output preview, 2 KiB each for a
 rejected response and its error, and 64 KiB total. The CLI defaults the total
-to 256 KiB. Goal and constraints are never truncated. Other bounded inputs use explicit truncation markers,
-valid UTF-8, and fences longer than embedded backtick runs. An oversized page
-fails visibly rather than dropping older steps.
+to 256 KiB. Goal and constraints are never truncated. Other bounded inputs
+use explicit truncation markers, valid UTF-8, and fences longer than embedded
+backtick runs. An oversized page fails visibly rather than dropping older
+steps.
 
 The loop reserves space before the window reaches its prompt capacity and
 requests a bounded `canti:handover` action. Optional step and byte thresholds

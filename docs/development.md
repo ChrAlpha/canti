@@ -103,7 +103,7 @@ processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
 output tokens per response, structured output and fallbacks on, 256 KiB per
 prompt (`-context-bytes`, including handover reserve; it must hold the goal,
 constraints, and the reserves for one more step and a failed handover, about
-85 KiB with a short goal and the default handover), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
+86 KiB with a short goal and the default handover), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
 
 `chat` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
