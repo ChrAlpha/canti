@@ -163,8 +163,47 @@ func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
 			}
 		})
 	}
-	if err := CheckLayout(t.TempDir(), "state"); err == nil {
-		t.Error("CheckLayout accepted a relative state directory")
+}
+
+func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
+	root := t.TempDir()
+	ws, file := filepath.Join(root, "real", "ws"), filepath.Join(root, "file")
+	link, dangling := filepath.Join(root, "link"), filepath.Join(root, "dangling")
+	if err := os.MkdirAll(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for target, name := range map[string]string{ws: link, filepath.Join(ws, "missing"): dangling} {
+		if err := os.Symlink(target, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tree := func() (paths []string) {
+		if err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+			paths = append(paths, p)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return paths
+	}
+	for _, tc := range []struct{ name, state, want string }{
+		{"relative", "state", "not a clean absolute path"},
+		{"unclean, inside the workspace through a link", link + "/../ws/state", "not a clean absolute path"},
+		{"below a file", filepath.Join(file, "state"), filepath.Join(file, "state")},
+		{"below a link to a missing directory of the workspace", filepath.Join(dangling, "state"), filepath.Join(ws, "missing")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := tree()
+			if err := CheckLayout(ws, tc.state); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckLayout(%s, %s) = %v, want an error naming %q", ws, tc.state, err, tc.want)
+			}
+			if after := tree(); !slices.Equal(after, before) {
+				t.Fatalf("CheckLayout changed %q to %q", before, after)
+			}
+		})
 	}
 }
 

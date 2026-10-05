@@ -164,24 +164,25 @@ func New(cfg Config) (*Executor, error) {
 
 // CheckLayout refuses a workspace and a state directory that overlap, as New
 // does, before the state directory exists and without touching the
-// filesystem: the state path resolves as its nearest existing ancestor
-// followed by the remaining components.
+// filesystem: the state, a clean absolute path, resolves as its nearest
+// existing ancestor followed by the missing components. A state below a
+// file or a dangling link is refused.
 func CheckLayout(workspace, state string) error {
 	ws, err := resolve(workspace)
 	if err != nil {
 		return err
 	}
-	if !filepath.IsAbs(state) {
-		return fmt.Errorf("docker: %q is not an absolute path", state)
+	if !filepath.IsAbs(state) || filepath.Clean(state) != state {
+		return fmt.Errorf("docker: state %q is not a clean absolute path", state)
 	}
-	dir, rest := filepath.Clean(state), ""
+	dir, rest := state, ""
 	p, err := filepath.EvalSymlinks(dir)
-	for errors.Is(err, fs.ErrNotExist) && filepath.Dir(dir) != dir {
+	for err != nil {
+		if _, missing := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) || !errors.Is(missing, fs.ErrNotExist) || filepath.Dir(dir) == dir {
+			return fmt.Errorf("docker: state %s: %w", state, err)
+		}
 		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
 		p, err = filepath.EvalSymlinks(dir)
-	}
-	if err != nil {
-		return err
 	}
 	if p = filepath.Join(p, rest); within(ws, p) || within(p, ws) {
 		return fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)

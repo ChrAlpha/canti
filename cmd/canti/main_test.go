@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -258,13 +259,15 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 
 func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 	for _, layout := range []struct {
-		name   string
-		paths  func(workspace, link string) (string, string)
-		absent bool
+		name     string
+		paths    func(workspace, link string) (string, string)
+		absent   bool
+		existing bool
 	}{
-		{"inside", func(ws, _ string) (string, string) { return ws, filepath.Join(ws, "state") }, true},
-		{"containing", func(ws, _ string) (string, string) { return ws, filepath.Dir(ws) }, false},
-		{"inside a linked workspace", func(_, link string) (string, string) { return link, filepath.Join(link, "state") }, true},
+		{"inside", func(ws, _ string) (string, string) { return ws, filepath.Join(ws, "state") }, true, false},
+		{"containing", func(ws, _ string) (string, string) { return ws, filepath.Dir(ws) }, false, false},
+		{"inside a linked workspace", func(_, link string) (string, string) { return link, filepath.Join(link, "state") }, true, false},
+		{"inside, holding a journal", func(ws, _ string) (string, string) { return filepath.Dir(ws), filepath.Join(filepath.Dir(ws), "state") }, false, true},
 	} {
 		for _, command := range []struct {
 			name string
@@ -275,24 +278,38 @@ func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 			{"chat", []string{"chat"}},
 		} {
 			t.Run(layout.name+"/"+command.name, func(t *testing.T) {
-				f := newFixture(t, nil)
+				f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 				link := filepath.Join(t.TempDir(), "workspace")
 				if err := os.Symlink(f.workspace, link); err != nil {
 					t.Fatal(err)
 				}
 				workspace, state := layout.paths(f.workspace, link)
-				tree := func() (paths []string) {
+				if layout.existing {
+					if r := f.cli(nil, "run", "-session", "s", "-input", "first", "-goal", "g"); r.code != exitOK || f.state != state {
+						t.Fatalf("run in the fixture's workspace = %d\nstderr: %s", r.code, r.stderr)
+					}
+				}
+				tree := func() (files map[string]string) {
+					files = map[string]string{}
 					for _, dir := range []string{filepath.Dir(f.workspace), filepath.Dir(link)} {
-						if err := filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
-							paths = append(paths, p)
-							return err
+						if err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+							if err != nil {
+								return err
+							}
+							files[p] = info.ModTime().String()
+							if info.Mode().IsRegular() {
+								data, err := os.ReadFile(p)
+								files[p] += string(data)
+								return err
+							}
+							return nil
 						}); err != nil {
 							t.Fatal(err)
 						}
 					}
-					return paths
+					return files
 				}
-				before := tree()
+				before, requests := tree(), len(f.model.requests())
 				r := f.cli(nil, command.args[0], slices.Concat(command.args[1:], []string{"-workspace", workspace, "-state", state})...)
 				if r.code != exitError || !strings.Contains(r.stderr, "overlap") {
 					t.Fatalf("%s = %d\nstderr: %s", command.name, r.code, r.stderr)
@@ -300,13 +317,21 @@ func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 				if _, err := os.Stat(state); layout.absent && !os.IsNotExist(err) {
 					t.Errorf("state directory inside the workspace: %v", err)
 				}
-				if _, err := os.Stat(filepath.Join(state, "history")); !os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(state, "history")); !layout.existing && !os.IsNotExist(err) {
 					t.Errorf("history directory of the refused state: %v", err)
 				}
-				if after := tree(); !slices.Equal(after, before) {
-					t.Errorf("the refusal changed the filesystem from %q to %q", before, after)
+				after := tree()
+				for _, p := range slices.Sorted(maps.Keys(after)) {
+					if b, ok := before[p]; !ok || b != after[p] {
+						t.Errorf("the refusal created or changed %s", p)
+					}
 				}
-				if len(f.model.requests()) != 0 {
+				for p := range before {
+					if _, ok := after[p]; !ok {
+						t.Errorf("the refusal removed %s", p)
+					}
+				}
+				if len(f.model.requests()) != requests {
 					t.Error("the model was called")
 				}
 			})
