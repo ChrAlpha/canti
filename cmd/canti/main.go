@@ -82,6 +82,7 @@ var commands = map[string]func(*flag.FlagSet, *app) action{
 type app struct {
 	stdout, stderr   io.Writer
 	display          *stderrWriter
+	outcome          strings.Builder
 	log              *slog.Logger
 	workspace, state string
 	runID            string
@@ -180,6 +181,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			a.cred, a.credErr = credentials()
 		}
 		code, err = act(ctx)
+		a.flushOutcome()
 	}
 	if err != nil {
 		var out strings.Builder

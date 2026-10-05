@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func TestStderrWriterOrdered(t *testing.T) {
@@ -312,6 +313,37 @@ func TestBlockedStderrDeliversTheFinalLinesOnceDrained(t *testing.T) {
 				t.Errorf("exit %d, want %d", got, code)
 			}
 		})
+	}
+}
+
+func TestBlockedStderrNeverKeepsTheWorkspaceLocked(t *testing.T) {
+	f := newFixture(t, nil)
+	held := f.model.holdRequests()
+	cmd, _, stderr := startCLIWithBlockedStderr(t, nil, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+	waitFor(t, func() bool { return len(held) > 0 })
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
+		if err != nil {
+			return false
+		}
+		defer store.Close()
+		run, err := store.LastRun(context.Background())
+		if err != nil {
+			return false
+		}
+		snap, err := store.Latest(context.Background(), run.ID)
+		return err == nil && snap.State.Phase == core.PhaseStopped
+	})
+	r := f.cli(nil, "stop")
+	go io.Copy(io.Discard, stderr)
+	if err := cmd.Wait(); err != nil && cmd.ProcessState.ExitCode() != exitStopped {
+		t.Fatal(err)
+	}
+	if r.code != exitStopped {
+		t.Fatalf("stop while the stopped run reports to a blocked stderr = %+v, want exit %d", r, exitStopped)
 	}
 }
 

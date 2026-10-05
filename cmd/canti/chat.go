@@ -160,6 +160,7 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
+					a.flushOutcome()
 					discardInput = terminal
 					select {
 					case displayErr := <-a.displayFailure:

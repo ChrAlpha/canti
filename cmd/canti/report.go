@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -109,12 +110,14 @@ func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, func(), err
 }
 
 // report prints the outcome of the run at snap and returns its exit status,
-// or active while the run is still active.
+// or active while the run is still active. Behind a stderr queue it keeps the
+// lines for flushOutcome, so that they never wait on stderr while the
+// workspace is locked.
 func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) {
 	s := snap.State
 	out := a.stderr
 	if a.display != nil {
-		out = finalStderr{a.display}
+		out = &a.outcome
 	}
 	switch {
 	case err != nil:
@@ -141,4 +144,13 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 	}
 	fmt.Fprintf(out, "canti: run %s is %s; continue it with \"canti %s -run %[1]s\".\n", s.RunID, s.Phase, next)
 	return active, nil
+}
+
+// flushOutcome writes the lines report kept, in one write that waits at most
+// stderrFinalTime; call it once the workspace is unlocked.
+func (a *app) flushOutcome() {
+	if a.display != nil && a.outcome.Len() > 0 {
+		io.WriteString(finalStderr{a.display}, a.outcome.String())
+		a.outcome.Reset()
+	}
 }
