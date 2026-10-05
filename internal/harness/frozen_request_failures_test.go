@@ -33,6 +33,20 @@ func failureScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "handover-gate", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
+				corpusDecision(core.Exec, "ls /workspace"),
+				corpusDecision(core.Exec, "cat go.mod"),
+				handover(1),
+				corpusDecision(core.Return, "I have not read go.mod yet."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			marks: map[string][]string{
+				"run1-step03-rev1.json": {"### Step 2\nCommand:\n```\ncat go.mod\n```\nExecution: exited, exit code 1\n",
+					"Preview:\n```\nContext action failed: handover is required before any more work; use canti:handover\n```\n", "## Handover required\n"},
+				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n"},
+			},
+		},
+		{
 			name: "operator-resolution", limits: stepLimits,
 			finals: map[string]harness.Job{
 				"make build":     {Status: harness.JobFailedToStart, Output: harness.ArtifactRef{Detail: `job never started: exec: "make": executable file not found in $PATH`}},
