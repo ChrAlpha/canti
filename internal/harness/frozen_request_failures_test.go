@@ -12,9 +12,28 @@ import (
 func failureScenarios() []frozenScenario {
 	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	partial := func(detail string) harness.ArtifactRef { return harness.ArtifactRef{Available: true, Detail: detail} }
-	failing, exit := "--- FAIL: TestParse (0.00s)\n    parse_test.go:12: unexpected token \"}\"\nFAIL\n", 2
+	failing, exit, zero := "--- FAIL: TestParse (0.00s)\n    parse_test.go:12: unexpected token \"}\"\nFAIL\n", 2, 0
 	kept := fmt.Sprintf("kept %d of 9000 bytes", len(failing))
 	return []frozenScenario{
+		{
+			name: "operator-resolution", limits: stepLimits,
+			finals: map[string]harness.Job{
+				"make build":     {Status: harness.JobFailedToStart, Output: harness.ArtifactRef{Detail: `job never started: exec: "make": executable file not found in $PATH`}},
+				"go build ./...": {Status: harness.JobUnknown, Output: harness.ArtifactRef{Detail: "container state is unavailable"}},
+			},
+			runs: []frozenRun{{id: corpusRun, goal: "Build the project and report the result.", replies: []string{
+				corpusDecision(core.Exec, "make build"),
+				corpusDecision(core.Exec, "go build ./..."),
+				corpusDecision(core.Return, "go build ./... succeeds; make is not installed."),
+			}, resolve: &harness.Observation{Execution: core.ExecutionExited, ExitCode: &zero, Preview: "Checked by hand: go build ./... finished without errors.",
+				Output: harness.ArtifactRef{Detail: "resolved by operator"}},
+				steps: []string{"1 failed_to_start output unavailable", "2 exited 0 resolved output unavailable"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"Execution: failed_to_start\nOutput: 0 bytes, incomplete, unavailable (job never started: exec: \"make\": ", "Preview: empty\n"},
+				"run1-step03-rev1.json": {"Execution: exited, exit code 0, set by explicit resolution\nOutput: 0 bytes, incomplete, unavailable (resolved by operator)\n" +
+					"Preview:\n```\nChecked by hand: "},
+			},
+		},
 		{
 			name: "execution-failures", limits: stepLimits,
 			outputs: map[string]string{"go test ./...": failing, "go test -run TestSlow ./...": "=== RUN   TestSlow\n", "go test -run TestFlaky ./...": "=== RUN   TestFlaky\n"},
