@@ -465,6 +465,30 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 	}
 }
 
+func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	imports := t.TempDir()
+	p := startPTYChat(t, f, nil, "-history-imports", imports)
+	pos := p.await(t, "ready", 0)
+	p.send(t, "one\r")
+	pos = p.await(t, "running", pos)
+	p.await(t, "first answer", pos)
+	p.await(t, "ready", pos)
+	if err := os.Remove(imports); err != nil {
+		t.Fatal(err)
+	}
+	p.send(t, "two\r")
+	p.finish(t, exitUsage)
+	out := p.text()
+	altEnd := strings.LastIndex(out, "\x1b[?1049l")
+	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti chat: history imports: ") || !strings.Contains(out[altEnd:], "Usage: canti chat [flags]") {
+		t.Fatalf("usage advice absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
+	}
+	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+		t.Fatalf("an input was submitted after no input fit: %+v", s)
+	}
+}
+
 func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
 	t.Setenv("PATH", t.TempDir())

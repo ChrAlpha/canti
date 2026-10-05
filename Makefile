@@ -27,6 +27,7 @@ PTY_TESTS = \
 	TestChatPTYBusyPasteTailAfterReturnIsDiscarded \
 	TestChatPTYBusyScrollDoesNotQueueInput \
 	TestChatPTYDisplayFailureWaitsForCancellation \
+	TestChatPTYEndsWithUsageWhenNoInputFits \
 	TestChatPTYExitPreservesCompleteTranscript \
 	TestChatPTYHangupCancelsTheDockerJob \
 	TestChatPTYHangupStopsTheActiveRun \

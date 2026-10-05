@@ -192,7 +192,7 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.addTranscript("\nerror: " + msg.err.Error() + "\n")
 		}
-		if m.exitAfterRun || msg.sig != nil && msg.sig != os.Interrupt || msg.err != nil && msg.code != exitUsage || msg.code != exitOK && msg.code != exitStopped && msg.code != exitUsage {
+		if m.exitAfterRun || msg.sig != nil && msg.sig != os.Interrupt || msg.err != nil && msg.code != exitUsage || msg.code != exitOK && msg.code != exitStopped && msg.code != exitUsage || errors.As(msg.err, new(errNoInputFits)) {
 			if m.err == nil {
 				m.err = msg.err
 			}

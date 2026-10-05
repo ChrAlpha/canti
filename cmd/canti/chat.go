@@ -102,7 +102,7 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 						}
 					}
 					if _, _, fixedErr := newRun("chat", fixed, s, time.Now()); fixedErr != nil {
-						return exitError, fixedErr, a.signal
+						return exitUsage, errNoInputFits{fixedErr}, a.signal
 					}
 				}
 				return code, err, a.signal
@@ -196,6 +196,10 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		}
 	}
 }
+
+// errNoInputFits ends the TUI with a usage error, as it ends line mode, when
+// the constraints and flags leave no room for any input.
+type errNoInputFits struct{ error }
 
 // inherited returns the constraints the next input of session inherits.
 func inherited(ctx context.Context, a *app, session string) (string, error) {
