@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -254,6 +255,104 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 	}
 	if snap, err := store.Latest(ctx, legacy.ID); err != nil || snap.Seq != 0 {
 		t.Errorf("the refused run has %d transitions, %v", snap.Seq, err)
+	}
+}
+
+// TestRunsOfAnotherContextVersionStayReadableAndClosable requires that a run
+// whose stored config records another context version, or none, can be
+// inspected and stopped, and that once it is closed the next run, alone or
+// in a session, is admitted after it.
+func TestRunsOfAnotherContextVersionStayReadableAndClosable(t *testing.T) {
+	for _, tc := range []struct{ name, version string }{{"missing", ""}, {"zero", "0"}, {"later", "2"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+			if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
+				t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+			}
+			frozen, steps := f.status(), f.history()
+			setContextVersion(t, f.state, frozen.Run.ID, tc.version)
+			if s := f.status(); s.Run.ID != frozen.Run.ID || s.Seq != frozen.Seq || s.Phase != core.PhaseRequestFrozen {
+				t.Errorf("status = %+v\nwant %+v", s, frozen)
+			}
+			if h := f.history(); !reflect.DeepEqual(h, steps) {
+				t.Errorf("history = %v, want %v", kinds(h), kinds(steps))
+			}
+			var report struct {
+				RunID string `json:"run_id"`
+			}
+			if r := f.cli(nil, "context"); r.code != exitOK || json.Unmarshal([]byte(r.stdout), &report) != nil || report.RunID != frozen.Run.ID {
+				t.Errorf("context = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			if r := f.cli(nil, "context", "-raw"); r.code != exitOK || !json.Valid([]byte(r.stdout)) {
+				t.Errorf("context -raw = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitError || !strings.Contains(r.stderr, "is request_frozen: resume or stop it first") {
+				t.Errorf("run beside the open run = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(nil, "stop"); r.code != exitStopped {
+				t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if s := f.status(); s.Run.ID != frozen.Run.ID || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
+				t.Errorf("status after stop = %+v", s)
+			}
+			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("run after stop = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			input := []string{"run", "-session", "s", "-input", "first", "-goal", "first"}
+			if r := f.cli(nil, input[0], input[1:]...); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("first session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			first := f.status()
+			setContextVersion(t, f.state, first.Run.ID, tc.version)
+			if r := f.cli(nil, input[0], input[1:]...); r.code != exitOK || r.stdout != "done\n" {
+				t.Errorf("retried session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "second"); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("next session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			if s := f.status(); s.Run.ID == first.Run.ID || s.Run.SessionID != "s" || s.Run.SessionSeq != 2 || s.Phase != core.PhaseReturned {
+				t.Errorf("next session run = %+v", s)
+			}
+		})
+	}
+}
+
+// setContextVersion rewrites the stored config of run id to record context
+// version, or no context version when it is empty, as a run of another
+// context revision would.
+func setContextVersion(t *testing.T, state, id, version string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "canti.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var data []byte
+	var run harness.Run
+	var c map[string]json.RawMessage
+	err = db.QueryRow(`SELECT run FROM runs WHERE id = ?`, id).Scan(&data)
+	if err == nil {
+		err = json.Unmarshal(data, &run)
+	}
+	if err == nil {
+		err = json.Unmarshal(run.Config, &c)
+	}
+	if err == nil {
+		delete(c, "context_version")
+		if version != "" {
+			c["context_version"] = json.RawMessage(version)
+		}
+		run.Config, err = json.Marshal(c)
+	}
+	if err == nil {
+		data, err = json.Marshal(run)
+	}
+	if err == nil {
+		_, err = db.Exec(`UPDATE runs SET run = ? WHERE id = ?`, string(data), id)
+	}
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

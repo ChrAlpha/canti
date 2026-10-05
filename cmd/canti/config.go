@@ -144,9 +144,6 @@ func decodeConfig(run harness.Run, workspace string) (config, error) {
 	if err := d.Decode(&c); err != nil {
 		return c, fmt.Errorf("run %s has an unreadable config: %w; runs of an earlier revision are not supported, so use a fresh -state", run.ID, err)
 	}
-	if c.ContextVersion != contextVersion {
-		return c, fmt.Errorf("run %s uses an unsupported context version; use a fresh -state", run.ID)
-	}
 	if c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool" {
 		return c, fmt.Errorf("run %s has an unsupported decision format %q", run.ID, c.DecisionFormat)
 	}

@@ -45,7 +45,7 @@ func TestRemovedContextStrategiesAreRejected(t *testing.T) {
 	}
 }
 
-func TestResumeRejectsLegacyContextConfiguration(t *testing.T) {
+func TestDecodeConfigKeepsAnyStoredContextVersion(t *testing.T) {
 	s := parseSpec(t)
 	run, _, err := newRun("goal", "", s, time.Now())
 	if err != nil {
@@ -65,8 +65,16 @@ func TestResumeRejectsLegacyContextConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		want := s.config
+		want.ContextVersion, _ = version.(int)
+		if c, err := decodeConfig(run, s.config.Workspace); err != nil || c != want {
+			t.Fatalf("context version %v decodes as %+v, %v\nwant %+v", version, c, err, want)
+		}
+	}
+	for _, config := range []string{"", `{"context_version":2,"history":8}`} {
+		run.Config = []byte(config)
 		if _, err := decodeConfig(run, s.config.Workspace); err == nil {
-			t.Fatalf("accepted context version %v", version)
+			t.Errorf("accepted config %q", config)
 		}
 	}
 }
