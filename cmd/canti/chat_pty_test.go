@@ -467,11 +467,25 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 
 func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	release := make(chan struct{})
+	var releaseOnce, holdOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		holdOnce.Do(func() {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		})
+		f.model.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { releaseGate(); gate.Close() })
 	imports := t.TempDir()
-	p := startPTYChat(t, f, nil, "-history-imports", imports)
+	p := startPTYChat(t, f, nil, "-model-url", gate.URL, "-history-imports", imports)
 	pos := p.await(t, "ready", 0)
 	p.send(t, "one\r")
 	pos = p.await(t, "running", pos)
+	releaseGate()
 	p.await(t, "first answer", pos)
 	p.await(t, "ready", pos)
 	if err := os.Remove(imports); err != nil {
