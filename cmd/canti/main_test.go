@@ -257,14 +257,60 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 }
 
 func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
-	f := newFixture(t, nil)
-	state := filepath.Join(f.workspace, "state")
-	r := f.cli(nil, "run", "-goal", "g", "-state", state)
-	if r.code != exitError || !strings.Contains(r.stderr, "overlap") {
-		t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
-	}
-	if _, err := os.Stat(filepath.Join(state, "canti.db")); !os.IsNotExist(err) {
-		t.Errorf("journal inside the workspace: %v", err)
+	for _, layout := range []struct {
+		name   string
+		paths  func(workspace, link string) (string, string)
+		absent bool
+	}{
+		{"inside", func(ws, _ string) (string, string) { return ws, filepath.Join(ws, "state") }, true},
+		{"containing", func(ws, _ string) (string, string) { return ws, filepath.Dir(ws) }, false},
+		{"inside a linked workspace", func(_, link string) (string, string) { return link, filepath.Join(link, "state") }, true},
+	} {
+		for _, command := range []struct {
+			name string
+			args []string
+		}{
+			{"run", []string{"run", "-goal", "g"}},
+			{"run -session", []string{"run", "-session", "s", "-input", "i", "-goal", "g"}},
+			{"chat", []string{"chat"}},
+		} {
+			t.Run(layout.name+"/"+command.name, func(t *testing.T) {
+				f := newFixture(t, nil)
+				link := filepath.Join(t.TempDir(), "workspace")
+				if err := os.Symlink(f.workspace, link); err != nil {
+					t.Fatal(err)
+				}
+				workspace, state := layout.paths(f.workspace, link)
+				tree := func() (paths []string) {
+					for _, dir := range []string{filepath.Dir(f.workspace), filepath.Dir(link)} {
+						if err := filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
+							paths = append(paths, p)
+							return err
+						}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return paths
+				}
+				before := tree()
+				r := f.cli(nil, command.args[0], slices.Concat(command.args[1:], []string{"-workspace", workspace, "-state", state})...)
+				if r.code != exitError || !strings.Contains(r.stderr, "overlap") {
+					t.Fatalf("%s = %d\nstderr: %s", command.name, r.code, r.stderr)
+				}
+				if _, err := os.Stat(state); layout.absent && !os.IsNotExist(err) {
+					t.Errorf("state directory inside the workspace: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(state, "history")); !os.IsNotExist(err) {
+					t.Errorf("history directory of the refused state: %v", err)
+				}
+				if after := tree(); !slices.Equal(after, before) {
+					t.Errorf("the refusal changed the filesystem from %q to %q", before, after)
+				}
+				if len(f.model.requests()) != 0 {
+					t.Error("the model was called")
+				}
+			})
+		}
 	}
 }
 

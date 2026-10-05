@@ -246,6 +246,9 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
+		if err := docker.CheckLayout(a.workspace, a.state); err != nil {
+			return exitError, err
+		}
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
 			return exitError, err
 		}

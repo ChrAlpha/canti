@@ -24,6 +24,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
@@ -47,6 +48,9 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 		id := cmp.Or(*session, strings.ToLower(rand.Text()))
 		if !sqlite.ValidKey(id) {
 			return exitUsage, errors.New("-session must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
+		}
+		if err := docker.CheckLayout(a.workspace, a.state); err != nil {
+			return exitError, err
 		}
 		fixed := *constraints
 		if !explicit {

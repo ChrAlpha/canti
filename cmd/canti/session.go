@@ -8,11 +8,15 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/docker"
 )
 
 func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s spec, url string, once bool) (int, error) {
 	if session == "" || input == "" {
 		return exitUsage, errors.New("-session and -input are required together")
+	}
+	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
+		return exitError, err
 	}
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
 		return exitError, err

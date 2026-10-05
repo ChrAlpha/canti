@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -159,6 +160,33 @@ func New(cfg Config) (*Executor, error) {
 	}
 	cfg.Workspace, cfg.State, cfg.Mounts = ws, state, mounts
 	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}}, nil
+}
+
+// CheckLayout refuses a workspace and a state directory that overlap, as New
+// does, before the state directory exists and without touching the
+// filesystem: the state path resolves as its nearest existing ancestor
+// followed by the remaining components.
+func CheckLayout(workspace, state string) error {
+	ws, err := resolve(workspace)
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(state) {
+		return fmt.Errorf("docker: %q is not an absolute path", state)
+	}
+	dir, rest := filepath.Clean(state), ""
+	p, err := filepath.EvalSymlinks(dir)
+	for errors.Is(err, fs.ErrNotExist) && filepath.Dir(dir) != dir {
+		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
+		p, err = filepath.EvalSymlinks(dir)
+	}
+	if err != nil {
+		return err
+	}
+	if p = filepath.Join(p, rest); within(ws, p) || within(p, ws) {
+		return fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)
+	}
+	return nil
 }
 
 func resolve(path string) (string, error) {

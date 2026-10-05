@@ -116,6 +116,58 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 	}
 }
 
+func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   func(root, ws, link string) string
+		overlap bool
+	}{
+		{"apart", func(root, _, _ string) string { return filepath.Join(root, "a", "b", "state") }, false},
+		{"apart with a shared prefix", func(root, _, _ string) string { return filepath.Join(root, "ws-state") }, false},
+		{"inside", func(_, ws, _ string) string { return filepath.Join(ws, "a", "b", "state") }, true},
+		{"the workspace", func(_, ws, _ string) string { return ws }, true},
+		{"containing", func(root, _, _ string) string { return root }, true},
+		{"inside through a link", func(_, _, link string) string { return filepath.Join(link, "a", "state") }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			ws, link := filepath.Join(root, "ws"), filepath.Join(root, "workspace-link")
+			if err := os.Mkdir(ws, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(ws, link); err != nil {
+				t.Fatal(err)
+			}
+			tree := func() (paths []string) {
+				if err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+					paths = append(paths, p)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return paths
+			}
+			state, before := tc.state(root, ws, link), tree()
+			err := CheckLayout(link, state)
+			if (err != nil) != tc.overlap || err != nil && !strings.Contains(err.Error(), "overlap") {
+				t.Fatalf("CheckLayout(%s, %s) = %v, want an overlap %t", link, state, err, tc.overlap)
+			}
+			if after := tree(); !slices.Equal(after, before) {
+				t.Fatalf("CheckLayout changed %q to %q", before, after)
+			}
+			if err := os.MkdirAll(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := New(Config{Image: "i", Workspace: link, State: state}); (err != nil) != tc.overlap {
+				t.Fatalf("New() = %v once the state exists; CheckLayout predicted an overlap %t", err, tc.overlap)
+			}
+		})
+	}
+	if err := CheckLayout(t.TempDir(), "state"); err == nil {
+		t.Error("CheckLayout accepted a relative state directory")
+	}
+}
+
 func pair(args []string, flag, value string) bool {
 	for i := range len(args) - 1 {
 		if args[i] == flag && args[i+1] == value {
