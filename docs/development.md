@@ -219,6 +219,15 @@ change, rewrite them with
 `go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
 and review the diff.
 
+`TestLegacyJournals` reads and resumes every journal under
+`internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an
+unmodified historical `canti` binary wrote and whose `manifest.json` records
+how. A case is never rewritten: a new one gets a new name, and
+`go test -count=1 -tags legacygen -run LegacyJournalGenerate ./internal/harness -args -legacy-generate=<producer SHA>/<case>`
+builds its producer from the local Git history and writes it. When an
+intended change alters how the current code continues a case, update that
+case's expectation in the test, not the case.
+
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.
 Keep large outputs, credentials, databases, and local task state outside Git.
