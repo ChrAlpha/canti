@@ -47,6 +47,20 @@ func failureScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "stopped-session-run", limits: core.Limits{MaxSteps: 1, MaxAttempts: 3}, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			runs: []frozenRun{
+				{id: corpusRun, goal: "List /workspace.", replies: []string{corpusDecision(core.Exec, "ls /workspace")},
+					steps: []string{"1 exited 0 output complete"}, stop: core.StopStepsExhausted},
+				{id: corpusNextRun, goal: "What did the previous run find?", replies: []string{
+					corpusDecision(core.Return, "It listed go.mod and main.go before it ran out of steps."),
+				}},
+			},
+			marks: map[string][]string{
+				"run2-step01-rev1.json": {"## Earlier session dialogue\n",
+					"goal, steps, and result): stopped, reason steps_exhausted, recorded steps 1; no assistant return.\nEarlier user goal:\n```\nList /workspace.\n```\n"},
+			},
+		},
+		{
 			name: "operator-resolution", limits: stepLimits,
 			finals: map[string]harness.Job{
 				"make build":     {Status: harness.JobFailedToStart, Output: harness.ArtifactRef{Detail: `job never started: exec: "make": executable file not found in $PATH`}},
