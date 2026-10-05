@@ -323,10 +323,11 @@ func TestBlockedStderrNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	waitFor(t, func() bool { return len(held) > 0 })
 	ended := make(chan struct{})
 	go func() { cmd.Wait(); close(ended) }()
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Fatal(err)
-	}
-	awaitUnlockedWhileRunning(t, f.state, ended)
+	awaitUnlockedWhileRunning(t, f.state, ended, func() {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+	})
 	out, err := io.ReadAll(stderr)
 	<-ended
 	if err != nil {
@@ -345,12 +346,13 @@ func TestBlockedStdoutNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	}
 	defer r.Close()
 	fillPipe(t, w)
-	_, wait := f.startIO(nil, w, nil, "run", "-goal", "g")
+	url, release := holdFirstAnswer(t, f)
+	_, wait := f.startIO(nil, w, nil, "run", "-goal", "g", "-model-url", url)
 	w.Close()
 	ended := make(chan struct{})
 	var res result
 	go func() { res = wait(); close(ended) }()
-	awaitUnlockedWhileRunning(t, f.state, ended)
+	awaitUnlockedWhileRunning(t, f.state, ended, release)
 	out, err := io.ReadAll(r)
 	<-ended
 	if err != nil {
@@ -420,37 +422,45 @@ func cliCommand(t *testing.T, env []string, args ...string) *exec.Cmd {
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	if _, ok := os.LookupEnv("GORACE"); !ok {
-		cmd.Env = append(cmd.Env, "GORACE=atexit_sleep_ms=0")
+	gorace := "atexit_sleep_ms=0"
+	if v := os.Getenv("GORACE"); v != "" {
+		gorace = v + " " + gorace
 	}
+	cmd.Env = append(cmd.Env, "GORACE="+gorace)
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
 	return cmd
 }
 
-// awaitUnlockedWhileRunning fails unless the workspace lock of state can be
-// taken while the command, which ends when ended closes, still runs, and keeps
-// running for a while after: the command waits on its blocked output only
-// once it has released the lock.
-func awaitUnlockedWhileRunning(t *testing.T, state string, ended <-chan struct{}) {
+// awaitUnlockedWhileRunning fails unless the command, which ends when ended
+// closes, first holds the workspace lock of state, then, after proceed, lets
+// it be taken while it still runs, and keeps running for a while after: the
+// command waits on its blocked output only once it has released the lock.
+func awaitUnlockedWhileRunning(t *testing.T, state string, ended <-chan struct{}, proceed func()) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-ended:
-			t.Fatal("the command ended before it released the workspace lock while its output was blocked")
-		case <-deadline:
-			t.Fatal("the command kept the workspace locked while its output was blocked")
-		default:
+	locked := func() (bool, bool) {
+		lock, err := os.OpenFile(filepath.Join(state, "lock"), os.O_RDWR, 0)
+		if err != nil {
+			return false, false
 		}
-		if lock, err := os.OpenFile(filepath.Join(state, "lock"), os.O_RDWR, 0); err == nil {
-			err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-			lock.Close()
-			if err == nil {
-				break
+		defer lock.Close()
+		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		return errors.Is(err, syscall.EWOULDBLOCK), err == nil
+	}
+	wait := func(what string, done func() bool) {
+		deadline := time.After(5 * time.Second)
+		for !done() {
+			select {
+			case <-ended:
+				t.Fatalf("the command ended before %s", what)
+			case <-deadline:
+				t.Fatalf("the command never %s", what)
+			case <-time.After(5 * time.Millisecond):
 			}
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
+	wait("held the workspace lock", func() bool { held, _ := locked(); return held })
+	proceed()
+	wait("released the workspace lock while its output was blocked", func() bool { _, free := locked(); return free })
 	select {
 	case <-ended:
 		t.Fatal("the command ended as soon as it released the workspace lock, so it did not wait on its output unlocked")
@@ -484,9 +494,11 @@ func startCLIWithBlockedStderr(t *testing.T, stdin io.Reader, env []string, args
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	if _, ok := os.LookupEnv("GORACE"); !ok {
-		cmd.Env = append(cmd.Env, "GORACE=atexit_sleep_ms=0")
+	gorace := "atexit_sleep_ms=0"
+	if v := os.Getenv("GORACE"); v != "" {
+		gorace = v + " " + gorace
 	}
+	cmd.Env = append(cmd.Env, "GORACE="+gorace)
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
 	var stdout bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, w

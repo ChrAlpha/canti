@@ -238,9 +238,11 @@ func startCLIWith(t *testing.T, stdin io.Reader, stdout io.Writer, env []string,
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	if _, ok := os.LookupEnv("GORACE"); !ok {
-		cmd.Env = append(cmd.Env, "GORACE=atexit_sleep_ms=0")
+	gorace := "atexit_sleep_ms=0"
+	if v := os.Getenv("GORACE"); v != "" {
+		gorace = v + " " + gorace
 	}
+	cmd.Env = append(cmd.Env, "GORACE="+gorace)
 	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
 	var out, stderr bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, cmp.Or(stdout, io.Writer(&out)), &stderr
