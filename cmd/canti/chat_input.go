@@ -345,12 +345,19 @@ func (g *chatInputGate) frameLength(p []byte) int {
 	return 0
 }
 
+// startChatInput reads terminal f through a non-blocking description of its
+// own: a blocking read of a terminal waits while another process blocks in a
+// read of it. When f cannot be reopened, it reads f itself, with VMIN 0 and a
+// poll before each read, which only such a reader can still delay.
 func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() error, error) {
 	restore, err := rawInput(f.Fd())
 	if err != nil {
 		return nil, nil, err
 	}
-	fd := int(f.Fd())
+	fd, release := int(f.Fd()), func() error { return nil }
+	if private, err := reopenNonblocking(fd, unix.O_RDONLY); err == nil {
+		fd, release = private, func() error { return unix.Close(private) }
+	}
 	g := &chatInputGate{fd: fd}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -404,7 +411,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	cleanup := func() error {
 		close(stop)
 		<-done
-		return restore()
+		return errors.Join(release(), restore())
 	}
 	return g, cleanup, nil
 }

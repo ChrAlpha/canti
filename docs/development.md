@@ -167,11 +167,13 @@ with an error; abrupt process loss may still require `canti resume` or
 
 Chat never changes the file status flags of the descriptors it inherits. It
 writes to a pipe or terminal through its own reopened description, so that a
-display write waits at most 250 ms. When that description cannot be opened, as
-for a pipe or terminal of another user, without `/proc`, or for a
-pseudo-terminal master, chat says so once on standard error and writes to the
-inherited descriptor, which can then block it; a hung-up terminal output still
-ends chat with an error before it touches any state.
+display write waits at most 250 ms, and the TUI reads its terminal the same
+way. When that description cannot be opened, as for a pipe or terminal of
+another user, without `/proc`, or for a pseudo-terminal master, chat says so
+once on standard error and writes to the inherited descriptor, which can then
+block it, and the TUI reads the inherited terminal after a poll, which another
+process blocked in a read of that terminal can delay; a hung-up terminal
+output still ends chat with an error before it touches any state.
 
 Empty input is skipped. The TUI editor caps inserted text at its character
 limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted

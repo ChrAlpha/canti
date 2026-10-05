@@ -36,10 +36,6 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 	}
 	switch stat.Mode & unix.S_IFMT {
 	case unix.S_IFCHR, unix.S_IFIFO:
-		if _, err := unix.IoctlGetInt(out.fd, unix.TIOCGPTN); err == nil {
-			out.blocking = errors.New("a pseudo-terminal master opens a new terminal when reopened")
-			return out, func() {}, nil
-		}
 		fd, err := reopenNonblocking(out.fd, unix.O_WRONLY)
 		switch {
 		case errors.Is(err, unix.EIO):
@@ -60,8 +56,12 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 // O_NONBLOCK on fd itself would change the one it shares with the shell, and a
 // signal can keep the process from restoring it. The reopen needs /proc and
 // the access the inode's permissions grant, which a descriptor passed from
-// another user lacks; newChatOutput then keeps the inherited description.
+// another user lacks, and a pseudo-terminal master would open a new terminal;
+// chat then keeps the inherited description.
 func reopenNonblocking(fd, mode int) (int, error) {
+	if _, err := unix.IoctlGetInt(fd, unix.TIOCGPTN); err == nil {
+		return -1, errors.New("a pseudo-terminal master opens a new terminal when reopened")
+	}
 	path := fmt.Sprintf("/proc/self/fd/%d", fd)
 	private, err := unix.Open(path, mode|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
 	if err != nil {

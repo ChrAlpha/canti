@@ -14,6 +14,51 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestChatInputReadsItsOwnNonblockingDescription(t *testing.T) {
+	for _, unreopenable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reopened", true: "unreopenable terminal"}[unreopenable], func(t *testing.T) {
+			if unreopenable && os.Geteuid() == 0 {
+				t.Skip("root reopens a terminal whatever its mode")
+			}
+			master, slave, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer master.Close()
+			defer slave.Close()
+			if unreopenable {
+				if err := unix.Fchmod(int(slave.Fd()), 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inherited := int(slave.Fd())
+			flags, err := unix.FcntlInt(uintptr(inherited), unix.F_GETFL, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g, cleanup, err := startChatInput(slave, func(tea.Msg) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fd := g.fd
+			own, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+			if cleanupErr := cleanup(); err != nil || cleanupErr != nil {
+				t.Fatal(err, cleanupErr)
+			}
+			if after, err := unix.FcntlInt(uintptr(inherited), unix.F_GETFL, 0); err != nil || after != flags {
+				t.Fatalf("inherited file status flags %#x, then %#x: %v", flags, after, err)
+			}
+			_, closedErr := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+			switch {
+			case unreopenable && fd != inherited:
+				t.Fatalf("read descriptor %d, want the inherited %d of an unreopenable terminal", fd, inherited)
+			case !unreopenable && (fd == inherited || own&unix.O_NONBLOCK == 0 || !errors.Is(closedErr, unix.EBADF)):
+				t.Fatalf("read descriptor %d (inherited %d) with flags %#x, closed by cleanup: %v", fd, inherited, own, closedErr)
+			}
+		})
+	}
+}
+
 func TestChatInputTerminalReadNeverWaitsForInput(t *testing.T) {
 	master, slave, err := pty.Open()
 	if err != nil {

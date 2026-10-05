@@ -22,6 +22,7 @@ PTY_TESTS = \
 	TestChatInputContinuesDroppingPasteAcrossRunCompletion \
 	TestChatInputDrainedInterruptReachesProgram \
 	TestChatInputReadsABlockingTerminalOnlyWhenInputIsReady \
+	TestChatInputReadsItsOwnNonblockingDescription \
 	TestChatInputTerminalReadNeverWaitsForInput \
 	TestChatKeepsInheritedDescriptorsBlocking \
 	TestChatPromptWriteBackpressure \
