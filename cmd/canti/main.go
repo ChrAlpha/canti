@@ -165,14 +165,14 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case errors.Is(err, flag.ErrHelp):
 		help(stdout)
 		return exitOK
-	case err != nil:
-		help(&parseErr)
+	case err != nil || fs.NArg() > 0:
+		if err == nil {
+			fmt.Fprintf(&parseErr, "canti %s: unexpected argument %q\n", name, fs.Arg(0))
+		}
+		var usage strings.Builder
+		help(&usage)
 		setupNote(parseErr.String())
-		return exitUsage
-	case fs.NArg() > 0:
-		fmt.Fprintf(&parseErr, "canti %s: unexpected argument %q\n", name, fs.Arg(0))
-		help(&parseErr)
-		setupNote(parseErr.String())
+		setupNote(usage.String())
 		return exitUsage
 	}
 	final := stderr

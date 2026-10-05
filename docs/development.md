@@ -99,8 +99,8 @@ program, so use the binary to inspect its exact exit code.
 Outside the TUI, a blocked standard error does not delay a run or its cleanup:
 diagnostics and progress lines that overflow a bounded queue are dropped and
 counted in a later notice, while a flag error with its usage, a command's
-outcome and recovery advice, and its final error line each wait up to 1 s to
-be written, with the workspace unlocked.
+outcome and recovery advice, and its final error line are written with the
+workspace unlocked, each write waiting at most 1 s.
 
 `run`, `chat`, and `resume` read the credential from `ANTHROPIC_API_KEY`, or else
 `ANTHROPIC_AUTH_TOKEN`, and the API base URL from `-model-url`, or else

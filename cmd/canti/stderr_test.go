@@ -381,6 +381,16 @@ func TestBlockedStderrBoundsAFlagError(t *testing.T) {
 	}
 }
 
+func TestALongFlagErrorKeepsTheWholeUsage(t *testing.T) {
+	f := newFixture(t, nil)
+	for _, arg := range []string{"-" + strings.Repeat("x", 5000), strings.Repeat("y", 5000)} {
+		r := f.cli(nil, "status", arg)
+		if r.code != exitUsage || !strings.Contains(r.stderr, "Usage: canti status [flags]") || !strings.HasSuffix(r.stderr, "workspace directory of the run (default \".\")\n") {
+			t.Fatalf("status %.12q...: exit %d, stderr tail %q", arg, r.code, r.stderr[max(0, len(r.stderr)-160):])
+		}
+	}
+}
+
 func TestChatSetupNoteLeadsAStderrItWaitedOn(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reopens a pipe whatever its mode")
