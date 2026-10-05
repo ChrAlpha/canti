@@ -153,7 +153,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
 			},
 		},
-	}, edgeScenarios())
+	}, edgeScenarios(), failureScenarios())
 }
 
 // TestFrozenRequestBodies records the exact request body committed for each
