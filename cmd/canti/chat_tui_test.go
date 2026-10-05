@@ -183,6 +183,37 @@ func TestChatTUIFailuresDoNotEscalateCancellation(t *testing.T) {
 	}
 }
 
+func TestChatTUIContinuesAfterAnInputThatAloneDoesNotFit(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	fd := int(r.Fd())
+	if err := unix.SetNonblock(fd, true); err != nil {
+		t.Fatal(err)
+	}
+	g := &chatInputGate{fd: fd}
+	g.enterBusy()
+	epoch := g.currentEpoch()
+	m := newChatTUI("session", nil, nil, nil, nil, nil, new(chatDisplay))
+	m.inputGate, m.busy = g, true
+	updated, cmd := m.Update(chatDone{code: exitUsage, err: errors.New("-context-bytes: the input needs 300000 bytes")})
+	m = updated.(chatTUI)
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("an input that alone does not fit ended chat")
+		}
+	}
+	g.mu.Lock()
+	reopened := !g.busy && g.epoch != epoch
+	g.mu.Unlock()
+	if m.code != exitOK || m.err != nil || m.busy || !reopened || !strings.Contains(m.transcript, "error: -context-bytes: the input needs 300000 bytes") {
+		t.Fatalf("after an input that alone does not fit: code=%d err=%v busy=%v reopened=%v transcript=%q", m.code, m.err, m.busy, reopened, m.transcript)
+	}
+}
+
 func TestChatTUIPreparesEachAcceptedInputBeforeSubmit(t *testing.T) {
 	var prepared atomic.Int32
 	m := newChatTUI("session", func() { prepared.Add(1) }, nil, nil, nil, nil, new(chatDisplay))
