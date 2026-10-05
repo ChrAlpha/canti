@@ -9,9 +9,71 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
+
+func TestChatInputReadsABlockingTerminalOnlyWhenInputIsReady(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	if _, err := term.MakeRaw(slave.Fd()); err != nil {
+		t.Fatal(err)
+	}
+	g := &chatInputGate{fd: int(slave.Fd())}
+	read := func() (int, bool, error) {
+		type result struct {
+			n     int
+			ready bool
+			err   error
+		}
+		got := make(chan result, 1)
+		go func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			n, ready, err := g.readReadyLocked(make([]byte, 16))
+			got <- result{n, ready, err}
+		}()
+		select {
+		case r := <-got:
+			return r.n, r.ready, r.err
+		case <-time.After(2 * time.Second):
+			master.Write([]byte("x"))
+			t.Fatal("a read of the blocking terminal waited for input it did not have")
+			return 0, false, nil
+		}
+	}
+	if n, ready, err := read(); n != 0 || ready || err != nil {
+		t.Fatalf("read without input = %d, %v, %v", n, ready, err)
+	}
+	if _, err := master.Write([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n, ready, err := read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			if n != 2 {
+				t.Fatalf("read %d bytes of the 2 written", n)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("written input never became ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n, ready, err := read(); n != 0 || ready || err != nil {
+		t.Fatalf("read after the input was taken = %d, %v, %v", n, ready, err)
+	}
+}
 
 func TestChatOutputBackpressureDiscardsInputBeforeReopening(t *testing.T) {
 	inR, inW, err := os.Pipe()

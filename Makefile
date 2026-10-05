@@ -21,6 +21,7 @@ PTY_TESTS = \
 	TestChatInputContinuesDroppingPageKeyAcrossRunCompletion \
 	TestChatInputContinuesDroppingPasteAcrossRunCompletion \
 	TestChatInputDrainedInterruptReachesProgram \
+	TestChatInputReadsABlockingTerminalOnlyWhenInputIsReady \
 	TestChatKeepsInheritedDescriptorsBlocking \
 	TestChatPromptWriteBackpressure \
 	TestChatPTYBusyInputDoesNotBecomeNextRun \

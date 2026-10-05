@@ -115,24 +115,10 @@ func (g *chatInputGate) finishDrainLocked() error {
 func (g *chatInputGate) drainAvailableLocked() error {
 	buf := make([]byte, 4096)
 	total := 0
-	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
 	for {
-		ready, err := unix.Poll(fds, 0)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if ready == 0 {
+		n, ready, err := g.readReadyLocked(buf)
+		if err == nil && !ready || errors.Is(err, syscall.EAGAIN) {
 			return nil
-		}
-		n, err := unix.Read(g.fd, buf)
-		if errors.Is(err, syscall.EAGAIN) {
-			return nil
-		}
-		if errors.Is(err, syscall.EINTR) {
-			continue
 		}
 		if err != nil {
 			return err
@@ -153,6 +139,28 @@ func (g *chatInputGate) drainAvailableLocked() error {
 				g.pendingInterrupts++
 			}
 		}
+	}
+}
+
+// readReadyLocked reads the terminal input that a poll under g.mu finds,
+// without waiting on the inherited blocking descriptor: every reader of the
+// gate holds g.mu, so no read inside chat takes the input between the poll
+// and the read. It reports false, with no error, when there is none.
+func (g *chatInputGate) readReadyLocked(buf []byte) (int, bool, error) {
+	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
+	for {
+		ready, err := unix.Poll(fds, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil || ready == 0 {
+			return 0, false, err
+		}
+		n, err := unix.Read(g.fd, buf)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return n, true, err
 	}
 }
 
@@ -347,13 +355,13 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 				return
 			}
 			g.mu.Lock()
-			read, err := unix.Read(fd, buf)
+			read, ready, err := g.readReadyLocked(buf)
 			batch := chatKeys{}
 			if err == nil && read > 0 {
 				batch = g.decodeLocked(buf[:read])
 			}
 			g.mu.Unlock()
-			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+			if err == nil && !ready || errors.Is(err, syscall.EAGAIN) {
 				continue
 			}
 			if err != nil || read == 0 {
