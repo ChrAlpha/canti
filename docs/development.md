@@ -34,7 +34,7 @@ Cloning requires repository access while the repository is private.
 | --- | --- |
 | `make check` | Read-only formatting validation, vet, the test-name check, and all unit tests |
 | `make fmt` | Check `gofmt` output; does not rewrite files |
-| `make vet` | `go vet ./...`, then `go vet -tags integration,live ./...` so tagged test files compile |
+| `make vet` | `go vet ./...`, then `go vet -tags integration,live,legacygen ./...` so tagged test files compile |
 | `make test` | `go test ./...` |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
 | `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
@@ -55,9 +55,10 @@ failure. Do not run a repository-wide rewrite as part of an unrelated change.
 
 Build tags keep slow and paid tests out of the default run. `integration`
 marks tests that need Docker or take tens of seconds; CI runs them in
-separate jobs. `live` marks `internal/harness/anthropic/live_test.go`, which
-sends one real request and is never part of `make check`, `make integration`,
-or CI:
+separate jobs. `legacygen` marks the generator of the legacy journal corpus,
+which `make vet` compiles and nothing runs. `live` marks
+`internal/harness/anthropic/live_test.go`, which sends one real request and is
+never part of `make check`, `make integration`, or CI:
 
 ```sh
 ANTHROPIC_API_KEY=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
