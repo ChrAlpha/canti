@@ -170,10 +170,12 @@ writes to a pipe or terminal through its own reopened description, so that a
 display write waits at most 250 ms, and the TUI reads its terminal the same
 way. When that description cannot be opened, as for a pipe or terminal of
 another user, without `/proc`, or for a pseudo-terminal master, chat says so
-once on standard error and writes to the inherited descriptor, which can then
-block it, and the TUI reads the inherited terminal after a poll, which another
-process blocked in a read of that terminal can delay; a hung-up terminal
-output still ends chat with an error before it touches any state.
+once on standard error for an output and writes to the inherited descriptor,
+which can then block it, and the TUI reads the inherited terminal after a
+poll; a hung-up terminal output still ends chat with an error before it
+touches any state. The TUI must be the only reader of its terminal: another
+process reading it can take or delay input, including input typed during a
+run that chat would discard.
 
 Empty input is skipped. The TUI editor caps inserted text at its character
 limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted
