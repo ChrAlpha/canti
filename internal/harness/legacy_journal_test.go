@@ -23,6 +23,8 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
+const legacyHandover = "Read evidence ranges [0,24576) of /canti/imports/evidence.txt. Next: summarize them."
+
 // legacyExpectation is what the current harness does when it resumes a
 // legacy journal: the decisions its scripted model returns, the event kinds
 // it appends, and the run's answer.
@@ -69,6 +71,44 @@ func legacyExpectations() map[string]legacyExpectation {
 				}
 				if len(r.sent) != 1 || !bytes.Equal(r.sent[0], r.frozen(t, p.Step, p.RequestRev)) {
 					t.Error("resume did not resend exactly the request the producer froze")
+				}
+			},
+		},
+		legacySemantics2 + "/capacity-unrequested": {
+			replies: func(run string) []string {
+				return []string{
+					corpusRetrieve("read", "/canti/imports/evidence.txt", `,"offset":16384,"limit":8192`, "Read the third evidence range."),
+					corpusDecision(core.Exec, `canti:handover {"run_id":"`+run+`","first_step":1,"text":"`+legacyHandover+`"}`),
+					corpusDecision(core.Return, "The evidence is numbered plain-text lines."),
+				}
+			},
+			kinds:  slices.Concat(cycle, cycle, closing),
+			answer: "The evidence is numbered plain-text lines.",
+			check: func(t *testing.T, r legacyResult) {
+				var requests []*harness.Request
+				var steps []int
+				for _, tr := range r.suffix {
+					if tr.Facts.Request != nil {
+						requests, steps = append(requests, tr.Facts.Request), append(steps, tr.To.Step)
+					}
+				}
+				if !slices.Equal(steps, []int{3, 4, 5}) {
+					t.Fatalf("resume froze requests for steps %v", steps)
+				}
+				probe, next := r.copy.manifest.Capacity.Probe, requests[0]
+				got := legacyHandoverCheck{Step: steps[0], Status: next.Context.Handover.Status, Used: next.Context.Handover.Used,
+					Capacity: next.Context.Handover.Capacity, Growth: next.Context.Handover.Growth, Requested: next.Window.Requested,
+					Reasons: next.Context.Handover.Reasons, Body: legacyHash(next.Body)}
+				got.Headroom = got.Capacity - got.Used - got.Growth
+				if !reflect.DeepEqual(got, probe) || probe.Requested || probe.Headroom <= 0 {
+					t.Errorf("the next request evaluated %+v; the producer evaluated %+v", got, probe)
+				}
+				legacySamePrefix(t, r.frozen(t, 2, 1), next.Body, 2)
+				if w := requests[1].Window; !w.Requested || !slices.Equal(requests[1].Context.Handover.Reasons, []string{"capacity"}) {
+					t.Errorf("the request after one more read did not request a handover for capacity: %+v %+v", w, requests[1].Context.Handover)
+				}
+				if w := *requests[2].Window; w != (harness.Window{FirstStep: 5, SourceStep: 4, Handover: legacyHandover}) {
+					t.Errorf("the handover opened window %+v", w)
 				}
 			},
 		},
