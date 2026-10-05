@@ -27,6 +27,10 @@ Results record original paths, byte ranges, hashes, and whether more remains. Wh
 	return s
 }
 
+// contextError reports committed context that fails an integrity or policy
+// check, which no retry repairs.
+type contextError struct{ error }
+
 func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error {
 	w := Window{FirstStep: 1}
 	req, err := l.journal.LatestRequest(ctx, snap.State.RunID)
@@ -34,16 +38,16 @@ func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error 
 		return err
 	}
 	if errors.Is(err, ErrNotFound) && (snap.State.Step != 1 || snap.State.RequestRev != 0) {
-		return errors.New("harness: durable context window request is missing after progress")
+		return contextError{errors.New("harness: durable context window request is missing after progress")}
 	}
 	if err == nil {
 		if req.Window == nil {
-			return errors.New("harness: window configuration changed during a run")
+			return contextError{errors.New("harness: window configuration changed during a run")}
 		}
 		w = *req.Window
 	}
 	if err := w.Validate(snap.State.Step); err != nil {
-		return err
+		return contextError{err}
 	}
 	f.Window = &w
 	return nil
@@ -182,10 +186,10 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	f := l.frame(run, s)
 	var err error
 	if err := l.contextFrame(ctx, snap, &f); err != nil {
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+		return l.refuse(ctx, snap, err)
 	}
 	if err := l.sessionContext(ctx, run, &f); err != nil {
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+		return l.refuse(ctx, snap, err)
 	}
 	if s.Step == 1 && s.RequestRev == 0 {
 		if err := f.ValidateContext(l.cfg.Limits); err != nil {
@@ -234,4 +238,14 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	req.Window = f.Window
 	req.Context = f.capture
 	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &req})
+}
+
+// refuse commits an unrecoverable stop for a contextError and returns any
+// other error, such as a failed journal read, committing nothing, so that the
+// next Step prepares again.
+func (l *Loop) refuse(ctx context.Context, snap Snapshot, err error) (Snapshot, error) {
+	if !errors.As(err, new(contextError)) {
+		return snap, err
+	}
+	return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 }

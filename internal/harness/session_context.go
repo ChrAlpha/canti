@@ -23,22 +23,22 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 	}
 	j, ok := l.journal.(SessionJournal)
 	if !ok {
-		return errors.New("harness: session journal is required for a session run")
+		return contextError{errors.New("harness: session journal is required for a session run")}
 	}
 	if run.SessionSeq < 1 {
-		return errors.New("harness: session sequence is required")
+		return contextError{errors.New("harness: session sequence is required")}
 	}
 	prior, err := j.SessionRuns(ctx, run.SessionID, run.SessionSeq, sessionContextCandidates)
 	if err != nil {
 		return err
 	}
 	if len(prior) > sessionContextCandidates {
-		return errors.New("harness: session journal exceeded the candidate limit")
+		return contextError{errors.New("harness: session journal exceeded the candidate limit")}
 	}
 	previous := run.SessionSeq
 	for _, p := range prior {
 		if p.SessionID != run.SessionID || p.SessionSeq < 1 || p.SessionSeq >= previous || p.ID == run.ID {
-			return errors.New("harness: invalid earlier session run")
+			return contextError{errors.New("harness: invalid earlier session run")}
 		}
 		previous = p.SessionSeq
 	}
@@ -66,7 +66,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 			return err
 		}
 		if snap.State.Phase != core.PhaseReturned && snap.State.Phase != core.PhaseStopped {
-			return fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)
+			return contextError{fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)}
 		}
 		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, inline(f.RunsDir), inline(p.ID))
 		goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
