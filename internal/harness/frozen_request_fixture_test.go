@@ -132,12 +132,14 @@ type corpusRig struct {
 	store *sqlite.Store
 	model *corpusModel
 	loop  *harness.Loop
+	path  string
 }
 
 func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlite.Open(context.Background(), filepath.Join(dir, "canti.db"))
+	path := filepath.Join(dir, "canti.db")
+	store, err := sqlite.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +169,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &corpusRig{store: store, model: model, loop: loop}
+	return &corpusRig{store: store, model: model, loop: loop, path: path}
 }
 
 func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
