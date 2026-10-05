@@ -131,6 +131,44 @@ func TestStderrWriterPromptAfterFullQueue(t *testing.T) {
 	}
 }
 
+func TestStderrWriterFinalLineWaitsBoundedForAFullQueue(t *testing.T) {
+	for _, resumes := range []bool{true, false} {
+		g := &gatedWriter{ready: make(chan struct{})}
+		w := newStderrWriter(g)
+		for range stderrQueueEntries + 10 {
+			io.WriteString(w, "progress\n")
+		}
+		if w.Dropped() == 0 {
+			t.Fatal("progress on a full queue was not dropped")
+		}
+		start := time.Now()
+		finished := make(chan error, 1)
+		go func() { _, err := io.WriteString(finalStderr{w}, "final\n"); finished <- err }()
+		if resumes {
+			time.Sleep(stderrDrainTime)
+			close(g.ready)
+		}
+		var err error
+		select {
+		case err = <-finished:
+		case <-time.After(3 * stderrFinalTime):
+			t.Fatalf("resumes=%v: final line still blocked after %s", resumes, time.Since(start))
+		}
+		elapsed := time.Since(start)
+		if resumes && (err != nil || elapsed >= stderrFinalTime) || !resumes && (!errors.Is(err, os.ErrDeadlineExceeded) || elapsed < stderrFinalTime || elapsed > 2*stderrFinalTime) {
+			t.Fatalf("resumes=%v: final line = %v after %s", resumes, err, elapsed)
+		}
+		if !resumes {
+			close(g.ready)
+		}
+		w.Close()
+		<-w.done
+		if got := g.out.String(); resumes && !strings.HasSuffix(got, "final\n") {
+			t.Fatalf("final line missing after the reader resumed: %q", got)
+		}
+	}
+}
+
 type failedWriter struct{}
 
 func (failedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
@@ -191,7 +229,7 @@ func TestBlockedStderrSignalCleanup(t *testing.T) {
 			if twice {
 				held = f.model.holdRequests()
 			}
-			cmd, wait := startCLIWithBlockedStderr(t, nil, env, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+			cmd, wait, _ := startCLIWithBlockedStderr(t, nil, env, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
 			if twice {
 				waitFor(t, func() bool { return len(held) > 0 })
 			} else {
@@ -227,7 +265,57 @@ func TestBlockedStderrSignalCleanup(t *testing.T) {
 	}
 }
 
-func startCLIWithBlockedStderr(t *testing.T, stdin io.Reader, env []string, args ...string) (*exec.Cmd, func() result) {
+func TestBlockedStderrDeliversTheFinalLinesOnceDrained(t *testing.T) {
+	for _, abandon := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stop report", true: "error after abandoned cleanup"}[abandon], func(t *testing.T) {
+			f := newFixture(t, nil)
+			marker := filepath.Join(t.TempDir(), "blocked")
+			env := []string{"ANTHROPIC_API_KEY=" + f.key}
+			if abandon {
+				env = append(env, "CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED="+marker)
+			}
+			held := f.model.holdRequests()
+			cmd, _, stderr := startCLIWithBlockedStderr(t, nil, env, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+			waitFor(t, func() bool { return len(held) > 0 })
+			if err := cmd.Process.Signal(os.Interrupt); err != nil {
+				t.Fatal(err)
+			}
+			if abandon {
+				waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ended := make(chan struct{})
+			go func() { cmd.Wait(); close(ended) }()
+			select {
+			case <-ended:
+			case <-time.After(6 * stderrDrainTime):
+			}
+			out, err := io.ReadAll(stderr)
+			<-ended
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = bytes.TrimLeft(out, "\x00")
+			id := f.status().Run.ID
+			want, code := []string{"canti: run " + id + " stopped: cancelled\n"}, exitStopped
+			if abandon {
+				want, code = []string{"canti run: stopping run " + id + ": ", `; finish with "canti stop -run ` + id + `"`}, exitError
+			}
+			for _, w := range want {
+				if !bytes.Contains(out, []byte(w)) {
+					t.Errorf("stderr drained after the exit lacks %q:\n%s", w, out)
+				}
+			}
+			if got := cmd.ProcessState.ExitCode(); got != code {
+				t.Errorf("exit %d, want %d", got, code)
+			}
+		})
+	}
+}
+
+func startCLIWithBlockedStderr(t *testing.T, stdin io.Reader, env []string, args ...string) (*exec.Cmd, func() result, *os.File) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -271,5 +359,5 @@ func startCLIWithBlockedStderr(t *testing.T, stdin io.Reader, env []string, args
 			t.Fatalf("canti %q: %v", args, err)
 		}
 		return result{code: cmd.ProcessState.ExitCode(), stdout: stdout.String()}
-	}
+	}, r
 }

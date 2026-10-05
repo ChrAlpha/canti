@@ -157,10 +157,11 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		help(stderr)
 		return exitUsage
 	}
+	final := stderr
 	if name != "chat" || !isatty.IsTerminal(os.Stdin.Fd()) {
 		asyncStderr := newStderrWriter(stderr)
 		defer asyncStderr.Close()
-		stderr, a.stderr, a.display = asyncStderr, asyncStderr, asyncStderr
+		stderr, a.stderr, a.display, final = asyncStderr, asyncStderr, asyncStderr, finalStderr{asyncStderr}
 	}
 	var lv slog.Level
 	code, err := exitUsage, lv.UnmarshalText([]byte(*level))
@@ -175,13 +176,15 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		code, err = act(ctx)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "canti %s: %v\n", name, err)
+		var out strings.Builder
+		fmt.Fprintf(&out, "canti %s: %v\n", name, err)
 		switch {
 		case code == exitUsage:
-			help(stderr)
+			help(&out)
 		case errors.Is(err, errLocked):
 			code = exitLocked
 		}
+		io.WriteString(final, out.String())
 		code = cmp.Or(code, exitError)
 	}
 	return code

@@ -112,6 +112,10 @@ func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, func(), err
 // or active while the run is still active.
 func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) {
 	s := snap.State
+	out := a.stderr
+	if a.display != nil {
+		out = finalStderr{a.display}
+	}
 	switch {
 	case err != nil:
 		return exitError, err
@@ -119,14 +123,14 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 		fmt.Fprintln(a.stdout, s.Decision.Payload)
 		return exitOK, nil
 	case s.Phase == core.PhaseStopped:
-		fmt.Fprintf(a.stderr, "canti: run %s stopped: %s\n", s.RunID, s.Reason)
+		fmt.Fprintf(out, "canti: run %s stopped: %s\n", s.RunID, s.Reason)
 		return exitStopped, nil
 	case s.Phase == core.PhaseNeedsResolution:
-		fmt.Fprintf(a.stderr, "canti: run %s needs resolution: the outcome of effect %s is unknown. Inspect it, then "+
+		fmt.Fprintf(out, "canti: run %s needs resolution: the outcome of effect %s is unknown. Inspect it, then "+
 			"record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\"; "+
 			"-execution records the outcome only and leaves a job that may still run untouched.\n", s.RunID, s.EffectID)
 		if s.Reason != "" {
-			fmt.Fprintf(a.stderr, "canti: the stop is recorded (%s), but its job may still run until it is resolved; "+
+			fmt.Fprintf(out, "canti: the stop is recorded (%s), but its job may still run until it is resolved; "+
 				"after \"canti resolve -run %s -job\" records a job that still runs, \"canti stop\" cancels it.\n", s.Reason, s.RunID)
 		}
 		return exitResolution, nil
@@ -135,6 +139,6 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 	if s.Phase == core.PhaseCancelling {
 		next = "stop"
 	}
-	fmt.Fprintf(a.stderr, "canti: run %s is %s; continue it with \"canti %s -run %[1]s\".\n", s.RunID, s.Phase, next)
+	fmt.Fprintf(out, "canti: run %s is %s; continue it with \"canti %s -run %[1]s\".\n", s.RunID, s.Phase, next)
 	return active, nil
 }

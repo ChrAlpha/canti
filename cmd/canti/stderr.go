@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,7 @@ const (
 	stderrQueueEntries = 64
 	stderrEntryBytes   = 4096
 	stderrDrainTime    = 100 * time.Millisecond
+	stderrFinalTime    = time.Second
 )
 
 var stderrTruncated = []byte("... [stderr entry truncated]\n")
@@ -116,14 +118,14 @@ func (w *stderrWriter) Write(p []byte) (int, error) {
 }
 
 func (w *stderrWriter) WriteSync(p []byte) error {
-	return w.writeSync(p, nil)
+	return w.writeSync(p, nil, nil)
 }
 
 func (w *stderrWriter) Prompt(inputFD int) error {
-	return w.writeSync([]byte("> "), &inputFD)
+	return w.writeSync([]byte("> "), &inputFD, nil)
 }
 
-func (w *stderrWriter) writeSync(p []byte, inputFD *int) error {
+func (w *stderrWriter) writeSync(p []byte, inputFD *int, timeout <-chan time.Time) error {
 	if len(p) > stderrEntryBytes {
 		return errStderrEntryTooLarge
 	}
@@ -133,6 +135,8 @@ func (w *stderrWriter) writeSync(p []byte, inputFD *int) error {
 		return io.ErrClosedPipe
 	case <-w.done:
 		return w.outputError()
+	case <-timeout:
+		return os.ErrDeadlineExceeded
 	case w.queue <- entry:
 	}
 	select {
@@ -142,6 +146,8 @@ func (w *stderrWriter) writeSync(p []byte, inputFD *int) error {
 		return io.ErrClosedPipe
 	case <-w.done:
 		return w.outputError()
+	case <-timeout:
+		return os.ErrDeadlineExceeded
 	}
 }
 
@@ -151,6 +157,18 @@ type syncStderr struct{ w *stderrWriter }
 
 func (s syncStderr) Write(p []byte) (int, error) {
 	if err := s.w.WriteSync(p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// finalStderr writes a command's outcome and the operator's next step
+// synchronously, as WriteSync does, but waits at most stderrFinalTime for each
+// write so that a stderr nobody reads still lets the command exit.
+type finalStderr struct{ w *stderrWriter }
+
+func (s finalStderr) Write(p []byte) (int, error) {
+	if err := s.w.writeSync(stderrBytes(p), nil, time.After(stderrFinalTime)); err != nil {
 		return 0, err
 	}
 	return len(p), nil
