@@ -306,11 +306,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	if err != nil {
 		return nil, nil, err
 	}
-	fd := int(f.Fd())
-	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
-	if err == nil {
-		err = unix.SetNonblock(fd, true)
-	}
+	fd, err := reopenNonblocking(int(f.Fd()), unix.O_RDONLY)
 	if err != nil {
 		_ = term.Restore(f.Fd(), previous)
 		return nil, nil, err
@@ -368,8 +364,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	cleanup := func() error {
 		close(stop)
 		<-done
-		_, flagErr := unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags)
-		return errors.Join(flagErr, term.Restore(f.Fd(), previous))
+		return errors.Join(unix.Close(fd), term.Restore(f.Fd(), previous))
 	}
 	return g, cleanup, nil
 }

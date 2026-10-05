@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -16,6 +17,7 @@ type chatOutput struct {
 	file   *os.File
 	mu     sync.Mutex
 	fd     int
+	socket bool
 	gate   *chatInputGate
 	failed chan<- error
 	err    error
@@ -26,15 +28,44 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 	if !ok {
 		return w, func() {}, nil
 	}
-	fd := int(f.Fd())
-	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
-	if err != nil {
+	out := &chatOutput{file: f, fd: int(f.Fd()), failed: failed}
+	var stat unix.Stat_t
+	if err := unix.Fstat(out.fd, &stat); err != nil {
 		return nil, nil, err
 	}
-	if err = unix.SetNonblock(fd, true); err != nil {
-		return nil, nil, err
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFCHR, unix.S_IFIFO:
+		fd, err := reopenNonblocking(out.fd, unix.O_WRONLY)
+		if err != nil {
+			return nil, nil, err
+		}
+		out.fd = fd
+		return out, out.close, nil
+	case unix.S_IFSOCK:
+		out.socket = true
 	}
-	return &chatOutput{file: f, fd: fd, failed: failed}, func() { _, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags) }, nil
+	return out, func() {}, nil
+}
+
+// reopenNonblocking gives fd's pipe or terminal a new open file description:
+// O_NONBLOCK on fd itself would change the one it shares with the shell, and a
+// signal can keep the process from restoring it.
+func reopenNonblocking(fd, mode int) (int, error) {
+	return unix.Open(fmt.Sprintf("/proc/self/fd/%d", fd), mode|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+}
+
+func (w *chatOutput) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = os.ErrClosed
+	_ = unix.Close(w.fd)
+}
+
+func (w *chatOutput) write(p []byte) (int, error) {
+	if w.socket {
+		return unix.SendmsgN(w.fd, p, nil, nil, unix.MSG_DONTWAIT|unix.MSG_NOSIGNAL)
+	}
+	return unix.Write(w.fd, p)
 }
 
 func (w *chatOutput) Read(p []byte) (int, error) { return w.file.Read(p) }
@@ -75,13 +106,13 @@ func (w *chatOutput) Write(p []byte) (int, error) {
 				w.err = os.ErrDeadlineExceeded
 				break
 			}
-			n, err = unix.Write(w.fd, p)
+			n, err = w.write(p)
 			if err == nil && n == len(p) {
 				g.outputCongested = false
 			}
 			g.mu.Unlock()
 		} else {
-			n, err = unix.Write(w.fd, p)
+			n, err = w.write(p)
 		}
 		if n > 0 {
 			total += n

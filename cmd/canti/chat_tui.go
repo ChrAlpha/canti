@@ -421,6 +421,11 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 	close(ready)
 	final, err := p.Run()
 	inputErr := stopInput()
+	if out, ok := terminal.(*chatOutput); ok {
+		out.mu.Lock()
+		out.gate = nil
+		out.mu.Unlock()
+	}
 	gate.Lock()
 	closed = true
 	needsStop := running && !interrupted

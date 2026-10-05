@@ -117,6 +117,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		displayFailure = make(chan error, 2)
 		out, restoreOut, err := newChatOutput(stdout, displayFailure)
 		if err != nil {
+			fmt.Fprintf(stderr, "canti chat: standard output: %v\n", err)
 			return exitError
 		}
 		defer restoreOut()
@@ -124,6 +125,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if isatty.IsTerminal(os.Stdin.Fd()) {
 			diagnostic, restoreErr, err := newChatOutput(stderr, displayFailure)
 			if err != nil {
+				fmt.Fprintf(stderr, "canti chat: standard error: %v\n", err)
 				return exitError
 			}
 			defer restoreErr()

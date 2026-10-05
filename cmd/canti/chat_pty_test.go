@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ type ptyChat struct {
 	slave   *os.File
 	slaveFD int
 	base    *unix.Termios
+	flags   int
 	mu      sync.Mutex
 	output  bytes.Buffer
 	wake    chan struct{}
@@ -87,7 +90,7 @@ func startPTYChatWithDeadline(t *testing.T, f *fixture, stderr *os.File, env []s
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}
-	p := &ptyChat{cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	p := &ptyChat{cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		master.Close()
@@ -211,6 +214,83 @@ func (p *ptyChat) finish(t *testing.T, want int) {
 	if got.Lflag != p.base.Lflag || got.Iflag != p.base.Iflag || got.Oflag != p.base.Oflag || got.Cflag != p.base.Cflag {
 		t.Fatalf("terminal flags not restored: before=%+v after=%+v", p.base, got)
 	}
+	if flags := descriptionFlags(t, p.slaveFD); flags != p.flags {
+		t.Fatalf("chat changed the terminal's file status flags from %#x to %#x", p.flags, flags)
+	}
+}
+
+func descriptionFlags(t *testing.T, fd int) int {
+	t.Helper()
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return flags
+}
+
+func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+			t.Run(fmt.Sprintf("terminal=%v/%v at the prompt", terminal, sig), func(t *testing.T) {
+				f := newFixture(t, nil)
+				reader, out, err := os.Pipe()
+				if terminal {
+					reader, out, err = pty.Open()
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+				defer out.Close()
+				fd := int(out.Fd())
+				before := descriptionFlags(t, fd)
+				in, input := io.Pipe()
+				cmd, wait := f.startIO(in, out, nil, "chat")
+				waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
+				if err := cmd.Process.Signal(sig); err != nil {
+					t.Fatal(err)
+				}
+				input.Close()
+				if r := wait(); r.code != -1 {
+					t.Fatalf("chat survived %v at the prompt: %+v", sig, r)
+				}
+				if after := descriptionFlags(t, fd); after != before {
+					t.Fatalf("chat left the file status flags of its standard output at %#x, inherited %#x", after, before)
+				}
+			})
+		}
+	}
+	t.Run("TUI killed", func(t *testing.T) {
+		f := newFixture(t, nil)
+		p := startPTYChat(t, f, nil)
+		p.await(t, "ready", 0)
+		p.waited = true
+		if err := p.cmd.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.cmd.Wait(); err == nil {
+			t.Fatal("chat exited cleanly after SIGKILL")
+		}
+		if flags := descriptionFlags(t, p.slaveFD); flags != p.flags {
+			t.Fatalf("killed chat left the terminal's file status flags at %#x, inherited %#x", flags, p.flags)
+		}
+	})
+	t.Run("hung-up terminal output", func(t *testing.T) {
+		f := newFixture(t, nil)
+		master, out, err := pty.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		master.Close()
+		defer out.Close()
+		_, wait := f.startIO(strings.NewReader("never\n"), out, nil, "chat")
+		if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "canti chat: standard output: ") {
+			t.Fatalf("chat with an unopenable output: %+v", r)
+		}
+		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
+			t.Fatalf("state directory after the refusal: %v", err)
+		}
+	})
 }
 
 func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
@@ -316,9 +396,11 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the model did not receive the active run")
 	}
-	flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0)
-	if err != nil || flags&unix.O_NONBLOCK == 0 {
-		t.Fatalf("chat output is not nonblocking: flags=%x, error=%v", flags, err)
+	if flags := descriptionFlags(t, writeFD); flags&unix.O_NONBLOCK != 0 {
+		t.Fatalf("chat made the stderr it inherited nonblocking: flags=%#x", flags)
+	}
+	if err := unix.SetNonblock(writeFD, true); err != nil {
+		t.Fatal(err)
 	}
 	fillLivePipe(t, writeFD)
 	p.send(t, "\x03")
@@ -378,9 +460,11 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not reach provider")
 	}
-	flags, err := unix.FcntlInt(uintptr(writeFD), unix.F_GETFL, 0)
-	if err != nil || flags&unix.O_NONBLOCK == 0 {
-		t.Fatalf("chat output is not nonblocking: flags=%x, error=%v", flags, err)
+	if flags := descriptionFlags(t, writeFD); flags&unix.O_NONBLOCK != 0 {
+		t.Fatalf("chat made the stderr it inherited nonblocking: flags=%#x", flags)
+	}
+	if err := unix.SetNonblock(writeFD, true); err != nil {
+		t.Fatal(err)
 	}
 	fillLivePipe(t, writeFD)
 	p.send(t, "\x03")
