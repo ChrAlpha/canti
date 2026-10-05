@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -25,16 +25,16 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - name: Run checks
-        run: make check
-      - name: Run race checks
-        run: go test -count=1 -race ./...
+      - name: Check formatting and vet
+        run: make fmt vet
+      - name: Run race-enabled unit tests
+        run: make ci-unit
       - name: Smoke-test CLI
         run: test "$(go run ./cmd/canti -version)" = dev
 
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -47,7 +47,47 @@ jobs:
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run Docker-backed integration tests
-        run: make integration
+        run: make ci-integration
+      - name: Report leftover containers
+        if: always()
+        run: test -z "$(docker ps -aq --filter label=canti.effect)"
+
+  long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Pull test image
+        run: docker pull alpine:3.23
+      - name: Run long acceptance tests
+        run: make ci-long
+      - name: Report leftover containers
+        if: always()
+        run: test -z "$(docker ps -aq --filter label=canti.effect)"
+
+  pty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Pull test image
+        run: docker pull alpine:3.23
+      - name: Run pseudo-terminal tests serially
+        run: make ci-pty
       - name: Report leftover containers
         if: always()
         run: test -z "$(docker ps -aq --filter label=canti.effect)"

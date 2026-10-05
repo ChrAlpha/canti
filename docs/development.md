@@ -3,7 +3,8 @@
 ## Prerequisites
 
 - Go 1.25 or newer; `go.mod` declares the minimum version.
-- Make and a POSIX shell for the check targets.
+- Make and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
+  targets.
 - A C compiler and a supported platform for Go's race detector.
 - A Unix-like OS: the CLI and executor use `flock` and process groups. Only
   Linux has been verified.
@@ -36,6 +37,10 @@ Cloning requires repository access while the repository is private.
 | `make vet` | `go vet ./...`, then `go vet -tags integration,live ./...` so tagged test files compile |
 | `make test` | `go test ./...` |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
+| `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
+| `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
+| `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
+| `make ci-pty` | The tests listed in `PTY_TESTS`, which open a pseudo-terminal, alone in one test binary; needs Docker |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
@@ -48,8 +53,8 @@ Use `gofmt -w path/to/changed.go` on changed files to resolve a formatting
 failure. Do not run a repository-wide rewrite as part of an unrelated change.
 
 Build tags keep slow and paid tests out of the default run. `integration`
-marks tests that need Docker or take tens of seconds; CI runs them in a
-separate job. `live` marks `internal/harness/anthropic/live_test.go`, which
+marks tests that need Docker or take tens of seconds; CI runs them in
+separate jobs. `live` marks `internal/harness/anthropic/live_test.go`, which
 sends one real request and is never part of `make check`, `make integration`,
 or CI:
 
@@ -209,14 +214,27 @@ Keep large outputs, credentials, databases, and local task state outside Git.
 
 ## CI and delivery
 
-The CI workflow runs on pushes to `main` and pull requests. Its `check` job
-runs `make check`, the race-enabled unit tests, and a CLI version smoke test;
-its `integration` job pulls `alpine:3.23`, runs `make integration`, and fails
-if any container labelled `canti.effect` is left. CI configuration is
-versioned in `.github/workflows/ci.yml`; workflow success is separate
-evidence from checks run locally. Repository hosting settings such as branch
-protection, reviewer assignment, and private vulnerability reporting are not
-configured by committing workflow files.
+The CI workflow runs on pushes to `main` and pull requests in four parallel
+jobs. `check` runs `make fmt vet`, `make ci-unit`, and a CLI version smoke
+test. `integration`, `long`, and `pty` each pull `alpine:3.23`, run
+`make ci-integration`, `make ci-long`, or `make ci-pty`, and fail if any
+container labelled `canti.effect` is left; together they run each test of
+`make integration` once. The Makefile lists the tests of the last two jobs:
+`LONG_TESTS` are the slow acceptance tests, and `PTY_TESTS` are the tests that
+open a pseudo-terminal, which wait for terminal output within fixed deadlines;
+`ci-pty` runs them alone so that no other test binary competes for the CPU.
+Add a new test of either kind to its list.
+
+Each `ci-` target pipes `go test -json` through `scripts/test-report.sh`,
+which prints each package result as it finishes, then the output of every
+failed or unfinished test and the 20 slowest top-level tests, and exits with
+the status of `go test`; set `TEST_JSON` to keep the events. The `-timeout`
+of each target bounds one package: 10 min for `ci-integration`, 20 min for
+`ci-long`, and 5 min for `ci-pty`. CI configuration is versioned in
+`.github/workflows/ci.yml`; workflow success is separate evidence from checks
+run locally. Repository hosting settings such as branch protection, reviewer
+assignment, and private vulnerability reporting are not configured by
+committing workflow files.
 
 Before delivery, inspect the diff, run the relevant tests and documented
 checks, and record the actual outcomes. Explain unrun checks. Use the
