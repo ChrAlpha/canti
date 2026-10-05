@@ -142,10 +142,10 @@ func (g *chatInputGate) drainAvailableLocked() error {
 	}
 }
 
-// readReadyLocked reads the terminal input that a poll under g.mu finds,
-// without waiting on the inherited blocking descriptor: every reader of the
-// gate holds g.mu, so no read inside chat takes the input between the poll
-// and the read. It reports false, with no error, when there is none.
+// readReadyLocked reads the terminal input that a poll under g.mu finds. The
+// terminal is raw with VMIN 0, so a read returns at once even when another
+// process took the input after the poll; it reports false, with no error,
+// when there is none, and io.EOF for a hangup without input.
 func (g *chatInputGate) readReadyLocked(buf []byte) (int, bool, error) {
 	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
 	for {
@@ -157,11 +157,36 @@ func (g *chatInputGate) readReadyLocked(buf []byte) (int, bool, error) {
 			return 0, false, err
 		}
 		n, err := unix.Read(g.fd, buf)
-		if errors.Is(err, syscall.EINTR) {
+		switch {
+		case errors.Is(err, syscall.EINTR):
 			continue
+		case err == nil && n == 0 && fds[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0:
+			return 0, false, io.EOF
+		case err == nil && n == 0:
+			return 0, false, nil
 		}
 		return n, true, err
 	}
+}
+
+// rawInput puts terminal fd in raw mode with VMIN and VTIME 0, so that no read
+// of it waits for input, and returns the restore of its previous mode.
+func rawInput(fd uintptr) (func() error, error) {
+	previous, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	restore := func() error { return term.Restore(fd, previous) }
+	t, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
+	if err == nil {
+		t.Cc[unix.VMIN], t.Cc[unix.VTIME] = 0, 0
+		err = unix.IoctlSetTermios(int(fd), unix.TCSETS, t)
+	}
+	if err != nil {
+		_ = restore()
+		return nil, err
+	}
+	return restore, nil
 }
 
 func (g *chatInputGate) decode(read []byte) chatKeys {
@@ -321,7 +346,7 @@ func (g *chatInputGate) frameLength(p []byte) int {
 }
 
 func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() error, error) {
-	previous, err := term.MakeRaw(f.Fd())
+	restore, err := rawInput(f.Fd())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -379,7 +404,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	cleanup := func() error {
 		close(stop)
 		<-done
-		return term.Restore(f.Fd(), previous)
+		return restore()
 	}
 	return g, cleanup, nil
 }

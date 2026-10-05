@@ -14,6 +14,47 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestChatInputTerminalReadNeverWaitsForInput(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	fd := int(slave.Fd())
+	before, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore, err := rawInput(slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		n, err := unix.Read(fd, make([]byte, 16))
+		if err == nil && n != 0 {
+			err = errors.New("read input that was never written")
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		master.Write([]byte("x"))
+		t.Fatal("a read of the raw chat terminal waited for input")
+	}
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := unix.IoctlGetTermios(fd, unix.TCGETS); err != nil || *after != *before {
+		t.Fatalf("restored terminal mode %+v, want %+v: %v", after, before, err)
+	}
+}
+
 func TestChatInputReadsABlockingTerminalOnlyWhenInputIsReady(t *testing.T) {
 	master, slave, err := pty.Open()
 	if err != nil {
