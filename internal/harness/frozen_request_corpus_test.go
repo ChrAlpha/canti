@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 var updateRequests = flag.Bool("update-requests", false, "rewrite testdata/frozen-requests from the records the scenarios commit")
@@ -39,6 +41,7 @@ type frozenScenario struct {
 type frozenRun struct {
 	id, goal string
 	replies  []string
+	steps    []string // stepOutcome of every completed step, oldest first
 }
 
 func corpusDecision(kind core.Kind, payload string) string {
@@ -67,6 +70,13 @@ func frozenScenarios() []frozenScenario {
 				corpusRetrieve("search", corpusSteps+"/00000001", `,"query":"gamma"`, "Find gamma in the step record."),
 				corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find the step that printed beta."),
 				corpusDecision(core.Return, "Line 2 of the listing mentions beta."),
+			}, steps: []string{
+				"1 exited 0 output complete",
+				"2 exited 0 retrieval 1 sources 0 entries",
+				"3 exited 0 retrieval 0 sources 2 entries",
+				"4 exited 0 retrieval 1 sources 0 entries",
+				"5 exited 0 retrieval 2 sources 0 entries",
+				"6 exited 0 retrieval 3 sources 0 entries",
 			}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"Step 1 of at most 20, attempt 1 of 3.", "## Current window steps\nNone.\n"},
@@ -84,7 +94,7 @@ func frozenScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed /workspace: go.mod and main.go. Next: report them."}`),
 				corpusDecision(core.Return, "The workspace holds go.mod and main.go."),
-			}}},
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\n", "## Handover required\n"},
 				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", "Next: report them.", "## Current window steps\nNone.\n"},
@@ -106,7 +116,7 @@ func frozenScenarios() []frozenScenario {
 				{id: corpusRun, goal: "What is in /workspace?", replies: []string{
 					corpusDecision(core.Exec, "ls /workspace"),
 					corpusDecision(core.Return, "go.mod and main.go."),
-				}},
+				}, steps: []string{"1 exited 0 output complete"}},
 				{id: corpusNextRun, goal: "Which of those files is the entry point?", replies: []string{
 					corpusDecision(core.Return, "main.go is the entry point."),
 				}},
@@ -120,7 +130,7 @@ func frozenScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Return, "go.mod and main.go."),
-			}}},
+			}, steps: []string{"1 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"Step 1 (unlimited steps), attempt 1 of 3."},
 				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3."},
@@ -132,7 +142,7 @@ func frozenScenarios() []frozenScenario {
 				`{"kind":"exec","payload":"ls /workspace"}`,
 				`{"kind":"exec"}`,
 				`{"kind":"return","payload":"go.mod and main.go."}`,
-			}}},
+			}, steps: []string{"1 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\n"},
 				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
@@ -156,7 +166,7 @@ func TestFrozenRequestBodies(t *testing.T) {
 			got := map[string][]byte{}
 			var committed [][]byte
 			for i, run := range sc.runs {
-				rig.checkSteps(t, run.id)
+				rig.checkOutcomes(t, run)
 				for _, tr := range rig.frozen(t, run.id) {
 					if tr.Facts.Request.Adapter != adapter {
 						t.Errorf("run %s step %d adapter = %q, want %q", run.id, tr.To.Step, tr.Facts.Request.Adapter, adapter)
@@ -196,6 +206,54 @@ func TestFrozenRequestBodies(t *testing.T) {
 			compareFrozenRequests(t, dir, got)
 		})
 	}
+}
+
+func (r *corpusRig) checkOutcomes(t *testing.T, run frozenRun) {
+	t.Helper()
+	steps, err := r.store.Recent(context.Background(), run.id, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range steps {
+		got = append(got, stepOutcome(s))
+	}
+	if !slices.Equal(got, run.steps) {
+		t.Errorf("run %s ended its steps as\n%s\nwant\n%s", run.id, strings.Join(got, "\n"), strings.Join(run.steps, "\n"))
+	}
+}
+
+// stepOutcome reports how a completed step ended: its execution, exit code,
+// explicit resolution, and the result it recorded.
+func stepOutcome(s harness.StepRecord) string {
+	o := s.Observation
+	out := fmt.Sprintf("%d %s", s.Step, o.Execution)
+	if o.ExitCode != nil {
+		out += fmt.Sprintf(" %d", *o.ExitCode)
+	}
+	if s.Resolved {
+		out += " resolved"
+	}
+	switch r := o.Retrieval; {
+	case r != nil && r.Error != "":
+		out += " retrieval error"
+	case r != nil:
+		out += fmt.Sprintf(" retrieval %d sources %d entries", len(r.Sources), len(r.Entries))
+		if r.More {
+			out += " more"
+		}
+	case o.Handover != nil:
+		out += " handover"
+	case strings.HasPrefix(o.Preview, "Context action failed: "):
+		out += " action failed"
+	case o.Output.Complete:
+		out += " output complete"
+	case o.Output.Available:
+		out += " output incomplete"
+	default:
+		out += " output unavailable"
+	}
+	return out
 }
 
 // journal lists the sequence, kind, and event ID of every transition the
