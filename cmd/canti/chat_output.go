@@ -14,13 +14,14 @@ import (
 const displayTimeout = 250 * time.Millisecond
 
 type chatOutput struct {
-	file   *os.File
-	mu     sync.Mutex
-	fd     int
-	socket bool
-	gate   *chatInputGate
-	failed chan<- error
-	err    error
+	file     *os.File
+	mu       sync.Mutex
+	fd       int
+	socket   bool
+	blocking error
+	gate     *chatInputGate
+	failed   chan<- error
+	err      error
 }
 
 func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) {
@@ -35,9 +36,17 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 	}
 	switch stat.Mode & unix.S_IFMT {
 	case unix.S_IFCHR, unix.S_IFIFO:
+		if _, err := unix.IoctlGetInt(out.fd, unix.TIOCGPTN); err == nil {
+			out.blocking = errors.New("a pseudo-terminal master opens a new terminal when reopened")
+			return out, func() {}, nil
+		}
 		fd, err := reopenNonblocking(out.fd, unix.O_WRONLY)
-		if err != nil {
+		switch {
+		case errors.Is(err, unix.EIO):
 			return nil, nil, err
+		case err != nil:
+			out.blocking = err
+			return out, func() {}, nil
 		}
 		out.fd = fd
 		return out, out.close, nil
@@ -49,9 +58,25 @@ func newChatOutput(w io.Writer, failed chan<- error) (io.Writer, func(), error) 
 
 // reopenNonblocking gives fd's pipe or terminal a new open file description:
 // O_NONBLOCK on fd itself would change the one it shares with the shell, and a
-// signal can keep the process from restoring it.
+// signal can keep the process from restoring it. The reopen needs /proc and
+// the access the inode's permissions grant, which a descriptor passed from
+// another user lacks; newChatOutput then keeps the inherited description.
 func reopenNonblocking(fd, mode int) (int, error) {
-	return unix.Open(fmt.Sprintf("/proc/self/fd/%d", fd), mode|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	path := fmt.Sprintf("/proc/self/fd/%d", fd)
+	private, err := unix.Open(path, mode|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	if err != nil {
+		return -1, &os.PathError{Op: "reopen", Path: path, Err: err}
+	}
+	return private, nil
+}
+
+// blockingNote tells that writes to stream, the chat output out, keep their
+// inherited blocking description, or is empty when they do not.
+func blockingNote(stream string, out io.Writer) string {
+	if o, ok := out.(*chatOutput); ok && o.blocking != nil {
+		return fmt.Sprintf("canti chat: %s: %v; writes to it lose the %v display deadline and can block chat\n", stream, o.blocking, displayTimeout)
+	}
+	return ""
 }
 
 func (w *chatOutput) close() {

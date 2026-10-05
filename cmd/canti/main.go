@@ -117,20 +117,26 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		displayFailure = make(chan error, 2)
 		out, restoreOut, err := newChatOutput(stdout, displayFailure)
 		if err != nil {
-			fmt.Fprintf(stderr, "canti chat: standard output: %v\n", err)
+			writeBounded(stderr, fmt.Sprintf("canti chat: standard output: %v\n", err))
 			return exitError
 		}
 		defer restoreOut()
+		note := blockingNote("standard output", out)
 		stdout = out
+		diagnostic := stderr
 		if isatty.IsTerminal(os.Stdin.Fd()) {
-			diagnostic, restoreErr, err := newChatOutput(stderr, displayFailure)
-			if err != nil {
-				fmt.Fprintf(stderr, "canti chat: standard error: %v\n", err)
+			var restoreErr func()
+			if diagnostic, restoreErr, err = newChatOutput(stderr, displayFailure); err != nil {
+				writeBounded(stderr, fmt.Sprintf("canti chat: standard error: %v\n", err))
 				return exitError
 			}
 			defer restoreErr()
-			stderr = diagnostic
+			note += blockingNote("standard error", diagnostic)
 		}
+		if note != "" {
+			writeBounded(stderr, note)
+		}
+		stderr = diagnostic
 	}
 	a := &app{stdout: stdout, stderr: stderr, displayFailure: displayFailure}
 	fs := flag.NewFlagSet("canti "+name, flag.ContinueOnError)

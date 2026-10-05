@@ -115,7 +115,18 @@ func (g *chatInputGate) finishDrainLocked() error {
 func (g *chatInputGate) drainAvailableLocked() error {
 	buf := make([]byte, 4096)
 	total := 0
+	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
 	for {
+		ready, err := unix.Poll(fds, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if ready == 0 {
+			return nil
+		}
 		n, err := unix.Read(g.fd, buf)
 		if errors.Is(err, syscall.EAGAIN) {
 			return nil
@@ -306,11 +317,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	if err != nil {
 		return nil, nil, err
 	}
-	fd, err := reopenNonblocking(int(f.Fd()), unix.O_RDONLY)
-	if err != nil {
-		_ = term.Restore(f.Fd(), previous)
-		return nil, nil, err
-	}
+	fd := int(f.Fd())
 	g := &chatInputGate{fd: fd}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -364,7 +371,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	cleanup := func() error {
 		close(stop)
 		<-done
-		return errors.Join(unix.Close(fd), term.Restore(f.Fd(), previous))
+		return term.Restore(f.Fd(), previous)
 	}
 	return g, cleanup, nil
 }

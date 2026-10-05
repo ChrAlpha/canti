@@ -21,6 +21,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
@@ -61,6 +62,12 @@ func startPTYChatWithAttr(t *testing.T, f *fixture, stderr *os.File, env []strin
 	if err != nil {
 		t.Fatal(err)
 	}
+	return startPTYChatOn(t, f, master, slave, stderr, env, canonical, deadline, attr, args...)
+}
+
+// startPTYChatOn is startPTYChatWithAttr on the terminal of master and slave.
+func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, env []string, canonical bool, deadline time.Duration, attr *syscall.SysProcAttr, args ...string) *ptyChat {
+	t.Helper()
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 100}); err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +234,26 @@ func (p *ptyChat) finish(t *testing.T, want int) {
 	}
 }
 
+// holdFirstAnswer returns the URL of a model that answers as f.model does but
+// holds the first answer until release is called.
+func holdFirstAnswer(t *testing.T, f *fixture) (url string, release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	var releaseOnce, holdOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(held) }) }
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		holdOnce.Do(func() {
+			select {
+			case <-held:
+			case <-r.Context().Done():
+			}
+		})
+		f.model.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { release(); gate.Close() })
+	return gate.URL, release
+}
+
 func descriptionFlags(t *testing.T, fd int) int {
 	t.Helper()
 	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
@@ -283,6 +310,113 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 			t.Fatalf("killed chat left the terminal's file status flags at %#x, inherited %#x", flags, p.flags)
 		}
 	})
+	t.Run("unreopenable pipe output", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reopens a pipe whatever its mode")
+		}
+		for _, args := range [][]string{{"-h"}, nil} {
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+			reader, out, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			defer out.Close()
+			fd := int(out.Fd())
+			if err := unix.Fchmod(fd, 0); err != nil {
+				t.Fatal(err)
+			}
+			before := descriptionFlags(t, fd)
+			_, wait := f.startIO(strings.NewReader("one\n"), out, nil, "chat", args...)
+			r := wait()
+			if after := descriptionFlags(t, fd); after != before {
+				t.Fatalf("chat %q changed the file status flags of its standard output from %#x to %#x", args, before, after)
+			}
+			out.Close()
+			stdout, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "first answer\n"
+			if args != nil {
+				want = "Usage: canti chat [flags]"
+			}
+			if r.code != exitOK || !strings.Contains(string(stdout), want) || strings.Count(r.stderr, "canti chat: standard output: ") != 1 ||
+				!strings.Contains(r.stderr, "canti chat: standard output: reopen /proc/self/fd/1: permission denied; ") || !strings.Contains(r.stderr, "display deadline") {
+				t.Fatalf("chat %q with an unreopenable output: %+v, standard output %q", args, r, stdout)
+			}
+		}
+	})
+	t.Run("pseudo-terminal master output", func(t *testing.T) {
+		f := newFixture(t, nil)
+		master, slave, err := pty.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer master.Close()
+		defer slave.Close()
+		if _, err := term.MakeRaw(slave.Fd()); err != nil {
+			t.Fatal(err)
+		}
+		before := descriptionFlags(t, int(master.Fd()))
+		_, wait := f.startIO(strings.NewReader(""), master, nil, "chat", "-h")
+		r := wait()
+		if after := descriptionFlags(t, int(master.Fd())); after != before {
+			t.Fatalf("chat changed the file status flags of its pseudo-terminal master from %#x to %#x", before, after)
+		}
+		got := make(chan []byte, 1)
+		go func() {
+			var b []byte
+			buf := make([]byte, 4096)
+			for !strings.Contains(string(b), "Flags:") {
+				n, err := slave.Read(buf)
+				if err != nil {
+					break
+				}
+				b = append(b, buf[:n]...)
+			}
+			got <- b
+		}()
+		var out []byte
+		select {
+		case out = <-got:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the usage written to a pseudo-terminal master never reached its slave")
+		}
+		if r.code != exitOK || !strings.Contains(string(out), "Usage: canti chat [flags]") ||
+			!strings.Contains(r.stderr, "canti chat: standard output: a pseudo-terminal master opens a new terminal when reopened; ") {
+			t.Fatalf("chat -h on a pseudo-terminal master: %+v, slave read %q", r, out)
+		}
+	})
+	t.Run("unreopenable terminal", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reopens a terminal whatever its mode")
+		}
+		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+		url, release := holdFirstAnswer(t, f)
+		master, slave, err := pty.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Fchmod(int(slave.Fd()), 0); err != nil {
+			t.Fatal(err)
+		}
+		p := startPTYChatOn(t, f, master, slave, nil, nil, true, 30*time.Second, nil, "-model-url", url)
+		pos := p.await(t, "ready", 0)
+		p.send(t, "one\r")
+		pos = p.await(t, "running", pos)
+		release()
+		p.await(t, "first answer", pos)
+		p.await(t, "ready", pos)
+		p.send(t, "\x03")
+		p.finish(t, exitOK)
+		out := ansi.Strip(p.text())
+		for _, stream := range []string{"output: reopen /proc/self/fd/1", "error: reopen /proc/self/fd/2"} {
+			if strings.Count(out, "canti chat: standard "+stream) != 1 || !strings.Contains(out, "canti chat: standard "+stream+": permission denied; ") {
+				t.Fatalf("no single diagnostic for standard %s: %q", stream, out[:min(len(out), 600)])
+			}
+		}
+	})
 	t.Run("hung-up terminal output", func(t *testing.T) {
 		f := newFixture(t, nil)
 		master, out, err := pty.Open()
@@ -294,6 +428,53 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 		_, wait := f.startIO(strings.NewReader("never\n"), out, nil, "chat")
 		if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "canti chat: standard output: ") {
 			t.Fatalf("chat with an unopenable output: %+v", r)
+		}
+		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
+			t.Fatalf("state directory after the refusal: %v", err)
+		}
+	})
+	t.Run("hung-up terminal output with a blocked stderr", func(t *testing.T) {
+		f := newFixture(t, nil)
+		master, out, err := pty.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		master.Close()
+		defer out.Close()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		fillPipe(t, w)
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		cmd.Env = append(cmd.Env, "CANTI_TEST_MAIN=1", "ANTHROPIC_API_KEY="+f.key)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("never\n"), out, w
+		start := time.Now()
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		w.Close()
+		ended := make(chan struct{})
+		go func() { cmd.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+			go io.Copy(io.Discard, r)
+			<-ended
+			t.Fatalf("chat setup waited %s on a stderr nobody reads", time.Since(start))
+		}
+		if code, elapsed := cmd.ProcessState.ExitCode(), time.Since(start); code != exitError || elapsed > 3*stderrFinalTime {
+			t.Fatalf("chat with an unopenable output and a blocked stderr: exit %d after %s", code, elapsed)
 		}
 		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
 			t.Fatalf("state directory after the refusal: %v", err)
@@ -467,25 +648,13 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 
 func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
-	release := make(chan struct{})
-	var releaseOnce, holdOnce sync.Once
-	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		holdOnce.Do(func() {
-			select {
-			case <-release:
-			case <-r.Context().Done():
-			}
-		})
-		f.model.ServeHTTP(w, r)
-	}))
-	t.Cleanup(func() { releaseGate(); gate.Close() })
+	url, release := holdFirstAnswer(t, f)
 	imports := t.TempDir()
-	p := startPTYChat(t, f, nil, "-model-url", gate.URL, "-history-imports", imports)
+	p := startPTYChat(t, f, nil, "-model-url", url, "-history-imports", imports)
 	pos := p.await(t, "ready", 0)
 	p.send(t, "one\r")
 	pos = p.await(t, "running", pos)
-	releaseGate()
+	release()
 	p.await(t, "first answer", pos)
 	p.await(t, "ready", pos)
 	if err := os.Remove(imports); err != nil {

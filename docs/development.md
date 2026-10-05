@@ -164,6 +164,14 @@ including a terminal hangup (SIGHUP), requests a stop and cleanup, then exits
 with an error; abrupt process loss may still require `canti resume` or
 `canti stop`.
 
+Chat never changes the file status flags of the descriptors it inherits. It
+writes to a pipe or terminal through its own reopened description, so that a
+display write waits at most 250 ms. When that description cannot be opened, as
+for a pipe or terminal of another user, without `/proc`, or for a
+pseudo-terminal master, chat says so once on standard error and writes to the
+inherited descriptor, which can then block it; a hung-up terminal output still
+ends chat with an error before it touches any state.
+
 Empty input is skipped. The TUI editor caps inserted text at its character
 limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted
 input that fails validation (length, UTF-8, or `-context-bytes`) is reported and

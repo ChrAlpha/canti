@@ -174,6 +174,14 @@ func (s finalStderr) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// writeBounded writes s to out as finalStderr does, for diagnostics written
+// before a command sets up its stderr queue.
+func writeBounded(out io.Writer, s string) {
+	w := newStderrWriter(out)
+	io.WriteString(finalStderr{w}, s)
+	w.Close()
+}
+
 func (w *stderrWriter) outputError() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

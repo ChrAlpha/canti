@@ -10,6 +10,45 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestChatOutputKeepsAnUnreopenablePipeBlocking(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reopens a pipe whatever its mode")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	fd := int(w.Fd())
+	if err := unix.Fchmod(fd, 0); err != nil {
+		t.Fatal(err)
+	}
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, restore, err := newChatOutput(w, make(chan error, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, ok := out.(*chatOutput)
+	if !ok || o.fd != fd {
+		t.Fatalf("unreopenable pipe: %#v", out)
+	}
+	if _, err := io.WriteString(out, "kept"); err != nil {
+		t.Fatal(err)
+	}
+	restore()
+	if after, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0); err != nil || after != flags {
+		t.Fatalf("output flags changed from %#x to %#x: %v", flags, after, err)
+	}
+	w.Close()
+	if got, err := io.ReadAll(r); err != nil || string(got) != "kept" {
+		t.Fatalf("read %q: %v", got, err)
+	}
+}
+
 func TestChatOutputBackpressureIsBounded(t *testing.T) {
 	for _, socket := range []bool{false, true} {
 		t.Run(map[bool]string{false: "pipe", true: "socket"}[socket], func(t *testing.T) {
