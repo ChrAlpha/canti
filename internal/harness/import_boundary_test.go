@@ -11,12 +11,33 @@ import (
 
 const module = "github.com/ChrAlpha/canti"
 
-// dependencies reads, in this process and honouring build constraints, the
-// non-test imports of path and of every module package they reach, so the
-// test cache tracks each file it reads and no module lookup is needed. It
-// returns the module packages reached and the imports outside the module
-// and the standard library, whose first path element has no dot.
+// buildTags lists every build tag the module's files are built with.
+var buildTags = []string{"integration", "live", "legacygen", "race"}
+
+// dependencies reads, in this process and honouring the build constraints of
+// every combination of buildTags, the non-test imports of path and of every
+// module package they reach, so the test cache tracks each file it reads and
+// no module lookup is needed. It returns the module packages reached and the
+// imports outside the module and the standard library, whose first path
+// element has no dot.
 func dependencies(t *testing.T, path string) (internal, external []string) {
+	t.Helper()
+	for set := 0; set < 1<<len(buildTags); set++ {
+		ctx := build.Default
+		for i, tag := range buildTags {
+			if set&(1<<i) != 0 {
+				ctx.BuildTags = append(ctx.BuildTags, tag)
+			}
+		}
+		in, ex := tagDependencies(t, ctx, path)
+		internal, external = append(internal, in...), append(external, ex...)
+	}
+	slices.Sort(internal)
+	slices.Sort(external)
+	return slices.Compact(internal), slices.Compact(external)
+}
+
+func tagDependencies(t *testing.T, ctx build.Context, path string) (internal, external []string) {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -27,9 +48,9 @@ func dependencies(t *testing.T, path string) (internal, external []string) {
 	}
 	seen := map[string]bool{path: true}
 	for queue := []string{path}; len(queue) > 0; queue = queue[1:] {
-		p, err := build.ImportDir(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(queue[0], module))), 0)
+		p, err := ctx.ImportDir(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(queue[0], module))), 0)
 		if err != nil {
-			t.Fatalf("read package %s: %v", queue[0], err)
+			t.Fatalf("read package %s with tags %v: %v", queue[0], ctx.BuildTags, err)
 		}
 		for _, imp := range p.Imports {
 			switch {
@@ -42,8 +63,6 @@ func dependencies(t *testing.T, path string) (internal, external []string) {
 			seen[imp] = true
 		}
 	}
-	slices.Sort(internal)
-	slices.Sort(external)
 	return internal, external
 }
 
