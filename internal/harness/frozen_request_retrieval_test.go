@@ -13,7 +13,24 @@ func retrievalScenarios() []frozenScenario {
 	step1 := corpusSteps + "/00000001"
 	// {"binding":"<sha256 of [path,query]>","file":"<meta in base64url>","offset":0}
 	metaCursor := "eyJiaW5kaW5nIjoiMGVlOGI4M2E3YWYzMTgyMDdkODNhNDA0MTI2ZGRkMjNlODM4MDgyY2FkYzk4NmU1YThlOTJjN2I5YTlkMjhiOCIsImZpbGUiOiJiV1YwWVEiLCJvZmZzZXQiOjB9"
+	one, two := `printf 'beta one\n'`, `printf 'beta two\n'`
+	// {"binding":"<sha256 of ["discover",path,query,false]>","through":2,"step":1,"field":0,"offset":0}
+	stepCursor := "eyJiaW5kaW5nIjoiZjU1YzNhZjA2ZGRiNTA4Y2EyYmRhM2NmYzI1MThjNDhkMmQ3ZmVlN2JhNjRjNGExN2FjNzZjN2I3YjZkODhmMiIsInRocm91Z2giOjIsInN0ZXAiOjEsImZpZWxkIjowLCJvZmZzZXQiOjB9"
 	return []frozenScenario{
+		{
+			name: "discovery-pages", limits: stepLimits, outputs: map[string]string{one: "beta one\n", two: "beta two\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Find the steps that printed beta.", replies: []string{
+				corpusDecision(core.Exec, one),
+				corpusDecision(core.Exec, two),
+				corpusRetrieve("discover", corpusSteps, `,"query":"beta","limit":256`, "Find the steps that printed beta."),
+				corpusRetrieve("discover", corpusSteps, `,"query":"beta","limit":256,"cursor":"`+stepCursor+`"`, "Continue the discovery."),
+				corpusDecision(core.Return, "Steps 1 and 2 printed beta."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 exited 0 retrieval 3 sources 0 entries more", "4 exited 0 retrieval 3 sources 0 entries"}}},
+			marks: map[string][]string{
+				"run1-step04-rev1.json": {`Retrieval continuation: {"next_offset":0,"next_cursor":"` + stepCursor + `","more":true}`, "Source " + corpusSteps + "/00000002/meta:\n"},
+				"run1-step05-rev1.json": {`Retrieval continuation: {"next_offset":0,"more":false}`, "Source " + corpusSteps + "/00000001/meta:\n"},
+			},
+		},
 		{
 			name: "directory-search-pages", limits: stepLimits, outputs: map[string]string{letters: "alpha\nbeta\ngamma\ndelta\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Find every record of step 1 that mentions beta.", replies: []string{
