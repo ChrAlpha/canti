@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -35,9 +36,14 @@ func legacyProduce(t *testing.T, name string, spec legacySpec, built legacyBuilt
 			os.RemoveAll(out)
 		}
 	})
-	if err := os.MkdirAll(legacyReserved, 0o755); err != nil {
+	if err := os.Mkdir(legacyReserved, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		t.Fatal(err)
 	}
+	info, err := os.Lstat(legacyReserved)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+		t.Fatalf("%s is not a directory that only this user can write: %v", legacyReserved, err)
+	}
+	t.Cleanup(func() { os.Remove(legacyReserved) })
 	root := filepath.Join(legacyReserved, path.Dir(name)[:7]+"-"+path.Base(name))
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatalf("claiming the producer root: %v", err)
@@ -80,6 +86,7 @@ func legacyProduce(t *testing.T, name string, spec legacySpec, built legacyBuilt
 	}
 	file := filepath.Join(g.state, "canti.db")
 	checkpoint := legacyCheckpointDB(t, file)
+	legacyCheckState(t, g.state)
 	if k := g.killed; k != nil {
 		v, kind, seq := g.latest(g.state, k.run)
 		if checkpoint.Log == 0 || v != k.view || kind != k.kind || seq != k.seq {
@@ -175,6 +182,27 @@ func legacyCheckpointDB(t *testing.T, file string) legacyCheckpoint {
 		}
 	}
 	return c
+}
+
+// legacyCheckState fails when the producer's state directory holds more than
+// the journal, the lock, the archived roots, and an empty job directory.
+func legacyCheckState(t *testing.T, state string) {
+	t.Helper()
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "canti.db", "lock", "artifacts", "history":
+		case "jobs":
+			if jobs, err := os.ReadDir(filepath.Join(state, "jobs")); err != nil || len(jobs) > 0 {
+				t.Fatalf("the producer left job records, which this generator does not archive: %v", err)
+			}
+		default:
+			t.Fatalf("the producer left %s in its state directory", e.Name())
+		}
+	}
 }
 
 func legacySQLiteVersion(t *testing.T, file string) string {

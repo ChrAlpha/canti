@@ -26,8 +26,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/ChrAlpha/canti/core"
 )
 
 var (
@@ -67,7 +65,7 @@ type legacySpec struct {
 func legacySpecs() map[string]legacySpec {
 	unlimited := []string{"-wall-time", "0", "-job-timeout", "0"}
 	notes := legacyText("notes", 1500)
-	readNotes := legacyScripted{decision: corpusRetrieve("read", "/canti/imports/notes.txt", "", "Read the imported notes.")}
+	readNotes := legacyScripted{decision: legacyRetrieve("read", "/canti/imports/notes.txt", "", "Read the imported notes.")}
 	return map[string]legacySpec{
 		legacySchema1 + "/retrieval-awaiting-observation": {
 			coverage: []string{"schema 1", "semantics 1", "built-in retrieval of an import and of a published step record",
@@ -75,7 +73,7 @@ func legacySpecs() map[string]legacySpec {
 			imports: map[string]string{"notes.txt": notes},
 			replies: map[legacyKey]legacyScripted{
 				{1, 1, 1}: readNotes,
-				{1, 2, 1}: {decision: corpusRetrieve("read", "/canti/runs/{run}/steps/00000001/preview", "", "Check what the first step recorded.")},
+				{1, 2, 1}: {decision: legacyRetrieve("read", "/canti/runs/{run}/steps/00000001/preview", "", "Check what the first step recorded.")},
 			},
 			drive: func(g *legacyGen) {
 				g.cli(append([]string{"run", "-goal", "Summarize the imported notes.", "-history-imports", g.imports, "-once"}, unlimited...)...)
@@ -87,7 +85,7 @@ func legacySpecs() map[string]legacySpec {
 				"killed with SIGKILL after AttemptStarted was durable and before the response"},
 			imports: map[string]string{"notes.txt": notes},
 			replies: map[legacyKey]legacyScripted{
-				{1, 1, 1}: {decision: corpusDecision(core.Return, "The imported notes file is numbered plain text.")},
+				{1, 1, 1}: {decision: legacyDecision("return", "The imported notes file is numbered plain text.")},
 				{2, 1, 1}: readNotes,
 				{2, 2, 1}: {hold: true},
 			},
@@ -105,8 +103,8 @@ func legacySpecs() map[string]legacySpec {
 				"paused in idle with the window near the capacity trigger and no handover requested"},
 			imports: map[string]string{"evidence.txt": legacyText("evidence", 32<<10)},
 			replies: map[legacyKey]legacyScripted{
-				{1, 1, 1}: {decision: corpusRetrieve("read", "/canti/imports/evidence.txt", `,"offset":0,"limit":8192`, "Read the first evidence range.")},
-				{1, 2, 1}: {decision: corpusRetrieve("read", "/canti/imports/evidence.txt", `,"offset":8192,"limit":8192`, "Read the second evidence range.")},
+				{1, 1, 1}: {decision: legacyRetrieve("read", "/canti/imports/evidence.txt", `,"offset":0,"limit":8192`, "Read the first evidence range.")},
+				{1, 2, 1}: {decision: legacyRetrieve("read", "/canti/imports/evidence.txt", `,"offset":8192,"limit":8192`, "Read the second evidence range.")},
 			},
 			probe: true,
 			drive: func(g *legacyGen) {
@@ -116,6 +114,23 @@ func legacySpecs() map[string]legacySpec {
 			},
 		},
 	}
+}
+
+// legacyDecision encodes a scripted decision in the protocol every producer
+// decodes, independently of the current core types.
+func legacyDecision(kind, payload string) string {
+	b, err := json.Marshal(struct {
+		Kind    string `json:"kind"`
+		Payload string `json:"payload"`
+	}{kind, payload})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func legacyRetrieve(operation, path, extra, reason string) string {
+	return legacyDecision("exec", `canti:retrieve {"operation":"`+operation+`","path":"`+path+`"`+extra+`,"reason":"`+reason+`"}`)
 }
 
 func legacyText(name string, size int) string {
@@ -333,8 +348,10 @@ func (g *legacyGen) sending(body []byte) (legacyKey, string, error) {
 	return legacyKey{n, v.Step, v.Attempt}, runID, nil
 }
 
+// legacyRaw opens a producer's journal read-only, so that closing it never
+// checkpoints a WAL a killed producer left.
 func legacyRaw(file string) (*sql.DB, error) {
-	dsn := url.URL{Scheme: "file", OmitHost: true, Path: file, RawQuery: "_pragma=query_only(1)&_pragma=busy_timeout(5000)"}
+	dsn := url.URL{Scheme: "file", OmitHost: true, Path: file, RawQuery: "mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"}
 	db, err := sql.Open("sqlite", dsn.String())
 	if err == nil {
 		db.SetMaxOpenConns(1)
