@@ -326,8 +326,9 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
 `synchronous=FULL`, `fullfsync=1` (which SQLite applies only on macOS),
 `foreign_keys=1`, a 5 s busy timeout, and immediate write transactions.
 
-- The schema version is `user_version` 1. A database with another version or
-  a foreign schema is refused with `ErrIncompatible`.
+- The schema version is `user_version` 2. Opening a version-1 database adds
+  the session table; another version or a foreign schema is refused with
+  `ErrIncompatible`.
 - `runs` holds one row per run: the immutable `harness.Run` record (goal,
   constraints, budget, creation time, opaque host config), its initial state,
   its semantics version, and running totals.

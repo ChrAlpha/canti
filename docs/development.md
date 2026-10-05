@@ -222,9 +222,13 @@ and review the diff.
 `TestLegacyJournals` reads and resumes every journal under
 `internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an
 unmodified historical `canti` binary wrote and whose `manifest.json` records
-how. A case is never rewritten: a new one gets a new name, and
+how. The corpus pins how the current code continues those runs; it does not
+extend the support policy for earlier state directories. A case is never
+rewritten: a new one gets a new name, a generator spec, and an expectation of
+the test, and
 `go test -count=1 -tags legacygen -run LegacyJournalGenerate ./internal/harness -args -legacy-generate=<producer SHA>/<case>`
-builds its producer from the local Git history and writes it. When an
+builds its producer from the local Git history and writes it, refusing to run
+unless `/tmp/canti-legacy-w0a` is absent or private to the user. When an
 intended change alters how the current code continues a case, update that
 case's expectation in the test, not the case.
 
