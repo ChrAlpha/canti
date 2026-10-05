@@ -34,6 +34,8 @@ type frozenScenario struct {
 	limits      core.Limits
 	windowSteps int
 	outputs     map[string]string
+	finals      map[string]harness.Job // final job of a command instead of success
+	imports     map[string]string      // files of a read-only imported history archive
 	runs        []frozenRun
 	marks       map[string][]string
 }
@@ -42,6 +44,9 @@ type frozenRun struct {
 	id, goal string
 	replies  []string
 	steps    []string // stepOutcome of every completed step, oldest first
+	budget   harness.Budget
+	resolve  *harness.Observation // operator resolution of an unknown outcome
+	stop     core.StopReason      // the reason the run stops with instead of returning
 }
 
 func corpusDecision(kind core.Kind, payload string) string {

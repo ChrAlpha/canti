@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,11 +65,14 @@ func (m *corpusModel) sent() [][]byte {
 
 // corpusExecutor finishes a started job at its first inspection with the
 // scripted output of its command, which it writes as the job's artifact.
+// A command in finals ends as that job instead, with its output as the
+// preview, unless the job sets one, and as the artifact if it is available.
 type corpusExecutor struct {
 	artifacts string
 	outputs   map[string]string
 	jobs      map[string]*harness.Job
 	commands  map[string]string
+	finals    map[string]harness.Job
 }
 
 func (x *corpusExecutor) Bind(_ context.Context, e harness.Effect) (harness.Job, error) {
@@ -95,6 +99,20 @@ func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Jo
 	j := x.jobs[effectID]
 	if j == nil {
 		return harness.Job{}, false, nil
+	}
+	if final, scripted := x.finals[x.commands[effectID]]; scripted && j.Status == harness.JobRunning {
+		output := x.outputs[x.commands[effectID]]
+		final.ID, final.Preview = j.ID, cmp.Or(final.Preview, output)
+		if final.Output.Available {
+			final.Output.Path, final.Output.Bytes = effectID+"/output", int64(len(output))
+			if err := os.MkdirAll(filepath.Join(x.artifacts, effectID), 0o755); err != nil {
+				return harness.Job{}, false, err
+			}
+			if err := os.WriteFile(filepath.Join(x.artifacts, final.Output.Path), []byte(output), 0o644); err != nil {
+				return harness.Job{}, false, err
+			}
+		}
+		*j = final
 	}
 	if j.Status == harness.JobRunning {
 		output, code := x.outputs[x.commands[effectID]], 0
@@ -157,13 +175,25 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		t.Fatal(err)
 	}
 	history, artifacts := filepath.Join(dir, "history"), filepath.Join(dir, "artifacts")
-	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}}
+	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals}
+	reader := &harness.Reader{History: history, Artifacts: artifacts}
+	if sc.imports != nil {
+		reader.Imports = filepath.Join(dir, "imports")
+		if err := os.Mkdir(reader.Imports, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, data := range sc.imports {
+			if err := os.WriteFile(filepath.Join(reader.Imports, name), []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	limits := harness.DefaultPromptLimits()
 	limits.Total = 256 << 10
 	loop, err := harness.NewLoop(store, x, m, harness.LoopConfig{
 		Environment: corpusEnvironment, ArtifactDir: "/canti/artifacts", History: history, RunsPath: "/canti/runs",
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
-		Reader:      &harness.Reader{History: history, Artifacts: artifacts},
+		Reader:      reader,
 		WindowSteps: sc.windowSteps, HandoverBytes: 2048,
 	})
 	if err != nil {
@@ -181,7 +211,7 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: "Do not modify files outside /workspace.", Created: corpusCreated}
+		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: "Do not modify files outside /workspace.", Budget: run.budget, Created: corpusCreated}
 		if len(sc.runs) > 1 {
 			record.SessionID, record.InputID = "session-1", fmt.Sprintf("input-%d", i+1)
 			_, err = r.store.Submit(ctx, record, state)
@@ -195,7 +225,16 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		r.model.replies = append(r.model.replies, run.replies...)
 		r.model.mu.Unlock()
 		snap, err := r.loop.Run(ctx, run.id)
-		if err != nil || snap.State.Phase != core.PhaseReturned {
+		if err == nil && run.resolve != nil && snap.State.Phase == core.PhaseNeedsResolution {
+			if _, err = r.loop.Resolve(ctx, run.id, *run.resolve); err == nil {
+				snap, err = r.loop.Run(ctx, run.id)
+			}
+		}
+		phase := core.PhaseReturned
+		if run.stop != "" {
+			phase = core.PhaseStopped
+		}
+		if err != nil || snap.State.Phase != phase || snap.State.Reason != run.stop {
 			t.Fatalf("run %s halted at %+v, %v", run.id, snap.State, err)
 		}
 	}
