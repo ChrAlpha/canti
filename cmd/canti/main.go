@@ -82,7 +82,7 @@ var commands = map[string]func(*flag.FlagSet, *app) action{
 type app struct {
 	stdout, stderr   io.Writer
 	display          *stderrWriter
-	outcome          strings.Builder
+	answer, outcome  strings.Builder
 	log              *slog.Logger
 	workspace, state string
 	runID            string

@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func TestStderrWriterOrdered(t *testing.T) {
@@ -321,29 +320,74 @@ func TestBlockedStderrNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	held := f.model.holdRequests()
 	cmd, _, stderr := startCLIWithBlockedStderr(t, nil, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
 	waitFor(t, func() bool { return len(held) > 0 })
+	ended := make(chan struct{})
+	go func() { cmd.Wait(); close(ended) }()
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool {
-		store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
-		if err != nil {
-			return false
-		}
-		defer store.Close()
-		run, err := store.LastRun(context.Background())
-		if err != nil {
-			return false
-		}
-		snap, err := store.Latest(context.Background(), run.ID)
-		return err == nil && snap.State.Phase == core.PhaseStopped
-	})
-	r := f.cli(nil, "stop")
-	go io.Copy(io.Discard, stderr)
-	if err := cmd.Wait(); err != nil && cmd.ProcessState.ExitCode() != exitStopped {
+	awaitUnlockedWhileRunning(t, f.state, ended)
+	out, err := io.ReadAll(stderr)
+	<-ended
+	if err != nil {
 		t.Fatal(err)
 	}
-	if r.code != exitStopped {
-		t.Fatalf("stop while the stopped run reports to a blocked stderr = %+v, want exit %d", r, exitStopped)
+	if code, line := cmd.ProcessState.ExitCode(), "canti: run "+f.status().Run.ID+" stopped: cancelled\n"; code != exitStopped || !bytes.Contains(out, []byte(line)) {
+		t.Fatalf("exit %d, stderr drained after the release lacks %q:\n%s", code, line, out)
+	}
+}
+
+func TestBlockedStdoutNeverKeepsTheWorkspaceLocked(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "the answer"}})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	fillPipe(t, w)
+	_, wait := f.startIO(nil, w, nil, "run", "-goal", "g")
+	w.Close()
+	ended := make(chan struct{})
+	var res result
+	go func() { res = wait(); close(ended) }()
+	awaitUnlockedWhileRunning(t, f.state, ended)
+	out, err := io.ReadAll(r)
+	<-ended
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.code != exitOK || !bytes.HasSuffix(bytes.TrimRight(out, "\x00"), []byte("the answer\n")) {
+		t.Fatalf("returned run with a blocked stdout: %+v, stdout tail %q", res, out[max(0, len(out)-40):])
+	}
+}
+
+// awaitUnlockedWhileRunning fails unless the workspace lock of state can be
+// taken while the command, which ends when ended closes, still runs, and keeps
+// running for a while after: the command waits on its blocked output only
+// once it has released the lock.
+func awaitUnlockedWhileRunning(t *testing.T, state string, ended <-chan struct{}) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-ended:
+			t.Fatal("the command ended before it released the workspace lock while its output was blocked")
+		case <-deadline:
+			t.Fatal("the command kept the workspace locked while its output was blocked")
+		default:
+		}
+		if lock, err := os.OpenFile(filepath.Join(state, "lock"), os.O_RDWR, 0); err == nil {
+			err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			lock.Close()
+			if err == nil {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-ended:
+		t.Fatal("the command ended as soon as it released the workspace lock, so it did not wait on its output unlocked")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

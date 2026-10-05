@@ -111,19 +111,19 @@ func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, func(), err
 
 // report prints the outcome of the run at snap and returns its exit status,
 // or active while the run is still active. Behind a stderr queue it keeps the
-// lines for flushOutcome, so that they never wait on stderr while the
-// workspace is locked.
+// answer and the lines for flushOutcome, so that they never wait on a reader
+// while the workspace is locked.
 func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) {
 	s := snap.State
-	out := a.stderr
+	out, answer := a.stderr, a.stdout
 	if a.display != nil {
-		out = &a.outcome
+		out, answer = &a.outcome, &a.answer
 	}
 	switch {
 	case err != nil:
 		return exitError, err
 	case s.Phase == core.PhaseReturned:
-		fmt.Fprintln(a.stdout, s.Decision.Payload)
+		fmt.Fprintln(answer, s.Decision.Payload)
 		return exitOK, nil
 	case s.Phase == core.PhaseStopped:
 		fmt.Fprintf(out, "canti: run %s stopped: %s\n", s.RunID, s.Reason)
@@ -146,9 +146,14 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 	return active, nil
 }
 
-// flushOutcome writes the lines report kept, in one write that waits at most
-// stderrFinalTime; call it once the workspace is unlocked.
+// flushOutcome writes the answer report kept to stdout, then its lines in one
+// write that waits at most stderrFinalTime; call it once the workspace is
+// unlocked.
 func (a *app) flushOutcome() {
+	if a.answer.Len() > 0 {
+		io.WriteString(a.stdout, a.answer.String())
+		a.answer.Reset()
+	}
 	if a.display != nil && a.outcome.Len() > 0 {
 		io.WriteString(finalStderr{a.display}, a.outcome.String())
 		a.outcome.Reset()
