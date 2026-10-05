@@ -55,6 +55,23 @@ func legacyExpectations() map[string]legacyExpectation {
 				legacySamePrefix(t, r.frozen(t, 2, 1), r.suffix[1].Facts.Request.Body, 2)
 			},
 		},
+		legacySemantics2 + "/request-sent-killed": {
+			replies: func(string) []string { return []string{corpusDecision(core.Return, notes)} },
+			kinds:   []string{"attempt_started", "response_saved", "response_loaded"},
+			answer:  notes,
+			check: func(t *testing.T, r legacyResult) {
+				p := r.paused
+				if p.Phase != core.PhaseRequestSent {
+					t.Fatalf("the fixture is paused in %s", p.Phase)
+				}
+				if got, want := r.suffix[0].Event, core.Event(core.AttemptStarted{Step: p.Step, Attempt: p.Attempt + 1}); got != want {
+					t.Errorf("resume first committed %#v, want %#v counting the lost attempt", got, want)
+				}
+				if len(r.sent) != 1 || !bytes.Equal(r.sent[0], r.frozen(t, p.Step, p.RequestRev)) {
+					t.Error("resume did not resend exactly the request the producer froze")
+				}
+			},
+		},
 	}
 }
 

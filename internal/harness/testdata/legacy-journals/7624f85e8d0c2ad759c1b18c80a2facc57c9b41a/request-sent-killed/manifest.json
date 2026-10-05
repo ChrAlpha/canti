@@ -1,0 +1,411 @@
+{
+	"format": 1,
+	"case": "7624f85e8d0c2ad759c1b18c80a2facc57c9b41a/request-sent-killed",
+	"producer": {
+		"sha": "7624f85e8d0c2ad759c1b18c80a2facc57c9b41a",
+		"tree": "070fa19b3f21542e11e47067f8421ab8d2638631",
+		"binary": {
+			"path": "cmd/canti",
+			"bytes": 18912141,
+			"sha256": "80ce3261c7170eb5aa3d18ce46108d8c564a85cd96be37332bd21fe65697e4ec"
+		},
+		"go_version": "go1.25.6",
+		"build": [
+			"path github.com/ChrAlpha/canti/cmd/canti",
+			"mod github.com/ChrAlpha/canti (devel)",
+			"dep charm.land/bubbles/v2 v2.2.1 h1:Fq1+qm5hV6GkvzLQDhCBpXXE5tLgvh1PRriCLwSvIQU=",
+			"dep charm.land/bubbletea/v2 v2.0.8 h1:SxTJMhCAI3lbPmy4SgX5LWZ24AdINr4I6UEqzZvYJuY=",
+			"dep charm.land/lipgloss/v2 v2.0.5 h1:kbNxgeeUOYv5J0YdpxFjfvf3dFvqH8Aci4zB6xqFtrY=",
+			"dep github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=",
+			"dep github.com/charmbracelet/colorprofile v0.4.3 h1:QPa1IWkYI+AOB+fE+mg/5/4HRMZcaXex9t5KX76i20Q=",
+			"dep github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 h1:3FmWoGNWK4STvqg0O0Aeav2T7rodWJAPeF0QpH+8gFw=",
+			"dep github.com/charmbracelet/x/ansi v0.11.7 h1:kzv1kJvjg2S3r9KHo8hDdHFQLEqn4RBCb39dAYC84jI=",
+			"dep github.com/charmbracelet/x/term v0.2.2 h1:xVRT/S2ZcKdhhOuSP4t5cLi5o+JxklsoEObBSgfgZRk=",
+			"dep github.com/charmbracelet/x/termios v0.1.1 h1:o3Q2bT8eqzGnGPOYheoYS8eEleT5ZVNYNy8JawjaNZY=",
+			"dep github.com/charmbracelet/x/windows v0.2.2 h1:IofanmuvaxnKHuV04sC0eBy/smG6kIKrWG2/jYn2GuM=",
+			"dep github.com/clipperhouse/displaywidth v0.11.0 h1:lBc6kY44VFw+TDx4I8opi/EtL9m20WSEFgwIwO+UVM8=",
+			"dep github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=",
+			"dep github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=",
+			"dep github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+			"dep github.com/lucasb-eyer/go-colorful v1.4.0 h1:UtrWVfLdarDgc44HcS7pYloGHJUjHV/4FwW4TvVgFr4=",
+			"dep github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=",
+			"dep github.com/mattn/go-runewidth v0.0.27 h1:Feg/Oou5zI/wnpgDF6omIU0OokC9GxLC/WRknhVlIR0=",
+			"dep github.com/muesli/cancelreader v0.2.2 h1:3I4Kt4BQjOR54NavqnDogx/MIoWBFa0StPA8ELUXHmA=",
+			"dep github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=",
+			"dep github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=",
+			"dep github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=",
+			"dep golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=",
+			"dep golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+			"dep modernc.org/libc v1.75.7 h1:o3DTP9/0p9pKmY2WCKQaySW6wIiZhNM7wc2lUoyhfew=",
+			"dep modernc.org/mathutil v1.7.1 h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU=",
+			"dep modernc.org/memory v1.12.1 h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g=",
+			"dep modernc.org/sqlite v1.59.0 h1:X1es1GpqBlS/5T+vbM4HLUdaa8OtQx468DF2vrx+38A=",
+			"build -buildmode=exe",
+			"build -compiler=gc",
+			"build -trimpath=true",
+			"build CGO_ENABLED=0",
+			"build GOARCH=amd64",
+			"build GOOS=linux",
+			"build GOAMD64=v1"
+		]
+	},
+	"generator": {
+		"files": [
+			{
+				"path": "legacy_journal_gen_test.go",
+				"bytes": 18611,
+				"sha256": "95308fb2498285527d130dddbc3b096b5169686c95c486c1d1e4ccd009fd24f1"
+			},
+			{
+				"path": "legacy_journal_export_test.go",
+				"bytes": 12207,
+				"sha256": "3b661ff583b188213e3a9f3eb81343d07718cc569ca05bad9b353deaac8a5bd3"
+			},
+			{
+				"path": "legacy_journal_fixture_test.go",
+				"bytes": 16540,
+				"sha256": "98eb4cb6446bf49766ab369bed037ce61d06bb36c2bd37cfaf815ff522407093"
+			}
+		],
+		"go_version": "go1.25.6",
+		"sqlite": "3.53.4"
+	},
+	"paths": {
+		"root": "/tmp/canti-legacy-w0a/7624f85-request-sent-killed",
+		"workspace": "/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+		"state": "/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+		"imports": "/tmp/canti-legacy-w0a/7624f85-request-sent-killed/imports"
+	},
+	"environment": [
+		"PATH=/tmp/canti-legacy-w0a/7624f85-request-sent-killed/bin",
+		"HOME=/tmp/canti-legacy-w0a/7624f85-request-sent-killed/home",
+		"TMPDIR=/tmp/canti-legacy-w0a/7624f85-request-sent-killed/tmp",
+		"ANTHROPIC_API_KEY=(fake credential withheld)"
+	],
+	"invocations": [
+		{
+			"args": [
+				"run",
+				"-input",
+				"input-1",
+				"-goal",
+				"What kind of file is the imported notes file?",
+				"-session",
+				"legacy-w0a",
+				"-history-imports",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/imports",
+				"-once",
+				"-wall-time",
+				"0",
+				"-job-timeout",
+				"0",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "request_frozen"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "response_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "0",
+			"phase": "returned"
+		},
+		{
+			"args": [
+				"run",
+				"-input",
+				"input-2",
+				"-goal",
+				"Read the imported notes, then summarize them.",
+				"-session",
+				"legacy-w0a",
+				"-history-imports",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/imports",
+				"-once",
+				"-wall-time",
+				"0",
+				"-job-timeout",
+				"0",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "request_frozen"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "response_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "effect_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "job_bound"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "awaiting_observation"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "idle"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "request_frozen"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/7624f85-request-sent-killed/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "signal killed",
+			"phase": "request_sent"
+		}
+	],
+	"replies": [
+		{
+			"run": 1,
+			"step": 1,
+			"attempt": 1,
+			"request_sha256": "95eed6fcade822c1d7f58e486edef14b1f420e3cf34ff6e9ec7c1de4bd4824fb",
+			"decision": "{\"kind\":\"return\",\"payload\":\"The imported notes file is numbered plain text.\"}"
+		},
+		{
+			"run": 2,
+			"step": 1,
+			"attempt": 1,
+			"request_sha256": "3728983ed21fdbc09719173fcb7cd2f6f8e92e4565e2e5a23a9b2e7ea88e84b8",
+			"decision": "{\"kind\":\"exec\",\"payload\":\"canti:retrieve {\\\"operation\\\":\\\"read\\\",\\\"path\\\":\\\"/canti/imports/notes.txt\\\",\\\"reason\\\":\\\"Read the imported notes.\\\"}\"}"
+		},
+		{
+			"run": 2,
+			"step": 2,
+			"attempt": 1,
+			"request_sha256": "f2e5b014ddb01600f36b5c1fd7baf14b389a611c63fcb1d27b20ad4559b6960e",
+			"hold": true
+		}
+	],
+	"checkpoint": {
+		"busy": 0,
+		"log": 2,
+		"checkpointed": 2,
+		"integrity": "ok",
+		"journal_mode": "wal"
+	},
+	"journal": {
+		"db": {
+			"path": "journal.db",
+			"bytes": 106496,
+			"sha256": "8addb254b66c14a1e2ec3c3d19addfa6a1b77724c4ffafa483ccfeb5ed0966f2"
+		},
+		"user_version": 2,
+		"rows": {
+			"runs": 2,
+			"session_runs": 2,
+			"transitions": 13
+		},
+		"kinds": [
+			"attempt_started",
+			"job_bound",
+			"job_started",
+			"observed",
+			"request_frozen",
+			"response_loaded",
+			"response_saved"
+		],
+		"runs": [
+			{
+				"n": 1,
+				"id": "run_fc6f81e49011e6adc4e3333a72c0c2e7",
+				"semantics": 2,
+				"session_id": "legacy-w0a",
+				"session_seq": 1,
+				"input_id": "input-1",
+				"seq": 4,
+				"phase": "returned",
+				"step": 1,
+				"attempt": 1,
+				"request_rev": 1
+			},
+			{
+				"n": 2,
+				"id": "run_d3cba9630b7001cd4fc914f424f0e1c1",
+				"semantics": 2,
+				"session_id": "legacy-w0a",
+				"session_seq": 2,
+				"input_id": "input-2",
+				"seq": 9,
+				"phase": "request_sent",
+				"step": 2,
+				"attempt": 1,
+				"request_rev": 1
+			}
+		]
+	},
+	"coverage": [
+		"schema 2",
+		"semantics 2",
+		"two-run session",
+		"built-in retrieval of an import",
+		"killed with SIGKILL after AttemptStarted was durable and before the response"
+	],
+	"files": [
+		{
+			"path": "journal.db.gz",
+			"bytes": 13217,
+			"sha256": "85b2151c592b99644283a184d8d0f598fbd9dda5d0a8e4ace9d5d83df1f44b94"
+		},
+		{
+			"path": "roots.tar.gz",
+			"bytes": 933,
+			"sha256": "3dcf23dbdad1e9e4e1ad64be24d28ce85857480eb4828c017e7d7196ccc908c0"
+		}
+	],
+	"roots": [
+		{
+			"path": "history/run_d3cba9630b7001cd4fc914f424f0e1c1/goal",
+			"bytes": 45,
+			"sha256": "ec080737fc448578a676e9e1800fd151d26ecb3c143e1d3282e9337d082b3806"
+		},
+		{
+			"path": "history/run_d3cba9630b7001cd4fc914f424f0e1c1/session",
+			"bytes": 119,
+			"sha256": "5193e2a2873a32119af91093680652fccdc2b2083a3970e00ade5f0ad583449f"
+		},
+		{
+			"path": "history/run_d3cba9630b7001cd4fc914f424f0e1c1/steps/00000001/command",
+			"bytes": 105,
+			"sha256": "6fe62b97e8d8ed834c22ba252cef9d951ce54fe1df8fae1ff9f63c43b6209f0e"
+		},
+		{
+			"path": "history/run_d3cba9630b7001cd4fc914f424f0e1c1/steps/00000001/meta",
+			"bytes": 114,
+			"sha256": "aaa2943b60044e8d1d1ce629f26c5ad78d1802d000c0aff77e91c1ab436d881f"
+		},
+		{
+			"path": "history/run_d3cba9630b7001cd4fc914f424f0e1c1/steps/00000001/preview",
+			"bytes": 281,
+			"sha256": "ee92ec4e1cced8d2f678a79b9ceeb6770ffd213a45942e5e6b62764eb98aa83f"
+		},
+		{
+			"path": "history/run_fc6f81e49011e6adc4e3333a72c0c2e7/goal",
+			"bytes": 45,
+			"sha256": "f83e99fc4b1e63b61732161bb2b0021b386f08feda9085a3b820af160a3de387"
+		},
+		{
+			"path": "history/run_fc6f81e49011e6adc4e3333a72c0c2e7/result",
+			"bytes": 64,
+			"sha256": "b3f9f3059ad965016e41d4e65d9d8f42ce378f6f7a67671098e1341625aa9985"
+		},
+		{
+			"path": "history/run_fc6f81e49011e6adc4e3333a72c0c2e7/session",
+			"bytes": 62,
+			"sha256": "b3b09b16010e7cebbb52c35751a09f612727ff49067c1f3c1e22dc3ed14cb28b"
+		},
+		{
+			"path": "imports/notes.txt",
+			"bytes": 1560,
+			"sha256": "68435c49611d55f0994c24977aaaed7ebbc1d820eb3fc0a95e40efde67d0d782"
+		}
+	]
+}
