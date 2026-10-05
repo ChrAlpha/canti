@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,19 +31,21 @@ const legacyHandover = "Read evidence ranges [0,24576) of /canti/imports/evidenc
 // legacy journal: the decisions its scripted model returns, the event kinds
 // it appends, and the run's answer.
 type legacyExpectation struct {
-	replies func(runID string) []string
-	kinds   []string
-	answer  string
-	check   func(t *testing.T, r legacyResult)
+	replies   func(runID string) []string
+	kinds     []string
+	answer    string
+	published []int
+	check     func(t *testing.T, r legacyResult)
 }
 
 func legacyExpectations() map[string]legacyExpectation {
 	notes := "The notes are numbered plain-text lines."
 	return map[string]legacyExpectation{
 		legacySchema1 + "/retrieval-awaiting-observation": {
-			replies: func(string) []string { return []string{corpusDecision(core.Return, notes)} },
-			kinds:   append([]string{"observed"}, closing...),
-			answer:  notes,
+			replies:   func(string) []string { return []string{corpusDecision(core.Return, notes)} },
+			kinds:     append([]string{"observed"}, closing...),
+			answer:    notes,
+			published: []int{2},
 			check: func(t *testing.T, r legacyResult) {
 				preview := "/canti/runs/" + r.run.ID + "/steps/00000001/preview"
 				data, ok := r.copy.files["history"+preview[len("/canti/runs"):]]
@@ -54,13 +58,25 @@ func legacyExpectations() map[string]legacyExpectation {
 				if got := o.Retrieval.Sources[0]; got != want {
 					t.Errorf("the retrieval read %+v, not the producer's published preview %+v", got, want)
 				}
-				legacySamePrefix(t, r.frozen(t, 2, 1), r.suffix[1].Facts.Request.Body, 2)
+				next := r.suffix[1].Facts.Request
+				legacySamePrefix(t, r.frozen(t, 2, 1), next.Body, 2)
+				_, blocks := legacyBlocks(t, next.Body)
+				expanded := slices.Contains(next.Context.Sources, harness.ContextSource{Step: 2, Source: want, Available: true})
+				if !expanded || len(blocks) != 4 || !strings.Contains(blocks[2], "Retrieved original evidence:") || !strings.Contains(blocks[2], string(data)) {
+					t.Errorf("the next request does not carry the resumed retrieval's evidence: %+v", next.Context.Sources)
+				}
 			},
 		},
 		legacySemantics2 + "/request-sent-killed": {
-			replies: func(string) []string { return []string{corpusDecision(core.Return, notes)} },
-			kinds:   []string{"attempt_started", "response_saved", "response_loaded"},
-			answer:  notes,
+			replies: func(string) []string {
+				return []string{
+					corpusRetrieve("read", "/canti/imports/notes.txt", "", "Read the imported notes again."),
+					corpusDecision(core.Return, notes),
+				}
+			},
+			kinds:     append([]string{"attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}, closing...),
+			answer:    notes,
+			published: []int{2},
 			check: func(t *testing.T, r legacyResult) {
 				p := r.paused
 				if p.Phase != core.PhaseRequestSent {
@@ -69,8 +85,13 @@ func legacyExpectations() map[string]legacyExpectation {
 				if got, want := r.suffix[0].Event, core.Event(core.AttemptStarted{Step: p.Step, Attempt: p.Attempt + 1}); got != want {
 					t.Errorf("resume first committed %#v, want %#v counting the lost attempt", got, want)
 				}
-				if len(r.sent) != 1 || !bytes.Equal(r.sent[0], r.frozen(t, p.Step, p.RequestRev)) {
+				if len(r.sent) != 2 || !bytes.Equal(r.sent[0], r.frozen(t, p.Step, p.RequestRev)) {
 					t.Error("resume did not resend exactly the request the producer froze")
+				}
+				next := r.suffix[6].Facts.Request
+				legacySamePrefix(t, r.frozen(t, p.Step, p.RequestRev), next.Body, 2)
+				if _, blocks := legacyBlocks(t, next.Body); !strings.Contains(blocks[0], "## Earlier session dialogue\n") || len(next.Context.Session) != 1 {
+					t.Errorf("the next request does not carry the earlier session run: %+v", next.Context.Session)
 				}
 			},
 		},
@@ -82,8 +103,9 @@ func legacyExpectations() map[string]legacyExpectation {
 					corpusDecision(core.Return, "The evidence is numbered plain-text lines."),
 				}
 			},
-			kinds:  slices.Concat(cycle, cycle, closing),
-			answer: "The evidence is numbered plain-text lines.",
+			kinds:     slices.Concat(cycle, cycle, closing),
+			answer:    "The evidence is numbered plain-text lines.",
+			published: []int{2, 3, 4},
 			check: func(t *testing.T, r legacyResult) {
 				var requests []*harness.Request
 				var steps []int
@@ -148,17 +170,30 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 	if !reflect.DeepEqual(summary, c.manifest.Journal) {
 		t.Fatalf("the journal does not match its manifest:\n got %+v\nwant %+v", summary, c.manifest.Journal)
 	}
+	checkLegacyManifest(t, c, before)
 	runs := before.runs(t)
 	paused := runs[len(runs)-1].text(t, "id")
-	store, err := sqlite.Open(context.Background(), c.db)
+	ctx := context.Background()
+	store, err := sqlite.OpenReadOnly(ctx, c.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	exerciseLegacyReads(t, store, before, paused)
+	exerciseLegacyReads(t, store, before, paused, before.version != 1)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	compareLegacy(t, before, snapshotLegacy(t, c.db), nil, nil)
+	if data, err := os.ReadFile(c.db); err != nil || legacyHash(data) != c.manifest.Journal.DB.SHA256 {
+		t.Fatalf("the read-only store changed the journal file: %v", err)
+	}
+	compareLegacy(t, before, snapshotLegacy(t, c.db), before.version, nil, nil)
+	if store, err = sqlite.Open(ctx, c.db); err != nil {
+		t.Fatal(err)
+	}
+	exerciseLegacyReads(t, store, before, paused, true)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compareLegacy(t, before, snapshotLegacy(t, c.db), 2, nil, nil)
 	r := resumeLegacy(t, c, before, x)
 	var grown legacyCounters
 	for _, tr := range r.suffix {
@@ -170,16 +205,101 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 		}
 	}
 	after := snapshotLegacy(t, c.db)
-	compareLegacy(t, before, after, map[string]legacyCounters{paused: grown}, map[string]int{paused: len(r.suffix)})
-	if store, err = sqlite.Open(context.Background(), c.db); err != nil {
+	compareLegacy(t, before, after, 2, map[string]legacyCounters{paused: grown}, map[string]int{paused: len(r.suffix)})
+	checkLegacyRoots(t, c, paused, x.published)
+	if store, err = sqlite.Open(ctx, c.db); err != nil {
 		t.Fatal(err)
 	}
-	exerciseLegacyReads(t, store, after, "")
+	exerciseLegacyReads(t, store, after, "", true)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	x.check(t, r)
 	return c.stored
+}
+
+// checkLegacyManifest checks the manifest's claims about the journal: one
+// scripted reply per send, each to the bytes frozen for that attempt, the
+// recorded producer paths, and the producer's capacity measurement.
+func checkLegacyManifest(t *testing.T, c legacyCopy, db legacyDB) {
+	t.Helper()
+	m, runs := c.manifest, db.runs(t)
+	sends := 0
+	for _, row := range runs {
+		var run harness.Run
+		var cfg legacyConfig
+		if err := json.Unmarshal([]byte(row.text(t, "run")), &run); err != nil {
+			t.Fatal(err)
+		}
+		if err := legacyStrict(run.Config, &cfg); err != nil || cfg.Workspace != m.Paths.Workspace || cfg.HistoryImports != m.Paths.Imports {
+			t.Fatalf("run %s config %+v does not match the recorded paths %+v: %v", run.ID, cfg, m.Paths, err)
+		}
+		if m.Capacity != nil && row.text(t, "id") == runs[len(runs)-1].text(t, "id") &&
+			(cfg.ContextBytes != m.Capacity.ContextBytes || !reflect.DeepEqual(legacyLastCheck(t, db, run.ID), m.Capacity.Last)) {
+			t.Fatalf("run %s does not record the manifest's last capacity check %+v", run.ID, m.Capacity.Last)
+		}
+		frozen := map[[2]int64][]byte{}
+		for _, r := range db.transitions(t, run.ID) {
+			switch r.text(t, "kind") {
+			case "request_frozen":
+				frozen[[2]int64{r.num(t, "step"), r.num(t, "rev")}] = legacyFactsOf(t, r).Request.Body
+			case "attempt_started":
+				v := legacyViewOf(t, r.text(t, "to_state"))
+				i := slices.IndexFunc(m.Replies, func(p legacyReply) bool {
+					return int64(p.Run) == row.num(t, "n") && p.Step == v.Step && p.Attempt == v.Attempt
+				})
+				if i < 0 || m.Replies[i].Request != legacyHash(frozen[[2]int64{int64(v.Step), int64(v.RequestRev)}]) {
+					t.Fatalf("run %s step %d attempt %d has no reply to its frozen request", run.ID, v.Step, v.Attempt)
+				}
+				sends++
+			}
+		}
+	}
+	if sends != len(m.Replies) {
+		t.Fatalf("the journal records %d sends, the manifest %d replies", sends, len(m.Replies))
+	}
+}
+
+// checkLegacyRoots requires that resuming rewrote no file of the producer's
+// roots and added only the step records of the given steps.
+func checkLegacyRoots(t *testing.T, c legacyCopy, runID string, published []int) {
+	t.Helper()
+	added := map[string]bool{}
+	for _, step := range published {
+		for _, file := range []string{"command", "meta", "preview"} {
+			added[fmt.Sprintf("history/%s/steps/%08d/%s", runID, step, file)] = true
+		}
+	}
+	err := filepath.WalkDir(c.roots, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(c.roots, p)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+		data, err := os.ReadFile(p)
+		original, ok := c.files[name]
+		switch {
+		case err != nil:
+			return err
+		case !d.Type().IsRegular():
+			t.Errorf("the resume left %s, which is not a regular file", name)
+		case ok && !bytes.Equal(data, original):
+			t.Errorf("the resume rewrote %s", name)
+		case !ok && !added[name]:
+			t.Errorf("the resume wrote %s", name)
+		}
+		delete(added, name)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range added {
+		t.Errorf("the resume did not publish %s", name)
+	}
 }
 
 // legacyUsage is what corpusModel reports for every response.
@@ -278,12 +398,17 @@ func resumeLegacy(t *testing.T, c legacyCopy, before legacyDB, x legacyExpectati
 	t.Helper()
 	runs := before.runs(t)
 	r := legacyResult{copy: c, before: before}
-	if err := json.Unmarshal([]byte(runs[len(runs)-1].text(t, "run")), &r.run); err != nil {
+	store, err := sqlite.Open(context.Background(), c.db)
+	if err != nil {
 		t.Fatal(err)
 	}
+	r.run, err = store.LastRun(context.Background())
+	if err = errors.Join(err, store.Close()); err != nil || r.run.ID != runs[len(runs)-1].text(t, "id") {
+		t.Fatalf("LastRun = %q, %v", r.run.ID, err)
+	}
 	var cfg legacyConfig
-	if err := legacyStrict(r.run.Config, &cfg); err != nil {
-		t.Fatalf("run config: %v", err)
+	if err := legacyStrict(r.run.Config, &cfg); err != nil || cfg.ContextVersion != 1 {
+		t.Fatalf("run config %+v: %v", cfg, err)
 	}
 	rows := before.transitions(t, r.run.ID)
 	r.paused = legacyState(t, rows[len(rows)-1].text(t, "to_state"))
@@ -337,8 +462,7 @@ func resumeLegacy(t *testing.T, c legacyCopy, before legacyDB, x legacyExpectati
 	if snap.State.Phase != core.PhaseReturned || snap.State.Decision.Payload != x.answer {
 		t.Fatalf("run %s halted in %s with %q, want returned with %q", r.run.ID, snap.State.Phase, snap.State.Decision.Payload, x.answer)
 	}
-	store, err := sqlite.Open(ctx, c.db)
-	if err != nil {
+	if store, err = sqlite.Open(ctx, c.db); err != nil {
 		t.Fatal(err)
 	}
 	all, err := store.Transitions(ctx, r.run.ID, 0, 1<<16)

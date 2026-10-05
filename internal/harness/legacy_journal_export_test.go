@@ -221,26 +221,6 @@ func (g *legacyGen) probe(raw legacyDB, j legacyJournal) *legacyCapacity {
 	return c
 }
 
-func legacyLastCheck(t *testing.T, db legacyDB, runID string) legacyHandoverCheck {
-	t.Helper()
-	rows := db.transitions(t, runID)
-	for i := len(rows) - 1; i >= 0; i-- {
-		if rows[i].text(t, "kind") != "request_frozen" {
-			continue
-		}
-		f := legacyFactsOf(t, rows[i])
-		if f.Request == nil || f.Request.Window == nil || f.Request.Context == nil {
-			t.Fatalf("request at seq %d records no window or context", rows[i].num(t, "seq"))
-		}
-		h := f.Request.Context.Handover
-		return legacyHandoverCheck{Step: int(rows[i].num(t, "step")), Status: h.Status, Used: h.Used, Capacity: h.Capacity,
-			Growth: h.Growth, Headroom: h.Capacity - h.Used - h.Growth, Requested: f.Request.Window.Requested,
-			Reasons: h.Reasons, Body: legacyHash(f.Request.Body)}
-	}
-	t.Fatalf("run %s froze no request", runID)
-	return legacyHandoverCheck{}
-}
-
 func legacyCopyTree(t *testing.T, src, dst string) {
 	t.Helper()
 	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
