@@ -14,7 +14,24 @@ func failureScenarios() []frozenScenario {
 	partial := func(detail string) harness.ArtifactRef { return harness.ArtifactRef{Available: true, Detail: detail} }
 	failing, exit, zero := "--- FAIL: TestParse (0.00s)\n    parse_test.go:12: unexpected token \"}\"\nFAIL\n", 2, 0
 	kept := fmt.Sprintf("kept %d of 9000 bytes", len(failing))
+	handover := func(firstStep int) string {
+		return corpusDecision(core.Exec, fmt.Sprintf(`canti:handover {"run_id":"%s","first_step":%d,"text":"Read go.mod next, then report the module path."}`, corpusRun, firstStep))
+	}
 	return []frozenScenario{
+		{
+			name: "failed-context-actions", limits: stepLimits, windowSteps: 1,
+			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
+				corpusDecision(core.Exec, `canti:retrieve {"operation":"read","path":"/canti/runs/`+corpusRun+`/goal","reason":"Reread the goal.","bogus":true}`),
+				handover(2),
+				handover(1),
+				corpusDecision(core.Return, "I could not read go.mod yet."),
+			}, steps: []string{"1 exited 1 action failed", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"Preview:\n```\nContext action failed: json: unknown field \"bogus\"\n```\n", "## Handover required\n"},
+				"run1-step03-rev1.json": {"Preview:\n```\nContext action failed: harness: handover first_step must be 1, got 2\n```\n", "## Handover required\n"},
+				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n", "## Current window steps\nNone.\n"},
+			},
+		},
 		{
 			name: "operator-resolution", limits: stepLimits,
 			finals: map[string]harness.Job{
