@@ -447,17 +447,7 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 		}
 		defer r.Close()
 		fillPipe(t, w)
-		exe, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command(exe, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
-		for _, kv := range os.Environ() {
-			if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
-				cmd.Env = append(cmd.Env, kv)
-			}
-		}
-		cmd.Env = append(cmd.Env, "CANTI_TEST_MAIN=1", "ANTHROPIC_API_KEY="+f.key)
+		cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("never\n"), out, w
 		start := time.Now()
 		if err := cmd.Start(); err != nil {

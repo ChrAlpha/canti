@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/core"
+	"golang.org/x/sys/unix"
 )
 
 func TestStderrWriterOrdered(t *testing.T) {
@@ -358,6 +359,72 @@ func TestBlockedStdoutNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	if res.code != exitOK || !bytes.HasSuffix(bytes.TrimRight(out, "\x00"), []byte("the answer\n")) {
 		t.Fatalf("returned run with a blocked stdout: %+v, stdout tail %q", res, out[max(0, len(out)-40):])
 	}
+}
+
+func TestChatSetupNoteLeadsAStderrItWaitedOn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reopens a pipe whatever its mode")
+	}
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outR.Close()
+	if err := unix.Fchmod(int(outW.Fd()), 0); err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errR.Close()
+	fillPipe(t, errW)
+	cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("one\n"), outW, errW
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	outW.Close()
+	errW.Close()
+	defer cmd.Wait()
+	var answer []byte
+	for buf := make([]byte, 256); !bytes.Contains(answer, []byte("first answer\n")); {
+		n, err := outR.Read(buf)
+		if err != nil {
+			t.Fatalf("chat behind a blocked stderr never answered: %q, %v", answer, err)
+		}
+		answer = append(answer, buf[:n]...)
+	}
+	stderr, err := io.ReadAll(errR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := "canti chat: standard output: reopen /proc/self/fd/1: permission denied; "
+	if lines := strings.Split(string(bytes.TrimLeft(stderr, "\x00")), "\n"); !strings.HasPrefix(lines[0], note) || strings.Count(string(stderr), note) != 1 {
+		t.Fatalf("stderr drained behind the setup note does not start with it, once:\n%s", bytes.TrimLeft(stderr, "\x00"))
+	}
+}
+
+// cliCommand is the canti test binary running args with the test's
+// environment, without inherited credentials or test hooks, and env.
+func cliCommand(t *testing.T, env []string, args ...string) *exec.Cmd {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, args...)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if _, ok := os.LookupEnv("GORACE"); !ok {
+		cmd.Env = append(cmd.Env, "GORACE=atexit_sleep_ms=0")
+	}
+	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
+	return cmd
 }
 
 // awaitUnlockedWhileRunning fails unless the workspace lock of state can be

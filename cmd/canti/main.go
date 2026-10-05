@@ -113,31 +113,39 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "canti: unknown command %q\n\n%s", name, usage)
 		return exitUsage
 	}
+	tui := name == "chat" && isatty.IsTerminal(os.Stdin.Fd())
+	var queue *stderrWriter
+	setupNote := func(s string) { writeBounded(stderr, s) }
+	if !tui {
+		queue = newStderrWriter(stderr)
+		defer queue.Close()
+		setupNote = func(s string) { io.WriteString(finalStderr{queue}, s) }
+	}
 	var displayFailure chan error
 	if name == "chat" {
 		displayFailure = make(chan error, 2)
 		out, restoreOut, err := newChatOutput(stdout, displayFailure)
 		if err != nil {
-			writeBounded(stderr, fmt.Sprintf("canti chat: standard output: %v\n", err))
+			setupNote(fmt.Sprintf("canti chat: standard output: %v\n", err))
 			return exitError
 		}
 		defer restoreOut()
 		note := blockingNote("standard output", out)
 		stdout = out
-		diagnostic := stderr
-		if isatty.IsTerminal(os.Stdin.Fd()) {
-			var restoreErr func()
-			if diagnostic, restoreErr, err = newChatOutput(stderr, displayFailure); err != nil {
-				writeBounded(stderr, fmt.Sprintf("canti chat: standard error: %v\n", err))
+		if tui {
+			diagnostic, restoreErr, err := newChatOutput(stderr, displayFailure)
+			if err != nil {
+				setupNote(fmt.Sprintf("canti chat: standard error: %v\n", err))
 				return exitError
 			}
 			defer restoreErr()
+			stderr = diagnostic
+			setupNote = func(s string) { io.WriteString(diagnostic, s) }
 			note += blockingNote("standard error", diagnostic)
 		}
 		if note != "" {
-			writeBounded(stderr, note)
+			setupNote(note)
 		}
-		stderr = diagnostic
 	}
 	a := &app{stdout: stdout, stderr: stderr, displayFailure: displayFailure}
 	fs := flag.NewFlagSet("canti "+name, flag.ContinueOnError)
@@ -165,10 +173,8 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	final := stderr
-	if name != "chat" || !isatty.IsTerminal(os.Stdin.Fd()) {
-		asyncStderr := newStderrWriter(stderr)
-		defer asyncStderr.Close()
-		stderr, a.stderr, a.display, final = asyncStderr, asyncStderr, asyncStderr, finalStderr{asyncStderr}
+	if queue != nil {
+		stderr, a.stderr, a.display, final = queue, queue, queue, finalStderr{queue}
 	}
 	var lv slog.Level
 	code, err := exitUsage, lv.UnmarshalText([]byte(*level))
