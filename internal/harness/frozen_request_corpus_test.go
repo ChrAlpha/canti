@@ -3,6 +3,7 @@ package harness_test
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -198,7 +199,8 @@ func TestFrozenRequestBodies(t *testing.T) {
 }
 
 // journal lists the sequence, kind, and event ID of every transition the
-// runs committed, as the transitions table holds them.
+// runs committed, as the transitions table holds them, and the facts column
+// of each frozen request with its body replaced by the name of its golden.
 func (r *corpusRig) journal(t *testing.T, runs []frozenRun) []byte {
 	t.Helper()
 	db, err := sql.Open("sqlite", r.path)
@@ -208,23 +210,41 @@ func (r *corpusRig) journal(t *testing.T, runs []frozenRun) []byte {
 	defer db.Close()
 	var b bytes.Buffer
 	for i, run := range runs {
-		rows, err := db.Query(`SELECT seq, kind, event_id FROM transitions WHERE run_id = ? ORDER BY seq`, run.id)
+		rows, err := db.Query(`SELECT seq, kind, event_id, step, rev, facts FROM transitions WHERE run_id = ? ORDER BY seq`, run.id)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for rows.Next() {
 			var seq int64
-			var kind, id string
-			if err := rows.Scan(&seq, &kind, &id); err != nil {
+			var step, rev int
+			var kind, id, facts string
+			if err := rows.Scan(&seq, &kind, &id, &step, &rev, &facts); err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(&b, "run%d %d %s %s\n", i+1, seq, kind, id)
+			fmt.Fprintf(&b, "run%d %d %s %s", i+1, seq, kind, id)
+			if kind == "request_frozen" {
+				b.WriteString(" " + elideBody(t, facts, fmt.Sprintf("run%d-step%02d-rev%d.json", i+1, step, rev)))
+			}
+			b.WriteByte('\n')
 		}
 		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return b.Bytes()
+}
+
+func elideBody(t *testing.T, facts, name string) string {
+	t.Helper()
+	var f struct{ Request struct{ Body []byte } }
+	if err := json.Unmarshal([]byte(facts), &f); err != nil {
+		t.Fatal(err)
+	}
+	body := `"Body":"` + base64.StdEncoding.EncodeToString(f.Request.Body) + `"`
+	if strings.Count(facts, body) != 1 {
+		t.Fatalf("facts of %s hold its body %d times", name, strings.Count(facts, body))
+	}
+	return strings.Replace(facts, body, `"Body":"`+name+`"`, 1)
 }
 
 func writeFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
