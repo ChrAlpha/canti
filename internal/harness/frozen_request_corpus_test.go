@@ -59,7 +59,7 @@ func corpusRetrieve(operation, path, extra, reason string) string {
 func frozenScenarios() []frozenScenario {
 	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	ls := map[string]string{"ls /workspace": "go.mod\nmain.go\n"}
-	return []frozenScenario{
+	return slices.Concat([]frozenScenario{
 		{
 			name: "shell-and-retrieval", limits: stepLimits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Find which line of the listing mentions beta.", replies: []string{
@@ -148,7 +148,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
 			},
 		},
-	}
+	}, edgeScenarios())
 }
 
 // TestFrozenRequestBodies records the exact request body committed for each
