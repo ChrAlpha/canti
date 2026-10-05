@@ -163,7 +163,16 @@ func frozenScenarios() []frozenScenario {
 // record change.
 func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 	scenarios := frozenScenarios()
-	checkScenarioDirectories(t, scenarios)
+	orphans := checkScenarioDirectories(t, scenarios)
+	defer func() {
+		if *updateRequests && !t.Failed() {
+			for _, dir := range orphans {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	}()
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			rig := newCorpusRig(t, sc)
@@ -209,6 +218,9 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 			}
 			dir := filepath.Join("testdata", "frozen-requests", sc.name)
 			if *updateRequests {
+				if t.Failed() {
+					t.Fatal("-update-requests keeps the goldens of a failing scenario")
+				}
 				writeFrozenRequests(t, dir, got)
 				return
 			}
@@ -315,8 +327,9 @@ func elideBody(t *testing.T, facts, name string) string {
 }
 
 // checkScenarioDirectories fails on a golden directory that no scenario
-// records, which -update-requests removes instead.
-func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) {
+// records, or with -update-requests returns it for removal once every
+// scenario passed.
+func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) (orphans []string) {
 	t.Helper()
 	root := filepath.Join("testdata", "frozen-requests")
 	names := map[string]bool{}
@@ -334,13 +347,12 @@ func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) {
 		switch {
 		case names[e.Name()]:
 		case *updateRequests:
-			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
-				t.Fatal(err)
-			}
+			orphans = append(orphans, filepath.Join(root, e.Name()))
 		default:
 			t.Errorf("%s holds %s, which no scenario records; -update-requests removes it", root, e.Name())
 		}
 	}
+	return orphans
 }
 
 func writeFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
@@ -379,6 +391,7 @@ func compareFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
 	for _, name := range names {
 		want, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
+			t.Error(err)
 			continue
 		}
 		if body := got[name]; !bytes.Equal(body, want) {
