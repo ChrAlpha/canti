@@ -202,7 +202,7 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 		case core.ResponseSaved:
 			grown.input, grown.output = grown.input+legacyUsage.InputTokens, grown.output+legacyUsage.OutputTokens
 		case core.Observed, core.Resolved:
-			grown.steps++
+			grown.steps, grown.bytes = grown.steps+1, grown.bytes+tr.Facts.Observation.Output.Bytes
 		}
 	}
 	after := snapshotLegacy(t, c.db)
