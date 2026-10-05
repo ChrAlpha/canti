@@ -234,7 +234,7 @@ Each `ci-` target pipes `go test -json` through `scripts/test-report.sh`,
 which prints each package result as it finishes, then the output of every
 failed or unfinished test and the 20 slowest top-level tests, and exits with
 the status of `go test`; set `TEST_JSON` to keep the events. The `-timeout`
-of each target bounds one package: 10 min for `ci-integration`, 20 min for
+of each target bounds one package: 15 min for `ci-integration`, 30 min for
 `ci-long`, and 5 min for `ci-pty`. CI configuration is versioned in
 `.github/workflows/ci.yml`; workflow success is separate evidence from checks
 run locally. Repository hosting settings such as branch protection, reviewer
