@@ -2,7 +2,9 @@ package harness_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -14,7 +16,7 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-var updateRequests = flag.Bool("update-requests", false, "rewrite testdata/frozen-requests from the request bodies the scenarios freeze")
+var updateRequests = flag.Bool("update-requests", false, "rewrite testdata/frozen-requests from the records the scenarios commit")
 
 const (
 	corpusRun     = "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31"
@@ -162,6 +164,7 @@ func TestFrozenRequestBodies(t *testing.T) {
 					committed = append(committed, tr.Facts.Request.Body)
 				}
 			}
+			got["journal.txt"] = rig.journal(t, sc.runs)
 			sent := rig.model.sent()
 			if len(sent) != len(committed) {
 				t.Fatalf("sent %d requests for %d frozen requests", len(sent), len(committed))
@@ -192,6 +195,36 @@ func TestFrozenRequestBodies(t *testing.T) {
 			compareFrozenRequests(t, dir, got)
 		})
 	}
+}
+
+// journal lists the sequence, kind, and event ID of every transition the
+// runs committed, as the transitions table holds them.
+func (r *corpusRig) journal(t *testing.T, runs []frozenRun) []byte {
+	t.Helper()
+	db, err := sql.Open("sqlite", r.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var b bytes.Buffer
+	for i, run := range runs {
+		rows, err := db.Query(`SELECT seq, kind, event_id FROM transitions WHERE run_id = ? ORDER BY seq`, run.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var seq int64
+			var kind, id string
+			if err := rows.Scan(&seq, &kind, &id); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "run%d %d %s %s\n", i+1, seq, kind, id)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return b.Bytes()
 }
 
 func writeFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
