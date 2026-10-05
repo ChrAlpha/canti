@@ -194,6 +194,7 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 		t.Fatal(err)
 	}
 	compareLegacy(t, before, snapshotLegacy(t, c.db), 2, nil, nil)
+	roots := legacyRootFiles(t, c.roots)
 	r := resumeLegacy(t, c, before, x)
 	var grown legacyCounters
 	for _, tr := range r.suffix {
@@ -206,7 +207,7 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 	}
 	after := snapshotLegacy(t, c.db)
 	compareLegacy(t, before, after, 2, map[string]legacyCounters{paused: grown}, map[string]int{paused: len(r.suffix)})
-	checkLegacyRoots(t, c, paused, x.published)
+	checkLegacyRoots(t, c, roots, paused, x.published)
 	if store, err = sqlite.Open(ctx, c.db); err != nil {
 		t.Fatal(err)
 	}
@@ -260,9 +261,31 @@ func checkLegacyManifest(t *testing.T, c legacyCopy, db legacyDB) {
 	}
 }
 
-// checkLegacyRoots requires that resuming rewrote no file of the producer's
-// roots and added only the step records of the given steps.
-func checkLegacyRoots(t *testing.T, c legacyCopy, runID string, published []int) {
+// legacyRootFiles returns the file information of every entry but the
+// directories under the roots.
+func legacyRootFiles(t *testing.T, roots string) map[string]fs.FileInfo {
+	t.Helper()
+	files := map[string]fs.FileInfo{}
+	err := filepath.WalkDir(roots, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(roots, p)
+		if err == nil {
+			files[filepath.ToSlash(rel)], err = os.Lstat(p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// checkLegacyRoots requires that resuming neither rewrote nor replaced a
+// file of the producer's roots, which before held, and added only the step
+// records of the given steps.
+func checkLegacyRoots(t *testing.T, c legacyCopy, before map[string]fs.FileInfo, runID string, published []int) {
 	t.Helper()
 	added := map[string]bool{}
 	for _, step := range published {
@@ -270,32 +293,23 @@ func checkLegacyRoots(t *testing.T, c legacyCopy, runID string, published []int)
 			added[fmt.Sprintf("history/%s/steps/%08d/%s", runID, step, file)] = true
 		}
 	}
-	err := filepath.WalkDir(c.roots, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(c.roots, p)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(rel)
-		data, err := os.ReadFile(p)
+	if len(before) != len(c.files) {
+		t.Fatalf("the roots held %d files before the resume, the manifest lists %d", len(before), len(c.files))
+	}
+	for name, info := range legacyRootFiles(t, c.roots) {
+		data, err := os.ReadFile(filepath.Join(c.roots, filepath.FromSlash(name)))
 		original, ok := c.files[name]
 		switch {
 		case err != nil:
-			return err
-		case !d.Type().IsRegular():
+			t.Fatal(err)
+		case !info.Mode().IsRegular():
 			t.Errorf("the resume left %s, which is not a regular file", name)
-		case ok && !bytes.Equal(data, original):
+		case ok && (!bytes.Equal(data, original) || !os.SameFile(info, before[name]) || !info.ModTime().Equal(before[name].ModTime())):
 			t.Errorf("the resume rewrote %s", name)
 		case !ok && !added[name]:
 			t.Errorf("the resume wrote %s", name)
 		}
 		delete(added, name)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	for name := range added {
 		t.Errorf("the resume did not publish %s", name)
