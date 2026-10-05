@@ -117,7 +117,7 @@ func legacyProduce(t *testing.T, name string, spec legacySpec, built legacyBuilt
 		Paths:       legacyPaths{Root: root, Workspace: g.workspace, State: g.state, Imports: g.imports},
 		Environment: g.env(true), Invocations: g.invocations, Replies: g.replies, Checkpoint: checkpoint,
 		Journal: journal, Capacity: capacity, Coverage: spec.coverage, Roots: roots}
-	for _, source := range []string{"legacy_journal_gen_test.go", "legacy_journal_export_test.go", "legacy_journal_fixture_test.go"} {
+	for _, source := range []string{"legacy_journal_gen_test.go", "legacy_journal_export_test.go", "legacy_journal_fixture_test.go", "legacy_journal_raw_test.go"} {
 		data, err := os.ReadFile(source)
 		if err != nil {
 			t.Fatal(err)
