@@ -27,6 +27,8 @@ jobs:
           go-version-file: go.mod
       - name: Check formatting and vet
         run: make fmt vet
+      - name: Check test names
+        run: make test-names
       - name: Run race-enabled unit tests
         run: make ci-unit
       - name: Smoke-test CLI

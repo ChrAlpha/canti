@@ -41,6 +41,7 @@ Cloning requires repository access while the repository is private.
 | `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
 | `make ci-pty` | The tests listed in `PTY_TESTS`, which open a pseudo-terminal, alone in one test binary; needs Docker |
+| `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
@@ -215,15 +216,19 @@ Keep large outputs, credentials, databases, and local task state outside Git.
 ## CI and delivery
 
 The CI workflow runs on pushes to `main` and pull requests in four parallel
-jobs. `check` runs `make fmt vet`, `make ci-unit`, and a CLI version smoke
-test. `integration`, `long`, and `pty` each pull `alpine:3.23`, run
-`make ci-integration`, `make ci-long`, or `make ci-pty`, and fail if any
-container labelled `canti.effect` is left; together they run each test of
-`make integration` once. The Makefile lists the tests of the last two jobs:
-`LONG_TESTS` are the slow acceptance tests, and `PTY_TESTS` are the tests that
-open a pseudo-terminal, which wait for terminal output within fixed deadlines;
-`ci-pty` runs them alone so that no other test binary competes for the CPU.
-Add a new test of either kind to its list.
+jobs. `check` runs `make fmt vet`, `make test-names`, `make ci-unit`, and a
+CLI version smoke test. `integration`, `long`, and `pty` each pull
+`alpine:3.23`, run `make ci-integration`, `make ci-long`, or `make ci-pty`,
+and fail if any container labelled `canti.effect` is left; together they run
+each test of `make integration` once. The Makefile lists the tests of the last
+two jobs: `LONG_TESTS` are the slow acceptance tests, and `PTY_TESTS` are the
+tests that open a pseudo-terminal, which wait for terminal output within fixed
+deadlines; `ci-pty` runs them alone so that no other test binary competes for
+the CPU. Add a new test of either kind to its list. `make test-names` fails
+when a listed name is not a test, when a test that opens a pseudo-terminal is
+not in `PTY_TESTS`, or when `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, or a
+document under `docs/` cites a test that does not exist; the dated evidence
+records, which cite the tests of their revision, are not checked.
 
 Each `ci-` target pipes `go test -json` through `scripts/test-report.sh`,
 which prints each package result as it finishes, then the output of every

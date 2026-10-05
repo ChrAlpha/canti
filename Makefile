@@ -1,4 +1,4 @@
-.PHONY: check ci-integration ci-long ci-pty ci-unit fmt integration test vet
+.PHONY: check ci-integration ci-long ci-pty ci-unit fmt integration test test-names vet
 
 empty :=
 space := $(empty) $(empty)
@@ -70,3 +70,6 @@ ci-long:
 
 ci-pty:
 	$(CI_TEST) -p 1 -timeout=5m -tags integration -run '$(PTY)' ./cmd/canti
+
+test-names:
+	LONG='$(LONG)' PTY='$(PTY)' scripts/check-test-names.sh
