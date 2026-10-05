@@ -33,6 +33,9 @@ func failureScenarios() []frozenScenario {
 			},
 		},
 		{
+			// The gate records a command it refused as a bound and started job
+			// that exited 1, although the command never ran. Recording the refusal
+			// as failed_to_start without a job must change these records.
 			name: "handover-gate", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
 				corpusDecision(core.Exec, "ls /workspace"),
