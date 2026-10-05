@@ -44,7 +44,7 @@ LONG = $(call anchored,$(LONG_TESTS))
 PTY = $(call anchored,$(PTY_TESTS))
 CI_TEST = scripts/test-report.sh go test -json -count=1 -race
 
-check: fmt vet test
+check: fmt vet test-names test
 
 fmt:
 	test -z "$$(gofmt -l .)"

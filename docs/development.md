@@ -32,7 +32,7 @@ Cloning requires repository access while the repository is private.
 
 | Command | Purpose |
 | --- | --- |
-| `make check` | Read-only formatting validation, vet, and all unit tests |
+| `make check` | Read-only formatting validation, vet, the test-name check, and all unit tests |
 | `make fmt` | Check `gofmt` output; does not rewrite files |
 | `make vet` | `go vet ./...`, then `go vet -tags integration,live ./...` so tagged test files compile |
 | `make test` | `go test ./...` |
