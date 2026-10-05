@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -82,7 +83,6 @@ var commands = map[string]func(*flag.FlagSet, *app) action{
 type app struct {
 	stdout, stderr   io.Writer
 	display          *stderrWriter
-	answer, outcome  strings.Builder
 	log              *slog.Logger
 	workspace, state string
 	runID            string
@@ -187,7 +187,6 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			a.cred, a.credErr = credentials()
 		}
 		code, err = act(ctx)
-		a.flushOutcome()
 	}
 	if err != nil {
 		var out strings.Builder
@@ -292,6 +291,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		}
 		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
 		snap, err := drive(l, run.ID)
+		done()
 		return a.report(snap, err, exitActive)
 	}
 }
@@ -409,7 +409,7 @@ func (a *app) open(ctx context.Context, lock, create bool) (*sqlite.Store, func(
 		release()
 		return nil, nil, err
 	}
-	return store, func() { store.Close(); release() }, nil
+	return store, sync.OnceFunc(func() { store.Close(); release() }), nil
 }
 
 // find returns the selected run and its stored config.
@@ -501,6 +501,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 		return exitError, err
 	}
 	snap, err := op(l, run.ID)
+	done()
 	return a.report(snap, err, active)
 }
 

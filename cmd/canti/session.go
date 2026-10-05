@@ -35,6 +35,7 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 			return exitError, err
 		}
 		snap, err := store.Latest(ctx, previous.ID)
+		done()
 		return a.report(snap, err, exitActive)
 	}
 	if !errors.Is(err, harness.ErrNotFound) {
@@ -83,5 +84,6 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	if err != nil {
 		return exitError, fmt.Errorf("session %s run %s: %w", session, run.ID, err)
 	}
+	done()
 	return a.report(snap, nil, exitActive)
 }
