@@ -2,7 +2,11 @@
 # Usage: scripts/test-report.sh go test -json ... (TEST_JSON names the saved event file)
 set -uo pipefail
 
-json=${TEST_JSON:-$(mktemp)}
+json=${TEST_JSON:-}
+if [ -z "$json" ]; then
+	json=$(mktemp)
+	trap 'rm -f "$json"' EXIT
+fi
 "$@" | tee "$json" | jq -Rrj --unbuffered '
 	(fromjson? // {Action: "raw", Output: (. + "\n")})
 	| if .Action == "raw" or .Action == "build-output" then .Output
