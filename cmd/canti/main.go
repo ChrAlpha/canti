@@ -149,7 +149,8 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	a := &app{stdout: stdout, stderr: stderr, displayFailure: displayFailure}
 	fs := flag.NewFlagSet("canti "+name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	var parseErr strings.Builder
+	fs.SetOutput(&parseErr)
 	fs.Usage = func() {}
 	workspace := fs.String("workspace", ".", "workspace `directory` of the run")
 	state := fs.String("state", "", "state `directory` (default $XDG_STATE_HOME/canti/<hash of the workspace path>)")
@@ -165,11 +166,13 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		help(stdout)
 		return exitOK
 	case err != nil:
-		help(stderr)
+		help(&parseErr)
+		setupNote(parseErr.String())
 		return exitUsage
 	case fs.NArg() > 0:
-		fmt.Fprintf(stderr, "canti %s: unexpected argument %q\n", name, fs.Arg(0))
-		help(stderr)
+		fmt.Fprintf(&parseErr, "canti %s: unexpected argument %q\n", name, fs.Arg(0))
+		help(&parseErr)
+		setupNote(parseErr.String())
 		return exitUsage
 	}
 	final := stderr

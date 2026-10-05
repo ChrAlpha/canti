@@ -363,6 +363,24 @@ func TestBlockedStdoutNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	}
 }
 
+func TestBlockedStderrBoundsAFlagError(t *testing.T) {
+	f := newFixture(t, nil)
+	cmd, _, stderr := startCLIWithBlockedStderr(t, nil, nil, "status", "-workspace", f.workspace, "-state", f.state, "-bogus")
+	start := time.Now()
+	ended := make(chan struct{})
+	go func() { cmd.Wait(); close(ended) }()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		go io.Copy(io.Discard, stderr)
+		<-ended
+		t.Fatal("a flag error waited for a stderr nobody reads")
+	}
+	if code, elapsed := cmd.ProcessState.ExitCode(), time.Since(start); code != exitUsage || elapsed > 3*stderrFinalTime {
+		t.Fatalf("flag error behind a blocked stderr: exit %d after %s", code, elapsed)
+	}
+}
+
 func TestChatSetupNoteLeadsAStderrItWaitedOn(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reopens a pipe whatever its mode")
