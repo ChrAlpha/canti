@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -397,7 +396,7 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int, grown map[
 			}
 			switch fresh, ok := session[key]; {
 			case name == "sqlite_schema" && ok:
-				for _, column := range []string{"type", "tbl_name", "sql"} {
+				for _, column := range []string{"type", "name", "tbl_name", "sql"} {
 					if !reflect.DeepEqual(row[column], fresh[column]) {
 						t.Errorf("migrated schema object %s has %s %#v, a new journal %#v", key, column, row[column], fresh[column])
 					}
@@ -423,26 +422,29 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int, grown map[
 	}
 }
 
-// legacySessionSchema returns the schema objects of the session table of a
-// journal the current store creates.
+// legacySessionSchema returns the schema objects of the session table that
+// the semantics-2 producer created in every journal of the corpus it wrote.
 func legacySessionSchema(t *testing.T) map[string]legacyRow {
 	t.Helper()
-	file := filepath.Join(t.TempDir(), "canti.db")
-	store, err := sqlite.Open(context.Background(), file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	objects := map[string]legacyRow{}
-	for name, row := range snapshotLegacy(t, file).tables["sqlite_schema"].rows {
-		if row.text(t, "tbl_name") == "session_runs" {
-			objects[name] = row
+	var objects map[string]legacyRow
+	for _, name := range legacyCaseNames(t) {
+		if !strings.HasPrefix(name, legacySemantics2+"/") {
+			continue
 		}
+		found := map[string]legacyRow{}
+		for key, row := range snapshotLegacy(t, openLegacyCase(t, name).db).tables["sqlite_schema"].rows {
+			if row.text(t, "tbl_name") == "session_runs" {
+				delete(row, "rootpage")
+				found[key] = row
+			}
+		}
+		if objects != nil && !reflect.DeepEqual(found, objects) {
+			t.Fatalf("%s holds another session table than the other journals of its producer", name)
+		}
+		objects = found
 	}
 	if len(objects) == 0 {
-		t.Fatal("a new journal has no session table")
+		t.Fatalf("no journal of %s holds a session table", legacySemantics2)
 	}
 	return objects
 }

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -196,18 +197,22 @@ func testLegacyJournal(t *testing.T, name string, x legacyExpectation) int64 {
 	compareLegacy(t, before, snapshotLegacy(t, c.db), 2, nil, nil)
 	roots := legacyRootFiles(t, c.roots)
 	r := resumeLegacy(t, c, before, x)
+	output := legacyBuiltinOutput(t, before, paused)
 	var grown legacyCounters
 	for _, tr := range r.suffix {
 		switch tr.Event.(type) {
 		case core.ResponseSaved:
 			grown.input, grown.output = grown.input+legacyUsage.InputTokens, grown.output+legacyUsage.OutputTokens
 		case core.Observed, core.Resolved:
-			grown.steps, grown.bytes = grown.steps+1, grown.bytes+tr.Facts.Observation.Output.Bytes
+			if tr.Facts.Observation.Output != output {
+				t.Errorf("seq %d observed built-in output %+v, the producer %+v", tr.Seq, tr.Facts.Observation.Output, output)
+			}
+			grown.steps, grown.bytes = grown.steps+1, grown.bytes+output.Bytes
 		}
 	}
 	after := snapshotLegacy(t, c.db)
 	compareLegacy(t, before, after, 2, map[string]legacyCounters{paused: grown}, map[string]int{paused: len(r.suffix)})
-	checkLegacyRoots(t, c, roots, paused, x.published)
+	checkLegacyRoots(t, c, roots, paused, x.answer, x.published)
 	if store, err = sqlite.Open(ctx, c.db); err != nil {
 		t.Fatal(err)
 	}
@@ -240,25 +245,64 @@ func checkLegacyManifest(t *testing.T, c legacyCopy, db legacyDB) {
 			t.Fatalf("run %s does not record the manifest's last capacity check %+v", run.ID, m.Capacity.Last)
 		}
 		frozen := map[[2]int64][]byte{}
+		reply := func(v legacyView) legacyReply {
+			i := slices.IndexFunc(m.Replies, func(p legacyReply) bool {
+				return int64(p.Run) == row.num(t, "n") && p.Step == v.Step && p.Attempt == v.Attempt
+			})
+			if i < 0 {
+				t.Fatalf("run %s step %d attempt %d has no reply", run.ID, v.Step, v.Attempt)
+			}
+			return m.Replies[i]
+		}
 		for _, r := range db.transitions(t, run.ID) {
+			v := legacyViewOf(t, r.text(t, "to_state"))
 			switch r.text(t, "kind") {
 			case "request_frozen":
 				frozen[[2]int64{r.num(t, "step"), r.num(t, "rev")}] = legacyFactsOf(t, r).Request.Body
 			case "attempt_started":
-				v := legacyViewOf(t, r.text(t, "to_state"))
-				i := slices.IndexFunc(m.Replies, func(p legacyReply) bool {
-					return int64(p.Run) == row.num(t, "n") && p.Step == v.Step && p.Attempt == v.Attempt
-				})
-				if i < 0 || m.Replies[i].Request != legacyHash(frozen[[2]int64{int64(v.Step), int64(v.RequestRev)}]) {
+				if reply(v).Request != legacyHash(frozen[[2]int64{int64(v.Step), int64(v.RequestRev)}]) {
 					t.Fatalf("run %s step %d attempt %d has no reply to its frozen request", run.ID, v.Step, v.Attempt)
 				}
 				sends++
+			case "response_saved":
+				var body struct{ Content []struct{ Text string } }
+				p := reply(v)
+				if err := json.Unmarshal(legacyFactsOf(t, r).Response.Body, &body); err != nil || p.Hold || len(body.Content) != 1 || body.Content[0].Text != p.Decision {
+					t.Fatalf("run %s step %d attempt %d saved another response than the scripted %q: %v", run.ID, v.Step, v.Attempt, p.Decision, err)
+				}
 			}
 		}
 	}
 	if sends != len(m.Replies) {
 		t.Fatalf("the journal records %d sends, the manifest %d replies", sends, len(m.Replies))
 	}
+}
+
+// legacyBuiltinOutput returns the output reference the producer recorded for
+// the built-in actions of a run, which every pilot observes only; a resumed
+// built-in action must record the same.
+func legacyBuiltinOutput(t *testing.T, db legacyDB, runID string) harness.ArtifactRef {
+	t.Helper()
+	var outputs []harness.ArtifactRef
+	for _, row := range db.transitions(t, runID) {
+		if row.text(t, "kind") != "observed" {
+			continue
+		}
+		var o harness.Observation
+		if err := json.Unmarshal([]byte(legacyField(t, row, "Observation")), &o); err != nil {
+			t.Fatal(err)
+		}
+		if o.Retrieval == nil && o.Handover == nil {
+			t.Fatalf("seq %d of %s observed a job, not a built-in action", row.num(t, "seq"), runID)
+		}
+		if outputs = append(outputs, o.Output); o.Output != outputs[0] {
+			t.Fatalf("the producer recorded built-in outputs %+v and %+v", outputs[0], o.Output)
+		}
+	}
+	if len(outputs) == 0 {
+		t.Fatalf("run %s observed no built-in action", runID)
+	}
+	return outputs[0]
 }
 
 // legacyRootFiles returns the file information of every entry but the
@@ -282,12 +326,13 @@ func legacyRootFiles(t *testing.T, roots string) map[string]fs.FileInfo {
 	return files
 }
 
-// checkLegacyRoots requires that resuming neither rewrote nor replaced a
-// file of the producer's roots, which before held, and added only the step
-// records of the given steps.
-func checkLegacyRoots(t *testing.T, c legacyCopy, before map[string]fs.FileInfo, runID string, published []int) {
+// checkLegacyRoots requires that resuming kept every file of the producer's
+// roots, which before held, without rewriting or replacing it, and added only
+// the step records of the given steps, whose meta has the form of the
+// producer's meta of step 1, and the result of the returned run.
+func checkLegacyRoots(t *testing.T, c legacyCopy, before map[string]fs.FileInfo, runID, answer string, published []int) {
 	t.Helper()
-	added := map[string]bool{}
+	added := map[string]bool{"history/" + runID + "/result": true}
 	for _, step := range published {
 		for _, file := range []string{"command", "meta", "preview"} {
 			added[fmt.Sprintf("history/%s/steps/%08d/%s", runID, step, file)] = true
@@ -296,7 +341,17 @@ func checkLegacyRoots(t *testing.T, c legacyCopy, before map[string]fs.FileInfo,
 	if len(before) != len(c.files) {
 		t.Fatalf("the roots held %d files before the resume, the manifest lists %d", len(before), len(c.files))
 	}
-	for name, info := range legacyRootFiles(t, c.roots) {
+	after := legacyRootFiles(t, c.roots)
+	for name := range c.files {
+		if _, ok := after[name]; !ok {
+			t.Errorf("the resume removed %s", name)
+		}
+	}
+	first, ok := c.files["history/"+runID+"/steps/00000001/meta"]
+	if !ok {
+		t.Fatalf("the producer published no meta of step 1 of %s", runID)
+	}
+	for name, info := range after {
 		data, err := os.ReadFile(filepath.Join(c.roots, filepath.FromSlash(name)))
 		original, ok := c.files[name]
 		switch {
@@ -308,6 +363,13 @@ func checkLegacyRoots(t *testing.T, c legacyCopy, before map[string]fs.FileInfo,
 			t.Errorf("the resume rewrote %s", name)
 		case !ok && !added[name]:
 			t.Errorf("the resume wrote %s", name)
+		case !ok && path.Base(name) == "meta":
+			step := path.Base(path.Dir(name))
+			if want := strings.Replace(string(first), "step: 1\n", "step: "+strings.TrimLeft(step, "0")+"\n", 1); string(data) != want {
+				t.Errorf("the resume published %s as %q, want %q", name, data, want)
+			}
+		case !ok && path.Base(name) == "result" && string(data) != "phase: returned\n\n"+answer:
+			t.Errorf("the resume published %s as %q", name, data)
 		}
 		delete(added, name)
 	}
@@ -465,6 +527,9 @@ func resumeLegacy(t *testing.T, c legacyCopy, before legacyDB, x legacyExpectati
 		loop, err := harness.NewLoop(store, executor, m, lc)
 		if err == nil {
 			snap, err = loop.Step(ctx, r.run.ID)
+		}
+		if err == nil && snap.State.Intent() == core.IntentHalt {
+			snap, err = loop.Run(ctx, r.run.ID)
 		}
 		if err = errors.Join(err, store.Close()); err != nil {
 			t.Fatalf("step %d of run %s: %v", i+1, r.run.ID, err)
