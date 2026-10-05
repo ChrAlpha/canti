@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -142,6 +143,7 @@ func TestChatTUIFailuresDoNotEscalateCancellation(t *testing.T) {
 	key := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl})
 	output := chatOutputFailure{err: errors.New("terminal output failed")}
 	input := chatInputFailure{err: errors.New("terminal input failed")}
+	hangup := chatSignal{sig: syscall.SIGHUP}
 	for _, tc := range []struct {
 		name   string
 		events []tea.Msg
@@ -149,6 +151,7 @@ func TestChatTUIFailuresDoNotEscalateCancellation(t *testing.T) {
 		{"interrupt first", []tea.Msg{key, output, input, output}},
 		{"output first", []tea.Msg{output, input, key, output}},
 		{"input first", []tea.Msg{input, output, key, input}},
+		{"hangup first", []tea.Msg{hangup, key, hangup}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stopped int

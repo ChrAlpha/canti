@@ -28,6 +28,8 @@ PTY_TESTS = \
 	TestChatPTYBusyScrollDoesNotQueueInput \
 	TestChatPTYDisplayFailureWaitsForCancellation \
 	TestChatPTYExitPreservesCompleteTranscript \
+	TestChatPTYHangupCancelsTheDockerJob \
+	TestChatPTYHangupStopsTheActiveRun \
 	TestChatPTYInterruptsDockerJobAndKeepsSession \
 	TestChatPTYResolutionGuidanceSurvivesAltScreen \
 	TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr \

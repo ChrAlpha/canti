@@ -146,6 +146,9 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, chatPoll()
 	case chatSignal:
+		if msg.sig == syscall.SIGHUP {
+			return m.Update(chatInputFailure{err: errors.New("hung up")})
+		}
 		if m.busy {
 			m.stop(msg.sig)
 			if msg.sig == syscall.SIGTERM {

@@ -52,12 +52,19 @@ func startPTYChatWithMode(t *testing.T, f *fixture, stderr *os.File, env []strin
 }
 
 func startPTYChatWithDeadline(t *testing.T, f *fixture, stderr *os.File, env []string, canonical bool, deadline time.Duration, args ...string) *ptyChat {
+	return startPTYChatWithAttr(t, f, stderr, env, canonical, deadline, nil, args...)
+}
+
+func startPTYChatWithAttr(t *testing.T, f *fixture, stderr *os.File, env []string, canonical bool, deadline time.Duration, attr *syscall.SysProcAttr, args ...string) *ptyChat {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(int(master.Fd()), true); err != nil {
 		t.Fatal(err)
 	}
 	slaveFD := int(slave.Fd())
@@ -90,6 +97,7 @@ func startPTYChatWithDeadline(t *testing.T, f *fixture, stderr *os.File, env []s
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}
+	cmd.SysProcAttr = attr
 	p := &ptyChat{cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -420,6 +428,40 @@ func fillLivePipe(t *testing.T, fd int) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "unused"}})
+	held := f.model.holdRequests()
+	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true})
+	p.await(t, "ready", 0)
+	p.send(t, "busy request\r")
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the model did not receive the active run")
+	}
+	p.waited = true
+	ended := make(chan error, 1)
+	go func() { ended <- p.cmd.Wait() }()
+	if err := p.master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("chat did not exit after its terminal hung up")
+	}
+	s := f.status()
+	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+		t.Fatalf("hangup: %v, exit %d, run %+v", p.cmd.ProcessState, code, s)
+	}
+	f.model.mu.Lock()
+	f.model.hold = nil
+	f.model.mu.Unlock()
+	if r := f.cli(nil, "run", "-session", "pty", "-input", "next", "-goal", "fresh"); r.code != exitOK || f.status().Run.SessionSeq != 2 {
+		t.Fatalf("the session did not continue after the hangup: %+v", r)
 	}
 }
 

@@ -154,9 +154,10 @@ tails, and execution status. Lines containing control characters are quoted
 as Go strings after `(quoted)`; answers and output are cleaned of control
 characters. A stopped run reports its stop reason and recorded steps. SIGTERM,
 or Ctrl+C with non-TTY input, stops the run and ends chat with the run's status:
-3 if stopped, 0 if it had already returned. A TUI input or output failure
-requests a stop and cleanup, then exits with an error; abrupt process loss may
-still require `canti resume` or `canti stop`.
+3 if stopped, 0 if it had already returned. A TUI input or output failure,
+including a terminal hangup (SIGHUP), requests a stop and cleanup, then exits
+with an error; abrupt process loss may still require `canti resume` or
+`canti stop`.
 
 Empty input is skipped. The TUI editor caps inserted text at its character
 limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted

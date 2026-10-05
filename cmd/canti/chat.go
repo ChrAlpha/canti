@@ -86,7 +86,7 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 			a.log = slog.New(slog.NewTextHandler(display, &slog.HandlerOptions{Level: lv}))
 			a.stopSignals = make(chan os.Signal, 2)
 			signals := make(chan os.Signal, 2)
-			signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+			signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer signal.Stop(signals)
 			submit := func(goal string) (int, error, os.Signal) {
 				a.signal = nil

@@ -6,11 +6,45 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
 )
+
+func TestChatPTYHangupCancelsTheDockerJob(t *testing.T) {
+	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo started > started; sleep 60"}})
+	p := startPTYChatWithAttr(t, f, nil, nil, true, time.Minute, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-image", image)
+	p.await(t, "ready", 0)
+	p.send(t, "start job\r")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(f.workspace, "started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Docker command never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p.waited = true
+	ended := make(chan error, 1)
+	go func() { ended <- p.cmd.Wait() }()
+	if err := p.master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(stopCleanup):
+		t.Fatal("chat did not exit after its terminal hung up")
+	}
+	s := f.status()
+	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 {
+		t.Fatalf("hangup: %v, exit %d, run %+v", p.cmd.ProcessState, code, s)
+	}
+	checkReleased(t, f, f.history("-run", s.Run.ID))
+}
 
 func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{
