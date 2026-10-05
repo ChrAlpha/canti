@@ -29,10 +29,12 @@ suite LONG "${LONG:-}" >"$tmp/long"
 suite PTY "${PTY:-}" >"$tmp/pty"
 
 while read -r name; do
-	grep -q " $name\$" "$tmp/integration" || problem "LONG: $name is not a test with -tags integration"
+	awk -v n="$name" '$2 == n { found = 1 } END { exit !found }' "$tmp/integration" ||
+		problem "LONG: $name is not a test with -tags integration"
 done <"$tmp/long"
 while read -r name; do
-	grep -q "/cmd/canti $name\$" "$tmp/integration" || problem "PTY: $name is not a test of ./cmd/canti with -tags integration"
+	awk -v n="$name" '$2 == n { if ($1 ~ /\/cmd\/canti$/) found = 1; else other = 1 } END { exit !found || other }' "$tmp/integration" ||
+		problem "PTY: $name is not a test of ./cmd/canti alone with -tags integration"
 done <"$tmp/pty"
 sort "$tmp/long" "$tmp/pty" | uniq -d >"$tmp/both"
 while read -r name; do
@@ -53,7 +55,7 @@ go list -tags integration,live -f '{{.Dir}}{{range .TestGoFiles}} {{.}}{{end}}{{
 			/^(}|type |var |const |import )/ { cur = ""; next }
 			cur != "" { body[cur] = body[cur] " " $0 }
 			END {
-				for (f in body) if (body[f] ~ /pty\.(Open|Start)\(|\/dev\/ptmx/) pty[f] = 1
+				for (f in body) if (body[f] ~ /pty\.(Open|Start)[A-Za-z]*\(|\/dev\/ptmx/) pty[f] = 1
 				for (changed = 1; changed;) {
 					changed = 0
 					for (f in body) {
@@ -88,7 +90,7 @@ awk '
 	skip { next }
 	{
 		line = $0
-		run = line ~ /-run /
+		run = line ~ /(^|[ \t])-run[ \t]/
 		while (match(line, /Test[A-Z0-9_][A-Za-z0-9_]*/)) {
 			name = substr(line, RSTART, RLENGTH)
 			before = RSTART > 1 ? substr(line, RSTART - 1, 1) : ""

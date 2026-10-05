@@ -41,7 +41,7 @@ Cloning requires repository access while the repository is private.
 | `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
 | `make ci-pty` | The tests listed in `PTY_TESTS`, which open a pseudo-terminal, alone in one test binary; needs Docker |
-| `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs |
+| `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
