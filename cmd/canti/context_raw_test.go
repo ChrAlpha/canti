@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -14,12 +15,13 @@ func TestContextRawReadsOnlySelectedFrozenRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name, update string
 		revision     int
+		refused      string
 	}{
-		{"previous request", `UPDATE transitions SET facts = '{' WHERE kind = 'request_frozen' AND rev = 1`, 2},
-		{"next request", `UPDATE transitions SET facts = '{' WHERE kind = 'request_frozen' AND rev = 2`, 1},
-		{"following response", `UPDATE transitions SET facts = '{' WHERE kind = 'response_saved'`, 1},
-		{"following event", `UPDATE transitions SET event = '{' WHERE kind = 'attempt_started'`, 2},
-		{"run metadata", `UPDATE runs SET run = '{'`, 2},
+		{"previous request", `UPDATE transitions SET facts = '{' WHERE kind = 'request_frozen' AND rev = 1`, 2, ""},
+		{"next request", `UPDATE transitions SET facts = '{' WHERE kind = 'request_frozen' AND rev = 2`, 1, ""},
+		{"following response", `UPDATE transitions SET facts = '{' WHERE kind = 'response_saved'`, 1, ""},
+		{"following event", `UPDATE transitions SET event = '{' WHERE kind = 'attempt_started'`, 2, ""},
+		{"run metadata", `UPDATE runs SET run = '{'`, 2, "incompatible record"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
@@ -39,7 +41,11 @@ func TestContextRawReadsOnlySelectedFrozenRequest(t *testing.T) {
 			}
 			before := rawJournalSnapshot(t, db)
 			r := f.cli(nil, "context", "-raw", "-run", runID, "-step", "1", "-revision", fmt.Sprint(tc.revision))
-			if r.code != exitOK || r.stdout != string(requests[tc.revision-1]) {
+			if tc.refused != "" {
+				if r.code != exitError || r.stdout != "" || !strings.Contains(r.stderr, tc.refused) {
+					t.Fatalf("export without the run's workspace: code %d, stderr %s, bytes %d; want a refusal", r.code, r.stderr, len(r.stdout))
+				}
+			} else if r.code != exitOK || r.stdout != string(requests[tc.revision-1]) {
 				t.Fatalf("selected request export: code %d, stderr %s, bytes %d; want %d", r.code, r.stderr, len(r.stdout), len(requests[tc.revision-1]))
 			}
 			if after := rawJournalSnapshot(t, db); !reflect.DeepEqual(before, after) || len(f.model.requests()) != len(requests) {

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -47,19 +48,20 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if *raw && (*text || *bodies || *after != 0) || *text && *bodies {
 			return exitUsage, errors.New("raw cannot be combined with text/responses/after; responses requires JSON")
 		}
-		store, err := sqlite.OpenReadOnly(ctx, filepath.Join(a.state, "canti.db"))
+		path := filepath.Join(a.state, "canti.db")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return exitError, fmt.Errorf("no runs in workspace %s", a.workspace)
+		}
+		store, err := sqlite.OpenReadOnly(ctx, path)
 		if err != nil {
 			return exitError, err
 		}
 		defer store.Close()
-		id := a.runID
-		if id == "" {
-			run, err := store.LastRun(ctx)
-			if err != nil {
-				return exitError, err
-			}
-			id = run.ID
+		run, _, err := a.find(ctx, store)
+		if err != nil {
+			return exitError, err
 		}
+		id := run.ID
 		if *raw {
 			request, err := store.ContextRequest(ctx, id, *step, *revision)
 			if err != nil {

@@ -195,7 +195,7 @@ func TestRunRefusesAGoalOrConstraintsOverTheirLimit(t *testing.T) {
 
 func TestReadersReportMissingRuns(t *testing.T) {
 	f := newFixture(t, nil)
-	for _, c := range []string{"status", "history", "resume", "stop"} {
+	for _, c := range []string{"status", "history", "context", "resume", "stop"} {
 		if r := f.cli(nil, c); r.code != exitError || !strings.Contains(r.stderr, "no runs in workspace") {
 			t.Errorf("%s = %d\nstderr: %s", c, r.code, r.stderr)
 		}
@@ -206,7 +206,7 @@ func TestReadersReportMissingRuns(t *testing.T) {
 	if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
-	for _, c := range []string{"status", "history", "resume", "stop", "resolve"} {
+	for _, c := range []string{"status", "history", "context", "resume", "stop", "resolve"} {
 		args := []string{"-run", "run_missing"}
 		if c == "resolve" {
 			args = append(args, "-job")
@@ -662,9 +662,9 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 		t.Errorf("resume after the resolution = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	other := t.TempDir()
-	for _, c := range []string{"status", "history", "stop"} {
-		if r := runCLI(t, nil, c, "-workspace", other, "-state", f.state); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
-			t.Errorf("%s from another workspace = %d\nstderr: %s", c, r.code, r.stderr)
+	for _, args := range [][]string{{"status"}, {"history"}, {"context"}, {"context", "-raw"}, {"stop"}} {
+		if r := runCLI(t, nil, append(args, "-workspace", other, "-state", f.state)...); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") || r.stdout != "" {
+			t.Errorf("%q from another workspace = %d\nstdout: %s\nstderr: %s", args, r.code, r.stdout, r.stderr)
 		}
 	}
 	if r := f.cli(nil, "run", "-goal", "g", "-workspace", other); r.code != exitError || !strings.Contains(r.stderr, "belongs to workspace") {
