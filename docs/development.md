@@ -209,11 +209,14 @@ and remove their containers; the CLI gate fixtures also fail on a container
 left running. Live model checks must be explicit opt-ins with finite budgets;
 do not make paid provider calls part of default tests.
 
-`TestFrozenRequestBodies` compares the exact body of every model request its
-scenarios freeze with the files under `internal/harness/testdata/frozen-requests`;
-only for an intended prompt or adapter change, rewrite them with
-`go test ./internal/harness -run TestFrozenRequestBodies -update-requests` and
-review the diff.
+`TestLoopScenariosKeepTheirCommittedRecords` compares what its scenarios commit
+with `internal/harness/testdata/frozen-requests/<scenario>`: the exact body of
+every frozen model request and, in `journal.txt`, the event ID of every
+transition and the facts of every frozen request. It also fails on a directory
+that no scenario records. Only for an intended prompt, adapter, or record
+change, rewrite them with
+`go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
+and review the diff.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

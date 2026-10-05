@@ -156,11 +156,15 @@ func frozenScenarios() []frozenScenario {
 	}, edgeScenarios(), failureScenarios(), retrievalScenarios())
 }
 
-// TestFrozenRequestBodies records the exact request body committed for each
-// model request of every scenario under testdata/frozen-requests. Rewrite
-// them with -update-requests only for an intended prompt or adapter change.
-func TestFrozenRequestBodies(t *testing.T) {
-	for _, sc := range frozenScenarios() {
+// TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
+// model request every scenario freezes, the event IDs of its transitions, and
+// the facts of its frozen requests with testdata/frozen-requests/<scenario>.
+// Rewrite them with -update-requests only for an intended prompt, adapter, or
+// record change.
+func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
+	scenarios := frozenScenarios()
+	checkScenarioDirectories(t, scenarios)
+	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			rig := newCorpusRig(t, sc)
 			rig.drive(t, sc)
@@ -308,6 +312,35 @@ func elideBody(t *testing.T, facts, name string) string {
 		t.Fatalf("facts of %s hold its body %d times", name, strings.Count(facts, body))
 	}
 	return strings.Replace(facts, body, `"Body":"`+name+`"`, 1)
+}
+
+// checkScenarioDirectories fails on a golden directory that no scenario
+// records, which -update-requests removes instead.
+func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) {
+	t.Helper()
+	root := filepath.Join("testdata", "frozen-requests")
+	names := map[string]bool{}
+	for _, sc := range scenarios {
+		if names[sc.name] {
+			t.Fatalf("two scenarios are named %s", sc.name)
+		}
+		names[sc.name] = true
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		switch {
+		case names[e.Name()]:
+		case *updateRequests:
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Errorf("%s holds %s, which no scenario records; -update-requests removes it", root, e.Name())
+		}
+	}
 }
 
 func writeFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
