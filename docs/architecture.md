@@ -281,8 +281,9 @@ the intent is `halt` or a step fails, and at a halt publishes the run's
 `Loop.Stop` commits `StopRequested` with the given reason unless the run is
 closed or already records a reason, then runs it to a halt; its context
 carries the cleanup deadline. `ResolveJob` records with `JobBound` the job the
-executor finds for the effect of a run in `needs_resolution`, and `Resolve`
-records an explicit outcome with `Resolved`. `Resolve` records the outcome
+executor finds for the effect of a run in `needs_resolution`, refusing without
+a commit one that reports an unknown outcome, and `Resolve` records an
+explicit outcome with `Resolved`. `Resolve` records the outcome
 only: it leaves the backend untouched, so a job of the effect that may still
 run keeps running, and a created container of the effect that never started
 is not removed. Every commit handed to the store
@@ -488,8 +489,9 @@ abandoned or misses its deadline leaves the run for a later `canti stop`. A
 stop of a run in `needs_resolution` records its reason and exits with status
 4: the job may still run until `canti resolve -job` records it, after which
 `canti stop` cancels it. A job whose container exited without an exit record
-inspects the same way every time, so only `canti resolve -execution`, after
-reading `docker logs canti-<effect ID>`, moves its run on.
+inspects the same way every time, so `canti resolve -job` refuses it, and only
+`canti resolve -execution`, after reading `docker logs canti-<effect ID>`,
+moves its run on.
 `run` refuses to start a run while the latest run of its state directory is
 open or needs resolution, and publishes the step records of that run first,
 refusing when it cannot.

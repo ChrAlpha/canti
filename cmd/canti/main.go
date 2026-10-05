@@ -350,10 +350,15 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 			obs.ExitCode = exitCode
 		}
 		return a.with(ctx, withoutModel, exitOK, func(l *harness.Loop, id string) (harness.Snapshot, error) {
-			if *job {
-				return l.ResolveJob(ctx, id)
+			if !*job {
+				return l.Resolve(ctx, id, obs)
 			}
-			return l.Resolve(ctx, id, obs)
+			snap, err := l.ResolveJob(ctx, id)
+			if errors.Is(err, harness.ErrJobUnknown) {
+				err = fmt.Errorf("%w; recording the job cannot resolve effect %s: inspect it, as with \"docker logs canti-%[2]s\", "+
+					"then record its outcome with \"canti resolve -run %s -execution STATE\"", err, snap.State.EffectID, id)
+			}
+			return snap, err
 		})
 	}
 }

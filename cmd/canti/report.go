@@ -127,8 +127,7 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 			"-execution records the outcome only and leaves a job that may still run untouched.\n", s.RunID, s.EffectID)
 		if s.Reason != "" {
 			fmt.Fprintf(a.stderr, "canti: the stop is recorded (%s), but its job may still run until it is resolved; "+
-				"after \"canti resolve -run %s -job\" records a job that still runs, \"canti stop\" cancels it, "+
-				"and a job that exited without an exit record is resolved only with -execution.\n", s.Reason, s.RunID)
+				"after \"canti resolve -run %s -job\" records a job that still runs, \"canti stop\" cancels it.\n", s.Reason, s.RunID)
 		}
 		return exitResolution, nil
 	}

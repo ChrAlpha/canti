@@ -277,6 +277,30 @@ func TestLoopResolveJobRequiresAFoundJob(t *testing.T) {
 	}
 }
 
+func TestLoopResolveJobRefusesAJobOfUnknownOutcome(t *testing.T) {
+	unknown := func(id string) (harness.Job, bool, error) {
+		return harness.Job{ID: jobID(id), Status: harness.JobUnknown, Output: harness.ArtifactRef{Detail: "no exit record"}}, true, nil
+	}
+	f := unresolved(t, unknown, returnReply("done"))
+	before, calls := f.transitions(), f.exec.log()
+	_, err := f.fresh().ResolveJob(context.Background(), runID)
+	if got := f.transitions(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("ResolveJob() = %v and committed %+v", err, got[len(before):])
+	}
+	if !errors.Is(err, harness.ErrJobUnknown) || !strings.Contains(err.Error(), "no exit record") {
+		t.Fatalf("ResolveJob() error = %v, want %v with the detail", err, harness.ErrJobUnknown)
+	}
+	if got := f.exec.log(); !slices.Equal(got, append(calls, "inspect")) {
+		t.Fatalf("executor calls = %v, want one more inspection", got[len(calls):])
+	}
+	snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionCancelled})
+	if err != nil {
+		t.Fatalf("Resolve() after the refusal: %v", err)
+	}
+	wantState(t, snap, core.PhaseIdle, "")
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+}
+
 func TestLoopResolveRecordsAnExplicitOutcome(t *testing.T) {
 	missing := func(string) (harness.Job, bool, error) { return harness.Job{}, false, nil }
 	t.Run("exited continues", func(t *testing.T) {

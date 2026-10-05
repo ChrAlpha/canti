@@ -68,14 +68,17 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 		}
 		return h
 	}
-	unknown("after the kill")
-	if r := f.cli(nil, "resolve", "-job"); r.code != exitOK {
-		t.Fatalf("resolve -job = %d\nstderr: %s", r.code, r.stderr)
+	h := unknown("after the kill")
+	if r := f.cli(nil, "resolve", "-job"); r.code != exitError || !strings.Contains(r.stderr, s.EffectID) ||
+		!strings.Contains(r.stderr, `"canti resolve -run `+s.RunID+` -execution STATE"`) {
+		t.Fatalf("resolve -job of the killed job = %d\nstderr: %s", r.code, r.stderr)
 	}
-	if h := f.history(); h[len(h)-1].Kind != "job_bound" || h[len(h)-1].To != core.PhaseAwaitingObservation || h[len(h)-1].State.JobID != s.JobID {
-		t.Fatalf("job resolution = %+v", h[len(h)-1])
+	if now := f.history(); !extends(now, h) || len(now) != len(h) {
+		t.Fatalf("resolve -job of the killed job committed %q", kinds(now[len(h):]))
 	}
-	h := unknown("after resolve -job")
+	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "exited" {
+		t.Errorf("containers after resolve -job = %+v, want the killed job %s kept", cs, s.JobID)
+	}
 	if r := f.cli(nil, "resolve", "-execution", "cancelled", "-note", "killed outside canti"); r.code != exitOK {
 		t.Fatalf("resolve -execution = %d\nstderr: %s", r.code, r.stderr)
 	}
@@ -90,7 +93,7 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 	}
 	final := f.history()
 	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:6],
-		[]string{"outcome_unknown", "job_bound", "outcome_unknown", "resolved"}, stepKinds[:4])) {
+		[]string{"outcome_unknown", "resolved"}, stepKinds[:4])) {
 		t.Fatalf("history = %q", kinds(final))
 	}
 	if jobs := boundJobs(t, final); len(jobs) != 1 || jobs[s.EffectID] != s.JobID {

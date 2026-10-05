@@ -180,17 +180,30 @@ func (l *Loop) Stop(ctx context.Context, runID string, reason core.StopReason) (
 	return l.Run(ctx, runID)
 }
 
+// ErrJobUnknown reports that the job of an unresolved effect inspects to an
+// unknown outcome, which recording the job again would only reach again.
+var ErrJobUnknown = errors.New("harness: the job reports an unknown outcome")
+
 // ResolveJob inspects the effect of a run in needs_resolution and records
 // the job found for it with JobBound, so the run resumes behind the start
-// boundary. It fails when no job is found.
+// boundary. It fails when no job is found, and with ErrJobUnknown when the
+// job reports an unknown outcome; neither commits anything.
 func (l *Loop) ResolveJob(ctx context.Context, runID string) (Snapshot, error) {
 	snap, err := l.unresolved(ctx, runID)
 	if err != nil {
 		return snap, err
 	}
 	job, found, err := l.executor.Inspect(ctx, snap.State.EffectID)
-	if err == nil && !found {
+	switch {
+	case err != nil:
+	case !found:
 		err = fmt.Errorf("harness: no job owns effect %s", snap.State.EffectID)
+	case job.Status == JobUnknown:
+		detail := ""
+		if job.Output.Detail != "" {
+			detail = ": " + job.Output.Detail
+		}
+		err = fmt.Errorf("%w: job %s of effect %s%s", ErrJobUnknown, job.ID, snap.State.EffectID, detail)
 	}
 	if err != nil {
 		return snap, err
