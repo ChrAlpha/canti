@@ -187,7 +187,8 @@ var ErrJobUnknown = errors.New("harness: the job reports an unknown outcome")
 // ResolveJob inspects the effect of a run in needs_resolution and records
 // the job found for it with JobBound, so the run resumes behind the start
 // boundary. It fails when no job is found, and with ErrJobUnknown when the
-// job reports an unknown outcome; neither commits anything.
+// job reports an unknown outcome, which it takes for a stable report, as the
+// docker executor's are, that only Resolve settles; neither commits anything.
 func (l *Loop) ResolveJob(ctx context.Context, runID string) (Snapshot, error) {
 	snap, err := l.unresolved(ctx, runID)
 	if err != nil {
