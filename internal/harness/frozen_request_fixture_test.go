@@ -186,12 +186,19 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	reader := &harness.Reader{History: history, Artifacts: artifacts}
 	if sc.imports != nil {
 		reader.Imports, x.imports = filepath.Join(dir, "imports"), filepath.Join(dir, "imports")
+		if err := os.Mkdir(reader.Imports, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		root, err := os.OpenRoot(reader.Imports)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
 		for name, data := range sc.imports {
-			file := filepath.Join(reader.Imports, name)
-			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(file, []byte(data), 0o644); err != nil {
+			if err := root.WriteFile(name, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
