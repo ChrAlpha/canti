@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -10,12 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -156,7 +161,7 @@ type legacyCase struct {
 	name, dir string
 	sum       [sha256.Size]byte
 	manifest  struct {
-		Paths   struct{ Workspace string } `json:"paths"`
+		Paths   struct{ Root, Workspace, State, Imports string } `json:"paths"`
 		Journal struct {
 			DB struct {
 				SHA256 string `json:"sha256"`
@@ -217,4 +222,203 @@ func (c legacyCase) expand(t *testing.T, file string) {
 	if err != nil {
 		t.Fatalf("%s: %v", c.name, err)
 	}
+}
+
+// TestLegacyRunsAreClosedAndFollowedByNewRuns requires of every journal of
+// the legacy corpus, recreated at the paths its producer recorded, that
+// resume refuses its open run of another context version without a
+// transition, a request, or a step record; that status, history, and
+// context read it; that stop closes it; and that a new run in the same
+// state directory, alone and in the producer's session, then returns.
+func TestLegacyRunsAreClosedAndFollowedByNewRuns(t *testing.T) {
+	for _, c := range legacyCases(t) {
+		t.Run(c.name, func(t *testing.T) {
+			m := c.manifest
+			last := m.Journal.Runs[len(m.Journal.Runs)-1]
+			db, history := c.recreate(t)
+			f := &fixture{t: t, workspace: m.Paths.Workspace, state: m.Paths.State, key: "sk-test-legacy",
+				model: newScriptedModel(t, "sk-test-legacy", map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})}
+			if r := f.cli(nil, "resume"); r.code != exitError || !refusesResume(r.stderr, last.ID, "1") {
+				t.Fatalf("resume = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if _, seq, rows := legacyRows(t, db, last.ID); seq != last.Seq || rows != int(last.Seq) {
+				t.Errorf("the refused resume left %d transitions of run %s, the last at %d; the producer left %d", rows, last.ID, seq, last.Seq)
+			}
+			if got := legacyTree(t, filepath.Join(m.Paths.State, "history")); !maps.Equal(got, history) || len(f.model.requests()) != 0 {
+				t.Errorf("the refused resume published %v and sent %d requests", slices.Sorted(maps.Keys(got)), len(f.model.requests()))
+			}
+			if _, err := os.Stat(filepath.Join(m.Paths.State, "jobs")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the refused resume built the executor: %v", err)
+			}
+			if s := f.status(); s.Run.ID != last.ID || s.Seq != last.Seq || s.Phase != last.Phase {
+				t.Errorf("status = %+v; the producer paused run %s at %d in %s", s, last.ID, last.Seq, last.Phase)
+			}
+			if h := f.history(); len(h) != int(last.Seq) {
+				t.Errorf("history has %d transitions, the producer %d", len(h), last.Seq)
+			}
+			if r := f.cli(nil, "context"); r.code != exitOK || !strings.Contains(r.stdout, last.ID) {
+				t.Errorf("context = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitError || !strings.Contains(r.stderr, fmt.Sprintf("is %s: stop it first", last.Phase)) {
+				t.Errorf("run beside the open run = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if r := f.cli(nil, "stop"); r.code != exitStopped {
+				t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || len(f.model.requests()) != 0 {
+				t.Errorf("status after stop = %+v, after %d requests", s, len(f.model.requests()))
+			}
+			if r := f.cli(nil, "run", "-goal", "Report done."); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("run after stop = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+			if r := f.cli(nil, "run", "-session", "legacy-w0a", "-input", "after-upgrade", "-goal", "Report done."); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("session input after stop = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+			}
+		})
+	}
+}
+
+// legacyReserved holds the workspace and state directory of every producer
+// of the legacy corpus.
+const legacyReserved = "/tmp/canti-legacy-w0a"
+
+// reserveLegacyRoot claims root, a new directory under legacyReserved, while
+// holding the lock of legacyReserved, which must be private to the user,
+// and removes root and releases the lock when the test ends.
+func reserveLegacyRoot(t *testing.T, root string) {
+	t.Helper()
+	if filepath.Dir(root) != legacyReserved {
+		t.Fatalf("the recorded root %s is not under %s", root, legacyReserved)
+	}
+	if err := os.Mkdir(legacyReserved, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(legacyReserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dir.Close() })
+	info, err := dir.Stat()
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+		t.Fatalf("%s is not a directory that only this user can write: %v", legacyReserved, err)
+	}
+	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("claiming the recorded root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// recreate writes the journal and the roots of the case at the paths its
+// producer recorded, which it reserves until the test ends, and returns the
+// path of the journal and the files of the history root by path below it.
+func (c legacyCase) recreate(t *testing.T) (db string, history map[string]string) {
+	t.Helper()
+	m := c.manifest
+	reserveLegacyRoot(t, m.Paths.Root)
+	db = filepath.Join(m.Paths.State, "canti.db")
+	for _, dir := range []string{m.Paths.Workspace, m.Paths.State} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.expand(t, db)
+	return db, c.expandRoots(t, map[string]string{"history": filepath.Join(m.Paths.State, "history"),
+		"artifacts": filepath.Join(m.Paths.State, "artifacts"), "imports": m.Paths.Imports})
+}
+
+// expandRoots writes the files of the case's roots under the directories
+// that dirs names for each root and returns those of the history root, by
+// path below it.
+func (c legacyCase) expandRoots(t *testing.T, dirs map[string]string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(c.dir, "roots.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := map[string]string{}
+	for r := tar.NewReader(z); ; {
+		h, err := r.Next()
+		if err == io.EOF {
+			return history
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, rest, _ := strings.Cut(strings.TrimSuffix(h.Name, "/"), "/")
+		dir, ok := dirs[root]
+		if !ok || rest != "" && (path.Clean(rest) != rest || strings.HasPrefix(rest, "..")) {
+			t.Fatalf("roots entry %q is not a clean path under a recorded root", h.Name)
+		}
+		target := filepath.Join(dir, filepath.FromSlash(rest))
+		switch h.Typeflag {
+		case tar.TypeDir:
+			err = os.MkdirAll(target, 0o755)
+		case tar.TypeReg:
+			var b []byte
+			if b, err = io.ReadAll(r); err == nil {
+				err = os.MkdirAll(filepath.Dir(target), 0o755)
+			}
+			if err == nil {
+				err = os.WriteFile(target, b, 0o644)
+			}
+			if root == "history" {
+				history[rest] = string(b)
+			}
+		default:
+			err = fmt.Errorf("roots entry %q has type %q", h.Name, h.Typeflag)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// legacyTree returns the regular files under dir by slash-separated path.
+func legacyTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		rel, _ := filepath.Rel(dir, p)
+		files[filepath.ToSlash(rel)] = string(data)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// legacyRows reads the schema version of the journal in file, and the last
+// sequence and the number of transitions of run id, without changing it.
+func legacyRows(t *testing.T, file, id string) (version int, seq int64, rows int) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+file+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	ctx := context.Background()
+	err = raw.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
+	if err == nil {
+		err = raw.QueryRowContext(ctx, "SELECT coalesce(max(seq), 0), count(*) FROM transitions WHERE run_id = ?", id).Scan(&seq, &rows)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return version, seq, rows
 }
