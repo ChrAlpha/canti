@@ -246,9 +246,10 @@ that no scenario records. Only for an intended prompt, adapter, or record
 change, rewrite them with
 `go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
 and review the diff. `TestContextVersionPinsItsRules` digests these goldens
-into the rules of the current context version: rewriting those of a scenario
-it records requires a new context version, while a new scenario is added to
-the record with
+into the rules of the current context version, which
+`cmd/canti/testdata/context-v<version>.txt` records once: rewriting the
+goldens of a scenario, or adding one, which may observe a changed rule,
+requires a new context version, recorded with
 `go test ./cmd/canti -run TestContextVersionPinsItsRules -record-context`.
 
 `TestLegacyJournals` reads every journal under

@@ -26,11 +26,11 @@ var recordContext = flag.Bool("record-context", false, "record the context rules
 // version stands for are those recorded for contextVersion: the rendering of
 // every system prompt variant in every request transport and of every block
 // kind, the prompt limits, the defaults the loop applies, every term of the
-// context accounting at the default flags and at their extremes, the action
-// prefixes, and the requests of every scenario of the frozen-request corpus.
-// Changing any of them requires a new context version, whose rules
-// -record-context records once; it never rewrites a version, and only adds
-// the scenarios the corpus gained to it.
+// context accounting at the default flags and at their extremes, what the
+// CLI maps stored flags onto, the action prefixes, and the requests of every
+// scenario of the frozen-request corpus. Changing any of them, or adding a
+// scenario, which may observe a changed rule, requires a new context version,
+// whose rules -record-context records once; it never rewrites a version.
 func TestContextVersionPinsItsRules(t *testing.T) {
 	file := filepath.Join("testdata", fmt.Sprintf("context-v%d.txt", contextVersion))
 	got := contextRules(t)
@@ -54,24 +54,13 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 			changed = append(changed, "- "+line)
 		}
 	}
-	added := len(changed) == 0
 	for _, line := range gotLines {
 		if !slices.Contains(lines, line) {
 			changed = append(changed, "+ "+line)
-			added = added && strings.HasPrefix(line, "corpus ")
 		}
 	}
-	switch {
-	case added && *recordContext:
-		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	case added:
-		t.Fatalf("context version %d does not record the requests of new corpus scenarios; add them with -record-context:\n%s", contextVersion, strings.Join(changed, "\n"))
-	default:
-		t.Fatalf("the context rules are not those of context version %d, which runs of it store; bump contextVersion and record the rules of the new version with -record-context. Changed:\n%s",
-			contextVersion, strings.Join(changed, "\n"))
-	}
+	t.Fatalf("the context rules are not those of context version %d, which runs of it store; bump contextVersion and record the rules of the new version with -record-context. Changed:\n%s",
+		contextVersion, strings.Join(changed, "\n"))
 }
 
 func contextRules(t *testing.T) string {
