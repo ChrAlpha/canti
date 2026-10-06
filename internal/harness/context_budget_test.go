@@ -1,7 +1,6 @@
 package harness
 
 import (
-	"context"
 	"encoding/json"
 	"math"
 	"math/rand"
@@ -243,30 +242,5 @@ func TestContextFitRequiresTheLargestHandoverWindow(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestContextFitSelectsTheSessionDialogueOfItsLimit requires that the
-// accounting of a session run includes the earlier dialogue the run selects
-// under the limit accounted for, not a fixed one.
-func TestContextFitSelectsTheSessionDialogueOfItsLimit(t *testing.T) {
-	ctx := context.Background()
-	cfg := LoopConfig{Environment: "test", ArtifactDir: "/canti/artifacts", RunsPath: "/canti/runs", Reader: &Reader{}}
-	run, limits := Run{ID: "run-1", Goal: "continue work"}, core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	alone, err := ContextFit(ctx, nil, cfg, run, limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	j := &sessionFixture{runs: []Run{{ID: "run-0", Goal: "earlier request", SessionID: "s", SessionSeq: 1}},
-		states: map[string]core.State{"run-0": returned(strings.Repeat("earlier answer ", 400))}}
-	run.SessionID, run.SessionSeq = "s", 2
-	dialogue, err := ContextFit(ctx, j, cfg, run, limits)
-	if err != nil || dialogue.Head <= alone.Head+6000 || dialogue.Deficit() != 0 {
-		t.Fatalf("the session run accounts %+v beside %+v: %v", dialogue, alone, err)
-	}
-	cfg.Limits = DefaultPromptLimits()
-	cfg.Limits.Total = alone.Required() + 100
-	if fit, err := ContextFit(ctx, j, cfg, run, limits); err != nil || fit.Head != alone.Head || fit.Deficit() != 0 {
-		t.Errorf("under %d bytes the session run accounts %+v, without its dialogue %+v: %v", cfg.Limits.Total, fit, alone, err)
 	}
 }

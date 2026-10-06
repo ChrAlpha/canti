@@ -120,7 +120,7 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
 	}
-	fit, err := harness.ContextFit(context.Background(), nil, contextConfig(c, b), run, s.limits)
+	fit, err := harness.ContextFit(contextConfig(c, b), run, s.limits)
 	if err == nil {
 		err = fit.Check()
 	}

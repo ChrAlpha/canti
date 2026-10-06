@@ -56,13 +56,12 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 
 func contextRules(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
 	var b strings.Builder
 	fmt.Fprintf(&b, "context version %d\nactions %q %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Reader: &harness.Reader{}}
-	fit, err := harness.ContextFit(ctx, nil, loop, run, limits)
+	fit, err := harness.ContextFit(loop, run, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +99,7 @@ func contextRules(t *testing.T) string {
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
 		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"}} {
 		s := parseSpec(t, flags...)
-		fit, err := harness.ContextFit(ctx, nil, contextConfig(s.config, s.budget), run, s.limits)
+		fit, err := harness.ContextFit(contextConfig(s.config, s.budget), run, s.limits)
 		if err != nil {
 			t.Fatal(err)
 		}

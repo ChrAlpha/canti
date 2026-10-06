@@ -317,15 +317,15 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 // defaults of NewLoop and refuses the configurations NewLoop refuses.
 func TestContextFitNormalizesAsNewLoop(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{})
-	ctx, run := context.Background(), harness.Run{ID: runID, Goal: "Count the Go files."}
+	run := harness.Run{ID: runID, Goal: "Count the Go files."}
 	f.cfg.Reader = &harness.Reader{}
-	implicit, err := harness.ContextFit(ctx, nil, f.cfg, run, limits)
+	implicit, err := harness.ContextFit(f.cfg, run, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	explicit := f.cfg
 	explicit.HandoverBytes, explicit.Limits = 2048, harness.DefaultPromptLimits()
-	if fit, err := harness.ContextFit(ctx, nil, explicit, run, limits); err != nil || fit != implicit || fit.Handover != 2048 || fit.Limit != explicit.Limits.Total {
+	if fit, err := harness.ContextFit(explicit, run, limits); err != nil || fit != implicit || fit.Handover != 2048 || fit.Limit != explicit.Limits.Total {
 		t.Errorf("the defaults account %+v, their values %+v: %v", implicit, fit, err)
 	}
 	for _, bad := range []func(*harness.LoopConfig){
@@ -335,7 +335,7 @@ func TestContextFitNormalizesAsNewLoop(t *testing.T) {
 	} {
 		c := f.cfg
 		bad(&c)
-		_, fitErr := harness.ContextFit(ctx, nil, c, run, limits)
+		_, fitErr := harness.ContextFit(c, run, limits)
 		_, loopErr := harness.NewLoop(f.store, f.exec, f.model, c)
 		if fitErr == nil || loopErr == nil || fitErr.Error() != loopErr.Error() {
 			t.Errorf("ContextFit refuses %+v with %v, NewLoop with %v", c, fitErr, loopErr)
