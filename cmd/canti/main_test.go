@@ -405,6 +405,34 @@ func TestHintsForAnOpenRunOfAnotherContextVersionNameStop(t *testing.T) {
 	})
 }
 
+// TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion requires that
+// resume reports a run of another context version that has halted without
+// building the model or the executor or publishing its step records.
+func TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-goal", "g"); r.code != exitOK {
+		t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	id, steps, sent := f.status().Run.ID, f.history(), len(f.model.requests())
+	setContextVersion(t, f.state, id, "1")
+	for _, dir := range []string{"history", "jobs"} {
+		if err := os.RemoveAll(filepath.Join(f.state, dir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Errorf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	for _, dir := range []string{"history", "jobs"} {
+		if _, err := os.Stat(filepath.Join(f.state, dir)); !os.IsNotExist(err) {
+			t.Errorf("resume created %s: %v", dir, err)
+		}
+	}
+	if h := f.history(); !reflect.DeepEqual(h, steps) || len(f.model.requests()) != sent {
+		t.Errorf("resume appended %v and sent %d requests", kinds(h[len(steps):]), len(f.model.requests())-sent)
+	}
+}
+
 // refusesResume reports whether stderr refuses to resume run id of the
 // stored context version, as setContextVersion records it, and names stop.
 func refusesResume(stderr, id, version string) bool {
@@ -419,6 +447,13 @@ func refusesResume(stderr, id, version string) bool {
 // version, or no context version when it is empty, as a run of another
 // context revision would.
 func setContextVersion(t *testing.T, state, id, version string) {
+	t.Helper()
+	setConfig(t, state, id, "context_version", version)
+}
+
+// setConfig rewrites field of the stored config of run id to value, or
+// removes it when value is empty.
+func setConfig(t *testing.T, state, id, field, value string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "canti.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -436,9 +471,9 @@ func setContextVersion(t *testing.T, state, id, version string) {
 		err = json.Unmarshal(run.Config, &c)
 	}
 	if err == nil {
-		delete(c, "context_version")
-		if version != "" {
-			c["context_version"] = json.RawMessage(version)
+		delete(c, field)
+		if value != "" {
+			c[field] = json.RawMessage(value)
 		}
 		run.Config, err = json.Marshal(c)
 	}

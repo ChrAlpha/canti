@@ -465,22 +465,18 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	return fmt.Errorf("run %s is %s: %s it first", last.ID, snap.State.Phase, next)
 }
 
-// resumable fails, naming how to close it, for run id of config c when c
-// records another context version and the run has not halted: this binary
-// renders the context of contextVersion only.
-func resumable(ctx context.Context, store *sqlite.Store, id string, c config) error {
-	why := unresumable(id, c)
-	if why == "" {
-		return nil
-	}
+// halted returns the snapshot of run id, of config c of another context
+// version, once it has halted, and otherwise fails naming how to close it:
+// this binary renders the context of contextVersion only.
+func halted(ctx context.Context, store *sqlite.Store, id string, c config) (harness.Snapshot, error) {
 	snap, err := store.Latest(ctx, id)
 	if err == nil {
 		err = snap.Validate()
 	}
-	if err != nil || snap.State.Intent() == core.IntentHalt {
-		return err
+	if err == nil && snap.State.Intent() != core.IntentHalt {
+		err = fmt.Errorf("run %s is %s and %s", id, snap.State.Phase, unresumable(id, c))
 	}
-	return fmt.Errorf("run %s is %s and %s", id, snap.State.Phase, why)
+	return snap, err
 }
 
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
@@ -496,8 +492,8 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 
 // with locks the workspace, rebuilds the loop of the selected run from its
 // stored config and the model that model builds from it, and reports what op
-// does with the loop. With resume it first refuses a run that resumable
-// refuses.
+// does with the loop. With resume, a run of another context version is only
+// reported once it has halted and refused before that.
 func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), resume bool, active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
 	store, done, err := a.open(ctx, false)
 	if err != nil {
@@ -505,8 +501,12 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 	}
 	defer done()
 	run, c, err := a.find(ctx, store)
-	if err == nil && resume {
-		err = resumable(ctx, store, run.ID, c)
+	if err == nil && resume && c.ContextVersion != contextVersion {
+		var snap harness.Snapshot
+		if snap, err = halted(ctx, store, run.ID, c); err == nil {
+			done()
+			return a.report(snap, nil, active, c)
+		}
 	}
 	var m harness.Model
 	var x *docker.Executor
