@@ -19,7 +19,7 @@ run1 18 observed event_45013c58373915a73c09f3bf668eff70684ab8f66640a58b08b2d8e0e
 run1 19 request_frozen event_56855fdc92a5ce325fd1b10b0a918fe610451b452b8fd58b0460e3e7e403fe16 {"Request":{"Body":"run1-step03-rev1.json","Model":"claude-opus-5","Protocol":"anthropic-messages/2023-06-01+server-side-fallback-2026-07-01","Adapter":"canti-anthropic/2","Window":{"FirstStep":1,"Handover":"","SourceStep":0,"Requested":true,"Failures":1},"Context":{"Bytes":{"Total":9788,"Limit":262144,"System":5698,"Goal":27,"Constraints":56,"Environment":724,"Session":0,"Window":98,"Handover":0,"StepHeader":25,"EmptySteps":0,"Progress":50,"HandoverRequired":619,"Repair":0,"Steps":[{"Step":1,"Bytes":193},{"Step":2,"Bytes":2298}]},"Handover":{"Status":"already_requested","Used":0,"Capacity":0,"Growth":0,"Steps":0,"WindowSteps":0,"WindowBytes":0}}},"Response":null,"Observation":null,"Failure":""}
 run1 20 attempt_started event_46393f920911e52f6ea2aef19c6e51ffae5a2d43bbb0f6fffee3a3d39d76755a
 run1 21 response_saved event_7a617b67e0b6499d4f41a09791054c1f30421dea3b40c3700e8a05d4b679ed89
-run1 22 response_loaded event_2e8ddf06aea5593c4bcaab7d073aab898304c49235d8b41a0905d5030be0ea4c
+run1 22 response_loaded event_826f107b774f5c04ec097e9928856ecfe5a51333f5dfa85fcc1cd990ef047b3d
 run1 23 job_bound event_6bb9d8ef8ce8f3ede7267ecfdea44c26ff08c6e7aa804812e57b9d7557be5a04
 run1 24 job_started event_471b97ec927a79d89f42400fce2d1ac70acb2efa4a8962995282b613cc205376
 run1 25 observed event_7422b62d7ac0664fd8909071c70a6158749ffe4ebd447b26a9ba3ca78f5af3a8

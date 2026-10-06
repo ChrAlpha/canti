@@ -32,7 +32,7 @@ func boundaryScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "make build"),
 				"I will hand over now.",
 				handover(1, note+strings.Repeat(" ", 2049-len(note))),
-				handover(3, note),
+				handover(1, " \\n\\t "),
 			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
