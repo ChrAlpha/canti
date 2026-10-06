@@ -181,6 +181,34 @@ func (l *Loop) frame(run Run, s core.State) Frame {
 	}
 }
 
+// ContextFit accounts for the context of run, with steps and attempts
+// bounded by limits, as a loop configured as cfg, normalized as NewLoop
+// normalizes it, renders the first page of the run: with the earlier session
+// dialogue that the run selects from j, which may be nil for a run outside a
+// session.
+func ContextFit(ctx context.Context, j Journal, cfg LoopConfig, run Run, limits core.Limits) (Fit, error) {
+	cfg, err := normalize(cfg)
+	if err != nil {
+		return Fit{}, err
+	}
+	return (&Loop{journal: j, cfg: cfg}).fit(ctx, run, limits)
+}
+
+func (l *Loop) fit(ctx context.Context, run Run, limits core.Limits) (Fit, error) {
+	s, err := core.NewState(run.ID, limits)
+	if err != nil {
+		return Fit{}, err
+	}
+	f := l.frame(run, s)
+	f.Window = &Window{FirstStep: 1}
+	// A failed integrity check is prepare's to record; the dialogue is only
+	// selected where it fits, so the accounting without it decides the same.
+	if err := l.sessionContext(ctx, run, &f); err != nil && !errors.As(err, new(contextError)) {
+		return Fit{}, err
+	}
+	return f.fit(l.cfg.Limits)
+}
+
 func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	f := l.frame(run, s)

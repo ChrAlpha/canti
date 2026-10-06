@@ -312,3 +312,33 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 		t.Fatal("source change diagnostic did not reach the model")
 	}
 }
+
+// TestContextFitNormalizesAsNewLoop requires that ContextFit applies the
+// defaults of NewLoop and refuses the configurations NewLoop refuses.
+func TestContextFitNormalizesAsNewLoop(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{})
+	ctx, run := context.Background(), harness.Run{ID: runID, Goal: "Count the Go files."}
+	f.cfg.Reader = &harness.Reader{}
+	implicit, err := harness.ContextFit(ctx, nil, f.cfg, run, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit := f.cfg
+	explicit.HandoverBytes, explicit.Limits = 2048, harness.DefaultPromptLimits()
+	if fit, err := harness.ContextFit(ctx, nil, explicit, run, limits); err != nil || fit != implicit || fit.Handover != 2048 || fit.Limit != explicit.Limits.Total {
+		t.Errorf("the defaults account %+v, their values %+v: %v", implicit, fit, err)
+	}
+	for _, bad := range []func(*harness.LoopConfig){
+		func(c *harness.LoopConfig) { c.HandoverBytes = -1 }, func(c *harness.LoopConfig) { c.HandoverBytes = 8193 },
+		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 1} }, func(c *harness.LoopConfig) { c.RunsPath = " " },
+		func(c *harness.LoopConfig) { c.Environment = "" }, func(c *harness.LoopConfig) { c.WindowSteps = -1 },
+	} {
+		c := f.cfg
+		bad(&c)
+		_, fitErr := harness.ContextFit(ctx, nil, c, run, limits)
+		_, loopErr := harness.NewLoop(f.store, f.exec, f.model, c)
+		if fitErr == nil || loopErr == nil || fitErr.Error() != loopErr.Error() {
+			t.Errorf("ContextFit refuses %+v with %v, NewLoop with %v", c, fitErr, loopErr)
+		}
+	}
+}

@@ -1,9 +1,11 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,5 +200,73 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		if _, err := f.Prompt(l); err != nil {
 			t.Fatalf("%d-byte total: a full window could not render a read, the failed handover, and the retry: %v", total, err)
 		}
+	}
+}
+
+// TestContextFitRequiresTheLargestHandoverWindow requires that Required is
+// the smallest total that admits a first page, with and without imports and
+// session dialogue, at both handover extremes: at Required the window that
+// the largest, all-backtick handover opens at the widest step number keeps
+// one byte of capacity, and one byte less is refused although a window that
+// an ordinary handover of that length opens at a small step number keeps
+// capacity, so the floor is a conservative guarantee, not the least context
+// some continuation needs.
+func TestContextFitRequiresTheLargestHandoverWindow(t *testing.T) {
+	session := budgetFrame()
+	session.SessionContext = "Run run-0 (session sequence 1; source /canti/runs/run-0/goal and result; returned):\n" + strings.Repeat("dialogue ", 900)
+	for name, f := range map[string]Frame{"default": budgetFrame(), "session": session} {
+		for _, handover := range []int{1, 2048, RetrievalMaxBytes} {
+			for _, imports := range []bool{false, true} {
+				f.HandoverBytes, f.ImportsEnabled = handover, imports
+				l := DefaultPromptLimits()
+				fit, err := f.fit(l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				largest := f
+				largest.Window = &Window{FirstStep: math.MaxInt, Handover: strings.Repeat("`", handover)}
+				ordinary := f
+				ordinary.Step, ordinary.Window = 3, &Window{FirstStep: 3, SourceStep: 2, Handover: strings.Repeat("a", handover)}
+				l.Total = fit.Required()
+				capacity, err := largest.workCapacity(l)
+				if err != nil || capacity != 1 || f.ValidateContext(l) != nil {
+					t.Errorf("%s, %d-byte handover, imports %v: at the %d bytes required the largest window keeps %d bytes: %v, %v",
+						name, handover, imports, l.Total, capacity, err, f.ValidateContext(l))
+				}
+				l.Total--
+				want := "at least " + strconv.Itoa(fit.Required()) + " bytes"
+				if _, err := largest.workCapacity(l); err == nil || f.ValidateContext(l) == nil || !strings.Contains(f.ValidateContext(l).Error(), want) {
+					t.Errorf("%s, %d-byte handover, imports %v: %d bytes are admitted: %v", name, handover, imports, l.Total, f.ValidateContext(l))
+				}
+				if capacity, err := ordinary.workCapacity(l); err != nil || capacity <= 0 {
+					t.Errorf("%s, %d-byte handover, imports %v: an ordinary handover leaves %d bytes at %d: %v", name, handover, imports, capacity, l.Total, err)
+				}
+			}
+		}
+	}
+}
+
+// TestContextFitSelectsTheSessionDialogueOfItsLimit requires that the
+// accounting of a session run includes the earlier dialogue the run selects
+// under the limit accounted for, not a fixed one.
+func TestContextFitSelectsTheSessionDialogueOfItsLimit(t *testing.T) {
+	ctx := context.Background()
+	cfg := LoopConfig{Environment: "test", ArtifactDir: "/canti/artifacts", RunsPath: "/canti/runs", Reader: &Reader{}}
+	run, limits := Run{ID: "run-1", Goal: "continue work"}, core.Limits{MaxSteps: 20, MaxAttempts: 3}
+	alone, err := ContextFit(ctx, nil, cfg, run, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := &sessionFixture{runs: []Run{{ID: "run-0", Goal: "earlier request", SessionID: "s", SessionSeq: 1}},
+		states: map[string]core.State{"run-0": returned(strings.Repeat("earlier answer ", 400))}}
+	run.SessionID, run.SessionSeq = "s", 2
+	dialogue, err := ContextFit(ctx, j, cfg, run, limits)
+	if err != nil || dialogue.Head <= alone.Head+6000 || dialogue.Deficit() != 0 {
+		t.Fatalf("the session run accounts %+v beside %+v: %v", dialogue, alone, err)
+	}
+	cfg.Limits = DefaultPromptLimits()
+	cfg.Limits.Total = alone.Required() + 100
+	if fit, err := ContextFit(ctx, j, cfg, run, limits); err != nil || fit.Head != alone.Head || fit.Deficit() != 0 {
+		t.Errorf("under %d bytes the session run accounts %+v, without its dialogue %+v: %v", cfg.Limits.Total, fit, alone, err)
 	}
 }

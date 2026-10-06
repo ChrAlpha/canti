@@ -54,28 +54,47 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if j == nil || m == nil {
 		return nil, errors.New("harness: loop journal and model are required")
 	}
-	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.History, cfg.RunsPath} {
+	if strings.TrimSpace(cfg.History) == "" {
+		return nil, errPaths
+	}
+	cfg, err := normalize(cfg)
+	if err != nil {
+		return nil, err
+	}
+	r, err := NewRunner(logged{j, cfg.Logger}, x)
+	if err != nil {
+		return nil, err
+	}
+	return &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg}, nil
+}
+
+var errPaths = errors.New("harness: loop environment, artifact directory, and history paths are required")
+
+// normalize validates cfg, apart from its history directory, and applies its
+// defaults, for a loop and for an accounting of the context that it renders.
+func normalize(cfg LoopConfig) (LoopConfig, error) {
+	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.RunsPath} {
 		if strings.TrimSpace(v) == "" {
-			return nil, errors.New("harness: loop environment, artifact directory, and history paths are required")
+			return cfg, errPaths
 		}
 	}
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
-		return nil, errors.New("harness: loop poll and inspect retries must not be negative")
+		return cfg, errors.New("harness: loop poll and inspect retries must not be negative")
 	}
 	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
-		return nil, errors.New("harness: context window limits must not be negative")
+		return cfg, errors.New("harness: context window limits must not be negative")
 	}
 	if cfg.HandoverBytes == 0 {
 		cfg.HandoverBytes = 2048
 	}
 	if cfg.HandoverBytes > 8192 {
-		return nil, errors.New("harness: handover exceeds 8192 bytes")
+		return cfg, errors.New("harness: handover exceeds 8192 bytes")
 	}
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
 	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Rejected, p.Total) <= 0 {
-		return nil, fmt.Errorf("harness: prompt limits %+v must be positive", p)
+		return cfg, fmt.Errorf("harness: prompt limits %+v must be positive", p)
 	}
 	cfg.Poll = cmp.Or(cfg.Poll, 500*time.Millisecond)
 	cfg.Backoff = cmp.Or(cfg.Backoff, time.Second)
@@ -86,11 +105,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	r, err := NewRunner(logged{j, cfg.Logger}, x)
-	if err != nil {
-		return nil, err
-	}
-	return &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg}, nil
+	return cfg, nil
 }
 
 // Run steps the run until its intent is halt or a step fails. At a halt it
