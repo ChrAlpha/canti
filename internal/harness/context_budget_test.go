@@ -147,7 +147,7 @@ func TestFailedHandoverReserveCoversDecoderErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("handover with an unknown field was accepted")
 			}
-			s := StepRecord{Step: 7, Command: handoverPrefix + payload, Observation: Observation{Execution: core.ExecutionExited,
+			s := StepRecord{Step: 7, Command: HandoverPrefix + payload, Observation: Observation{Execution: core.ExecutionExited,
 				ExitCode: &exit, Preview: actionFailure + clip(err.Error(), actionFailureBytes)}}
 			if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
 				t.Fatalf("%d %s: failed handover %d exceeds reserve %d at a %d-byte preview", n, backtick, actual, bound, l.Preview)
@@ -180,7 +180,7 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 			NextOffset: RetrievalMaxBytes, More: true}
 		command, _ := json.Marshal(query)
 		body, _ := json.Marshal(read)
-		next.Command = retrievePrefix + string(command)
+		next.Command = RetrievePrefix + string(command)
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: string(body), Retrieval: &read}
 		f.Steps = append(f.Steps, next)
 		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", RetrievalMaxBytes) + "\n"}
@@ -191,7 +191,7 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		if decoded == nil {
 			t.Fatal("handover with an unknown field was accepted")
 		}
-		next.Command = handoverPrefix + payload
+		next.Command = HandoverPrefix + payload
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: actionFailure + clip(decoded.Error(), actionFailureBytes)}
 		f.Steps = append(f.Steps, next)
 		f.Step, f.Attempt = next.Step+1, 2

@@ -22,7 +22,7 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			query, _ := json.Marshal(r.Query)
 			f := testFrame()
 			f.Step = 2
-			f.Steps = []StepRecord{{Step: 1, Command: retrievePrefix + string(query), Observation: Observation{
+			f.Steps = []StepRecord{{Step: 1, Command: RetrievePrefix + string(query), Observation: Observation{
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &r,
 			}}}
 			if operation != "list" {
@@ -72,7 +72,7 @@ func TestRetrievalPromptKeepsQueryWhenCommandIsClipped(t *testing.T) {
 		r := Retrieval{Query: query}
 		body, _ := json.Marshal(r)
 		command, _ := json.Marshal(query)
-		s := StepRecord{Step: 1, Command: retrievePrefix + string(command), Observation: Observation{Retrieval: &r, Preview: string(body)}}
+		s := StepRecord{Step: 1, Command: RetrievePrefix + string(command), Observation: Observation{Retrieval: &r, Preview: string(body)}}
 		text := testFrame().step(s, DefaultPromptLimits())
 		if !strings.Contains(text, "[truncated") || !strings.Contains(text, string(body)) {
 			t.Fatalf("clipped command lost retrieval query: %s", text)

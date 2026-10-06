@@ -89,7 +89,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 			return fmt.Errorf("discover command %d: %w", cursor.Step, err)
 		}
 		remaining -= len(command)
-		if strings.HasPrefix(string(command), retrievePrefix) || strings.HasPrefix(string(command), handoverPrefix) || strings.HasPrefix(string(command), "# canti:discovery") {
+		if strings.HasPrefix(string(command), RetrievePrefix) || strings.HasPrefix(string(command), HandoverPrefix) || strings.HasPrefix(string(command), "# canti:discovery") {
 			cursor.Step--
 			cursor.Field, cursor.Offset = 0, 0
 			continue

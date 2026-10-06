@@ -10,13 +10,18 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-const retrievePrefix = "canti:retrieve "
-const handoverPrefix = "canti:handover "
+// RetrievePrefix and HandoverPrefix begin the exec payloads that the harness
+// performs itself instead of running them as commands.
+const (
+	RetrievePrefix = "canti:retrieve "
+	HandoverPrefix = "canti:handover "
+)
+
 const actionFailure, actionFailureBytes = "Context action failed: ", 2048
 
 func (l *Loop) isBuiltin(ctx context.Context, snap Snapshot) (bool, error) {
 	s := snap.State
-	if strings.HasPrefix(s.Decision.Payload, retrievePrefix) || strings.HasPrefix(s.Decision.Payload, handoverPrefix) || s.JobID == "read_"+s.EffectID {
+	if strings.HasPrefix(s.Decision.Payload, RetrievePrefix) || strings.HasPrefix(s.Decision.Payload, HandoverPrefix) || s.JobID == "read_"+s.EffectID {
 		return true, nil
 	}
 	if s.Intent() != core.IntentBind {
@@ -74,11 +79,11 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	if err != nil {
 		return obs, err
 	}
-	if req.Window != nil && req.Window.Requested && !strings.HasPrefix(command, handoverPrefix) {
+	if req.Window != nil && req.Window.Requested && !strings.HasPrefix(command, HandoverPrefix) {
 		err = errors.New("handover is required before any more work; use canti:handover")
-	} else if strings.HasPrefix(command, retrievePrefix) {
+	} else if strings.HasPrefix(command, RetrievePrefix) {
 		var q RetrievalQuery
-		err = decodeAction(strings.TrimPrefix(command, retrievePrefix), &q)
+		err = decodeAction(strings.TrimPrefix(command, RetrievePrefix), &q)
 		if l.cfg.Reader == nil {
 			err = errors.New("retrieval is disabled for this run")
 		}
@@ -96,7 +101,7 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 		}
 	} else {
 		var h Handover
-		err = decodeAction(strings.TrimPrefix(command, handoverPrefix), &h)
+		err = decodeAction(strings.TrimPrefix(command, HandoverPrefix), &h)
 		if err == nil {
 			if req.Window == nil || !req.Window.Requested {
 				err = errors.New("handover was not requested for this step")
