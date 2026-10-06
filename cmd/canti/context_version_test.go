@@ -173,13 +173,11 @@ func storedRules(t *testing.T) string {
 		t.Fatalf("resume of the tool run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	b += frozenRequests(t, f, "stored tool run")
-	f = newFixture(t, nil)
-	f.model.decide = func(step int, _ string) (core.Decision, error) {
-		if step <= 65 {
-			return read, nil
-		}
-		return core.Decision{Kind: core.Return, Payload: "done"}, nil
+	long := map[int]core.Decision{66: {Kind: core.Return, Payload: "done"}}
+	for step := 1; step <= 65; step++ {
+		long[step] = read
 	}
+	f = newFixture(t, long)
 	if r := f.cli(nil, "run", "-goal", "Read the notes 65 times.", "-max-steps", "0", "-history-imports", imports); r.code != exitOK {
 		t.Fatalf("run of 66 steps = %d\nstderr: %s", r.code, r.stderr)
 	}
