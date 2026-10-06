@@ -493,7 +493,9 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 // with locks the workspace, rebuilds the loop of the selected run from its
 // stored config and the model that model builds from it, and reports what op
 // does with the loop. With resume, a run of another context version is only
-// reported once it has halted and refused before that.
+// reported once it has halted and refused before that. Without resume, op
+// renders no request, so the loop ignores the context settings of the run,
+// which another version may have stored.
 func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), resume bool, active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
 	store, done, err := a.open(ctx, false)
 	if err != nil {
@@ -508,6 +510,10 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 			return a.report(snap, nil, active, c)
 		}
 	}
+	loop := c
+	if !resume {
+		loop.ContextBytes, loop.HandoverBytes, loop.WindowSteps, loop.WindowBytes = harness.DefaultPromptLimits().Total, 0, 0, 0
+	}
 	var m harness.Model
 	var x *docker.Executor
 	var l *harness.Loop
@@ -518,7 +524,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 		x, err = newExecutor(c, a.state)
 	}
 	if err == nil {
-		l, err = a.loop(store, x, m, c, run.Budget)
+		l, err = a.loop(store, x, m, loop, run.Budget)
 	}
 	if err != nil {
 		return exitError, err

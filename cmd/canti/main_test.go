@@ -433,6 +433,51 @@ func TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion(t *testing.T) {
 	}
 }
 
+// TestRunsOfAnotherContextVersionCloseWhateverTheirContextSettings requires
+// that stop and resolve, which render no request, close a run of another
+// context version whose context settings this canti does not accept.
+func TestRunsOfAnotherContextVersionCloseWhateverTheirContextSettings(t *testing.T) {
+	foreign := func(f *fixture, id string) {
+		setContextVersion(t, f.state, id, "3")
+		setConfig(t, f.state, id, "handover_bytes", "16384")
+		setConfig(t, f.state, id, "context_bytes", "0")
+	}
+	t.Run("stop", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+		if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
+			t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+		}
+		id := f.status().Run.ID
+		foreign(f, id)
+		if r := f.cli(nil, "stop"); r.code != exitStopped {
+			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
+		}
+		if s := f.status(); s.Run.ID != id || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
+			t.Errorf("status after stop = %+v", s)
+		}
+	})
+	t.Run("resolve", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
+		noDocker := []string{"PATH=" + t.TempDir()}
+		if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
+			t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
+		}
+		id := f.status().Run.ID
+		foreign(f, id)
+		if r := runCLI(t, noDocker, "resolve", "-workspace", f.workspace, "-state", f.state, "-execution", "failed_to_start"); r.code != exitOK {
+			t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
+		}
+		if r := f.cli(noDocker, "stop"); r.code != exitStopped {
+			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
+		}
+		if s := f.status(); s.Run.ID != id || s.Phase != core.PhaseStopped {
+			t.Errorf("status after stop = %+v", s)
+		}
+	})
+}
+
 // refusesResume reports whether stderr refuses to resume run id of the
 // stored context version, as setContextVersion records it, and names stop.
 func refusesResume(stderr, id, version string) bool {
