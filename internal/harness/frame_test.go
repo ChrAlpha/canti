@@ -75,3 +75,13 @@ func TestUnlimitedProgress(t *testing.T) {
 		t.Fatalf("unlimited progress missing: %s", p.User())
 	}
 }
+
+// TestHistoryPageIsOutgrownByTheLongWindowOfTheContextVersion requires that
+// the 65 reads after which the context version of cmd/canti records a
+// request, through TestContextVersionPinsItsRules, outgrow one journal page,
+// so that the record covers the selection of a window across pages.
+func TestHistoryPageIsOutgrownByTheLongWindowOfTheContextVersion(t *testing.T) {
+	if historyPage >= 65 {
+		t.Fatalf("a journal page holds %d records; raise the 65 reads of storedRules in cmd/canti above it", historyPage)
+	}
+}

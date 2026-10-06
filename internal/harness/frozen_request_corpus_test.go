@@ -114,10 +114,12 @@ func frozenScenarios() []frozenScenario {
 			name: "protocol-repair", limits: stepLimits,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
 				"I will start by listing the workspace.",
+				strings.Repeat("`", 2048),
 				corpusDecision(core.Return, "I need the workspace path first."),
 			}}},
 			marks: map[string][]string{
 				"run1-step01-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", "I will start by listing the workspace."},
+				"run1-step01-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n…[truncated 2048 bytes]\n```\n"},
 			},
 		},
 		{

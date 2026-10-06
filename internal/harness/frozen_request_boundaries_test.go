@@ -54,19 +54,25 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
-			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 6},
+			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 7},
 			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
-				envelope("e1", `"stop_reason":"end_turn"`, `"id":"toolu_e1","name":"canti_decision"`),
-				envelope("e2", `"stop_reason":"tool_use"`, `"id":"","name":"canti_decision"`),
-				envelope("e3", `"stop_reason":"tool_use"`, `"id":"toolu_e3","name":"other_tool"`),
-				envelope("e4", `"stop_reason":"tool_use"`, `"id":"toolu_e4","name":"other_tool","name":"canti_decision"`),
-				`{"kind":"return","payload":"Every envelope was rejected."}`,
+				envelope("e1", "end_turn", toolBlock("toolu_e1", `"name":"canti_decision"`, "e1")),
+				envelope("e2", "tool_use", toolBlock("", `"name":"canti_decision"`, "e2")),
+				envelope("e3", "tool_use", toolBlock("toolu_e3", `"name":"other_tool"`, "e3")),
+				envelope("e4", "tool_use", toolBlock("toolu_e4", `"name":"other_tool","name":"canti_decision"`, "e4")),
+				envelope("e5", "tool_use", `{"type":"mystery"},`+toolBlock("toolu_e5", `"name":"canti_decision"`, "e5")),
+				envelope("e6", "tool_use", toolBlock("toolu_e6a", `"name":"canti_decision"`, "e6")+","+toolBlock("toolu_e6b", `"name":"canti_decision"`, "e6")),
+				envelope("e7", "tool_use", `{"type":"text","text":"Returning now."},{"type":"thinking","thinking":"Every envelope failed.","signature":"sig"},`+
+					`{"type":"redacted_thinking","data":"cmVkYWN0ZWQ="},`+
+					`{"type":"tool_use","id":"toolu_e7","name":"canti_decision","input":{"kind":"return","payload":"Every envelope was rejected."}}`),
 			}}},
 			marks: map[string][]string{
 				"run1-step01-rev2.json": {"Rejected reply:\n```\n{\"id\":\"msg_e1\""},
 				"run1-step01-rev3.json": {"Rejected reply:\n```\n{\"id\":\"msg_e2\""},
 				"run1-step01-rev4.json": {"Rejected reply:\n```\n{\"id\":\"msg_e3\""},
 				"run1-step01-rev5.json": {"Rejected reply:\n```\n{\"id\":\"msg_e4\""},
+				"run1-step01-rev6.json": {"Rejected reply:\n```\n{\"id\":\"msg_e5\""},
+				"run1-step01-rev7.json": {"Rejected reply:\n```\n{\"id\":\"msg_e6\""},
 			},
 		},
 		{
@@ -120,12 +126,17 @@ func boundaryScenarios() []frozenScenario {
 	})
 }
 
-// envelope is a raw tool-transport response, complete by its stop reason,
-// whose one tool block holds an unsupported decision behind fields that
-// make the block no canti_decision call.
-func envelope(id, stop, block string) string {
-	return `raw:{"id":"msg_` + id + `","type":"message","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use",` + block +
-		`,"input":{"kind":"bogus","payload":"envelope ` + id + `"}}],` + stop + `,"usage":{"input_tokens":1000,"output_tokens":20}}`
+// envelope is a raw tool-transport response of content blocks, complete by
+// its stop reason.
+func envelope(id, stop, blocks string) string {
+	return `raw:{"id":"msg_` + id + `","type":"message","role":"assistant","model":"claude-opus-5","content":[` + blocks +
+		`],"stop_reason":"` + stop + `","usage":{"input_tokens":1000,"output_tokens":20}}`
+}
+
+// toolBlock is a tool_use block of id and name fields holding an unsupported
+// decision.
+func toolBlock(id, name, payload string) string {
+	return `{"type":"tool_use","id":"` + id + `",` + name + `,"input":{"kind":"bogus","payload":"envelope ` + payload + `"}}`
 }
 
 // capped is a retrieval of imported whose command, with the fence marks
