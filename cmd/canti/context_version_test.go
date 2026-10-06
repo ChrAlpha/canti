@@ -117,18 +117,22 @@ func contextRules(t *testing.T) string {
 	fmt.Fprintf(&b, "page of every block kind: %s\n", digest(p.System+"\x00"+strings.Join(p.Blocks, "\x00")))
 	imports, previous := t.TempDir(), ""
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
-		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"}} {
+		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
+		{"-image", strings.Repeat("x", 2048)}} {
 		s := parseSpec(t, flags...)
 		fit, err := harness.ContextFit(contextConfig(s.config, s.budget), run, s.limits)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(flags) > 0 && flags[0] == "-history-imports" {
+		switch {
+		case len(flags) > 0 && flags[0] == "-history-imports":
 			flags = []string{"-history-imports", "DIR"}
+		case len(flags) > 0 && flags[0] == "-image":
+			flags = []string{"-image", "2048 x"}
 		}
 		fmt.Fprintf(&b, "run %q: %+v, required %d\n", flags, fit, fit.Required())
 		if env := environment(s.config, s.budget); env != previous {
-			fmt.Fprintf(&b, "  environment %q\n", env)
+			fmt.Fprintf(&b, "  environment %s\n", digest(env))
 			previous = env
 		}
 	}

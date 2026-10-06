@@ -29,15 +29,19 @@ const (
 )
 
 type frozenScenario struct {
-	name        string
-	tool        bool
-	limits      core.Limits
-	windowSteps int
-	outputs     map[string]string
-	finals      map[string]harness.Job // final job of a command instead of success
-	imports     map[string]string      // files of a read-only imported history archive
-	runs        []frozenRun
-	marks       map[string][]string
+	name         string
+	tool         bool
+	limits       core.Limits
+	contextBytes int // PromptLimits.Total instead of 256 KiB
+	windowSteps  int
+	windowBytes  int
+	outputs      map[string]string
+	finals       map[string]harness.Job // final job of a command instead of success
+	imports      map[string]string      // files of a read-only imported history archive
+	deletes      map[string]string      // imported file that disappears while a command runs
+	runs         []frozenRun
+	marks        map[string][]string
+	edge         func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
 }
 
 type frozenRun struct {
@@ -153,7 +157,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
 			},
 		},
-	}, edgeScenarios(), failureScenarios(), retrievalScenarios())
+	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
 }
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
@@ -181,7 +185,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 			if sc.tool {
 				adapter = "canti-anthropic/3-tool"
 			}
-			got := map[string][]byte{}
+			got, requests := map[string][]byte{}, map[string]harness.Request{}
 			var committed [][]byte
 			for i, run := range sc.runs {
 				rig.checkOutcomes(t, run)
@@ -189,9 +193,13 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 					if tr.Facts.Request.Adapter != adapter {
 						t.Errorf("run %s step %d adapter = %q, want %q", run.id, tr.To.Step, tr.Facts.Request.Adapter, adapter)
 					}
-					got[fmt.Sprintf("run%d-step%02d-rev%d.json", i+1, tr.To.Step, tr.To.RequestRev)] = tr.Facts.Request.Body
+					name := fmt.Sprintf("run%d-step%02d-rev%d.json", i+1, tr.To.Step, tr.To.RequestRev)
+					got[name], requests[name] = tr.Facts.Request.Body, *tr.Facts.Request
 					committed = append(committed, tr.Facts.Request.Body)
 				}
+			}
+			if sc.edge != nil {
+				sc.edge(t, requests)
 			}
 			got["journal.txt"] = rig.journal(t, sc.runs)
 			sent := rig.model.sent()

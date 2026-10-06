@@ -16,13 +16,15 @@ system, retrieval true, imports true: 5879 bytes, sha256 e895b736a49abdf0c00be5f
   request, tool, structured false, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 7355 bytes, sha256 ccbf1c3eabf146c23247485d4fb19ebae857f9f32afe8b6632f3ea4d48a6ed21
 page of every block kind: 9181 bytes, sha256 b5fb65c8f0253a1a8843a1090e87f5db1fc9ee95c2553b009b9db31a049f3755
 run []: {Limit:262144 Handover:2048 Page:6668 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
-  environment "Each command runs in a new Linux container from image debian:bookworm-slim with working directory /workspace, which is read-write and persists between steps. Network: none. Per-command limits: memory 2g, CPUs unlimited, processes 512, run time 10m0s."
+  environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
 run ["-handover-bytes" "1"]: {Limit:262144 Handover:1 Page:6668 System:5698 Head:1057 Step:10836 Evidence:51713 Failed:6362 Tail:5184}, required 80851
 run ["-handover-bytes" "8192"]: {Limit:262144 Handover:8192 Page:6668 System:5698 Head:25628 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 105428
 run ["-history-imports" "DIR"]: {Limit:262144 Handover:2048 Page:6849 System:5879 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87177
 run ["-max-steps" "0" "-max-attempts" "1"]: {Limit:262144 Handover:2048 Page:6672 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
 run ["-pids" "0" "-job-timeout" "0" "-memory" "" "-cpus" "4" "-network" "bridge"]: {Limit:262144 Handover:2048 Page:6679 System:5698 Head:7207 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87007
-  environment "Each command runs in a new Linux container from image debian:bookworm-slim with working directory /workspace, which is read-write and persists between steps. Network: bridge. Per-command limits: memory unlimited, CPUs 4, processes unlimited, run time unlimited."
+  environment 261 bytes, sha256 4ff1dea32fd62532c7691977024668a3d289e364aea5f02fe11e193f6bf0e454
+run ["-image" "2048 x"]: {Limit:262144 Handover:2048 Page:8490 System:5698 Head:9018 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 88818
+  environment 2278 bytes, sha256 d288d086e8db151b57396efe7d85156601181d588c67570e2a6cbf0f4c0f44b8
 session run 10 of 10: request 8973 bytes, sha256 6e02e61351546417107ff783ddb2ff15ad487fb7412af7c0776633796a0d2927, navigation RUN9
   earlier RUN2, sequence 2, returned, goal true
   earlier RUN3, sequence 3, returned, goal true
@@ -38,13 +40,23 @@ corpus discovery-pages: sha256 be0769ab6742c7734c2af4faca249c4d31a41d0a9f57d34fa
 corpus execution-failures: sha256 8203e12698b3261e7748907aa16210f39477b1cf64980bb4f8fed8e2802333cb
 corpus failed-context-actions: sha256 e684ee646b3636b30b51ad503c4c5bda7d76a6c74634c7aa880db931f2718155
 corpus handover: sha256 5e870337626198de65fa5dbbedc14cda4cc64424168ab1fbf768b58af4273272
+corpus handover-failed-twice: sha256 c37f6fd40809d146f8c6346d6429fe77ac08e8a77f78274f46976b64bcbfc2e5
 corpus handover-gate: sha256 845efbc133ae12c6c6756c096149c0d3ce3d12cb86af94767df92d01b247d882
+corpus handover-thresholds-reached: sha256 604c9d79ae3d099d569055a22372311a442d0a2338ffaa6e7f1cd81f75bf2762
+corpus handover-thresholds-short: sha256 6f0005339cb8844465b7133cab475f3cb30df867f581c3deb9991b33991a91bf
 corpus history-imports: sha256 ad6fefa7d530bccc4369e02a275c6c5988103b3e367186a6e2b7d7dea095e3fc
 corpus operator-resolution: sha256 042be6a84dc6d71cc123a7fd07f841f74ed11c6b6c48a0dc0470719de84ec038
 corpus protocol-repair: sha256 10fcd8834e28529029a462eaa3178813201a39949e9484c0efeb1ab8177e7bb5
 corpus session-dialogue: sha256 1c024567f11a08efb32248216505cf96cecf81196ebe0ec99321d9849bf9d746
 corpus session-history-files: sha256 93a195aaaeee797a36d34213fb1db017e8bd057884c97350e936979d67a87bbe
+corpus session-navigation: sha256 b19936ce2493bc379f5e01892488e39ab664b1552134bd1c4f54e23873661c7a
+corpus session-navigation-only: sha256 576a5b68c16febf7828a378f6afdd3b8963408e3d937ab3b10773157a05b084b
+corpus session-status-only: sha256 9ccb39bc0f841823dbdc8dfb940694267c3fe8ebba6fcb003cdb60db21932e04
+corpus session-stopped-goal: sha256 49afae6816efc5b456b9136dc66c37b787333e43c070c78761c379da5bca8596
+corpus session-stopped-status: sha256 b3f873d522fec1e3e1569c931304db84bcbdcb8d21863eac1fd3474041529604
+corpus session-without-dialogue: sha256 c3f4b1c68b9ea221a2d482bdd121186498c1ec4d5053aa1568007addd2dabbf3
 corpus shell-and-retrieval: sha256 4fcd6e3effa42680b3151d2bf3170db88d0e71fda34e5d0f6db722fe35634051
 corpus stopped-session-run: sha256 65fe35e437adf57d11ccc3b59278ac666eca35ef5b48e4fe23f747e03221d1ba
 corpus tool-transport: sha256 98a0c73d3cbde0fbc2630a1bc8ad7afc9709af8b2fc154c9d75f045b32873706
+corpus unavailable-evidence: sha256 f1dc3d97ebdbc178f2c9d1523b7ed28ff90ca433e35d85b530f94a631bea3964
 corpus unlimited-steps: sha256 15c7e4b2f497533e03b65fe21426f76b715d61646150b94f971a16a8d2d089d7

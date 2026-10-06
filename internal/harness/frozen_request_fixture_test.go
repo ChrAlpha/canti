@@ -69,10 +69,12 @@ func (m *corpusModel) sent() [][]byte {
 // preview, unless the job sets one, and as the artifact if it is available.
 type corpusExecutor struct {
 	artifacts string
+	imports   string
 	outputs   map[string]string
 	jobs      map[string]*harness.Job
 	commands  map[string]string
 	finals    map[string]harness.Job
+	deletes   map[string]string
 }
 
 func (x *corpusExecutor) Bind(_ context.Context, e harness.Effect) (harness.Job, error) {
@@ -113,6 +115,11 @@ func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Jo
 			}
 		}
 		*j = final
+	}
+	if name := x.deletes[x.commands[effectID]]; name != "" && j.Status == harness.JobRunning {
+		if err := os.Remove(filepath.Join(x.imports, name)); err != nil {
+			return harness.Job{}, false, err
+		}
 	}
 	if j.Status == harness.JobRunning {
 		output, code := x.outputs[x.commands[effectID]], 0
@@ -175,26 +182,27 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		t.Fatal(err)
 	}
 	history, artifacts := filepath.Join(dir, "history"), filepath.Join(dir, "artifacts")
-	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals}
+	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals, deletes: sc.deletes}
 	reader := &harness.Reader{History: history, Artifacts: artifacts}
 	if sc.imports != nil {
-		reader.Imports = filepath.Join(dir, "imports")
-		if err := os.Mkdir(reader.Imports, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		reader.Imports, x.imports = filepath.Join(dir, "imports"), filepath.Join(dir, "imports")
 		for name, data := range sc.imports {
-			if err := os.WriteFile(filepath.Join(reader.Imports, name), []byte(data), 0o644); err != nil {
+			file := filepath.Join(reader.Imports, name)
+			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	limits := harness.DefaultPromptLimits()
-	limits.Total = 256 << 10
+	limits.Total = cmp.Or(sc.contextBytes, 256<<10)
 	loop, err := harness.NewLoop(store, x, m, harness.LoopConfig{
 		Environment: corpusEnvironment, ArtifactDir: "/canti/artifacts", History: history, RunsPath: "/canti/runs",
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
 		Reader:      reader,
-		WindowSteps: sc.windowSteps, HandoverBytes: 2048,
+		WindowSteps: sc.windowSteps, WindowBytes: sc.windowBytes, HandoverBytes: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)
