@@ -128,7 +128,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
-		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "-context-bytes must be at least 65536"},
+		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and handover reserve: it needs a total of at least "},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},

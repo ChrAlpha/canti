@@ -465,13 +465,10 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 	if a.steps != nil {
 		j = rendering{j.(harness.SessionJournal), a.steps}
 	}
-	reader := &harness.Reader{History: historyRoot(a.state), Artifacts: filepath.Join(a.state, "artifacts"), Imports: c.HistoryImports}
-	return harness.NewLoop(j, x, m, harness.LoopConfig{
-		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir,
-		History: historyRoot(a.state), RunsPath: runsDir,
-		Limits: promptLimits(c), Logger: a.log,
-		Reader: reader, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
-	})
+	cfg := contextConfig(c, b)
+	cfg.History, cfg.Logger = historyRoot(a.state), a.log
+	cfg.Reader.History, cfg.Reader.Artifacts = cfg.History, filepath.Join(a.state, "artifacts")
+	return harness.NewLoop(j, x, m, cfg)
 }
 
 // with locks the workspace, rebuilds the loop of the selected run from its

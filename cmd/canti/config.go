@@ -45,7 +45,6 @@ type config struct {
 	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
-const minContextBytes = 64 << 10
 const contextVersion = 1
 
 type spec struct {
@@ -68,7 +67,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.Structured, "structured", true, "constrain text responses to the decision schema")
 	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
-	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window; at least 65536")
+	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window and the reserves its next step and handover need")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under /canti/imports")
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
 	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
@@ -84,8 +83,6 @@ func (s *spec) register(fs *flag.FlagSet) {
 func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.config, s.budget
 	switch {
-	case c.ContextBytes < minContextBytes:
-		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes must be at least %d", minContextBytes)
 	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
 		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
@@ -121,18 +118,24 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
 	}
-	f := harness.Frame{
-		Goal: goal, Constraints: constraints, Environment: environment(c, b),
-		Step: 1, MaxSteps: s.limits.MaxSteps, Attempt: 1, MaxAttempts: s.limits.MaxAttempts,
-		RunID: run.ID, ArtifactDir: docker.ArtifactDir, RunsDir: runsDir,
-		Window: &harness.Window{FirstStep: 1}, HandoverBytes: c.HandoverBytes,
-		RetrievalEnabled: true, ImportsEnabled: c.HistoryImports != "",
+	fit, err := harness.ContextFit(context.Background(), nil, contextConfig(c, b), run, s.limits)
+	if err == nil {
+		err = fit.Check()
 	}
-	if err := f.ValidateContext(promptLimits(c)); err != nil {
+	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes: %w", err)
 	}
 	run.Config, err = json.Marshal(c)
 	return run, initial, err
+}
+
+// contextConfig is the loop configuration that decides the context of a run
+// of c with budget b; a loop adds the paths of its state directory.
+func contextConfig(c config, b harness.Budget) harness.LoopConfig {
+	return harness.LoopConfig{
+		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Limits: promptLimits(c),
+		Reader: &harness.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+	}
 }
 
 // decodeConfig returns the stored config of run, which must belong to
