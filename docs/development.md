@@ -235,7 +235,11 @@ transition and the facts of every frozen request. It also fails on a directory
 that no scenario records. Only for an intended prompt, adapter, or record
 change, rewrite them with
 `go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
-and review the diff.
+and review the diff. `TestContextVersionPinsItsRules` digests these goldens
+into the rules of the current context version: rewriting those of a scenario
+it records requires a new context version, while a new scenario is added to
+the record with
+`go test ./cmd/canti -run TestContextVersionPinsItsRules -record-context`.
 
 `TestLegacyJournals` reads every journal under
 `internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an

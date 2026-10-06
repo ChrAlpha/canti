@@ -26,9 +26,11 @@ var recordContext = flag.Bool("record-context", false, "record the context rules
 // version stands for are those recorded for contextVersion: the rendering of
 // every system prompt variant in every request transport and of every block
 // kind, the prompt limits, the defaults the loop applies, every term of the
-// context accounting at the default flags and at their extremes, and the
-// action prefixes. Changing any of them requires a new context version,
-// whose rules -record-context records once; it never rewrites a version.
+// context accounting at the default flags and at their extremes, the action
+// prefixes, and the requests of every scenario of the frozen-request corpus.
+// Changing any of them requires a new context version, whose rules
+// -record-context records once; it never rewrites a version, and only adds
+// the scenarios the corpus gained to it.
 func TestContextVersionPinsItsRules(t *testing.T) {
 	file := filepath.Join("testdata", fmt.Sprintf("context-v%d.txt", contextVersion))
 	got := contextRules(t)
@@ -42,13 +44,31 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 	case err != nil:
 		t.Fatalf("context version %d has no recorded rules: %v", contextVersion, err)
 	}
-	if lines := strings.Split(string(want), "\n"); got != string(want) {
-		var changed []string
-		for _, line := range strings.Split(got, "\n") {
-			if !slices.Contains(lines, line) {
-				changed = append(changed, line)
-			}
+	if got == string(want) {
+		return
+	}
+	lines, gotLines := strings.Split(string(want), "\n"), strings.Split(got, "\n")
+	var changed []string
+	for _, line := range lines {
+		if !slices.Contains(gotLines, line) {
+			changed = append(changed, "- "+line)
 		}
+	}
+	added := len(changed) == 0
+	for _, line := range gotLines {
+		if !slices.Contains(lines, line) {
+			changed = append(changed, "+ "+line)
+			added = added && strings.HasPrefix(line, "corpus ")
+		}
+	}
+	switch {
+	case added && *recordContext:
+		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	case added:
+		t.Fatalf("context version %d does not record the requests of new corpus scenarios; add them with -record-context:\n%s", contextVersion, strings.Join(changed, "\n"))
+	default:
 		t.Fatalf("the context rules are not those of context version %d, which runs of it store; bump contextVersion and record the rules of the new version with -record-context. Changed:\n%s",
 			contextVersion, strings.Join(changed, "\n"))
 	}
@@ -113,6 +133,45 @@ func contextRules(t *testing.T) string {
 		}
 	}
 	b.WriteString(sessionRules(t))
+	b.WriteString(corpusRules(t))
+	return b.String()
+}
+
+// corpusRules digests, for every scenario of the frozen-request corpus that
+// TestLoopScenariosKeepTheirCommittedRecords keeps equal to what the loop
+// commits, the body of every request it freezes and the facts recorded with
+// each: its window and its context accounting.
+func corpusRules(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests")
+	scenarios, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, sc := range scenarios {
+		files, err := os.ReadDir(filepath.Join(root, sc.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.New()
+		for _, f := range files {
+			data, err := os.ReadFile(filepath.Join(root, sc.Name(), f.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.Name() != "journal.txt" {
+				fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				if fields := strings.SplitN(line, " ", 5); len(fields) == 5 && fields[2] == "request_frozen" {
+					fmt.Fprintf(h, "%s\n", fields[4])
+				}
+			}
+		}
+		fmt.Fprintf(&b, "corpus %s: sha256 %x\n", sc.Name(), h.Sum(nil))
+	}
 	return b.String()
 }
 
