@@ -153,11 +153,13 @@ func frozenScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
 				`{"kind":"exec","payload":"ls /workspace"}`,
 				`{"kind":"exec"}`,
+				`null`,
 				`{"kind":"return","payload":"go.mod and main.go."}`,
 			}, steps: []string{"1 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\n"},
 				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
+				"run1-step02-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n{\"id\":\"msg_03\"", `"input":null`},
 			},
 		},
 	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
