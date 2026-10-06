@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -14,11 +17,11 @@ import (
 func statusCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
-		store, run, done, err := a.read(ctx)
+		store, run, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
-		defer done()
+		defer store.Close()
 		snap, t, err := consistent(ctx, store, run.ID)
 		if err != nil {
 			return exitError, err
@@ -63,11 +66,11 @@ const historyPage = 8
 func historyCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
-		store, run, done, err := a.read(ctx)
+		store, run, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
-		defer done()
+		defer store.Close()
 		enc := a.encoder()
 		for after := int64(0); ; {
 			page, err := store.Transitions(ctx, run.ID, after, historyPage)
@@ -95,17 +98,22 @@ func (a *app) encoder() *json.Encoder {
 	return enc
 }
 
-// read opens the workspace journal without the lock and finds the run.
-func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, func(), error) {
-	store, done, err := a.open(ctx, false, false)
+// read opens the workspace journal read-only, without the lock, and finds
+// the run.
+func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, error) {
+	path := filepath.Join(a.state, "canti.db")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, harness.Run{}, fmt.Errorf("no runs in workspace %s", a.workspace)
+	}
+	store, err := sqlite.OpenReadOnly(ctx, path)
 	if err != nil {
-		return nil, harness.Run{}, nil, err
+		return nil, harness.Run{}, err
 	}
 	run, _, err := a.find(ctx, store)
 	if err != nil {
-		done()
+		store.Close()
 	}
-	return store, run, done, err
+	return store, run, err
 }
 
 // report prints the outcome of the run at snap and returns its exit status,

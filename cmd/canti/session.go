@@ -21,7 +21,7 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
 		return exitError, err
 	}
-	store, done, err := a.open(ctx, true, true)
+	store, done, err := a.open(ctx, true)
 	if err != nil {
 		return exitError, err
 	}

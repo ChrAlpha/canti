@@ -277,7 +277,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
-		store, done, err := a.open(ctx, true, true)
+		store, done, err := a.open(ctx, true)
 		if err != nil {
 			return exitError, err
 		}
@@ -385,34 +385,30 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-// open opens the workspace journal, holding the workspace lock until done
-// when lock is set. Unless create is set, a missing journal is an error.
-func (a *app) open(ctx context.Context, lock, create bool) (*sqlite.Store, func(), error) {
+// open opens the workspace journal, holding the workspace lock until done.
+// Unless create is set, a missing journal is an error.
+func (a *app) open(ctx context.Context, create bool) (*sqlite.Store, func(), error) {
 	path := filepath.Join(a.state, "canti.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && !create {
 		return nil, nil, fmt.Errorf("no runs in workspace %s", a.workspace)
 	}
-	release := func() {}
-	if lock {
-		f, err := os.OpenFile(filepath.Join(a.state, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
-		if err != nil {
-			return nil, nil, err
+	f, err := os.OpenFile(filepath.Join(a.state, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			err = fmt.Errorf("workspace %s is %w", a.workspace, errLocked)
 		}
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			f.Close()
-			if errors.Is(err, syscall.EWOULDBLOCK) {
-				err = fmt.Errorf("workspace %s is %w", a.workspace, errLocked)
-			}
-			return nil, nil, err
-		}
-		release = func() { f.Close() }
+		return nil, nil, err
 	}
 	store, err := sqlite.Open(ctx, path)
 	if err != nil {
-		release()
+		f.Close()
 		return nil, nil, err
 	}
-	return store, sync.OnceFunc(func() { store.Close(); release() }), nil
+	return store, sync.OnceFunc(func() { store.Close(); f.Close() }), nil
 }
 
 // find returns the selected run and its stored config.
@@ -482,7 +478,7 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 // stored config and the model that model builds from it, and reports what op
 // does with the loop.
 func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
-	store, done, err := a.open(ctx, true, false)
+	store, done, err := a.open(ctx, false)
 	if err != nil {
 		return exitError, err
 	}
