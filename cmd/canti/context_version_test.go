@@ -115,12 +115,14 @@ func contextRules(t *testing.T) string {
 		t.Fatal(err)
 	}
 	fmt.Fprintf(&b, "page of every block kind: %s\n", digest(p.System+"\x00"+strings.Join(p.Blocks, "\x00")))
-	imports, previous := t.TempDir(), ""
+	imports, previous, mapped := t.TempDir(), "", ""
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
 		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
-		{"-image", strings.Repeat("x", 2048)}} {
+		{"-image", strings.Repeat("x", 2048)},
+		{"-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false", "-decision-format", "tool", "-fallbacks=false", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
 		s := parseSpec(t, flags...)
-		fit, err := harness.ContextFit(contextConfig(s.config, s.budget), run, s.limits)
+		loop := contextConfig(s.config, s.budget)
+		fit, err := harness.ContextFit(loop, run, s.limits)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,6 +136,12 @@ func contextRules(t *testing.T) string {
 		if env := environment(s.config, s.budget); env != previous {
 			fmt.Fprintf(&b, "  environment %s\n", digest(env))
 			previous = env
+		}
+		mc := modelConfig(s.config, "", credential{})
+		if m := fmt.Sprintf("model %s, max tokens %d, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
+			mc.Model, mc.MaxTokens, mc.StructuredOutput, mc.DecisionFormat, mc.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
+			fmt.Fprintf(&b, "  %s\n", m)
+			mapped = m
 		}
 	}
 	b.WriteString(sessionRules(t))

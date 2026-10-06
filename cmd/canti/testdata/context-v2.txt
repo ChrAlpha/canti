@@ -17,14 +17,20 @@ system, retrieval true, imports true: 5879 bytes, sha256 e895b736a49abdf0c00be5f
 page of every block kind: 9181 bytes, sha256 b5fb65c8f0253a1a8843a1090e87f5db1fc9ee95c2553b009b9db31a049f3755
 run []: {Limit:262144 Handover:2048 Page:6668 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
   environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
+  model claude-opus-5, max tokens 16000, structured true, decision format "", fallbacks true, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144}, window steps 0, window bytes 0, imports false
 run ["-handover-bytes" "1"]: {Limit:262144 Handover:1 Page:6668 System:5698 Head:1057 Step:10836 Evidence:51713 Failed:6362 Tail:5184}, required 80851
 run ["-handover-bytes" "8192"]: {Limit:262144 Handover:8192 Page:6668 System:5698 Head:25628 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 105428
 run ["-history-imports" "DIR"]: {Limit:262144 Handover:2048 Page:6849 System:5879 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87177
+  model claude-opus-5, max tokens 16000, structured true, decision format "", fallbacks true, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144}, window steps 0, window bytes 0, imports true
 run ["-max-steps" "0" "-max-attempts" "1"]: {Limit:262144 Handover:2048 Page:6672 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
+  model claude-opus-5, max tokens 16000, structured true, decision format "", fallbacks true, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144}, window steps 0, window bytes 0, imports false
 run ["-pids" "0" "-job-timeout" "0" "-memory" "" "-cpus" "4" "-network" "bridge"]: {Limit:262144 Handover:2048 Page:6679 System:5698 Head:7207 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87007
   environment 261 bytes, sha256 4ff1dea32fd62532c7691977024668a3d289e364aea5f02fe11e193f6bf0e454
 run ["-image" "2048 x"]: {Limit:262144 Handover:2048 Page:8490 System:5698 Head:9018 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 88818
   environment 2278 bytes, sha256 d288d086e8db151b57396efe7d85156601181d588c67570e2a6cbf0f4c0f44b8
+run ["-model" "claude-sonnet-5" "-max-tokens" "4096" "-structured=false" "-decision-format" "tool" "-fallbacks=false" "-context-bytes" "131072" "-window-steps" "6" "-window-bytes" "9000"]: {Limit:131072 Handover:2048 Page:6668 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
+  environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
+  model claude-sonnet-5, max tokens 4096, structured false, decision format "tool", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:131072}, window steps 6, window bytes 9000, imports false
 session run 10 of 10: request 8973 bytes, sha256 6e02e61351546417107ff783ddb2ff15ad487fb7412af7c0776633796a0d2927, navigation RUN9
   earlier RUN2, sequence 2, returned, goal true
   earlier RUN3, sequence 3, returned, goal true
