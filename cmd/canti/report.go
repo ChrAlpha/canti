@@ -116,10 +116,11 @@ func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, error) {
 	return store, run, err
 }
 
-// report prints the outcome of the run at snap and returns its exit status,
-// or active while the run is still active. Callers release the workspace
-// lock first: behind a stderr queue each line waits up to stderrFinalTime.
-func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) {
+// report prints the outcome of the run at snap, of config c, and returns its
+// exit status, or active while the run is still active. Callers release the
+// workspace lock first: behind a stderr queue each line waits up to
+// stderrFinalTime.
+func (a *app) report(snap harness.Snapshot, err error, active int, c config) (int, error) {
 	s := snap.State
 	out := a.stderr
 	if a.display != nil {
@@ -145,7 +146,11 @@ func (a *app) report(snap harness.Snapshot, err error, active int) (int, error) 
 		return exitResolution, nil
 	}
 	next := "resume"
-	if s.Phase == core.PhaseCancelling {
+	switch why := unresumable(s.RunID, c); {
+	case why != "":
+		fmt.Fprintf(out, "canti: run %s is %s and %s.\n", s.RunID, s.Phase, why)
+		return active, nil
+	case s.Phase == core.PhaseCancelling:
 		next = "stop"
 	}
 	fmt.Fprintf(out, "canti: run %s is %s; continue it with \"canti %s -run %[1]s\".\n", s.RunID, s.Phase, next)

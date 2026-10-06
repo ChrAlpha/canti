@@ -295,7 +295,7 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
 		snap, err := drive(l, run.ID)
 		done()
-		return a.report(snap, err, exitActive)
+		return a.report(snap, err, exitActive, s.config)
 	}
 }
 
@@ -325,7 +325,7 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 		drive, release := a.drive(ctx, *once)
 		defer release()
 		model := func(c config) (harness.Model, error) { return newModel(c, *url, a.cred) }
-		return a.with(ctx, model, exitActive, drive)
+		return a.with(ctx, model, true, exitActive, drive)
 	}
 }
 
@@ -338,7 +338,7 @@ func stopCommand(fs *flag.FlagSet, a *app) action {
 		}
 		ctx, cancel := context.WithTimeout(ctx, *cleanup)
 		defer cancel()
-		return a.with(ctx, withoutModel, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
+		return a.with(ctx, withoutModel, false, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
 			return stop(ctx, l, id)
 		})
 	}
@@ -371,7 +371,7 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 		if set["exit-code"] {
 			obs.ExitCode = exitCode
 		}
-		return a.with(ctx, withoutModel, exitOK, func(l *harness.Loop, id string) (harness.Snapshot, error) {
+		return a.with(ctx, withoutModel, false, exitOK, func(l *harness.Loop, id string) (harness.Snapshot, error) {
 			if !*job {
 				return l.Resolve(ctx, id, obs)
 			}
@@ -437,8 +437,9 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 		return nil
 	}
 	var snap harness.Snapshot
+	var c config
 	if err == nil {
-		_, err = decodeConfig(last, a.workspace)
+		c, err = decodeConfig(last, a.workspace)
 	}
 	if err == nil {
 		snap, err = store.Latest(ctx, last.ID)
@@ -457,7 +458,29 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	case p == core.PhaseNeedsResolution:
 		return fmt.Errorf("run %s needs resolution: resolve it first", last.ID)
 	}
-	return fmt.Errorf("run %s is %s: resume or stop it first", last.ID, snap.State.Phase)
+	next := "resume or stop"
+	if c.ContextVersion != contextVersion {
+		next = "stop"
+	}
+	return fmt.Errorf("run %s is %s: %s it first", last.ID, snap.State.Phase, next)
+}
+
+// resumable fails, naming how to close it, for run id of config c when c
+// records another context version and the run has not halted: this binary
+// renders the context of contextVersion only.
+func resumable(ctx context.Context, store *sqlite.Store, id string, c config) error {
+	why := unresumable(id, c)
+	if why == "" {
+		return nil
+	}
+	snap, err := store.Latest(ctx, id)
+	if err == nil {
+		err = snap.Validate()
+	}
+	if err != nil || snap.State.Intent() == core.IntentHalt {
+		return err
+	}
+	return fmt.Errorf("run %s is %s and %s", id, snap.State.Phase, why)
 }
 
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
@@ -473,14 +496,18 @@ func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c con
 
 // with locks the workspace, rebuilds the loop of the selected run from its
 // stored config and the model that model builds from it, and reports what op
-// does with the loop.
-func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
+// does with the loop. With resume it first refuses a run that resumable
+// refuses.
+func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), resume bool, active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
 	store, done, err := a.open(ctx, false)
 	if err != nil {
 		return exitError, err
 	}
 	defer done()
 	run, c, err := a.find(ctx, store)
+	if err == nil && resume {
+		err = resumable(ctx, store, run.ID, c)
+	}
 	var m harness.Model
 	var x *docker.Executor
 	var l *harness.Loop
@@ -498,7 +525,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 	}
 	snap, err := op(l, run.ID)
 	done()
-	return a.report(snap, err, active)
+	return a.report(snap, err, active, c)
 }
 
 // drive catches SIGINT and SIGTERM until release and returns op, which runs

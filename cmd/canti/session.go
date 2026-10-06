@@ -31,12 +31,13 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 		if previous.Goal != goal || explicitConstraints && previous.Constraints != constraints {
 			return exitError, errors.New("session input ID already exists with different content")
 		}
-		if _, err := decodeConfig(previous, a.workspace); err != nil {
+		c, err := decodeConfig(previous, a.workspace)
+		if err != nil {
 			return exitError, err
 		}
 		snap, err := store.Latest(ctx, previous.ID)
 		done()
-		return a.report(snap, err, exitActive)
+		return a.report(snap, err, exitActive, c)
 	}
 	if !errors.Is(err, harness.ErrNotFound) {
 		return exitError, err
@@ -85,5 +86,5 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 		return exitError, fmt.Errorf("session %s run %s: %w", session, run.ID, err)
 	}
 	done()
-	return a.report(snap, nil, exitActive)
+	return a.report(snap, nil, exitActive, s.config)
 }

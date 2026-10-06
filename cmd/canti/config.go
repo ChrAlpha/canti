@@ -158,6 +158,19 @@ func decodeConfig(run harness.Run, workspace string) (config, error) {
 	return c, nil
 }
 
+// unresumable names, for run id of config c, why this binary does not
+// resume it and how to close it, unless c records contextVersion.
+func unresumable(id string, c config) string {
+	if c.ContextVersion == contextVersion {
+		return ""
+	}
+	stored := "none"
+	if c.ContextVersion != 0 {
+		stored = strconv.Itoa(c.ContextVersion)
+	}
+	return fmt.Sprintf("uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", stored, contextVersion, id)
+}
+
 func promptLimits(c config) harness.PromptLimits {
 	l := harness.DefaultPromptLimits()
 	l.Total = c.ContextBytes
