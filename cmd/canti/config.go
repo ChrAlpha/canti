@@ -45,7 +45,9 @@ type config struct {
 	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
-const contextVersion = 1
+// contextVersion names the rules that decide the context of a run, which
+// testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
+const contextVersion = 2
 
 type spec struct {
 	config config

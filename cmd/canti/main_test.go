@@ -263,7 +263,7 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 // inspected and stopped, and that once it is closed the next run, alone or
 // in a session, is admitted after it.
 func TestRunsOfAnotherContextVersionStayReadableAndClosable(t *testing.T) {
-	for _, tc := range []struct{ name, version string }{{"missing", ""}, {"zero", "0"}, {"later", "2"}} {
+	for _, tc := range []struct{ name, version string }{{"missing", ""}, {"zero", "0"}, {"earlier", "1"}, {"later", "3"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})

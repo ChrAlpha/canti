@@ -1,0 +1,25 @@
+context version 2
+actions "canti:retrieve " "canti:handover "
+prompt limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:131072}
+loop defaults: handover 2048, total 131072
+system, retrieval false, imports false: 1706 bytes, sha256 6789b26db2e96325989a9ff91c208b0cc13446c4fede4a4ab6c493df3adc7987
+  request, text, structured true, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 2962 bytes, sha256 5efc884adfe04f2b72dc7787e0014a5a0b58cf9a8244dd2395d691037a7f6ce8
+  request, text, structured false, fallbacks false: anthropic-messages/2023-06-01 canti-anthropic/2 2711 bytes, sha256 dbf60744d3658850db4e57327ab7268f4fdc4a04323639f7d47a20e2a59f577c
+  request, tool, structured false, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 3138 bytes, sha256 34dde9cadc900360be32c63710f5fb608059bb66a6faa0b5ef9888870e1b6a9a
+system, retrieval true, imports false: 5698 bytes, sha256 1d99e86ca04c72db3f76c42aa7f66355040736de4dbc5aa42ad14c2d0c27ef0f
+  request, text, structured true, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 6997 bytes, sha256 a430639f117e4bf4afa3dadc9a634443e6491ef0168c6ba5ef720476a5fe4939
+  request, text, structured false, fallbacks false: anthropic-messages/2023-06-01 canti-anthropic/2 6746 bytes, sha256 60ff1e282b7b27d5531a2528e5b98b24be97c90b79e0d55ea783faec548034e2
+  request, tool, structured false, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 7173 bytes, sha256 78f336bbe5c882a00a49018844b6d9ae7f3ac048f7c71ee76e3563ff40d06a99
+system, retrieval true, imports true: 5879 bytes, sha256 e895b736a49abdf0c00be5ffd614bb4319855ddcf9001c54458316ded0d35a4b
+  request, text, structured true, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 7179 bytes, sha256 b587cb6342abddb479b1a5fe48deaf09419709591266369607cc91eb93fede27
+  request, text, structured false, fallbacks false: anthropic-messages/2023-06-01 canti-anthropic/2 6928 bytes, sha256 8e4d7fa03b6b1de0c652a9e9ad383e27064547112b60015b5b99d3382b2e65e6
+  request, tool, structured false, fallbacks true: anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 7355 bytes, sha256 ccbf1c3eabf146c23247485d4fb19ebae857f9f32afe8b6632f3ea4d48a6ed21
+page of every block kind: 8726 bytes, sha256 81752c72aa8fdc99a05b3709e5723c4b49cec5f4bf3adf09d547ba58b958ad7c
+run []: {Limit:262144 Handover:2048 Page:6668 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
+  environment "Each command runs in a new Linux container from image debian:bookworm-slim with working directory /workspace, which is read-write and persists between steps. Network: none. Per-command limits: memory 2g, CPUs unlimited, processes 512, run time 10m0s."
+run ["-handover-bytes" "1"]: {Limit:262144 Handover:1 Page:6668 System:5698 Head:1057 Step:10836 Evidence:51713 Failed:6362 Tail:5184}, required 80851
+run ["-handover-bytes" "8192"]: {Limit:262144 Handover:8192 Page:6668 System:5698 Head:25628 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 105428
+run ["-history-imports" "DIR"]: {Limit:262144 Handover:2048 Page:6849 System:5879 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87177
+run ["-max-steps" "0" "-max-attempts" "1"]: {Limit:262144 Handover:2048 Page:6672 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
+run ["-pids" "0" "-job-timeout" "0" "-memory" "" "-cpus" "4" "-network" "bridge"]: {Limit:262144 Handover:2048 Page:6679 System:5698 Head:7207 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87007
+  environment "Each command runs in a new Linux container from image debian:bookworm-slim with working directory /workspace, which is read-write and persists between steps. Network: bridge. Per-command limits: memory unlimited, CPUs 4, processes unlimited, run time unlimited."

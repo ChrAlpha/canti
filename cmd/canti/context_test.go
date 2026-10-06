@@ -55,7 +55,7 @@ func TestDecodeConfigKeepsAnyStoredContextVersion(t *testing.T) {
 	if err := json.Unmarshal(run.Config, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []any{nil, 0, 2} {
+	for _, version := range []any{nil, 0, 1, 3} {
 		if version == nil {
 			delete(stored, "context_version")
 		} else {
