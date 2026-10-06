@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -134,7 +135,58 @@ func contextRules(t *testing.T) string {
 		}
 	}
 	b.WriteString(sessionRules(t))
+	b.WriteString(storedRules(t))
 	b.WriteString(corpusRules(t))
+	return b.String()
+}
+
+// storedRules records every request of a run whose model and context flags
+// all differ from their defaults, the first frozen by run -once and the next
+// by a resume process that rebuilds the run from its stored config, after
+// the run read an imported file and its window asked for a handover.
+func storedRules(t *testing.T) string {
+	t.Helper()
+	f := newFixture(t, map[int]core.Decision{
+		1: {Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`},
+		2: {Kind: core.Return, Payload: "done"},
+	})
+	imports := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imports, "notes.txt"), []byte("The parser was rewritten in v2.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false",
+		"-fallbacks=false", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
+		"-history-imports", imports, "-memory", "1g"); r.code != exitActive {
+		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	last, err := store.LastRun(context.Background())
+	var all []harness.Transition
+	if err == nil {
+		all, err = store.Transitions(context.Background(), last.ID, 0, 1000)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.NewReplacer(last.ID, "RUN").Replace
+	var b strings.Builder
+	for _, tr := range all {
+		if req := tr.Facts.Request; req != nil {
+			req.Body = []byte(name(string(req.Body)))
+			facts, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "stored run step %d revision %d: %s\n", tr.To.Step, tr.To.RequestRev, digest(name(string(facts))))
+		}
+	}
 	return b.String()
 }
 

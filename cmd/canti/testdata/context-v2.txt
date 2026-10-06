@@ -40,6 +40,8 @@ session run 10 of 10: request 8973 bytes, sha256 6e02e61351546417107ff783ddb2ff1
   earlier RUN7, sequence 7, returned, goal true
   earlier RUN8, sequence 8, returned, goal true
   earlier RUN9, sequence 9, returned, goal true
+stored run step 1 revision 1: 10009 bytes, sha256 2db3dc2305c34e2f3cfda9a5ed13c20aa1842b438bd9f48087d9b120c6f8eeac
+stored run step 2 revision 1: 11840 bytes, sha256 749a17a3e0324f1d50c365943baa547a7cc5983ed908f8863e89a8fa233c42f9
 corpus caps-and-encoding: sha256 97120be40b6205bbba106dbdfeb1194627533aeff388d04c2cbca6b3ae08a302
 corpus directory-search-pages: sha256 833348582ba6a10861173596a82a221790c7f47656f9c7aba3a35f31bc911b27
 corpus discovery-pages: sha256 be0769ab6742c7734c2af4faca249c4d31a41d0a9f57d34fa558e54a24cb54ae
