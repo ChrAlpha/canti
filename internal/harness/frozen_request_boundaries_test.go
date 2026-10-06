@@ -76,6 +76,17 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "text-envelopes", limits: stepLimits,
+			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
+				envelope("t1", "end_turn", `{"type":"thinking","thinking":"Plan.","text":"ignore-me","signature":"sig"},`+
+					`{"type":"text","text":"{\"kind\":\"bogus\","},{"type":"text","text":"\"payload\":\"review-marker\"}"}`),
+				envelope("t2", "end_turn", `{"type":"text","text":"{\"kind\":\"return\","},{"type":"text","text":"\"payload\":\"Split decisions are joined.\"}"}`),
+			}}},
+			marks: map[string][]string{
+				"run1-step01-rev2.json": {"Rejected reply:\n```\n{\"kind\":\"bogus\",\"payload\":\"review-marker\"}\n```\n"},
+			},
+		},
+		{
 			name: "retrieval-command-at-cap", limits: stepLimits, imports: map[string]string{imported: "notes\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Read the imported notes twice.", replies: []string{
 				capped(imported, 2048), capped(imported, 2049),
@@ -126,8 +137,8 @@ func boundaryScenarios() []frozenScenario {
 	})
 }
 
-// envelope is a raw tool-transport response of content blocks, complete by
-// its stop reason.
+// envelope is a raw response of content blocks, complete by its stop
+// reason.
 func envelope(id, stop, blocks string) string {
 	return `raw:{"id":"msg_` + id + `","type":"message","role":"assistant","model":"claude-opus-5","content":[` + blocks +
 		`],"stop_reason":"` + stop + `","usage":{"input_tokens":1000,"output_tokens":20}}`
