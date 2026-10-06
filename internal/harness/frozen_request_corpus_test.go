@@ -167,8 +167,8 @@ func frozenScenarios() []frozenScenario {
 }
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
-// model request every scenario freezes, the event IDs of its transitions, and
-// the facts of its frozen requests with testdata/frozen-requests/<scenario>.
+// model request every scenario freezes and the event IDs and facts of its
+// transitions with testdata/frozen-requests/<scenario>.
 // Rewrite them with -update-requests only for an intended prompt, adapter, or
 // record change.
 func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
@@ -291,9 +291,9 @@ func stepOutcome(s harness.StepRecord) string {
 	return out
 }
 
-// journal lists the sequence, kind, and event ID of every transition the
-// runs committed, as the transitions table holds them, and the facts column
-// of each frozen request with its body replaced by the name of its golden.
+// journal lists the sequence, kind, event ID, and facts of every transition
+// the runs committed, as the transitions table holds them, with the body of
+// each frozen request replaced by the name of its golden.
 func (r *corpusRig) journal(t *testing.T, runs []frozenRun) []byte {
 	t.Helper()
 	db, err := sql.Open("sqlite", r.path)
@@ -314,11 +314,10 @@ func (r *corpusRig) journal(t *testing.T, runs []frozenRun) []byte {
 			if err := rows.Scan(&seq, &kind, &id, &step, &rev, &facts); err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(&b, "run%d %d %s %s", i+1, seq, kind, id)
 			if kind == "request_frozen" {
-				b.WriteString(" " + elideBody(t, facts, fmt.Sprintf("run%d-step%02d-rev%d.json", i+1, step, rev)))
+				facts = elideBody(t, facts, fmt.Sprintf("run%d-step%02d-rev%d.json", i+1, step, rev))
 			}
-			b.WriteByte('\n')
+			fmt.Fprintf(&b, "run%d %d %s %s %s\n", i+1, seq, kind, id, facts)
 		}
 		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			t.Fatal(err)

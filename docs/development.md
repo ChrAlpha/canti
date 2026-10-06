@@ -241,8 +241,8 @@ do not make paid provider calls part of default tests.
 
 `TestLoopScenariosKeepTheirCommittedRecords` compares what its scenarios commit
 with `internal/harness/testdata/frozen-requests/<scenario>`: the exact body of
-every frozen model request and, in `journal.txt`, the event ID of every
-transition and the facts of every frozen request. It also fails on a directory
+every frozen model request and, in `journal.txt`, the event ID and facts of
+every transition. It also fails on a directory
 that no scenario records. Only for an intended prompt, adapter, or record
 change, rewrite them with
 `go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`

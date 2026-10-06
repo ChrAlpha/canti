@@ -31,13 +31,26 @@ func boundaryScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Build the project.", replies: []string{
 				corpusDecision(core.Exec, "make build"),
 				"I will hand over now.",
-				handover(1, note+strings.Repeat(" ", 2049-len(note))),
 				handover(1, " \\n\\t "),
+				handover(1, note+strings.Repeat(" ", 2049-len(note))),
 			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
 				"run1-step02-rev2.json": {"## Rejected response\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"Context action failed: harness: handover text is 2049 UTF-8 bytes; maximum 2048.", "## Handover required\n"},
+				"run1-step03-rev1.json": {"Context action failed: harness: handover text must not be empty", "## Handover required\n"},
+			},
+		},
+		{
+			name: "handover-wrong-run", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
+				corpusDecision(core.Exec, "ls /workspace"),
+				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusNextRun+`","first_step":1,"text":"Listed go.mod and main.go."}`),
+				handover(1, "Listed go.mod and main.go; report them next."),
+				corpusDecision(core.Return, "go.mod and main.go."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			marks: map[string][]string{
+				"run1-step03-rev1.json": {"Context action failed: harness: handover run_id must be \"" + corpusRun + "\"", "## Handover required\n"},
+				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n"},
 			},
 		},
 		{

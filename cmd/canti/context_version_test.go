@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -141,19 +142,20 @@ func contextRules(t *testing.T) string {
 }
 
 // storedRules records every request of a run whose model and context flags
-// all differ from their defaults, the first frozen by run -once and the next
-// by a resume process that rebuilds the run from its stored config, after
-// the run read an imported file and its window asked for a handover.
+// all differ from their defaults but its decision format, the first frozen
+// by run -once and the next by a resume process that rebuilds the run from
+// its stored config, after the run read an imported file and its window
+// asked for a handover; the repairs of a run of the tool decision format,
+// which a resume process freezes when text answers it; and a run whose
+// window outgrows a page of the journal, after 65 reads.
 func storedRules(t *testing.T) string {
 	t.Helper()
-	f := newFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`},
-		2: {Kind: core.Return, Payload: "done"},
-	})
+	read := core.Decision{Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`}
 	imports := t.TempDir()
 	if err := os.WriteFile(filepath.Join(imports, "notes.txt"), []byte("The parser was rewritten in v2.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	f := newFixture(t, map[int]core.Decision{1: read, 2: {Kind: core.Return, Payload: "done"}})
 	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false",
 		"-fallbacks=false", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
 		"-history-imports", imports, "-memory", "1g"); r.code != exitActive {
@@ -162,6 +164,34 @@ func storedRules(t *testing.T) string {
 	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
+	b := frozenRequests(t, f, "stored run")
+	f = newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-once", "-goal", "Report done.", "-decision-format", "tool"); r.code != exitActive {
+		t.Fatalf("run -once -decision-format tool = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitStopped {
+		t.Fatalf("resume of the tool run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	b += frozenRequests(t, f, "stored tool run")
+	f = newFixture(t, nil)
+	f.model.decide = func(step int, _ string) (core.Decision, error) {
+		if step <= 65 {
+			return read, nil
+		}
+		return core.Decision{Kind: core.Return, Payload: "done"}, nil
+	}
+	if r := f.cli(nil, "run", "-goal", "Read the notes 65 times.", "-max-steps", "0", "-history-imports", imports); r.code != exitOK {
+		t.Fatalf("run of 66 steps = %d\nstderr: %s", r.code, r.stderr)
+	}
+	h := sha256.New()
+	io.WriteString(h, frozenRequests(t, f, "step"))
+	return b + fmt.Sprintf("long window: %d requests, sha256 %x\n", len(f.model.requests()), h.Sum(nil))
+}
+
+// frozenRequests digests, one line labelled label per request, every request
+// the latest run of f froze, with its run ID named RUN.
+func frozenRequests(t *testing.T, f *fixture, label string) string {
+	t.Helper()
 	store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +200,7 @@ func storedRules(t *testing.T) string {
 	last, err := store.LastRun(context.Background())
 	var all []harness.Transition
 	if err == nil {
-		all, err = store.Transitions(context.Background(), last.ID, 0, 1000)
+		all, err = store.Transitions(context.Background(), last.ID, 0, 1<<20)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +214,7 @@ func storedRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(&b, "stored run step %d revision %d: %s\n", tr.To.Step, tr.To.RequestRev, digest(name(string(facts))))
+			fmt.Fprintf(&b, "%s step %d revision %d: %s\n", label, tr.To.Step, tr.To.RequestRev, digest(name(string(facts))))
 		}
 	}
 	return b.String()
@@ -192,8 +222,9 @@ func storedRules(t *testing.T) string {
 
 // corpusRules digests, for every scenario of the frozen-request corpus that
 // TestLoopScenariosKeepTheirCommittedRecords keeps equal to what the loop
-// commits, the body of every request it freezes and the facts recorded with
-// each: its window and its context accounting.
+// commits, the body of every request it freezes and its journal: the event
+// ID and facts of every transition, which record the window and context
+// accounting of each request and the outcome of each step and stop.
 func corpusRules(t *testing.T) string {
 	t.Helper()
 	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests")
@@ -213,15 +244,7 @@ func corpusRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if f.Name() != "journal.txt" {
-				fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
-				continue
-			}
-			for _, line := range strings.Split(string(data), "\n") {
-				if fields := strings.SplitN(line, " ", 5); len(fields) == 5 && fields[2] == "request_frozen" {
-					fmt.Fprintf(h, "%s\n", fields[4])
-				}
-			}
+			fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
 		}
 		fmt.Fprintf(&b, "corpus %s: sha256 %x\n", sc.Name(), h.Sum(nil))
 	}
