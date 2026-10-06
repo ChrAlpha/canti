@@ -82,6 +82,10 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Record the job, or the outcome, of an effect whose result is unknown |
 
+A run created by a canti whose context rules differ, as its stored context
+version records, is not resumed: inspect it, then stop it to start new runs in
+the same state directory.
+
 The first SIGINT or SIGTERM stops the run the same way as `canti stop`. For
 `run` and `resume`, exit status 0 means the agent returned, 3 that the run
 stopped, and 4 that it needs resolution; see the

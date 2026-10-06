@@ -573,10 +573,19 @@ concatenates the text blocks.
 A resend reuses the frozen bytes; changing the input requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code
-revision is not. A state directory written by an earlier revision is not
-supported, and no compatibility is kept: a stored configuration the current
-one cannot decode, or a missing or unsupported context version, makes the
-CLI refuse to resume the run; use a fresh `-state`.
+revision is not. The configuration records the context version of the canti
+that created the run, which names the rules that render its prompts and
+account for their bytes: `TestContextVersionPinsItsRules` records them for
+each version, together with every request of the frozen-request corpus, so
+changing them needs a new version. A run of another context version, or of
+none, is decoded by the fields it stores and stays readable; `resolve` still
+records its unknown results and `stop` closes it, since neither renders a
+request. `resume` refuses it
+unless it has halted, before it builds the model or the executor and without
+a commit, so no canti continues a run under rules it was not created with.
+Once that run is closed, the state directory takes new runs. A stored
+configuration the current one cannot decode makes every command refuse the
+run; use a fresh `-state`.
 
 ## Execution
 

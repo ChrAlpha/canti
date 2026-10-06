@@ -115,7 +115,8 @@ processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
 output tokens per response, structured output and fallbacks on, 256 KiB per
 prompt (`-context-bytes`, including handover reserve; it must hold the goal,
 constraints, and the reserves for one more step and a failed handover, about
-85 KiB with a short goal and the default handover), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
+85 KiB with a short goal and the default handover; `run` refuses a smaller
+value with the total it needs), 20 steps, 3 attempts per step, 30 min wall time, no token budget,
 256 MiB of output per run, and 10 min per job.
 
 `chat` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
@@ -202,7 +203,16 @@ of capacity-triggered runs, so keep zero for long work.
 `-handover-bytes` bounds the continuation text (2048 bytes by default).
 History retrieval is always available; `-history-imports` adds a read-only
 archive. Workspace notes are ordinary files and are not automatically read.
-Runs with the previous context configuration require a fresh state directory.
+
+Each run stores the context version of the canti that created it, which names
+the rules that render and account for its prompts. `resume` refuses an open
+run of another context version, or of none, with status 1 before it calls the
+model or commits anything, and reports a halted one as it is. Such a run stays
+readable through `status`, `history`, and `context`; `stop` closes it, after
+`resolve` if it needs resolution, and the state directory then takes new runs.
+A later run of its session still quotes its dialogue. A run whose stored
+configuration this canti cannot decode is refused by every command and
+requires a fresh state directory.
 
 A CLI check without Docker or credentials proves only that the command builds
 and parses its arguments; the integration tests drive real runs with a
