@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -339,19 +338,14 @@ func exerciseLegacySessions(t *testing.T, store *sqlite.Store, db legacyDB, raw 
 	}
 }
 
-type legacyCounters struct{ input, output, bytes, steps int64 }
-
 // compareLegacy fails unless after, at schema version, keeps every row of
-// before byte for byte, except that the counters of the runs in grown rose
-// by exactly those amounts, and adds nothing but the appended transitions
-// of those runs, at the current semantics, and, to a schema-1 journal it
+// before byte for byte and adds nothing but, to a schema-1 journal it
 // migrated, exactly the session table a new journal has.
-func compareLegacy(t *testing.T, before, after legacyDB, version int, grown map[string]legacyCounters, appended map[string]int) {
+func compareLegacy(t *testing.T, before, after legacyDB, version int) {
 	t.Helper()
 	if after.version != version {
 		t.Errorf("schema version %d, want %d after version %d", after.version, version, before.version)
 	}
-	counters := []string{"input_tokens", "output_tokens", "output_bytes", "steps"}
 	for name, table := range before.tables {
 		now, ok := after.tables[name]
 		if !ok {
@@ -364,23 +358,8 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int, grown map[
 				t.Errorf("%s row %q is gone", name, key)
 				continue
 			}
-			want := row
-			if name == "runs" {
-				want = maps.Clone(row)
-				d := grown[row.text(t, "id")]
-				for i, add := range []int64{d.input, d.output, d.bytes, d.steps} {
-					want[counters[i]] = row.num(t, counters[i]) + add
-				}
-			}
-			for column := range maps.Keys(got) {
-				if _, ok := want[column]; !ok {
-					t.Errorf("%s row %q gained column %s", name, key, column)
-				}
-			}
-			for column, value := range want {
-				if !reflect.DeepEqual(got[column], value) {
-					t.Errorf("%s row %q column %s = %#v, want %#v", name, key, column, got[column], value)
-				}
+			if !reflect.DeepEqual(got, row) {
+				t.Errorf("%s row %q = %#v, want %#v", name, key, got, row)
 			}
 		}
 	}
@@ -388,37 +367,26 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int, grown map[
 	if before.version == 1 && version == 2 {
 		session = legacySessionSchema(t)
 	}
-	added := map[string]int{}
 	for name, table := range after.tables {
 		for key, row := range table.rows {
 			if _, ok := before.tables[name].rows[key]; ok {
 				continue
 			}
-			switch fresh, ok := session[key]; {
-			case name == "sqlite_schema" && ok:
-				for _, column := range []string{"type", "name", "tbl_name", "sql"} {
-					if !reflect.DeepEqual(row[column], fresh[column]) {
-						t.Errorf("migrated schema object %s has %s %#v, a new journal %#v", key, column, row[column], fresh[column])
-					}
-				}
-				delete(session, key)
-			case name == "transitions" && appended[row.text(t, "run_id")] > 0:
-				added[row.text(t, "run_id")]++
-				if row.num(t, "semantics") != core.SemanticsVersion {
-					t.Errorf("appended transition %q has semantics %d", key, row.num(t, "semantics"))
-				}
-			default:
+			fresh, ok := session[key]
+			if name != "sqlite_schema" || !ok {
 				t.Errorf("%s gained row %q", name, key)
+				continue
 			}
+			for _, column := range []string{"type", "name", "tbl_name", "sql"} {
+				if !reflect.DeepEqual(row[column], fresh[column]) {
+					t.Errorf("migrated schema object %s has %s %#v, a new journal %#v", key, column, row[column], fresh[column])
+				}
+			}
+			delete(session, key)
 		}
 	}
 	for name := range session {
 		t.Errorf("the migration did not create %s", name)
-	}
-	for id, n := range appended {
-		if added[id] != n {
-			t.Errorf("run %s gained %d transitions, want %d", id, added[id], n)
-		}
 	}
 }
 

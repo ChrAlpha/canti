@@ -34,7 +34,7 @@ Cloning requires repository access while the repository is private.
 | --- | --- |
 | `make check` | Read-only formatting validation, vet, the test-name check, and all unit tests |
 | `make fmt` | Check `gofmt` output; does not rewrite files |
-| `make vet` | `go vet ./...`, then `go vet -tags integration,live,legacygen ./...` so tagged test files compile |
+| `make vet` | `go vet ./...`, then `go vet -tags integration,live ./...` so tagged test files compile |
 | `make test` | `go test ./...` |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
 | `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
@@ -55,8 +55,7 @@ failure. Do not run a repository-wide rewrite as part of an unrelated change.
 
 Build tags keep slow and paid tests out of the default run. `integration`
 marks tests that need Docker or take tens of seconds; CI runs them in
-separate jobs. `legacygen` marks the generator of the legacy journal corpus,
-which `make vet` compiles and nothing runs. `live` marks
+separate jobs. `live` marks
 `internal/harness/anthropic/live_test.go`, which sends one real request and is
 never part of `make check`, `make integration`, or CI:
 
@@ -238,18 +237,19 @@ change, rewrite them with
 `go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
 and review the diff.
 
-`TestLegacyJournals` reads and resumes every journal under
+`TestLegacyJournals` reads every journal under
 `internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an
 unmodified historical `canti` binary wrote and whose `manifest.json` records
-how. The corpus pins how the current code continues those runs; it does not
-extend the support policy for earlier state directories. A case is never
-rewritten: a new one gets a new name, a generator spec, and an expectation of
-the test, and
-`go test -count=1 -tags legacygen -run LegacyJournalGenerate ./internal/harness -args -legacy-generate=<producer SHA>/<case>`
-builds its producer from the local Git history and writes it, refusing to run
-unless `/tmp/canti-legacy-w0a` is absent or private to the user. When an
-intended change alters how the current code continues a case, update that
-case's expectation in the test, not the case.
+how, read-only and after the migration a writable open performs, and
+requires every recorded row to stay as it was.
+`TestLegacyRunsAreClosedAndFollowedByNewRuns` recreates each one at its
+recorded paths and requires that its open run, of another context version,
+is refused by `canti resume`, closed by `canti stop`, and followed by a new
+run. A case is never rewritten. The generator that wrote the corpus,
+`internal/harness/legacy_journal_gen_test.go` and
+`legacy_journal_export_test.go` behind the `legacygen` build tag, was
+removed once no test continued these runs; restore it from the history of
+`main` to add a case.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

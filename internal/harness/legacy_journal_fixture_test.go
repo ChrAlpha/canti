@@ -337,3 +337,25 @@ func legacyUntar(t *testing.T, data []byte, dir string) map[string][]byte {
 		}
 	}
 }
+
+// legacyConfig is the CLI configuration the producers stored with each run.
+type legacyConfig struct {
+	Workspace      string `json:"workspace"`
+	Image          string `json:"image"`
+	Network        string `json:"network"`
+	Memory         string `json:"memory"`
+	CPUs           string `json:"cpus"`
+	Pids           int    `json:"pids"`
+	OutputLimit    int64  `json:"output_limit"`
+	Model          string `json:"model"`
+	MaxTokens      int    `json:"max_tokens"`
+	Structured     bool   `json:"structured"`
+	DecisionFormat string `json:"decision_format,omitempty"`
+	Fallbacks      bool   `json:"fallbacks"`
+	ContextBytes   int    `json:"context_bytes"`
+	ContextVersion int    `json:"context_version"`
+	HistoryImports string `json:"history_imports,omitempty"`
+	WindowSteps    int    `json:"window_steps,omitempty"`
+	WindowBytes    int    `json:"window_bytes,omitempty"`
+	HandoverBytes  int    `json:"handover_bytes,omitempty"`
+}

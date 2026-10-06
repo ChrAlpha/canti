@@ -12,7 +12,7 @@ import (
 const module = "github.com/ChrAlpha/canti"
 
 // buildTags lists every build tag the module's files are built with.
-var buildTags = []string{"integration", "live", "legacygen", "race"}
+var buildTags = []string{"integration", "live", "race"}
 
 // dependencies reads, in this process and honouring the build constraints of
 // every combination of buildTags, the non-test imports of path and of every

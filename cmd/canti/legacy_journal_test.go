@@ -27,11 +27,10 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
-// TestLegacyRunsKeepTheirConfigAndEnvironment requires that the CLI still
-// decodes the stored config of every run of the legacy journal corpus and
-// renders the environment its producer rendered into the first request,
-// which the harness tests of the corpus copy.
-func TestLegacyRunsKeepTheirConfigAndEnvironment(t *testing.T) {
+// TestLegacyRunsKeepTheirConfig requires that the CLI still decodes the
+// stored config of every run of the legacy journal corpus, which stop and
+// inspection read.
+func TestLegacyRunsKeepTheirConfig(t *testing.T) {
 	ctx := context.Background()
 	for _, legacy := range legacyCases(t) {
 		t.Run(legacy.name, func(t *testing.T) {
@@ -68,25 +67,8 @@ func TestLegacyRunsKeepTheirConfigAndEnvironment(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				c, err := decodeConfig(run, m.Paths.Workspace)
-				if err != nil {
-					t.Fatalf("the CLI refuses legacy run %s: %v", id, err)
-				}
-				first, err := store.ContextRequest(ctx, id, 1, 1)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var body struct {
-					Messages []struct {
-						Content []struct{ Text string }
-					}
-				}
-				if err := json.Unmarshal(first.Facts.Request.Body, &body); err != nil || len(body.Messages) != 1 || len(body.Messages[0].Content) == 0 {
-					t.Fatalf("the first request of %s is not one Messages request: %v", id, err)
-				}
-				section := "## Environment\n" + environment(c, run.Budget) + "\n"
-				if !strings.Contains(body.Messages[0].Content[0].Text, section) {
-					t.Errorf("the CLI renders the environment of %s as %q, which its producer did not", id, section)
+				if c, err := decodeConfig(run, m.Paths.Workspace); err != nil || c.ContextVersion != 1 {
+					t.Errorf("legacy run %s decodes to context version %d: %v", id, c.ContextVersion, err)
 				}
 			}
 		})
