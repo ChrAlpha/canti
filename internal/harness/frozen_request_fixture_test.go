@@ -219,7 +219,7 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: "Do not modify files outside /workspace.", Budget: run.budget, Created: corpusCreated}
+		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: cmp.Or(run.constraints, "Do not modify files outside /workspace."), Budget: run.budget, Created: corpusCreated}
 		if len(sc.runs) > 1 {
 			record.SessionID, record.InputID = "session-1", fmt.Sprintf("input-%d", i+1)
 			_, err = r.store.Submit(ctx, record, state)

@@ -45,12 +45,13 @@ type frozenScenario struct {
 }
 
 type frozenRun struct {
-	id, goal string
-	replies  []string
-	steps    []string // stepOutcome of every completed step, oldest first
-	budget   harness.Budget
-	resolve  *harness.Observation // operator resolution of an unknown outcome
-	stop     core.StopReason      // the reason the run stops with instead of returning
+	id, goal    string
+	constraints string // instead of the corpus constraints
+	replies     []string
+	steps       []string // stepOutcome of every completed step, oldest first
+	budget      harness.Budget
+	resolve     *harness.Observation // operator resolution of an unknown outcome
+	stop        core.StopReason      // the reason the run stops with instead of returning
 }
 
 func corpusDecision(kind core.Kind, payload string) string {
@@ -122,16 +123,18 @@ func frozenScenarios() []frozenScenario {
 		{
 			name: "session-dialogue", limits: stepLimits, outputs: ls,
 			runs: []frozenRun{
-				{id: corpusRun, goal: "What is in /workspace?", replies: []string{
+				{id: corpusRun, goal: "\tWhat is in /workspace?  \n", replies: []string{
 					corpusDecision(core.Exec, "ls /workspace"),
-					corpusDecision(core.Return, "go.mod and main.go."),
+					corpusDecision(core.Return, "  go.mod and main.go.\n"),
 				}, steps: []string{"1 exited 0 output complete"}},
 				{id: corpusNextRun, goal: "Which of those files is the entry point?", replies: []string{
 					corpusDecision(core.Return, "main.go is the entry point."),
 				}},
 			},
 			marks: map[string][]string{
-				"run2-step01-rev1.json": {"## Earlier session dialogue\n", "What is in /workspace?", "go.mod and main.go."},
+				"run1-step01-rev1.json": {"## Goal\nWhat is in /workspace?\n\n"},
+				"run2-step01-rev1.json": {"## Earlier session dialogue\n", "Earlier user goal:\n```\nWhat is in /workspace?\n```\n",
+					"Earlier assistant return:\n```\n  go.mod and main.go.\n```\n"},
 			},
 		},
 		{

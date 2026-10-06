@@ -18,9 +18,10 @@ const corpusThirdRun = "run_5d2a8e6f1c9b4a07e3f8b2d6c1a9e4f0"
 // Each checks that it still sits on its threshold.
 func boundaryScenarios() []frozenScenario {
 	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	handover := func(firstStep int) string {
-		return corpusDecision(core.Exec, fmt.Sprintf(`canti:handover {"run_id":"%s","first_step":%d,"text":"Build failed to start; check the toolchain next."}`, corpusRun, firstStep))
+	handover := func(firstStep int, text string) string {
+		return corpusDecision(core.Exec, fmt.Sprintf(`canti:handover {"run_id":"%s","first_step":%d,"text":"%s"}`, corpusRun, firstStep, text))
 	}
+	note := "Build failed to start; check the toolchain next."
 	imported := strings.Repeat("a", 250) + "/" + strings.Repeat("b", 250) + "/" + strings.Repeat("c", 250) + "/" + strings.Repeat("d", 250) + ".md"
 	return slices.Concat(handoverThresholds(), sessionBoundaries(), []frozenScenario{
 		{
@@ -30,13 +31,24 @@ func boundaryScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Build the project.", replies: []string{
 				corpusDecision(core.Exec, "make build"),
 				"I will hand over now.",
-				handover(2),
-				handover(3),
+				handover(1, note+strings.Repeat(" ", 2049-len(note))),
+				handover(3, note),
 			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
 				"run1-step02-rev2.json": {"## Rejected response\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"Context action failed: harness: handover first_step must be 1, got 2", "## Handover required\n"},
+				"run1-step03-rev1.json": {"Context action failed: harness: handover text is 2049 UTF-8 bytes; maximum 2048.", "## Handover required\n"},
+			},
+		},
+		{
+			name: "goal-and-constraints-at-caps", limits: stepLimits,
+			runs: []frozenRun{{id: corpusRun, goal: "  " + strings.Repeat("Check every module. ", 1638) + "Then go.\n",
+				constraints: "\t" + strings.Repeat("Keep the tree clean. ", 780) + "Stop  ",
+				replies:     []string{corpusDecision(core.Return, "Every module is fine.")}}},
+			edge: func(t *testing.T, requests map[string]harness.Request) {
+				if b := requests["run1-step01-rev1.json"].Context.Bytes; b.Goal != len("## Goal\n")+32768+1 || b.Constraints != len("\n## Constraints\n")+16384+1 {
+					t.Errorf("the goal and constraints took %d and %d bytes; want them at their 32768- and 16384-byte caps", b.Goal, b.Constraints)
+				}
 			},
 		},
 		{
@@ -89,14 +101,18 @@ func handoverThresholds() []frozenScenario {
 			off = 0
 			sc.name, sc.contextBytes, sc.windowBytes = "handover-thresholds-reached", sc.contextBytes-1, sc.windowBytes-1
 			r := &sc.runs[0]
+			text := "The tests ran; every package passed. Next: report it."
 			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec,
-				`canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"The tests ran; every package passed. Next: report it."}`))
+				`canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"`+text+strings.Repeat(" ", 2048-len(text))+`"}`))
 			r.steps = append(r.steps, "3 exited 0 handover")
 		}
 		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
 			h := requests["run1-step03-rev1.json"].Context.Handover
 			if h.Growth == 0 || h.Used+h.Growth != h.Capacity+off || h.Used != h.WindowBytes+off {
 				t.Errorf("step 3 evaluated %+v; want used+growth %d byte(s) from the capacity and used as far from window_bytes, with growth", h, off)
+			}
+			if w := requests["run1-step04-rev1.json"].Window; reached && (w == nil || w.FirstStep != 4 || len(w.Handover) != 2048) {
+				t.Errorf("step 4 has window %+v; want one opened by a handover of exactly 2048 bytes", w)
 			}
 		}
 		out = append(out, sc)
