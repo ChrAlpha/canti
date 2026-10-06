@@ -209,8 +209,9 @@ the rules that render and account for its prompts. `resume` refuses an open
 run of another context version, or of none, with status 1 before it calls the
 model or commits anything, and reports a halted one as it is. Such a run stays
 readable through `status`, `history`, and `context`; `stop` closes it, after
-`resolve` if it needs resolution, and the state directory then takes new runs.
-A later run of its session still quotes its dialogue. A run whose stored
+`resolve` if it needs resolution, and the state directory then takes new runs,
+unless the run ended with an outcome resolved as unknown, which keeps blocking
+them. A later run of its session still quotes its dialogue. A run whose stored
 configuration this canti cannot decode is refused by every command and
 requires a fresh state directory.
 

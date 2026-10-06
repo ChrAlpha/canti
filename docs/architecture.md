@@ -521,7 +521,7 @@ subject to active retrieval expansion. A new window changes the first block.
 `PromptLimits` bounds bytes, not provider tokens: defaults are 32 KiB for the
 goal, 16 KiB for constraints, 2 KiB for the environment and each command,
 4 KiB per output preview, 2 KiB each for a rejected response and its error,
-and 64 KiB total. The CLI defaults the total to 256 KiB. Goal and constraints
+and 128 KiB total. The CLI defaults the total to 256 KiB. Goal and constraints
 are never truncated. Other bounded inputs use explicit truncation markers,
 valid UTF-8, and fences longer than embedded backtick runs. An oversized page
 fails visibly rather than dropping older steps.
@@ -580,12 +580,13 @@ each version, together with every request of the frozen-request corpus, so
 changing them needs a new version. A run of another context version, or of
 none, is decoded by the fields it stores and stays readable; `resolve` still
 records its unknown results and `stop` closes it, since neither renders a
-request. `resume` refuses it
-unless it has halted, before it builds the model or the executor and without
-a commit, so no canti continues a run under rules it was not created with.
-Once that run is closed, the state directory takes new runs. A stored
-configuration the current one cannot decode makes every command refuse the
-run; use a fresh `-state`.
+request. `resume` refuses it until it halts and then only reports it, either
+way before it builds the model or the executor and without a commit, so no
+canti continues a run under rules it was not created with. Once that run is
+closed, the state directory takes new runs, unless it ended with an outcome
+resolved as unknown, which keeps blocking them. A stored configuration the
+current one cannot decode makes every command refuse the run; use a fresh
+`-state`.
 
 ## Execution
 
