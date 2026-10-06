@@ -24,7 +24,8 @@ import (
 
 // corpusModel is a scripted Anthropic Messages endpoint. It records every
 // request body it receives and answers with the next scripted decision, as
-// a text block or, for the tool transport, as the canti_decision tool input.
+// a text block or, for the tool transport, as the canti_decision tool input,
+// or with the body that follows "raw:".
 type corpusModel struct {
 	mu       sync.Mutex
 	tool     bool
@@ -43,6 +44,10 @@ func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Unlock()
 	w.Header().Set("content-type", "application/json")
+	if body, ok := strings.CutPrefix(reply, "raw:"); ok {
+		io.WriteString(w, body)
+		return
+	}
 	if !scripted {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"unscripted request"}}`)
