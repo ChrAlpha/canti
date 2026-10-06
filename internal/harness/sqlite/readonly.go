@@ -28,6 +28,7 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	if err == nil && version != 1 && version != schemaVersion {
 		err = fmt.Errorf("%w: schema version %d, want 1 or %d", ErrIncompatible, version, schemaVersion)
 	}
+	s.sessions = version == schemaVersion
 	for _, query := range queries {
 		if err == nil {
 			s.stmts[query], err = db.PrepareContext(ctx, query)

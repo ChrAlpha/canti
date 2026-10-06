@@ -74,6 +74,12 @@ func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
 	if err != nil || page.AsOfSeq != 1 || page.Request.Seq != 1 || len(page.Events) != 0 {
 		t.Fatalf("legacy context = %#v, %v", page, err)
 	}
+	if runs, err := s.SessionRuns(context.Background(), "s", 0, 1); !errors.Is(err, ErrNoSessions) {
+		t.Fatalf("SessionRuns of a journal without sessions = %v, %v", runs, err)
+	}
+	if run, err := s.SessionInput(context.Background(), "s", "i"); !errors.Is(err, ErrNoSessions) {
+		t.Fatalf("SessionInput of a journal without sessions = %v, %v", run, err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}

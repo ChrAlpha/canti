@@ -118,6 +118,7 @@ type Store struct {
 	db       *sql.DB
 	stmts    map[string]*sql.Stmt
 	readOnly bool
+	sessions bool
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -133,7 +134,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
+	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), sessions: true}
 	err = s.write(ctx, s.migrate)
 	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)

@@ -18,6 +18,10 @@ OR (json_extract(t.to_state, '$.Phase') = 'stopped'
 	AND t.kind = 'resolved'
 	AND json_extract(t.event, '$.Execution') = 'unknown') LIMIT 1`
 
+// ErrNoSessions reports a session read of a schema-1 journal opened
+// read-only: the journal predates sessions and has no session table.
+var ErrNoSessions = errors.New("sqlite: the journal predates sessions")
+
 // ValidKey reports whether id can name a session or an input: 1 to 128
 // ASCII letters, digits, underscores, or hyphens.
 func ValidKey(id string) bool {
@@ -115,6 +119,9 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 	if !ValidKey(sessionID) || !ValidKey(inputID) {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
+	if !s.sessions {
+		return harness.Run{}, ErrNoSessions
+	}
 	return s.run(s.db.QueryRowContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
 }
 
@@ -122,6 +129,9 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
 	if !ValidKey(sessionID) || before < 0 || limit <= 0 {
 		return nil, errors.New("sqlite: invalid session page")
+	}
+	if !s.sessions {
+		return nil, ErrNoSessions
 	}
 	if limit > 32 {
 		limit = 32
