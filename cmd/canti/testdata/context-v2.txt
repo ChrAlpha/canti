@@ -26,8 +26,10 @@ run ["-max-steps" "0" "-max-attempts" "1"]: {Limit:262144 Handover:2048 Page:667
   model claude-opus-5, max tokens 16000, structured true, decision format "", fallbacks true, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144}, window steps 0, window bytes 0, imports false
 run ["-pids" "0" "-job-timeout" "0" "-memory" "" "-cpus" "4" "-network" "bridge"]: {Limit:262144 Handover:2048 Page:6679 System:5698 Head:7207 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 87007
   environment 261 bytes, sha256 4ff1dea32fd62532c7691977024668a3d289e364aea5f02fe11e193f6bf0e454
-run ["-image" "2048 x"]: {Limit:262144 Handover:2048 Page:8490 System:5698 Head:9018 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 88818
-  environment 2278 bytes, sha256 d288d086e8db151b57396efe7d85156601181d588c67570e2a6cbf0f4c0f44b8
+run ["-image" "2048 bytes, \"\\xffxxxxxx\" first"]: {Limit:262144 Handover:2048 Page:8490 System:5698 Head:9018 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 88818
+  environment 2278 bytes, sha256 7d9367f38b0520af44b08e7b7dc2503825d68588d9afb543a428b2151cc120b3
+run ["-image" "7 bytes, \"debian\\xff\" first"]: {Limit:262144 Handover:2048 Page:6657 System:5698 Head:7185 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86985
+  environment 237 bytes, sha256 76d38b814ac8f5b72ca4743c77af97593d63809fb0a2571a9cccf8c9bb7268c9
 run ["-model" "claude-sonnet-5" "-max-tokens" "4096" "-structured=false" "-decision-format" "tool" "-fallbacks=false" "-context-bytes" "131072" "-window-steps" "6" "-window-bytes" "9000"]: {Limit:131072 Handover:2048 Page:6668 System:5698 Head:7196 Step:10836 Evidence:51713 Failed:6362 Tail:5190}, required 86996
   environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
   model claude-sonnet-5, max tokens 4096, structured false, decision format "tool", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:131072}, window steps 6, window bytes 9000, imports false
@@ -42,7 +44,7 @@ session run 10 of 10: request 8973 bytes, sha256 6e02e61351546417107ff783ddb2ff1
   earlier RUN9, sequence 9, returned, goal true
 stored run step 1 revision 1: 10009 bytes, sha256 2db3dc2305c34e2f3cfda9a5ed13c20aa1842b438bd9f48087d9b120c6f8eeac
 stored run step 2 revision 1: 11840 bytes, sha256 749a17a3e0324f1d50c365943baa547a7cc5983ed908f8863e89a8fa233c42f9
-corpus caps-and-encoding: sha256 97120be40b6205bbba106dbdfeb1194627533aeff388d04c2cbca6b3ae08a302
+corpus caps-and-encoding: sha256 9f2a182f18f9d673aa136803f4e20eaa4c8936e017f143bfff17352cc1943b8f
 corpus directory-search-pages: sha256 833348582ba6a10861173596a82a221790c7f47656f9c7aba3a35f31bc911b27
 corpus discovery-pages: sha256 be0769ab6742c7734c2af4faca249c4d31a41d0a9f57d34fa558e54a24cb54ae
 corpus execution-failures: sha256 8203e12698b3261e7748907aa16210f39477b1cf64980bb4f8fed8e2802333cb
@@ -56,6 +58,7 @@ corpus handover-thresholds-short: sha256 6f0005339cb8844465b7133cab475f3cb30df86
 corpus history-imports: sha256 ad6fefa7d530bccc4369e02a275c6c5988103b3e367186a6e2b7d7dea095e3fc
 corpus operator-resolution: sha256 042be6a84dc6d71cc123a7fd07f841f74ed11c6b6c48a0dc0470719de84ec038
 corpus protocol-repair: sha256 10fcd8834e28529029a462eaa3178813201a39949e9484c0efeb1ab8177e7bb5
+corpus retrieval-command-at-cap: sha256 039327e57445560c7c60739053d968ca4aea5f5eb72d8272ea395e9181b29e94
 corpus session-dialogue: sha256 505c640a78741537e9d663b1c3b81019d4d7115b76ef5d39ccb798333f2d04b1
 corpus session-history-files: sha256 93a195aaaeee797a36d34213fb1db017e8bd057884c97350e936979d67a87bbe
 corpus session-navigation: sha256 b19936ce2493bc379f5e01892488e39ab664b1552134bd1c4f54e23873661c7a
@@ -68,4 +71,4 @@ corpus shell-and-retrieval: sha256 4fcd6e3effa42680b3151d2bf3170db88d0e71fda34e5
 corpus stopped-session-run: sha256 65fe35e437adf57d11ccc3b59278ac666eca35ef5b48e4fe23f747e03221d1ba
 corpus tool-transport: sha256 256bae844c36f29cf464d86aa55721739ed4955d8e383265a185f63a1f421d6a
 corpus unavailable-evidence: sha256 f1dc3d97ebdbc178f2c9d1523b7ed28ff90ca433e35d85b530f94a631bea3964
-corpus unlimited-steps: sha256 15c7e4b2f497533e03b65fe21426f76b715d61646150b94f971a16a8d2d089d7
+corpus unlimited-steps: sha256 073a834753837c3f3e87cb69e7574269434f77d893d7fc9df2350970f370f4fd

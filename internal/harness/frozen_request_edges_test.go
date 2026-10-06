@@ -14,7 +14,7 @@ func edgeScenarios() []frozenScenario {
 	// command at 2040 bytes, in the middle of the euro sign.
 	fenced := "cat <<'EOF'\n```text\nbeta\n```\n``````go\nfmt.Println(\"beta\")\n``````\n"
 	command := fenced + strings.Repeat("-", 2039-len(fenced)) + "€ and the rest of the heredoc\nEOF"
-	output := "alpha\n\xffbeta\n" + strings.Repeat("gamma line\n", 400)
+	output := "alpha\n\xffbeta\n```\n" + strings.Repeat("gamma line\n", 400)
 	rejected := strings.Repeat("Let me read the log first: 先看日志。 ", 60)
 	archived := "/canti/runs/" + strings.Repeat("日", 300)
 	return []frozenScenario{
@@ -28,7 +28,7 @@ func edgeScenarios() []frozenScenario {
 			}, steps: []string{"1 exited 0 output complete", "2 exited 1 retrieval error"}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"## Goal\n检查日志里的“beta”，并报告它在第几行。\n"},
-				"run1-step02-rev1.json": {"Command:\n```````\ncat <<'EOF'\n", "------…[truncated ", "Preview:\n```\nalpha\n\uFFFDbeta\n", "gamma line\ng…[truncated "},
+				"run1-step02-rev1.json": {"Command:\n```````\ncat <<'EOF'\n", "------…[truncated ", "Preview:\n````\nalpha\n\uFFFDbeta\n```\n", "gamma line\ngamma …[truncated "},
 				"run1-step02-rev2.json": {"## Rejected response\n", "Rejected reply:\n```\nLet me read the log first: 先看日志。", "…[truncated "},
 				"run1-step03-rev1.json": {`"error":"archive path unavailable: statat 日日`, "日…[truncated "},
 			},

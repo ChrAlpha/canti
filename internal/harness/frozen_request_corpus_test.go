@@ -140,12 +140,13 @@ func frozenScenarios() []frozenScenario {
 		{
 			name: "unlimited-steps", limits: core.Limits{MaxAttempts: 3}, outputs: ls,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
+				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Nothing done yet."}`),
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete"}}},
+			}, steps: []string{"1 exited 1 action failed", "2 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"Step 1 (unlimited steps), attempt 1 of 3."},
-				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3."},
+				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3.", "Context action failed: handover was not requested for this step"},
 			},
 		},
 		{

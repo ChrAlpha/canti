@@ -41,6 +41,17 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "retrieval-command-at-cap", limits: stepLimits, imports: map[string]string{imported: "notes\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Read the imported notes twice.", replies: []string{
+				capped(imported, 2048), capped(imported, 2049),
+				corpusDecision(core.Return, "The notes say notes."),
+			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 retrieval 1 sources 0 entries"}}},
+			marks: map[string][]string{
+				"run1-step03-rev1.json": {"### Step 1\n", "Retrieval: 1 original ranges, 0 directory entries\nRetrieval continuation: ",
+					"Retrieval: 1 original ranges, 0 directory entries\nPreview:\n"},
+			},
+		},
+		{
 			name: "goal-and-constraints-at-caps", limits: stepLimits,
 			runs: []frozenRun{{id: corpusRun, goal: "  " + strings.Repeat("Check every module. ", 1638) + "Then go.\n",
 				constraints: "\t" + strings.Repeat("Keep the tree clean. ", 780) + "Stop  ",
@@ -78,6 +89,17 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 	})
+}
+
+// capped is a retrieval of imported whose command, with the fence marks
+// beyond three that its four-backtick reason charges twice, takes width
+// bytes of the 2048-byte command cap.
+func capped(imported string, width int) string {
+	command := func(reason string) string {
+		return `canti:retrieve {"operation":"read","path":"/canti/imports/` + imported + `","reason":"` + reason + `"}`
+	}
+	fill := width - 2*(5-3) - len(command("````"))
+	return corpusDecision(core.Exec, command("````"+strings.Repeat("r", fill)))
 }
 
 // handoverThresholds are twins whose third request has used+growth one byte

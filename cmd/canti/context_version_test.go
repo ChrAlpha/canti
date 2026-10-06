@@ -108,7 +108,7 @@ func contextRules(t *testing.T) string {
 	imports, previous, mapped := t.TempDir(), "", ""
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
 		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
-		{"-image", strings.Repeat("x", 2048)},
+		{"-image", "\xff" + strings.Repeat("x", 2047)}, {"-image", "debian\xff"},
 		{"-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false", "-decision-format", "tool", "-fallbacks=false", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
 		s := parseSpec(t, flags...)
 		loop := contextConfig(s.config, s.budget)
@@ -120,7 +120,7 @@ func contextRules(t *testing.T) string {
 		case len(flags) > 0 && flags[0] == "-history-imports":
 			flags = []string{"-history-imports", "DIR"}
 		case len(flags) > 0 && flags[0] == "-image":
-			flags = []string{"-image", "2048 x"}
+			flags = []string{"-image", fmt.Sprintf("%d bytes, %q first", len(flags[1]), flags[1][:min(len(flags[1]), 7)])}
 		}
 		fmt.Fprintf(&b, "run %q: %+v, required %d\n", flags, fit, fit.Required())
 		if env := environment(s.config, s.budget); env != previous {
