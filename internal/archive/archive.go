@@ -85,77 +85,74 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	limit := q.Limit
-	if limit == 0 {
-		limit = DefaultBytes
-	}
-	if strings.TrimSpace(q.Reason) == "" || len(q.Reason) > 1024 || !utf8.ValidString(q.Reason) {
-		result.Error = "reason must be nonempty UTF-8 of at most 1024 bytes"
+	limit, problem := q.check()
+	if problem != "" {
+		result.Error = problem
 		return result, nil
 	}
-	if q.Offset < 0 || limit < 1 || limit > MaxBytes {
-		result.Error = "offset must be nonnegative; limit must be 1..8192 bytes"
-		return result, nil
-	}
-	search := q.Operation == "search" || q.Operation == "discover"
-	if q.Operation != "read" && q.Operation != "list" && !search {
-		result.Error = "operation must be read, list, search, or discover"
-		return result, nil
-	}
-	if len(q.Query) > MaxBytes || !utf8.ValidString(q.Query) || (!search && q.Query != "") {
-		result.Error = "query must be UTF-8 of at most 8192 bytes and only applies to search or discover"
-		return result, nil
-	}
-	if search && (q.Query == "" || len(q.Query) > limit || !utf8.ValidString(q.Query) || strings.ContainsRune(q.Query, 0)) {
-		result.Error = "search query must be nonempty UTF-8 and fit within limit"
-		return result, nil
-	}
-	if q.IgnoreCase && !search {
-		result.Error = "ignore_case only applies to search or discover"
-		return result, nil
-	}
-	if q.IgnoreCase && queryMatchBytes(q) > limit {
-		result.Error = fmt.Sprintf("ignore_case requires a limit of at least %d bytes for folded matches", queryMatchBytes(q))
-		return result, nil
-	}
-	if len(q.Cursor) > 1024 || (q.Cursor != "" && (!search || q.Offset != 0)) {
-		result.Error = "cursor is only valid for directory search or discover with offset zero and at most 1024 bytes"
-		return result, nil
-	}
-	f, err := r.open(q.Path)
-	if err == nil {
-		defer f.Close()
-		var info os.FileInfo
-		info, err = f.Stat()
-		if err == nil {
-			switch {
-			case q.Operation == "discover":
-				err = r.discover(ctx, f, limit, &result)
-			case q.Operation == "search" && info.IsDir():
-				err = r.searchDirectory(ctx, f, limit, &result)
-			case q.Operation == "list" && info.IsDir():
-				err = listRetrieval(ctx, f, limit, &result)
-			case q.Cursor != "":
-				err = errors.New("cursor requires a directory search")
-			case q.Operation != "list" && info.Mode().IsRegular():
-				err = readRetrieval(ctx, f, info.Size(), limit, &result)
-			default:
-				err = errors.New("list requires a directory; read requires a regular file; search requires either")
-			}
-		}
-	}
+	err := r.perform(ctx, limit, &result)
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
 	if err != nil {
-		result.Sources, result.Entries = nil, nil
-		result.More = false
-		result.NextCursor = ""
-		result.Incomplete = false
-		result.SkippedCount, result.Skipped = 0, nil
-		result.Error = err.Error()
+		result = Retrieval{Query: q, NextOffset: result.NextOffset, Error: err.Error()}
 	}
 	return result, nil
+}
+
+// check returns the byte limit of q, or why q is not a valid query.
+func (q RetrievalQuery) check() (int, string) {
+	limit := q.Limit
+	if limit == 0 {
+		limit = DefaultBytes
+	}
+	search := q.Operation == "search" || q.Operation == "discover"
+	switch {
+	case strings.TrimSpace(q.Reason) == "" || len(q.Reason) > 1024 || !utf8.ValidString(q.Reason):
+		return limit, "reason must be nonempty UTF-8 of at most 1024 bytes"
+	case q.Offset < 0 || limit < 1 || limit > MaxBytes:
+		return limit, "offset must be nonnegative; limit must be 1..8192 bytes"
+	case q.Operation != "read" && q.Operation != "list" && !search:
+		return limit, "operation must be read, list, search, or discover"
+	case len(q.Query) > MaxBytes || !utf8.ValidString(q.Query) || (!search && q.Query != ""):
+		return limit, "query must be UTF-8 of at most 8192 bytes and only applies to search or discover"
+	case search && (q.Query == "" || len(q.Query) > limit || strings.ContainsRune(q.Query, 0)):
+		return limit, "search query must be nonempty UTF-8 and fit within limit"
+	case q.IgnoreCase && !search:
+		return limit, "ignore_case only applies to search or discover"
+	case q.IgnoreCase && queryMatchBytes(q) > limit:
+		return limit, fmt.Sprintf("ignore_case requires a limit of at least %d bytes for folded matches", queryMatchBytes(q))
+	case len(q.Cursor) > 1024 || (q.Cursor != "" && (!search || q.Offset != 0)):
+		return limit, "cursor is only valid for directory search or discover with offset zero and at most 1024 bytes"
+	}
+	return limit, ""
+}
+
+// perform runs the operation of result's query on its path.
+func (r Reader) perform(ctx context.Context, limit int, result *Retrieval) error {
+	q := result.Query
+	f, err := r.open(q.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	switch {
+	case q.Operation == "discover":
+		return r.discover(ctx, f, limit, result)
+	case q.Operation == "search" && info.IsDir():
+		return r.searchDirectory(ctx, f, limit, result)
+	case q.Operation == "list" && info.IsDir():
+		return listRetrieval(ctx, f, limit, result)
+	case q.Cursor != "":
+		return errors.New("cursor requires a directory search")
+	case q.Operation != "list" && info.Mode().IsRegular():
+		return readRetrieval(ctx, f, info.Size(), limit, result)
+	}
+	return errors.New("list requires a directory; read requires a regular file; search requires either")
 }
 
 func (r Reader) Expand(ctx context.Context, source SourceRange) (string, error) {
