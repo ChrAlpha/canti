@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	purposeBody = []byte(`{"kind":"exec","purpose":"check","payload":"printf ok"}`)
-	blankBody   = []byte(`{"kind":"exec","payload":" "}`)
+	purposeBody       = []byte(`{"kind":"exec","purpose":"check","payload":"printf ok"}`)
+	returnPurposeBody = []byte(`{"kind":"return","purpose":"explain","payload":"done"}`)
+	blankBody         = []byte(`{"kind":"exec","payload":" "}`)
 )
 
 var recordSemantics = flag.Bool("record-semantics", false, "record the transitions of a semantics version that has none")
@@ -32,21 +33,19 @@ func candidates(s core.State) []core.Event {
 	if job == "" {
 		job = "job-1"
 	}
-	out := []core.Event{
-		core.RequestFrozen{},
-		core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}, core.AttemptStarted{Step: s.Step, Attempt: s.Attempt + 1},
-		core.AttemptStarted{Step: s.Step + 1, Attempt: s.Attempt},
-		core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, core.ResponseSaved{Step: s.Step, Attempt: s.Attempt + 1},
-		core.ResponseIncomplete{Step: s.Step, Attempt: s.Attempt}, core.ResponseIncomplete{Step: s.Step + 1, Attempt: s.Attempt},
-		core.JobBound{EffectID: s.EffectID, JobID: job}, core.JobBound{EffectID: "other", JobID: job}, core.JobBound{EffectID: s.EffectID, JobID: "other"},
-		core.JobStarted{EffectID: s.EffectID, JobID: job}, core.JobStarted{EffectID: s.EffectID, JobID: "other"},
-		core.OutcomeUnknown{EffectID: s.EffectID}, core.OutcomeUnknown{EffectID: "other"},
-		core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited},
+	out := []core.Event{core.RequestFrozen{}}
+	for _, at := range [][2]int{{s.Step, s.Attempt}, {s.Step, s.Attempt + 1}, {s.Step + 1, s.Attempt}} {
+		out = append(out, core.AttemptStarted{Step: at[0], Attempt: at[1]}, core.ResponseSaved{Step: at[0], Attempt: at[1]},
+			core.ResponseIncomplete{Step: at[0], Attempt: at[1]}, core.ResponseLoaded{Step: at[0], Attempt: at[1], Body: execBody})
 	}
-	for _, body := range [][]byte{execBody, returnBody, invalidBody, purposeBody, blankBody} {
+	for _, body := range [][]byte{returnBody, invalidBody, purposeBody, returnPurposeBody, blankBody} {
 		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
 	}
-	out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt + 1, Body: execBody})
+	for _, effect := range []string{s.EffectID, "other"} {
+		out = append(out, core.JobBound{EffectID: effect, JobID: job}, core.JobStarted{EffectID: effect, JobID: job}, core.OutcomeUnknown{EffectID: effect})
+	}
+	out = append(out, core.JobBound{EffectID: s.EffectID, JobID: "other"}, core.JobStarted{EffectID: s.EffectID, JobID: "other"},
+		core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited})
 	for _, e := range []core.ExecutionState{core.ExecutionExited, core.ExecutionTimedOut, core.ExecutionCancelled, core.ExecutionFailedToStart, core.ExecutionUnknown} {
 		out = append(out, core.Observed{EffectID: s.EffectID, Execution: e}, core.Resolved{EffectID: s.EffectID, Execution: e})
 	}
@@ -66,6 +65,8 @@ func label(e core.Event) string {
 			return "response_loaded(return)"
 		case string(purposeBody):
 			return "response_loaded(exec with purpose)"
+		case string(returnPurposeBody):
+			return "response_loaded(return with purpose)"
 		case string(blankBody):
 			return "response_loaded(blank exec)"
 		}
@@ -82,8 +83,9 @@ func label(e core.Event) string {
 
 // reachable explores every state Next reaches from a new run under limits,
 // following at most depth events, and returns the transitions it took,
-// labelled, and the digest of every transition in full: its state, event,
-// and next state.
+// labelled, and the digest of every event it tried in full: its state and
+// intent, the event, and the next state and intent, or whether Next refused
+// it as illegal or invalid.
 func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, string) {
 	t.Helper()
 	start, err := core.NewState("run-1", limits)
@@ -103,6 +105,8 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 		}
 		for _, e := range candidates(s) {
 			next, err := s.Next(e)
+			from, _ := json.Marshal(s)
+			event, _ := json.Marshal(e)
 			if err != nil {
 				if !errors.Is(err, core.ErrIllegalTransition) && !errors.Is(err, core.ErrInvalidEvent) {
 					t.Fatalf("Next(%+v, %+v) = %v", s, e, err)
@@ -110,6 +114,7 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 				if next != s {
 					t.Fatalf("Next(%+v, %+v) failed and changed the state to %+v", s, e, next)
 				}
+				full = append(full, fmt.Sprintf("%s %s %s %s refused: illegal %v", from, s.Intent(), e.Kind(), event, errors.Is(err, core.ErrIllegalTransition)))
 				continue
 			}
 			line := fmt.Sprintf("%s %s -> %s", s.Phase, label(e), next.Phase)
@@ -117,10 +122,8 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 				line += " " + string(next.Reason)
 			}
 			table[line] = true
-			from, _ := json.Marshal(s)
-			event, _ := json.Marshal(e)
 			to, _ := json.Marshal(next)
-			full = append(full, fmt.Sprintf("%s %s %s -> %s", from, e.Kind(), event, to))
+			full = append(full, fmt.Sprintf("%s %s %s %s -> %s %s", from, s.Intent(), e.Kind(), event, to, next.Intent()))
 			if _, ok := seen[next]; !ok {
 				seen[next] = seen[s] + 1
 				queue = append(queue, next)
@@ -129,7 +132,7 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 	}
 	slices.Sort(full)
 	sum := sha256.Sum256([]byte(strings.Join(full, "\n")))
-	return table, fmt.Sprintf("%d states, %d transitions, sha256 %x", len(seen), len(full), sum)
+	return table, fmt.Sprintf("%d states, %d events tried, sha256 %x", len(seen), len(full), sum)
 }
 
 // TestReachableStatesAreValidAndPinTheirSemantics requires that every state
