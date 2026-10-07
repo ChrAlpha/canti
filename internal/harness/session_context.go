@@ -108,10 +108,10 @@ func sessionText(parts []sessionPart) string {
 func (l *Loop) sessionHandovers(ctx context.Context, base Frame, nav string, parts []sessionPart, sources []ContextSessionSource) error {
 	for i := len(parts) - 1; i >= 0; i-- {
 		step, err := latestHandover(ctx, l.journal, sources[i].RunID)
-		if err != nil || step == 0 {
-			if err != nil {
-				return err
-			}
+		if err != nil {
+			return err
+		}
+		if step == 0 {
 			continue
 		}
 		parts[i].path = fmt.Sprintf("Latest handover of this run, agent-written and possibly overtaken by later steps: %s/%s/%s/%s/%s\n",
@@ -142,7 +142,7 @@ func latestHandover(ctx context.Context, j Journal, runID string) (int, error) {
 		return 0, nil
 	case err != nil:
 		return 0, err
-	case req.Window == nil || req.Window.FirstStep <= 1:
+	case req.Window == nil:
 		return 0, nil
 	}
 	return req.Window.SourceStep, nil
