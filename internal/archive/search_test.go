@@ -37,7 +37,7 @@ func TestRetrievalDirectorySearchAcrossFiles(t *testing.T) {
 			t.Fatalf("directory result exceeded bound or used offset: %+v", result)
 		}
 		for _, source := range result.Sources {
-			text, err := r.Expand(context.Background(), source)
+			text, err := r.expand(context.Background(), source)
 			if err != nil || text != "needle" {
 				t.Fatalf("bad source: %q %v", text, err)
 			}
@@ -78,7 +78,7 @@ func TestRetrievalDirectorySearchAggregateScanBudget(t *testing.T) {
 	if len(second.Sources) != 1 || second.More || second.Sources[0].Offset > 7 {
 		t.Fatalf("cross-scan match lost: %+v", second)
 	}
-	text, err := r.Expand(context.Background(), second.Sources[0])
+	text, err := r.expand(context.Background(), second.Sources[0])
 	if err != nil || !strings.Contains(text, "needle") {
 		t.Fatalf("cross-scan evidence: %q %v", text, err)
 	}
@@ -99,7 +99,7 @@ func TestRetrievalDirectorySearchUnicodeBoundary(t *testing.T) {
 	if len(second.Sources) != 1 || second.More {
 		t.Fatalf("Unicode continuation: %+v", second)
 	}
-	text, err := r.Expand(context.Background(), second.Sources[0])
+	text, err := r.expand(context.Background(), second.Sources[0])
 	if err != nil || !strings.Contains(text, q.Query) {
 		t.Fatalf("Unicode evidence: %q %v", text, err)
 	}

@@ -25,7 +25,7 @@ func TestRetrievalSearchCoalescesSelectedFileRanges(t *testing.T) {
 		t.Fatalf("selection changed after delivery: selected=%+v result=%+v", selected.Sources, result.Sources)
 	}
 	first := result.Sources[0]
-	content, err := r.Expand(context.Background(), first)
+	content, err := r.expand(context.Background(), first)
 	if err != nil || content != body[first.Offset:first.Offset+int64(first.Length)] {
 		t.Fatalf("merged bytes or SHA mismatch: %q %v", content, err)
 	}
@@ -50,7 +50,7 @@ func TestRetrievalSearchCoalescesDirectoryWithoutChangingCursor(t *testing.T) {
 	}
 	total := 0
 	for _, source := range result.Sources {
-		if _, err := r.Expand(context.Background(), source); err != nil {
+		if _, err := r.expand(context.Background(), source); err != nil {
 			t.Fatal(err)
 		}
 		total += source.Length
@@ -73,7 +73,7 @@ func TestRetrievalSearchSelectionAlreadyCoalesced(t *testing.T) {
 		t.Fatalf("fixture did not exercise separate ranges: %+v", result)
 	}
 	for i, source := range result.Sources {
-		if _, err := r.Expand(context.Background(), source); err != nil {
+		if _, err := r.expand(context.Background(), source); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {

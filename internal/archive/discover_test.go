@@ -52,7 +52,7 @@ func discoveryTexts(t *testing.T, r Reader, result Retrieval) map[string]string 
 	t.Helper()
 	texts := map[string]string{}
 	for _, source := range result.Sources {
-		body, err := r.Expand(t.Context(), source)
+		body, err := r.expand(t.Context(), source)
 		if err != nil {
 			t.Fatal(err)
 		}

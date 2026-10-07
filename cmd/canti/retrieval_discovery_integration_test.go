@@ -109,7 +109,6 @@ for file in /canti/runs/%s/steps/*/preview; do
     [ "$code" -eq 1 ] || exit "$code"
   fi
 done`, sourceRun)
-	reader := archive.Reader{History: historyRoot(f.state)}
 	returnedBytes, shellBytes, searchCalls, readCalls := 0, 0, 0, 0
 	for page := 0; page < 3; page++ {
 		first := step
@@ -146,20 +145,19 @@ done`, sourceRun)
 		for _, path := range paths {
 			found := query("search", path)
 			searchCalls++
-			for _, source := range found.Sources {
+			for i, source := range found.Sources {
 				returnedBytes += source.Length
-				text, err := reader.Expand(t.Context(), source)
-				if err != nil || strings.Contains(text, "approved wait is 45 seconds") {
-					t.Fatalf("candidate phase bypassed bounded read: %q %v", text, err)
+				if text := found.Evidence[i]; strings.Contains(text, "approved wait is 45 seconds") {
+					t.Fatalf("candidate phase bypassed bounded read: %q", text)
 				}
 			}
 			read := query("read", found.Sources[0].Path)
 			readCalls++
+			if len(read.Evidence) != len(read.Sources) {
+				t.Fatalf("read returned %d evidence texts for %d sources", len(read.Evidence), len(read.Sources))
+			}
 			for _, source := range read.Sources {
 				returnedBytes += source.Length
-				if _, err := reader.Expand(t.Context(), source); err != nil {
-					t.Fatal(err)
-				}
 			}
 		}
 		if page < 2 {

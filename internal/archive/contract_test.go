@@ -21,7 +21,7 @@ func TestDirectorySearchTextOnlyFailureAndIndividualRecovery(t *testing.T) {
 			if len(read.Sources) != 1 || read.More {
 				t.Fatalf("individual recovery: %+v", read)
 			}
-			text, err := r.Expand(context.Background(), read.Sources[0])
+			text, err := r.expand(context.Background(), read.Sources[0])
 			if err != nil || !strings.Contains(text, "evidence") {
 				t.Fatalf("individual evidence unavailable: %q %v", text, err)
 			}

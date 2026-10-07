@@ -17,7 +17,7 @@ func TestRetrievalSearchDenseHitsReachTailInOneCall(t *testing.T) {
 	if result.More || result.NextOffset != int64(len(body)) || len(result.Sources) != 1 {
 		t.Fatalf("dense hits stopped before tail: %+v", result)
 	}
-	content, err := r.Expand(context.Background(), result.Sources[0])
+	content, err := r.expand(context.Background(), result.Sources[0])
 	if err != nil || !strings.Contains(content, "answer=42") {
 		t.Fatalf("tail evidence unavailable: %q %v", content, err)
 	}
@@ -34,7 +34,7 @@ func TestRetrievalSearchDenseHitsSmallBudgetContinues(t *testing.T) {
 		if result.NextOffset <= previous || len(result.Sources) != 1 || result.Sources[0].Length > q.Limit {
 			t.Fatalf("invalid continuation at page %d: %+v", page, result)
 		}
-		content, err := r.Expand(context.Background(), result.Sources[0])
+		content, err := r.expand(context.Background(), result.Sources[0])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestSearchRangesKeepsSecondHitRightContext(t *testing.T) {
 	if len(result.Sources) != 1 || result.More {
 		t.Fatalf("second hit was not merged: %+v", result)
 	}
-	content, err := r.Expand(context.Background(), result.Sources[0])
+	content, err := r.expand(context.Background(), result.Sources[0])
 	if err != nil || !strings.Contains(content, "answer=42") {
 		t.Fatalf("second hit lost right context: %q %v", content, err)
 	}

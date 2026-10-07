@@ -141,7 +141,7 @@ func TestRetrievalCasefoldOriginalBytesAndContinuation(t *testing.T) {
 			result := retrieveOK(t, r, q)
 			bytes := 0
 			for _, s := range result.Sources {
-				text, err := r.Expand(context.Background(), s)
+				text, err := r.expand(context.Background(), s)
 				if err != nil || digest([]byte(text)) != s.SHA256 {
 					t.Fatalf("changed original evidence: %q %v", text, err)
 				}

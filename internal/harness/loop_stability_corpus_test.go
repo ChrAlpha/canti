@@ -76,10 +76,9 @@ func stabilityCorpus(ctx context.Context, t *testing.T) (archive.Reader, []strin
 			if err != nil || result.Error != "" || len(result.Sources) != 1 {
 				t.Fatalf("stability source read failed: %v", err)
 			}
-			source := result.Sources[0]
-			text, err := r.Expand(ctx, source)
-			if err != nil || source.Offset != offset || len(text) != source.Length {
-				t.Fatal("stability source expansion failed")
+			source, text := result.Sources[0], result.Evidence[0]
+			if source.Offset != offset || len(text) != source.Length {
+				t.Fatal("stability source evidence does not match its range")
 			}
 			h.Write([]byte(text))
 			total += int64(len(text))

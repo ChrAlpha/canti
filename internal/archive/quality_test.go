@@ -225,7 +225,7 @@ func qualityRun(t *testing.T, r Reader, tc qualityCase, budget, calls int, retri
 		}
 		bytes := 0
 		for _, source := range result.Sources {
-			text, err := r.Expand(context.Background(), source)
+			text, err := r.expand(context.Background(), source)
 			if err != nil || len(text) != source.Length || digest([]byte(text)) != source.SHA256 {
 				t.Fatalf("original source expansion/hash: %s: %v", tc.ID, err)
 			}

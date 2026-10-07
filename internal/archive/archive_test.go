@@ -75,7 +75,7 @@ func TestRetrievalUnicodeAndInvalidText(t *testing.T) {
 	}
 	q.Offset = result.NextOffset
 	result = retrieveOK(t, r, q)
-	text, err := r.Expand(context.Background(), result.Sources[0])
+	text, err := r.expand(context.Background(), result.Sources[0])
 	if err != nil || text != "文B" || result.More {
 		t.Fatalf("continuation: %q %+v %v", text, result, err)
 	}
@@ -116,7 +116,7 @@ func TestRetrievalSearchScanAndOutputContinuation(t *testing.T) {
 		t.Fatalf("final match: %+v", third)
 	}
 	for _, result := range []Retrieval{first, third} {
-		text, err := r.Expand(context.Background(), result.Sources[0])
+		text, err := r.expand(context.Background(), result.Sources[0])
 		if text != "needle" || err != nil {
 			t.Fatalf("match %q %v", text, err)
 		}
@@ -210,25 +210,12 @@ func TestRetrievalRejectsSymlinksAndSpecialFiles(t *testing.T) {
 	}
 }
 
-func TestRetrievalExpandVerifiesSourceAndDoesNotRecurse(t *testing.T) {
+func TestRetrievalEvidenceIsPlainTextAndDoesNotRecurse(t *testing.T) {
 	body := `{"sources":[{"path":"/canti/imports/missing","offset":0,"length":4}]}`
 	r, name := retrievalFixture(t, body)
 	result := retrieveOK(t, r, RetrievalQuery{Operation: "read", Path: name, Reason: "inspect prior retrieval metadata"})
-	text, err := r.Expand(context.Background(), result.Sources[0])
-	if err != nil || text != body {
-		t.Fatalf("metadata was not treated as plain text: %q %v", text, err)
-	}
-	if err := os.WriteFile(filepath.Join(r.Imports, "evidence"), []byte(strings.Repeat("x", len(body))), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Expand(context.Background(), result.Sources[0]); err == nil || !strings.Contains(err.Error(), "sha256") {
-		t.Fatalf("changed content accepted: %v", err)
-	}
-	if err := os.Remove(filepath.Join(r.Imports, "evidence")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Expand(context.Background(), result.Sources[0]); err == nil {
-		t.Fatal("missing source accepted")
+	if len(result.Sources) != 1 || result.Evidence[0] != body {
+		t.Fatalf("metadata was not returned as plain text: %+v", result)
 	}
 }
 
@@ -238,8 +225,5 @@ func TestRetrievalCancellation(t *testing.T) {
 	cancel()
 	if _, err := r.Retrieve(ctx, RetrievalQuery{Operation: "read", Path: name, Reason: "inspect"}); err != context.Canceled {
 		t.Fatalf("Retrieve: %v", err)
-	}
-	if _, err := r.Expand(ctx, SourceRange{}); err != context.Canceled {
-		t.Fatalf("Expand: %v", err)
 	}
 }

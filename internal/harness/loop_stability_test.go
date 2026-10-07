@@ -319,11 +319,11 @@ func TestLoopLongStability(t *testing.T) {
 						if !strings.Contains(payload, o.Retrieval.Query.Path) {
 							t.Fatal("retrieval observed a different source path")
 						}
-						for _, source := range o.Retrieval.Sources {
-							text, err := reader.Expand(ctx, source)
-							if err != nil {
-								t.Fatal("cannot verify retrieved original evidence")
-							}
+						if len(o.Retrieval.Evidence) != len(o.Retrieval.Sources) {
+							t.Fatal("retrieval did not commit the evidence of every source")
+						}
+						for i, source := range o.Retrieval.Sources {
+							text := o.Retrieval.Evidence[i]
 							evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
 							evidenceCounts[evidence]++
 							unique[source.Path] = true
