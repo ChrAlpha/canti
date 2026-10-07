@@ -25,6 +25,7 @@ PTY_TESTS = \
 	TestChatInputReadsItsOwnNonblockingDescription \
 	TestChatInputTerminalReadNeverWaitsForInput \
 	TestChatKeepsInheritedDescriptorsBlocking \
+	TestChatPromptWriteBackpressure \
 	TestChatPTYBusyInputDoesNotBecomeNextRun \
 	TestChatPTYBusyPasteTailAfterReturnIsDiscarded \
 	TestChatPTYBusyScrollDoesNotQueueInput \
@@ -39,6 +40,8 @@ PTY_TESTS = \
 	TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal \
 	TestChatPTYStderrBackpressureCancelsActiveRun \
 	TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded \
+	TestChatTerminalDiscardsBusyInput \
+	TestChatTerminalReopensPromptAfterStderrBackpressure \
 	TestChatTUIRejectsQueuedPreviousEpoch \
 	TestChatTUITeardownCancellation
 
