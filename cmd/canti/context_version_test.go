@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -174,6 +175,18 @@ func storedRules(t *testing.T) string {
 		t.Fatalf("resume of the tool run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	b += frozenRequests(t, f, "stored tool run")
+	purposed := read
+	purposed.Purpose = "Read the notes, then report them."
+	f = newFixture(t, map[int]core.Decision{1: purposed, 2: {Kind: core.Return, Payload: "done"}})
+	f.model.answer(1, 2, reply{status: http.StatusOK, body: toolReply(purposed)})
+	f.model.answer(2, 1, reply{status: http.StatusOK, body: toolReply(core.Decision{Kind: core.Return, Purpose: "The notes are read.", Payload: "done"})})
+	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-decision-format", "tool", "-history-imports", imports); r.code != exitActive {
+		t.Fatalf("run -once of the stepping tool run = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume of the stepping tool run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	b += frozenRequests(t, f, "stored stepping tool run")
 	f = newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	if r := f.cli(nil, "run", "-once", "-goal", "Report done.", "-decision-format", "text"); r.code != exitActive {
 		t.Fatalf("run -once -decision-format text = %d\nstderr: %s", r.code, r.stderr)

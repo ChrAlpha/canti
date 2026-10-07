@@ -44,6 +44,9 @@ stored run step 2 revision 1: 12276 bytes, sha256 7f0f37c645610e5d02d84e26891f12
 stored tool run step 1 revision 1: 10802 bytes, sha256 dda3138cbdc0f5d2055265256012d6e609eb0184145a40779d990090ea6d3228
 stored tool run step 1 revision 2: 11526 bytes, sha256 3c294bc05cdff681688a62abf8200a8f937cbbfb346427fce18d12f790382474
 stored tool run step 1 revision 3: 11526 bytes, sha256 0d74070df7fda4557552f13bdf0ab74b84a6a752c2f23f734c1459ee77c68fc5
+stored stepping tool run step 1 revision 1: 11062 bytes, sha256 429bbee7fb93f82aeabc8e62bfde536cde90dfb285f72fd3338ad6758e0094f1
+stored stepping tool run step 1 revision 2: 12094 bytes, sha256 29482ffb1747a8de42eb74fe5d739d7d1cb1c2e679d6a473590043ce8217e398
+stored stepping tool run step 2 revision 1: 12137 bytes, sha256 35d9c989ece3c625386582984f1b3f89107e05502a205c44f52536b324a0c1f6
 stored text run step 1 revision 1: 10729 bytes, sha256 582476d853f08d1007897852203b6f8c0ffcb3084d7610b5e9348a2a4cb7459f
 long window: 66 requests, sha256 d636a9a8c89d514e1e0624eb99f1c8f0119d19df2b666f7aa48e2f2efa55d6d8
 corpus caps-and-encoding: sha256 90684a7daba9066ab40b3c17e733aafe960a06560e7dc46f581b63ad856f84cb
@@ -76,7 +79,7 @@ corpus shell-and-retrieval: sha256 6d94d2d6e130af33b99063d5b61d990fdc602f66c9dd6
 corpus stopped-session-run: sha256 409b1c641a52e064b95f697da92c7f5d31c4dd28cd557de03aab68683eea1011
 corpus symlinked-evidence: sha256 48047c85d3e16007dd12a4bd572e955a20a47fafa306dfc368a2c6480f12294a
 corpus text-envelopes: sha256 0f8542ee2c3900ce07f3c4e7aa6e58e524c27e3f39344e6c12d0e2d8dc64a041
-corpus tool-envelopes: sha256 a4faf44ce662072a6c694397ace25f0e885595f5ad45cb5fd6ad0d25ef0a798e
-corpus tool-transport: sha256 4543ca279a4813940b285c23df191e6cbd3d0f7d0cc083924526968d72bf572a
+corpus tool-envelopes: sha256 afb3853247b81e9def79e6e785700fe2ed588a9da4d9b163724d0ea824638ab7
+corpus tool-transport: sha256 204374ccc07df292b12983f5b64c5ac93d45f8d42d1e2ab8273f0bd6ea542d5d
 corpus unavailable-evidence: sha256 d4877d8bf91f1bc1e2da0a3c066a18445e612023def444253099bf0b77f3d147
 corpus unlimited-steps: sha256 3769616f6327ed057f4e665a425a03ceca66e57a046b2559758dbcf6b319a3b6

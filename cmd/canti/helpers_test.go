@@ -445,3 +445,15 @@ func fillPipe(t *testing.T, w *os.File) {
 		t.Fatal(err)
 	}
 }
+
+// toolReply is a Messages response that narrates in text and calls
+// canti_decision once per decision.
+func toolReply(decisions ...core.Decision) string {
+	blocks := []any{map[string]any{"type": "text", "text": "Narration is not a decision."}}
+	for _, d := range decisions {
+		blocks = append(blocks, map[string]any{"type": "tool_use", "id": "toolu_test", "name": "canti_decision", "input": d})
+	}
+	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
+		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
+	return string(data)
+}

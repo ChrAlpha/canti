@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,16 +12,6 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 )
-
-func toolReply(decisions ...core.Decision) string {
-	blocks := []any{map[string]any{"type": "text", "text": "Narration is not a decision."}}
-	for _, d := range decisions {
-		blocks = append(blocks, map[string]any{"type": "tool_use", "id": "toolu_test", "name": "canti_decision", "input": d})
-	}
-	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
-		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
-	return string(data)
-}
 
 func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	f, image := recoveryFixture(t, nil)

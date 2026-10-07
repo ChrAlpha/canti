@@ -218,7 +218,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	loop, err := harness.NewLoop(store, x, m, harness.LoopConfig{
 		Environment: corpusEnvironment, ArtifactDir: "/canti/artifacts", History: history, RunsPath: "/canti/runs",
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
-		Reader:      reader,
+		Reader: reader, DecisionTool: sc.tool,
 		WindowSteps: sc.windowSteps, WindowBytes: sc.windowBytes, HandoverBytes: 2048,
 	})
 	if err != nil {
