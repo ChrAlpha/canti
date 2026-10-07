@@ -33,6 +33,18 @@ func failureScenarios() []frozenScenario {
 			},
 		},
 		{
+			name: "action-type-errors", limits: stepLimits,
+			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
+				corpusDecision(core.Exec, `canti:retrieve {"operation":1,"path":"/canti/runs/`+corpusRun+`/goal","reason":"Reread the goal."}`),
+				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":"1","text":"Continue."}`),
+				corpusDecision(core.Return, "Both actions were refused."),
+			}, steps: []string{"1 exited 1 action failed", "2 exited 1 action failed"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"Context action failed: json: cannot unmarshal number into Go struct field RetrievalQuery.operation of type string"},
+				"run1-step03-rev1.json": {"Context action failed: json: cannot unmarshal string into Go struct field Handover.first_step of type int"},
+			},
+		},
+		{
 			// The gate records a command it refused as a bound and started job
 			// that exited 1, although the command never ran. Recording the refusal
 			// as failed_to_start without a job must change these records.

@@ -49,6 +49,7 @@ stored stepping tool run step 1 revision 2: 12094 bytes, sha256 29482ffb1747a8de
 stored stepping tool run step 2 revision 1: 12137 bytes, sha256 35d9c989ece3c625386582984f1b3f89107e05502a205c44f52536b324a0c1f6
 stored text run step 1 revision 1: 10729 bytes, sha256 582476d853f08d1007897852203b6f8c0ffcb3084d7610b5e9348a2a4cb7459f
 long window: 66 requests, sha256 d636a9a8c89d514e1e0624eb99f1c8f0119d19df2b666f7aa48e2f2efa55d6d8
+corpus action-type-errors: sha256 f8f3b77e8b9d22ce04e6f88083bbc0202c3f38be307c2634de1ebf14d7fd383a
 corpus caps-and-encoding: sha256 90684a7daba9066ab40b3c17e733aafe960a06560e7dc46f581b63ad856f84cb
 corpus decision-purpose: sha256 655b1e2db5c0696cf9f64fb266d99f883362504d59a502ba203c72d6e3b91780
 corpus decode-diagnostics: sha256 bd6d59baa7fef779f4f0c06462b12475ac77ca47974e7d7b0aa98f64f3268410
