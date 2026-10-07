@@ -83,9 +83,9 @@ type Mount struct{ Source, Target string }
 // the effect's file lock, so callers in any goroutine or process never
 // observe a half-done start. A container that exits without the exit status
 // its shell records, as when it is killed outside canti, reports JobUnknown.
-// Only Inspect reads that record and captures and records the job of a
-// finished container; once recorded, a job is reported from its record
-// alone. Host environment variables never reach a job.
+// Only Inspect reads that record; every operation that finds a job finished
+// without it captures and records the job. Once recorded, a job is reported
+// from its record alone. Host environment variables never reach a job.
 type Executor struct {
 	cfg      Config
 	timeouts timeouts
@@ -417,16 +417,6 @@ func (o observation) exitRecord() string {
 	return o.c.Config.Labels[exitLabel]
 }
 
-// snapshot is the job derived without reading its exit record or output: an
-// exited job whose result needs the record is unknown until Inspect reads it.
-func (o observation) snapshot() harness.Job {
-	job := derive(o.latch, o.c, o.marked, nil)
-	if o.exitRecord() != "" {
-		job.Output = harness.ArtifactRef{}
-	}
-	return job
-}
-
 // finalize derives the job, reading its exit record when its result needs
 // one, and records it once it is finished.
 func (x *Executor) finalize(ctx context.Context, id string, o observation) (harness.Job, error) {
@@ -444,9 +434,20 @@ func (x *Executor) finalize(ctx context.Context, id string, o observation) (harn
 	return job, nil
 }
 
+// report is the job as Bind and Start report it: finalized, unless its
+// result needs the exit record, which only Inspect reads, so it is unknown.
+func (x *Executor) report(ctx context.Context, id string, o observation) (harness.Job, error) {
+	if o.exitRecord() == "" {
+		return x.finalize(ctx, id, o)
+	}
+	job := derive(o.latch, o.c, o.marked, nil)
+	job.Output = harness.ArtifactRef{}
+	return job, nil
+}
+
 // Bind creates the effect's container without starting it, or reports the
-// existing job if it was created for the same execution spec; like Start,
-// it reports a snapshot of the job. An effect fenced before it had a
+// existing job if it was created for the same execution spec, recording it
+// if it is finished, as Start does. An effect fenced before it had a
 // container is recorded cancelled without one.
 func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effect.ID)
@@ -479,16 +480,16 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	if done {
 		return rec.Job, nil
 	}
-	return o.snapshot(), nil
+	return x.report(ctx, effect.ID, o)
 }
 
 // Start sets the effect's latch and starts its never-started container,
 // unless the latch was already set. Once the latch is set the launch
 // finishes even if ctx is done, each of its calls within its own deadline.
-// Start reports a snapshot of the job, so a job that already exited is
-// unknown until Inspect reads its exit record. A start the daemon rejected
-// before the job's process began reports the job, failed to start, rather
-// than the error.
+// Start reads no exit record: a job whose result needs one is unknown until
+// Inspect reads it, and any other finished job is recorded. A start the
+// daemon rejected before the job's process began reports the job, failed to
+// start, rather than the error.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -522,7 +523,7 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 			return harness.Job{}, err
 		}
 	}
-	return o.snapshot(), nil
+	return x.report(ctx, effectID, o)
 }
 
 // Inspect reports the effect's job; found is false only when Docker reports

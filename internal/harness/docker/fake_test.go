@@ -232,21 +232,10 @@ func (f *fake) rejecting(script string) {
 func TestRejectedStartFailsToStart(t *testing.T) {
 	f := newFake(t)
 	f.rejecting("")
-	job, err := f.x.Start(t.Context(), "e")
-	reason := harness.ArtifactRef{Detail: "job never started: unable to find user nosuchuser"}
-	if err != nil || job.ID != "c-e" || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() || job.Output != reason {
-		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start with output %+v", job, err, reason)
-	}
-	if again, err := f.x.Bind(t.Context(), effect); err != nil || !same(again, job) {
-		t.Fatalf("Bind() after the failed start = %+v, %v; want %+v", again, err, job)
-	}
-	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("logs")) != 0 || len(f.calls("rm")) != 0 {
-		t.Fatalf("record %v, logs %q, rms %q; want Start and Bind to leave the failed start to Inspect", err, f.calls("logs"), f.calls("rm"))
-	}
-	want, found, err := f.x.Inspect(t.Context(), "e")
-	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: reason.Detail}
-	if err != nil || !found || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || want.Output != out {
-		t.Fatalf("Inspect(rejected) = %+v, %v, %v; want the job failed to start with output %+v", want, found, err, out)
+	want, err := f.x.Start(t.Context(), "e")
+	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job never started: unable to find user nosuchuser"}
+	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || want.Output != out {
+		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start with output %+v", want, err, out)
 	}
 	if _, err := os.Stat(f.x.record("e")); err != nil {
 		t.Fatalf("the failed start was not recorded: %v", err)
@@ -270,32 +259,25 @@ func TestRejectedStartFailsToStart(t *testing.T) {
 }
 
 func TestRejectedStartKeepsItsReason(t *testing.T) {
-	inspected := func(f *fake) (harness.Job, error) {
-		if _, err := f.x.Start(t.Context(), "e"); err != nil {
-			return harness.Job{}, err
-		}
-		job, _, err := f.x.Inspect(t.Context(), "e")
-		return job, err
-	}
 	f := newFake(t)
 	f.rejecting("")
 	f.set("logs.exit", "1")
-	job, err := inspected(f)
+	job, err := f.x.Start(t.Context(), "e")
 	if want := "job never started: unable to find user nosuchuser; logs unavailable: exit status 1"; err != nil || job.Status != harness.JobFailedToStart || job.Output.Detail != want {
-		t.Fatalf("Inspect(rejected, capture fails) = %+v, %v; want detail %q", job, err, want)
+		t.Fatalf("Start(rejected, capture fails) = %+v, %v; want detail %q", job, err, want)
 	}
 	w := newFake(t)
 	w.rejecting("")
 	if err := os.WriteFile(filepath.Join(w.x.artifacts(), "e"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	job, err = inspected(w)
+	job, err = w.x.Start(t.Context(), "e")
 	if err != nil || !strings.HasPrefix(job.Output.Detail, "job never started: unable to find user nosuchuser; artifact write failed: ") {
-		t.Fatalf("Inspect(rejected, artifact unwritable) = %+v, %v; want the reason kept", job, err)
+		t.Fatalf("Start(rejected, artifact unwritable) = %+v, %v; want the reason kept", job, err)
 	}
 	g := newFake(t)
 	g.rejecting("")
-	if _, err := inspected(g); err != nil {
+	if _, err := g.x.Start(t.Context(), "e"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(g.x.artifacts(), "e", "output")); err != nil {
@@ -310,15 +292,15 @@ func TestRejectedStartKeepsItsReason(t *testing.T) {
 func TestRejectedStartDuringShutdownIsRecordedLater(t *testing.T) {
 	f := newFake(t)
 	f.rejecting(`touch "$ctl/began"; sleep 0.3; `)
-	if job, err := f.x.Start(f.cancelAt("began"), "e"); err != nil || job.Status != harness.JobFailedToStart {
-		t.Fatalf("Start(rejected during shutdown) = %+v, %v; want the failed start", job, err)
+	if _, err := f.x.Start(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start(rejected during shutdown) = %v, want cancellation", err)
 	}
 	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-		t.Fatalf("Start recorded the failed start: %v, rms %q", err, f.calls("rm"))
+		t.Fatalf("a report after shutdown was recorded: %v, rms %q", err, f.calls("rm"))
 	}
-	job, _, err := f.x.Inspect(t.Context(), "e")
+	job, err := f.x.Start(t.Context(), "e")
 	if err != nil || job.Status != harness.JobFailedToStart || len(f.calls("start")) != 1 || len(f.calls("rm")) != 1 {
-		t.Fatalf("Inspect() = %+v, %v, starts %q; want the failed start recorded and released", job, err, f.calls("start"))
+		t.Fatalf("Start() again = %+v, %v, starts %q; want the failed start recorded and released", job, err, f.calls("start"))
 	}
 }
 
@@ -446,16 +428,21 @@ func TestBindAfterFenceKeepsTheJobBoundBeforeIt(t *testing.T) {
 	if err := f.x.Cancel(t.Context(), "e"); err != nil {
 		t.Fatal(err)
 	}
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobCancelled {
-		t.Fatalf("Bind() after the fence = %+v, %v; want the job bound before it, cancelled", job, err)
+	want, err := f.x.Bind(t.Context(), effect)
+	if err != nil || want.ID != "c-e" || want.Status != harness.JobCancelled {
+		t.Fatalf("Bind() after the fence = %+v, %v; want the job bound before it, cancelled", want, err)
 	}
-	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-		t.Fatalf("record %v, rms %q after Bind; want the job left to Inspect", err, f.calls("rm"))
+	if _, err := os.Stat(f.x.record("e")); err != nil {
+		t.Fatalf("the cancelled job was not recorded: %v", err)
 	}
-	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || job.ID != "c-e" || job.Status != harness.JobCancelled {
-		t.Fatalf("Inspect() = %+v, %v, %v; want the job bound before the fence, cancelled", job, found, err)
+	f.missing()
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
+		t.Fatalf("Bind() after the container was removed = %+v, %v; want %+v", job, err, want)
 	}
-	if creates, rms := f.calls("create"), f.calls("rm"); len(creates) != 1 || len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
+		t.Fatalf("Inspect() = %+v, %v, %v; want %+v", job, found, err, want)
+	}
+	if creates, rms := f.calls("create"), f.calls("rm"); len(creates) != 1 || len(rms) != 3 || rms[0] != "rm rm -v c-e" {
 		t.Fatalf("creates %q, rms %q; want one container, recorded and released", creates, rms)
 	}
 }

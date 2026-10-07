@@ -710,9 +710,9 @@ state directory, and each target a clean absolute path that overlaps neither
   forged record that differs from Docker's exit code is not final. Jobs run
   under Docker's json-file log driver with rotation disabled
   (`max-size=1p`) and `mode=blocking`, so no output is dropped. `Bind` and
-  `Start` report the job without reading its exit record or output, so a
-  job whose result needs that record is `unknown` until `Inspect` reads it.
-  The first `Inspect` of a finished job copies `docker logs` through a tap
+  `Start` never read the exit record, so a job whose result needs it is
+  `unknown` until `Inspect` reads it. On the first report of a finished job
+  whose result is known, the executor copies `docker logs` through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
   `artifacts/<effect ID>/output`, counts every byte, and keeps a preview of at
   most `PreviewLimit` bytes (4 KiB by default; the CLI sets it to the

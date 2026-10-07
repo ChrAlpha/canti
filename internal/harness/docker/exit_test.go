@@ -178,6 +178,39 @@ func TestJobOfAnEarlierRevisionIsDerivedFromDocker(t *testing.T) {
 	}
 }
 
+func TestStartRecordsAResultThatNeedsNoExitRecord(t *testing.T) {
+	for name, tt := range map[string]struct {
+		marked bool
+		out    func(*fake) string
+		want   harness.JobStatus
+	}{
+		"earlier revision": {false, func(f *fake) string { return f.legacy("exited", 3) }, harness.JobFailed},
+		"cancelled":        {true, func(f *fake) string { return f.container("exited", 143) }, harness.JobCancelled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t)
+			f.latch(latchStart)
+			if tt.marked {
+				if err := mark(f.x.dir("e")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.set("inspect.out", tt.out(f))
+			want, err := f.x.Start(t.Context(), "e")
+			if err != nil || want.ID != "c-e" || want.Status != tt.want || !want.Output.Available {
+				t.Fatalf("Start() = %+v, %v; want the job %s with its output", want, err, tt.want)
+			}
+			f.missing()
+			if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
+				t.Fatalf("Inspect() after the container was removed = %+v, %v, %v; want %+v", job, found, err, want)
+			}
+			if cps, starts := f.calls("cp"), f.calls("start"); len(cps) != 0 || len(starts) != 0 {
+				t.Fatalf("cps %q, starts %q; want neither", cps, starts)
+			}
+		})
+	}
+}
+
 func TestStartLeavesAnExitedJobToInspection(t *testing.T) {
 	f := newFake(t)
 	f.set("inspect.out", f.container("created", 0))
