@@ -8,13 +8,17 @@ import (
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 // RetrievePrefix and HandoverPrefix begin the exec payloads that the harness
-// performs itself instead of running them as commands.
+// performs itself instead of running them as commands. DiscoveryMarker
+// begins a shell command that searches the step records; discovery skips the
+// steps of all three.
 const (
-	RetrievePrefix = "canti:retrieve "
-	HandoverPrefix = "canti:handover "
+	RetrievePrefix  = "canti:retrieve "
+	HandoverPrefix  = "canti:handover "
+	DiscoveryMarker = "# canti:discovery"
 )
 
 const actionFailure, actionFailureBytes = "Context action failed: ", 2048
@@ -82,13 +86,13 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	if req.Window != nil && req.Window.Requested && !strings.HasPrefix(command, HandoverPrefix) {
 		err = errors.New("handover is required before any more work; use canti:handover")
 	} else if strings.HasPrefix(command, RetrievePrefix) {
-		var q RetrievalQuery
+		var q archive.RetrievalQuery
 		err = decodeAction(strings.TrimPrefix(command, RetrievePrefix), &q)
 		if l.cfg.Reader == nil {
 			err = errors.New("retrieval is disabled for this run")
 		}
 		if err == nil {
-			var r Retrieval
+			var r archive.Retrieval
 			r, err = l.cfg.Reader.Retrieve(ctx, q)
 			if err == nil {
 				obs.Retrieval = &r

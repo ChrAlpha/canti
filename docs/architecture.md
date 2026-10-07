@@ -29,6 +29,7 @@ is not.
 | `internal/harness/executortest` | Executable start latch contract | Passed by an offline reference and the Docker executor; rejects single-clause mutants |
 | `internal/harness/artifacts.go` | Observation and output reference records | Types |
 | `internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
+| `internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations and their continuations, and original-evidence expansion | Offline tests on real directories |
 | `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `internal/harness/docker` | One container per effect through the docker CLI, start latch, output capture | Fake-CLI tests and Docker integration tests |
 | `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |

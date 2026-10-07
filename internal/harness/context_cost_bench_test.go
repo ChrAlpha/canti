@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
@@ -65,11 +66,11 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 	if err != nil {
 		b.Fatal(err)
 	}
-	archive := filepath.Join(root, "archive")
-	if err := os.Mkdir(archive, 0700); err != nil {
+	imported := filepath.Join(root, "archive")
+	if err := os.Mkdir(imported, 0700); err != nil {
 		b.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte("evidence\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("evidence\n"), 0600); err != nil {
 		b.Fatal(err)
 	}
 	commands := []string{"true"}
@@ -85,7 +86,7 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 			commands[i] = `canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify evidence","limit":8}`
 		}
 	case "rejected_1MiB":
-		query, err := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: strings.Repeat("x", 1<<20)})
+		query, err := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: strings.Repeat("x", 1<<20)})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -95,7 +96,7 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 	c := &clock{now: created}
 	x := &fakeExec{clock: c, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
 	cfg := harness.LoopConfig{Environment: "fixture shell", ArtifactDir: "/canti/artifacts", RunsPath: "/canti/runs",
-		History: filepath.Join(root, "history"), Reader: &harness.Reader{Imports: archive}, Now: c.Now,
+		History: filepath.Join(root, "history"), Reader: &archive.Reader{Imports: imported}, Now: c.Now,
 		Poll: time.Microsecond, Backoff: -1, Limits: harness.DefaultPromptLimits()}
 	cfg.Limits.Total = 256 << 10
 	loop, err := harness.NewLoop(store, x, m, cfg)

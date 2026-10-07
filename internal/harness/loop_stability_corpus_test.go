@@ -15,10 +15,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
-func stabilityCorpus(ctx context.Context, t *testing.T) (harness.Reader, []string, string) {
+func stabilityCorpus(ctx context.Context, t *testing.T) (archive.Reader, []string, string) {
 	t.Helper()
 	manifest := os.Getenv("CANTI_STABILITY_CORPUS")
 	if manifest == "" {
@@ -28,7 +28,7 @@ func stabilityCorpus(ctx context.Context, t *testing.T) (harness.Reader, []strin
 			t.Fatal(err)
 		}
 		hash := sha256.Sum256(body)
-		return harness.Reader{Imports: root}, []string{"evidence.txt"}, hex.EncodeToString(hash[:])
+		return archive.Reader{Imports: root}, []string{"evidence.txt"}, hex.EncodeToString(hash[:])
 	}
 	if unsafeStabilityPath(manifest) {
 		t.Fatal("unsafe stability manifest path")
@@ -58,7 +58,7 @@ func stabilityCorpus(ctx context.Context, t *testing.T) (harness.Reader, []strin
 	if c.Format != "retrieval-quality/1" || !filepath.IsAbs(c.Root) || len(c.Hashes) == 0 || len(c.Hashes) > 4096 || unsafeStabilityPath(c.Root) {
 		t.Fatal("invalid stability corpus shape")
 	}
-	r := harness.Reader{Imports: c.Root}
+	r := archive.Reader{Imports: c.Root}
 	paths := make([]string, 0, len(c.Hashes))
 	for name := range c.Hashes {
 		if name == "" || path.IsAbs(name) || path.Clean(name) != name || strings.HasPrefix(name, "../") || unsafeStabilityPath(name) {
@@ -72,7 +72,7 @@ func stabilityCorpus(ctx context.Context, t *testing.T) (harness.Reader, []strin
 		h := sha256.New()
 		var offset int64
 		for {
-			result, err := r.Retrieve(ctx, harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + name, Reason: "verify frozen stability source", Offset: offset, Limit: 8192})
+			result, err := r.Retrieve(ctx, archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + name, Reason: "verify frozen stability source", Offset: offset, Limit: 8192})
 			if err != nil || result.Error != "" || len(result.Sources) != 1 {
 				t.Fatalf("stability source read failed: %v", err)
 			}

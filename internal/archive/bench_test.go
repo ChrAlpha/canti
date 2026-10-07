@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"strings"
@@ -27,9 +27,9 @@ func BenchmarkRetrievalSearch(b *testing.B) {
 				for b.Loop() {
 					result = Retrieval{Query: q}
 					if mode == "directory-metadata" {
-						searchRanges(data, RetrievalDefaultBytes, min(len(data), retrievalScanBytes), 32, RetrievalMaxBytes-2, &result)
+						searchRanges(data, DefaultBytes, min(len(data), scanBytes), 32, MaxBytes-2, &result)
 					} else {
-						searchRetrieval(data, RetrievalDefaultBytes, &result)
+						searchRetrieval(data, DefaultBytes, &result)
 					}
 				}
 				bytes := 0

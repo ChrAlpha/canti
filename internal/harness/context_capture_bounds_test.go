@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -19,7 +20,7 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 	for _, field := range []string{"reason", "operation", "path", "query", "cursor"} {
 		for _, size := range []int{16 << 10, 1 << 20} {
 			t.Run(fmt.Sprintf("%s/%d", field, size), func(t *testing.T) {
-				q := harness.RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Reason: "verify evidence", Query: "ORIGINAL"}
+				q := archive.RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Reason: "verify evidence", Query: "ORIGINAL"}
 				large := strings.Repeat("x", size)
 				switch field {
 				case "reason":
@@ -42,11 +43,11 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover with valid input","limit":8}`),
 					execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Original evidence verified; retrieval recovered."}`),
 					returnReply("Original evidence verified; retrieval recovered."))
-				archive := t.TempDir()
-				if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte("ORIGINAL_EVIDENCE"), 0600); err != nil {
+				imported := t.TempDir()
+				if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				f.cfg.Reader = &harness.Reader{Imports: archive}
+				f.cfg.Reader = &archive.Reader{Imports: imported}
 				f.cfg.WindowSteps = 2
 				ctx := f.bounded()
 				for i := 0; ; i++ {

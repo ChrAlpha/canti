@@ -1,7 +1,6 @@
-package harness
+package archive
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -41,7 +40,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 			return errors.New("directory cursor file is no longer available")
 		}
 	}
-	remaining, references := retrievalScanBytes, RetrievalMaxBytes-2
+	remaining, references := scanBytes, MaxBytes-2
 	examined := 0
 	matchBytes := queryMatchBytes(q)
 	for index < len(names) {
@@ -74,11 +73,9 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 		cursor.Offset = 0
 	}
 	if index < len(names) {
-		cursor.File = names[index]
-		cursor.File = base64.RawURLEncoding.EncodeToString([]byte(cursor.File))
-		encoded, _ := json.Marshal(cursor)
+		cursor.File = base64.RawURLEncoding.EncodeToString([]byte(names[index]))
 		result.More = true
-		result.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+		result.NextCursor = encodeCursor(cursor)
 	}
 	return nil
 }
@@ -139,17 +136,14 @@ func decodeDirectoryCursor(q RetrievalQuery) (directoryCursor, error) {
 	if q.Cursor == "" {
 		return directoryCursor{Binding: want}, nil
 	}
-	data, err := base64.RawURLEncoding.DecodeString(q.Cursor)
-	if err != nil {
+	var cursor directoryCursor
+	err := decodeCursor(q.Cursor, &cursor)
+	if errors.Is(err, errCursorEncoding) {
 		return directoryCursor{}, errors.New("invalid directory cursor encoding")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var cursor directoryCursor
-	err = decoder.Decode(&cursor)
 	filename, fileErr := base64.RawURLEncoding.DecodeString(cursor.File)
 	cursor.File = string(filename)
-	if err != nil || fileErr != nil || decoder.Decode(new(any)) != io.EOF || cursor.Binding != want ||
+	if err != nil || fileErr != nil || cursor.Binding != want ||
 		cursor.Offset < 0 || cursor.File == "" || cursor.File == "." || cursor.File == ".." ||
 		strings.ContainsRune(cursor.File, '/') || len(cursor.File) > 255 ||
 		!utf8.ValidString(cursor.File) || forbiddenRetrievalName(cursor.File) {

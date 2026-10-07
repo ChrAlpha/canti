@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -77,9 +78,9 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 		t.Fatal("missing observation")
 		return harness.Observation{}
 	}
-	query := func(operation, path string) harness.Retrieval {
+	query := func(operation, path string) archive.Retrieval {
 		t.Helper()
-		q := harness.RetrievalQuery{Operation: operation, Path: path, Reason: "recover original deployment evidence", Limit: 4096}
+		q := archive.RetrievalQuery{Operation: operation, Path: path, Reason: "recover original deployment evidence", Limit: 4096}
 		if operation == "search" {
 			q.Query, q.Limit = "Orchid", 128
 		}
@@ -108,7 +109,7 @@ for file in /canti/runs/%s/steps/*/preview; do
     [ "$code" -eq 1 ] || exit "$code"
   fi
 done`, sourceRun)
-	reader := harness.Reader{History: historyRoot(f.state)}
+	reader := archive.Reader{History: historyRoot(f.state)}
 	returnedBytes, shellBytes, searchCalls, readCalls := 0, 0, 0, 0
 	for page := 0; page < 3; page++ {
 		first := step

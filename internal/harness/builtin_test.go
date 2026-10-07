@@ -10,16 +10,17 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 func TestRetrievalCommitsReferencesWithoutCopiedEvidence(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify prior result"}`), returnReply("done"))
-	archive := t.TempDir()
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte("unique original evidence"), 0600); err != nil {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("unique original evidence"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	ctx := context.Background()
 	for {
 		snap, err := f.fresh().Step(ctx, runID)
@@ -53,7 +54,7 @@ func TestRetrievalCommitsReferencesWithoutCopiedEvidence(t *testing.T) {
 
 func TestRetrievalCancellationNeverUsesShellExecutor(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/missing","reason":"verify"}`))
-	f.cfg.Reader = &harness.Reader{Imports: t.TempDir()}
+	f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 	ctx := context.Background()
 	for {
 		s, err := f.loop().Step(ctx, runID)
@@ -77,7 +78,7 @@ func TestBuiltinCancellationAfterBindAndStartWithReaderDisabled(t *testing.T) {
 	for _, phase := range []core.Phase{core.PhaseEffectSaved, core.PhaseJobBound, core.PhaseAwaitingObservation} {
 		t.Run(string(phase), func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify"}`))
-			f.cfg.Reader = &harness.Reader{Imports: t.TempDir()}
+			f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 			ctx := f.bounded()
 			for {
 				s, err := f.fresh().Step(ctx, runID)
@@ -114,12 +115,12 @@ func (j observationLostAck) Commit(ctx context.Context, tr harness.Transition) e
 func TestRetrievalLostObservationAckKeepsPinnedReference(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify"}`), returnReply("done"))
-	archive := t.TempDir()
-	file := filepath.Join(archive, "evidence")
+	imported := t.TempDir()
+	file := filepath.Join(imported, "evidence")
 	if err := os.WriteFile(file, []byte("original immutable evidence"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	ctx := f.bounded()
 	for {
 		s, err := f.fresh().Step(ctx, runID)

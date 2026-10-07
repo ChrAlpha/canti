@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
@@ -193,7 +194,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	}
 	history, artifacts := filepath.Join(dir, "history"), filepath.Join(dir, "artifacts")
 	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals, changes: sc.changes}
-	reader := &harness.Reader{History: history, Artifacts: artifacts}
+	reader := &archive.Reader{History: history, Artifacts: artifacts}
 	if sc.imports != nil {
 		reader.Imports, x.imports = filepath.Join(dir, "imports"), filepath.Join(dir, "imports")
 		if err := os.Mkdir(reader.Imports, 0o755); err != nil {

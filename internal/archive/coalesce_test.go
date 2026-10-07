@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -56,7 +56,7 @@ func TestRetrievalSearchCoalescesDirectoryWithoutChangingCursor(t *testing.T) {
 		total += source.Length
 	}
 	encoded, err := json.Marshal(result.Sources)
-	if err != nil || total > q.Limit || len(encoded) > RetrievalMaxBytes {
+	if err != nil || total > q.Limit || len(encoded) > MaxBytes {
 		t.Fatalf("coalesced result exceeded budget: bytes=%d references=%d err=%v", total, len(encoded), err)
 	}
 }
@@ -67,7 +67,7 @@ func TestRetrievalSearchSelectionAlreadyCoalesced(t *testing.T) {
 		"b": "needle" + strings.Repeat("x", 400) + "needle",
 		"c": strings.Repeat("needle ", 30),
 	})
-	q := RetrievalQuery{Operation: "search", Path: "/canti/imports", Reason: "check selected ranges", Query: "needle", Limit: RetrievalMaxBytes}
+	q := RetrievalQuery{Operation: "search", Path: "/canti/imports", Reason: "check selected ranges", Query: "needle", Limit: MaxBytes}
 	result := retrieveOK(t, r, q)
 	if len(result.Sources) < 4 {
 		t.Fatalf("fixture did not exercise separate ranges: %+v", result)
@@ -94,7 +94,7 @@ func BenchmarkRetrievalReaderCoalesce(b *testing.B) {
 	r := Reader{Imports: root}
 	for _, path := range []string{"/canti/imports/evidence", "/canti/imports"} {
 		b.Run(path, func(b *testing.B) {
-			q := RetrievalQuery{Operation: "search", Path: path, Reason: "benchmark overlap", Query: "needle", Limit: RetrievalMaxBytes}
+			q := RetrievalQuery{Operation: "search", Path: path, Reason: "benchmark overlap", Query: "needle", Limit: MaxBytes}
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				result, err := r.Retrieve(context.Background(), q)

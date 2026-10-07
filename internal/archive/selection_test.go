@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 func TestRetrievalSearchDenseHitsReachTailInOneCall(t *testing.T) {
 	body := strings.Repeat("needle ", 215) + "answer=42 needle"
 	r, path := retrievalFixture(t, body)
-	q := RetrievalQuery{Operation: "search", Path: path, Reason: "find final answer", Query: "needle", Limit: RetrievalDefaultBytes}
+	q := RetrievalQuery{Operation: "search", Path: path, Reason: "find final answer", Query: "needle", Limit: DefaultBytes}
 	result := retrieveOK(t, r, q)
 	if result.More || result.NextOffset != int64(len(body)) || len(result.Sources) != 1 {
 		t.Fatalf("dense hits stopped before tail: %+v", result)
@@ -55,17 +55,17 @@ func TestSearchRangesMergedReferencesAndSlots(t *testing.T) {
 	data := []byte(strings.Repeat("needle ", 30) + strings.Repeat("x", 400) + "needle")
 	q := RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Reason: "find evidence", Query: "needle", Limit: 500}
 	result := Retrieval{Query: q}
-	_, remaining := searchRanges(data, q.Limit, len(data), 1, RetrievalMaxBytes-2, &result)
+	_, remaining := searchRanges(data, q.Limit, len(data), 1, MaxBytes-2, &result)
 	if len(result.Sources) != 1 || result.NextOffset <= int64(len("needle ")) || result.Sources[0].Length > q.Limit {
 		t.Fatalf("overlap consumed source slot or byte budget: %+v", result)
 	}
 	encoded, err := json.Marshal(result.Sources)
 	single, _ := json.Marshal(result.Sources[0])
-	if err != nil || len(encoded) > RetrievalMaxBytes || remaining != RetrievalMaxBytes-2-len(single)-1 {
+	if err != nil || len(encoded) > MaxBytes || remaining != MaxBytes-2-len(single)-1 {
 		t.Fatalf("reference accounting drifted: size=%d remaining=%d err=%v", len(encoded), remaining, err)
 	}
 	withSecond := Retrieval{Query: q}
-	searchRanges(data, q.Limit, len(data), 2, RetrievalMaxBytes-2, &withSecond)
+	searchRanges(data, q.Limit, len(data), 2, MaxBytes-2, &withSecond)
 	if len(withSecond.Sources) != 2 || withSecond.Sources[1].Offset <= withSecond.Sources[0].Offset+int64(withSecond.Sources[0].Length) {
 		t.Fatalf("independent range did not use second slot: %+v", withSecond)
 	}

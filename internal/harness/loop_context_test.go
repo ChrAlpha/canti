@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -19,11 +20,11 @@ func TestWindowHandoverRecoversAndDoesNotCarryOldEvidence(t *testing.T) {
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"check source"}`),
 		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue at the evidence reference; verify before use."}`),
 		reply{err: errors.New("transport interrupted")}, returnReply("done"))
-	archive := t.TempDir()
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte("ORIGINAL_EVIDENCE_SENTINEL"), 0600); err != nil {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE_SENTINEL"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.WindowSteps = 1
 	ctx := context.Background()
 	for {
@@ -141,7 +142,7 @@ func TestDirectorySearchCursorAndEvidenceReachFrozenRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f.cfg.Reader = &harness.Reader{Imports: root}
+	f.cfg.Reader = &archive.Reader{Imports: root}
 	if _, err := f.loop().Run(context.Background(), runID); err != nil {
 		t.Fatal(err)
 	}
@@ -164,11 +165,11 @@ func TestRetrievalSearchContinuationSurvivesPromptPreviewLimit(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"search","path":"/canti/imports/evidence","reason":"find earlier facts","query":"x","limit":8192}`),
 		returnReply("done"))
-	archive := t.TempDir()
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(strings.Repeat("x", 10000)), 0600); err != nil {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(strings.Repeat("x", 10000)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	if _, err := f.loop().Run(context.Background(), runID); err != nil {
 		t.Fatal(err)
 	}
@@ -188,12 +189,12 @@ func TestRevisitingRetrievalAfterHandoverDoesNotExpandItsEvidence(t *testing.T) 
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/runs/run-1/steps/00000001/preview","reason":"inspect prior access"}`),
 		execReply(`canti:handover {"run_id":"run-1","first_step":3,"text":"Finish."}`),
 		returnReply("done"))
-	archive := t.TempDir()
+	imported := t.TempDir()
 	const original = "UNIQUE_ORIGINAL_EVIDENCE_NOT_METADATA"
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(original), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Reader = &harness.Reader{Imports: archive, History: f.cfg.History}
+	f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
 	f.cfg.WindowSteps = 1
 	ctx := f.bounded()
 	for {
@@ -285,15 +286,15 @@ func TestHandoverPagePreservesRetryAndRepair(t *testing.T) {
 }
 
 func TestRetrievedFencedSourceReachesFrozenRequestWithoutLostBytes(t *testing.T) {
-	archive := t.TempDir()
+	imported := t.TempDir()
 	const evidence = "Original evidence:\n```go\nvalue := 42\n```\nFINAL_SOURCE_BYTE_Z"
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(evidence), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(evidence), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"read exact original evidence"}`),
 		returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	if _, err := f.loop().Run(f.bounded(), runID); err != nil {
 		t.Fatal(err)
 	}
@@ -307,15 +308,15 @@ func TestRetrievedFencedSourceReachesFrozenRequestWithoutLostBytes(t *testing.T)
 }
 
 func TestSuccessfulRetrievalDoesNotReportMissingIncompleteOutput(t *testing.T) {
-	archive := t.TempDir()
+	imported := t.TempDir()
 	const evidence = "complete original source evidence"
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(evidence), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(evidence), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify earlier evidence"}`),
 		returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	if _, err := f.loop().Run(f.bounded(), runID); err != nil {
 		t.Fatal(err)
 	}
@@ -348,12 +349,12 @@ func TestDirectorySearchGeneratedCursorCanAlwaysBeResumed(t *testing.T) {
 }
 
 func testDirectorySearchGeneratedCursor(t *testing.T, name string) {
-	archive := t.TempDir()
-	if err := os.WriteFile(filepath.Join(archive, name), []byte("needle needle"), 0600); err != nil {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, name), []byte("needle needle"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r := harness.Reader{Imports: archive}
-	q := harness.RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "needle", Reason: "locate evidence", Limit: 6}
+	r := archive.Reader{Imports: imported}
+	q := archive.RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "needle", Reason: "locate evidence", Limit: 6}
 	first, err := r.Retrieve(context.Background(), q)
 	if err != nil || first.Error != "" || !first.More || first.NextCursor == "" {
 		t.Fatalf("first page: %+v %v", first, err)

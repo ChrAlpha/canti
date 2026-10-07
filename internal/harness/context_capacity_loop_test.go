@@ -10,25 +10,26 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
-	archive := t.TempDir()
+	imported := t.TempDir()
 	var content strings.Builder
 	var replies []reply
 	for i := range 10 {
 		marker := fmt.Sprintf("EVIDENCE_%02d", i)
-		content.WriteString(marker + strings.Repeat("x", harness.RetrievalMaxBytes-len(marker)))
-		q, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect next part", Offset: int64(i * harness.RetrievalMaxBytes), Limit: harness.RetrievalMaxBytes})
+		content.WriteString(marker + strings.Repeat("x", archive.MaxBytes-len(marker)))
+		q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect next part", Offset: int64(i * archive.MaxBytes), Limit: archive.MaxBytes})
 		replies = append(replies, execReply("canti:retrieve "+string(q)))
 	}
 	replies = append(replies, returnReply("done"))
-	if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(content.String()), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(content.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, core.Limits{MaxSteps: 12, MaxAttempts: 3}, harness.Budget{}, replies...)
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 256 << 10
 	ctx := f.bounded()
@@ -58,17 +59,17 @@ func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
 }
 
 func TestUnavailableEvidenceTriggersHandoverAcrossSQLiteReopen(t *testing.T) {
-	archive := t.TempDir()
-	file := filepath.Join(archive, "evidence")
-	if err := os.WriteFile(file, []byte(strings.Repeat("x", harness.RetrievalMaxBytes)), 0600); err != nil {
+	imported := t.TempDir()
+	file := filepath.Join(imported, "evidence")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x", archive.MaxBytes)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	q, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect source", Limit: harness.RetrievalMaxBytes})
+	q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect source", Limit: archive.MaxBytes})
 	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 3}, harness.Budget{},
 		execReply("canti:retrieve "+string(q)),
 		execReply("canti:retrieve "+string(q)),
 		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Resume after checking original evidence."}`), returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 96 << 10
 	ctx := f.bounded()
@@ -110,7 +111,7 @@ func TestRequestedHandoverRejectsWorkAcrossReopen(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), execReply(command),
 				execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue after checking original evidence."}`), returnReply("done"))
-			f.cfg.Reader = &harness.Reader{Imports: t.TempDir()}
+			f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 			f.cfg.WindowSteps = 1
 			ctx := context.Background()
 			for {
@@ -148,7 +149,7 @@ func TestMaximumFencedHandoverStartsUsableWindow(t *testing.T) {
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 128 << 10
 	f.cfg.HandoverBytes, f.cfg.WindowSteps = 8192, 1
-	f.cfg.Reader = &harness.Reader{Imports: t.TempDir()}
+	f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
 	last := f.model.prompts[len(f.model.prompts)-1]
 	if !strings.Contains(last.User(), "\n"+h.Text+"\n") || strings.Contains(last.User(), "### Step 1") {
@@ -157,24 +158,24 @@ func TestMaximumFencedHandoverStartsUsableWindow(t *testing.T) {
 }
 
 func TestRetrievalBudgetIncludesSourceHeadersAndFencesAcrossReopen(t *testing.T) {
-	archive := t.TempDir()
+	imported := t.TempDir()
 	relative := strings.Repeat(strings.Repeat("a", 200)+"/", 15) + "evidence"
-	file := filepath.Join(archive, relative)
+	file := filepath.Join(imported, relative)
 	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
 		t.Fatal(err)
 	}
-	evidence := strings.Repeat("`", harness.RetrievalMaxBytes)
+	evidence := strings.Repeat("`", archive.MaxBytes)
 	if err := os.WriteFile(file, []byte(evidence), 0600); err != nil {
 		t.Fatal(err)
 	}
-	q, err := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + relative, Reason: "verify original bytes", Limit: harness.RetrievalMaxBytes})
+	q, err := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + relative, Reason: "verify original bytes", Limit: archive.MaxBytes})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(q)), execReply("canti:retrieve "+string(q)), returnReply("done"))
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 128 << 10
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	ctx := f.bounded()
 	for {
 		s, err := f.fresh().Step(ctx, runID)
@@ -205,9 +206,9 @@ func TestByteOnlyWindowTriggerPersistsHandoverAcrossReopen(t *testing.T) {
 		requested bool
 	}{{"threshold reached", 4096, true}, {"below threshold", 16384, false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			archive := t.TempDir()
+			imported := t.TempDir()
 			evidence := "BYTE_WINDOW_ORIGINAL_EVIDENCE:" + strings.Repeat("x", 5000)
-			if err := os.WriteFile(filepath.Join(archive, "evidence"), []byte(evidence), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(evidence), 0600); err != nil {
 				t.Fatal(err)
 			}
 			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover original evidence","limit":8192}`)}
@@ -216,7 +217,7 @@ func TestByteOnlyWindowTriggerPersistsHandoverAcrossReopen(t *testing.T) {
 			}
 			replies = append(replies, returnReply("done"))
 			f := newFixture(t, limits, harness.Budget{}, replies...)
-			f.cfg.Reader = &harness.Reader{Imports: archive}
+			f.cfg.Reader = &archive.Reader{Imports: imported}
 			f.cfg.WindowBytes = tc.threshold
 			ctx := f.bounded()
 			for {
@@ -265,23 +266,23 @@ func TestRetrievalRenderedSourceOverheadDoesNotHideNewestObservation(t *testing.
 }
 
 func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
-	archive := t.TempDir()
+	imported := t.TempDir()
 	relative := strings.Repeat(strings.Repeat("a", 100)+"/", 20) + "evidence"
-	file := filepath.Join(archive, relative)
+	file := filepath.Join(imported, relative)
 	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(file, []byte(strings.Repeat("x", 10000)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	query, err := json.Marshal(harness.RetrievalQuery{
+	query, err := json.Marshal(archive.RetrievalQuery{
 		Operation: "search", Path: "/canti/imports/" + relative, Reason: "recover earlier facts", Query: "x", Limit: 8192,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(query)), returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.WindowBytes = 48 << 10
 	ctx := f.bounded()
 	for {
@@ -318,7 +319,7 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 func TestContextFitNormalizesAsNewLoop(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{})
 	run := harness.Run{ID: runID, Goal: "Count the Go files."}
-	f.cfg.Reader = &harness.Reader{}
+	f.cfg.Reader = &archive.Reader{}
 	implicit, err := harness.ContextFit(f.cfg, run, limits)
 	if err != nil {
 		t.Fatal(err)

@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ func readRetrieval(ctx context.Context, f *os.File, size int64, limit int, resul
 	}
 	count := int64(limit)
 	if q.Operation == "search" {
-		count = retrievalScanBytes + int64(queryMatchBytes(q)) + utf8.UTFMax
+		count = scanBytes + int64(queryMatchBytes(q)) + utf8.UTFMax
 	}
 	count = min(count, size-q.Offset)
 	data := make([]byte, int(count))
@@ -49,7 +49,7 @@ func readRetrieval(ctx context.Context, f *os.File, size int64, limit int, resul
 }
 
 func searchRetrieval(data []byte, limit int, result *Retrieval) {
-	end := min(len(data), retrievalScanBytes)
+	end := min(len(data), scanBytes)
 	for end < len(data) && end > 0 && !utf8.RuneStart(data[end]) {
 		end--
 	}

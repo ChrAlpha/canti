@@ -1,17 +1,20 @@
 package harness
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func growthFixture(t *testing.T, groups, perGroup int, body, filename string) (*Loop, Frame, []string) {
 	t.Helper()
-	r := &Reader{Imports: t.TempDir()}
+	r := &archive.Reader{Imports: t.TempDir()}
 	limits := DefaultPromptLimits()
 	limits.Total = 256 << 10
 	l := &Loop{cfg: LoopConfig{Reader: r, Limits: limits, WindowSteps: 16}}
@@ -19,8 +22,8 @@ func growthFixture(t *testing.T, groups, perGroup int, body, filename string) (*
 	f.ImportsEnabled, f.Step = true, groups+1
 	var files []string
 	for group := 0; group < groups; group++ {
-		q := RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "x", Reason: "recover original evidence"}
-		result := &Retrieval{Query: q}
+		q := archive.RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "x", Reason: "recover original evidence"}
+		result := &archive.Retrieval{Query: q}
 		for item := 0; item < perGroup; item++ {
 			name := fmt.Sprintf("source-%03d-%s", len(files), filename)
 			file := filepath.Join(r.Imports, name)
@@ -28,10 +31,10 @@ func growthFixture(t *testing.T, groups, perGroup int, body, filename string) (*
 				t.Fatal(err)
 			}
 			files = append(files, file)
-			result.Sources = append(result.Sources, sourceRange("/canti/imports/"+name, 0, []byte(body)))
+			result.Sources = append(result.Sources, archive.SourceRange{Path: "/canti/imports/" + name, Length: len(body), SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(body)))})
 		}
 		encoded, _ := json.Marshal(result.Sources)
-		if len(encoded) > RetrievalMaxBytes || perGroup*len(body) > RetrievalMaxBytes {
+		if len(encoded) > archive.MaxBytes || perGroup*len(body) > archive.MaxBytes {
 			t.Fatal("fixture exceeds legal retrieval source budgets")
 		}
 		f.Steps = append(f.Steps, StepRecord{Step: group + 1, Command: `canti:retrieve {"operation":"search","path":"/canti/imports","query":"x","reason":"recover original evidence"}`,
@@ -89,7 +92,7 @@ func TestRetrievalGrowthBoundsFailureAndRestoration(t *testing.T) {
 				body = "x\n"
 			}
 			if scenario == "maximum-source-restoration" {
-				body, count = strings.Repeat("`", RetrievalMaxBytes), 1
+				body, count = strings.Repeat("`", archive.MaxBytes), 1
 			}
 			l, f, files := growthFixture(t, 2, count, body, filename)
 			if scenario == "backtick-root-error" {

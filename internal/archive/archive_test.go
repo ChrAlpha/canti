@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -35,7 +35,7 @@ func TestRetrievalReadContinuationAndNoBody(t *testing.T) {
 	var got strings.Builder
 	for {
 		result := retrieveOK(t, r, q)
-		if len(result.Sources) != 1 || result.Sources[0].Length > RetrievalDefaultBytes {
+		if len(result.Sources) != 1 || result.Sources[0].Length > DefaultBytes {
 			t.Fatalf("unbounded read: %+v", result)
 		}
 		encoded, err := json.Marshal(result)
@@ -92,16 +92,16 @@ func TestRetrievalUnicodeAndInvalidText(t *testing.T) {
 }
 
 func TestRetrievalSearchScanAndOutputContinuation(t *testing.T) {
-	body := strings.Repeat("x", retrievalScanBytes-2) + "needle" + strings.Repeat("y", retrievalScanBytes) + "needle"
+	body := strings.Repeat("x", scanBytes-2) + "needle" + strings.Repeat("y", scanBytes) + "needle"
 	r, name := retrievalFixture(t, body)
 	q := RetrievalQuery{Operation: "search", Path: name, Reason: "locate earlier decision", Query: "needle", Limit: 6}
 	first := retrieveOK(t, r, q)
-	if len(first.Sources) != 1 || first.Sources[0].Offset != retrievalScanBytes-2 || !first.More {
+	if len(first.Sources) != 1 || first.Sources[0].Offset != scanBytes-2 || !first.More {
 		t.Fatalf("missed scan boundary match: %+v", first)
 	}
 	q.Offset = first.NextOffset
 	second := retrieveOK(t, r, q)
-	if len(second.Sources) != 0 || !second.More || second.NextOffset != q.Offset+retrievalScanBytes {
+	if len(second.Sources) != 0 || !second.More || second.NextOffset != q.Offset+scanBytes {
 		t.Fatalf("empty bounded scan must continue: %+v", second)
 	}
 	q.Offset = second.NextOffset
@@ -116,12 +116,12 @@ func TestRetrievalSearchScanAndOutputContinuation(t *testing.T) {
 		}
 	}
 	r, name = retrievalFixture(t, strings.Repeat("a", 10000))
-	result := retrieveOK(t, r, RetrievalQuery{Operation: "search", Path: name, Reason: "many hits", Query: "a", Limit: RetrievalMaxBytes})
+	result := retrieveOK(t, r, RetrievalQuery{Operation: "search", Path: name, Reason: "many hits", Query: "a", Limit: MaxBytes})
 	total := 0
 	for _, source := range result.Sources {
 		total += source.Length
 	}
-	if total > RetrievalMaxBytes || len(result.Sources) > 32 || !result.More || result.NextOffset == 0 {
+	if total > MaxBytes || len(result.Sources) > 32 || !result.More || result.NextOffset == 0 {
 		t.Fatalf("unbounded search: %d %+v", total, result)
 	}
 }
@@ -160,10 +160,10 @@ func TestRetrievalRejectsInvalidQueriesAndPaths(t *testing.T) {
 		func(q *RetrievalQuery) { q.Offset = -1 },
 		func(q *RetrievalQuery) { q.Offset = 100 },
 		func(q *RetrievalQuery) { q.Limit = -1 },
-		func(q *RetrievalQuery) { q.Limit = RetrievalMaxBytes + 1 },
+		func(q *RetrievalQuery) { q.Limit = MaxBytes + 1 },
 		func(q *RetrievalQuery) { q.Operation = "execute" },
 		func(q *RetrievalQuery) { q.Operation = "search" },
-		func(q *RetrievalQuery) { q.Operation, q.Query = "search", strings.Repeat("x", RetrievalMaxBytes+1) },
+		func(q *RetrievalQuery) { q.Operation, q.Query = "search", strings.Repeat("x", MaxBytes+1) },
 		func(q *RetrievalQuery) { q.Path = "/etc/passwd" },
 		func(q *RetrievalQuery) { q.Path = "/canti/imports/../outside" },
 		func(q *RetrievalQuery) { q.Path = "/canti/imports/.env" },

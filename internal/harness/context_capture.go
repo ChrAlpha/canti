@@ -1,5 +1,7 @@
 package harness
 
+import "github.com/ChrAlpha/canti/internal/archive"
+
 type ContextCapture struct {
 	Bytes             ContextBytes
 	Session           []ContextSessionSource `json:",omitempty"`
@@ -29,8 +31,8 @@ type ContextSessionSource struct {
 
 type ContextRetrieval struct {
 	Step       int
-	Operation  string          `json:",omitempty"`
-	Query      *RetrievalQuery `json:",omitempty"` // Legacy frozen captures only.
+	Operation  string                  `json:",omitempty"`
+	Query      *archive.RetrievalQuery `json:",omitempty"` // Legacy frozen captures only.
 	More       bool
 	Incomplete bool
 	Error      string `json:",omitempty"`
@@ -51,7 +53,7 @@ func (r ContextRetrieval) OperationName() string {
 
 type ContextSource struct {
 	Step      int
-	Source    SourceRange
+	Source    archive.SourceRange
 	Available bool
 	Error     string `json:",omitempty"`
 }

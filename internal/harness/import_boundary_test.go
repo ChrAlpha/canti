@@ -72,7 +72,8 @@ func TestPackagesKeepTheirImportBoundaries(t *testing.T) {
 		want []string
 	}{
 		{module + "/core", nil},
-		{module + "/internal/harness", []string{module + "/core"}},
+		{module + "/internal/archive", nil},
+		{module + "/internal/harness", []string{module + "/core", module + "/internal/archive"}},
 	} {
 		if internal, external := dependencies(t, tc.path); !slices.Equal(internal, tc.want) || external != nil {
 			t.Errorf("%s depends on module packages %v and third-party packages %v, want only the standard library and %v", tc.path, internal, external, tc.want)

@@ -1,6 +1,9 @@
 package harness
 
-import "github.com/ChrAlpha/canti/core"
+import (
+	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
+)
 
 // ArtifactRef points to output stored outside the bounded observation
 // preview. Path is relative to the executor's artifact root. Detail explains
@@ -19,6 +22,6 @@ type Observation struct {
 	ExitCode  *int
 	Preview   string
 	Output    ArtifactRef
-	Retrieval *Retrieval `json:",omitempty"`
-	Handover  *Handover  `json:",omitempty"`
+	Retrieval *archive.Retrieval `json:",omitempty"`
+	Handover  *Handover          `json:",omitempty"`
 }

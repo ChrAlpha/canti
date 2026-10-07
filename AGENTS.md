@@ -24,6 +24,10 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   adapters are `sqlite`, `docker`, and `anthropic`; storage, execution, and
   provider guarantees require the integration evidence recorded in
   `docs/v1-acceptance.md`.
+- `internal/archive/` owns read-only access to the archive that jobs see:
+  path safety, the retrieval operations, and their continuations. It
+  imports only the standard library and knows no action protocol; the
+  harness supplies what discovery skips.
 - `cmd/canti/` is thin CLI wiring. Keep reusable behavior in the Go packages.
 - Keep one module. Add interfaces at external boundaries; start other behavior
   with concrete types. No plugin registry, generic workflow engine, or Memoh

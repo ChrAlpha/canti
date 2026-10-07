@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestRetrievalTermsCorpusExperiment(t *testing.T) {
 			t.Fatalf("experiment exceeds flat directory budget: %v", err)
 		}
 		found := map[string][]SourceRange{}
-		remaining := retrievalScanBytes
+		remaining := scanBytes
 		for _, name := range names {
 			file := path.Join(tc.Path, name)
 			f, err := r.open(file)

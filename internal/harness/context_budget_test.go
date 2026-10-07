@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func budgetFrame() Frame {
@@ -66,15 +67,15 @@ func TestContextStepAndTailBounds(t *testing.T) {
 		}}
 		switch i % 4 {
 		case 1:
-			s.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32),
+			s.Observation.Retrieval = &archive.Retrieval{Sources: make([]archive.SourceRange, 32),
 				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: pick()}
 		case 2:
-			entries := []string{strings.Repeat("`", RetrievalMaxBytes-4)}
+			entries := []string{strings.Repeat("`", archive.MaxBytes-4)}
 			encoded, _ := json.Marshal(entries)
-			if len(encoded) != RetrievalMaxBytes {
+			if len(encoded) != archive.MaxBytes {
 				t.Fatal("invalid test entry budget")
 			}
-			s.Observation.Retrieval = &Retrieval{Query: RetrievalQuery{Operation: "list"},
+			s.Observation.Retrieval = &archive.Retrieval{Query: archive.RetrievalQuery{Operation: "list"},
 				Entries: entries, NextOffset: math.MaxInt64, More: true}
 		case 3:
 			s.Observation.Handover = &Handover{}
@@ -119,7 +120,7 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 		next.Step++
 	}
 	next.Command, next.Observation.Preview, next.Purpose = strings.Repeat("x", 40000), strings.Repeat("`", 40000), strings.Repeat("\n", 40000)
-	next.Observation.Retrieval = &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64,
+	next.Observation.Retrieval = &archive.Retrieval{Sources: make([]archive.SourceRange, 32), NextOffset: math.MaxInt64,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
 	f.Steps = append(f.Steps, next)
 	f.Retrieved = map[int]string{next.Step: strings.Repeat("x", retrievalExpansionReserve()-len("Retrieved original evidence:\n")-9)}
@@ -176,16 +177,16 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 			next.Step++
 		}
 		path, sum := "/canti/runs/run-1/steps/00000002/preview", strings.Repeat("a", 64)
-		query := RetrievalQuery{Operation: "read", Path: path, Reason: "check earlier evidence", Limit: RetrievalMaxBytes}
-		read := Retrieval{Query: query, Sources: []SourceRange{{Path: path, Length: RetrievalMaxBytes, SHA256: sum}},
-			NextOffset: RetrievalMaxBytes, More: true}
+		query := archive.RetrievalQuery{Operation: "read", Path: path, Reason: "check earlier evidence", Limit: archive.MaxBytes}
+		read := archive.Retrieval{Query: query, Sources: []archive.SourceRange{{Path: path, Length: archive.MaxBytes, SHA256: sum}},
+			NextOffset: archive.MaxBytes, More: true}
 		command, _ := json.Marshal(query)
 		body, _ := json.Marshal(read)
 		next.Command = RetrievePrefix + string(command)
 		next.Purpose = strings.Repeat("x", 40000)
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: string(body), Retrieval: &read}
 		f.Steps = append(f.Steps, next)
-		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", RetrievalMaxBytes) + "\n"}
+		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", archive.MaxBytes) + "\n"}
 		next.Step++
 		payload := `{"` + strings.Repeat(`\u0060`, 1352) + `":1}`
 		var h Handover
@@ -217,7 +218,7 @@ func TestContextFitRequiresTheLargestHandoverWindow(t *testing.T) {
 	session := budgetFrame()
 	session.SessionContext = "Run run-0 (session sequence 1; source /canti/runs/run-0/goal and result; returned):\n" + strings.Repeat("dialogue ", 900)
 	for name, f := range map[string]Frame{"default": budgetFrame(), "session": session} {
-		for _, handover := range []int{1, 2048, RetrievalMaxBytes} {
+		for _, handover := range []int{1, 2048, archive.MaxBytes} {
 			for _, imports := range []bool{false, true} {
 				f.HandoverBytes, f.ImportsEnabled = handover, imports
 				l := DefaultPromptLimits()
@@ -288,12 +289,25 @@ func TestContextReservesCoverPurposeAtTheLimit(t *testing.T) {
 		strings.Repeat("\xff", l.Purpose+1), strings.Repeat("日", 1<<20)} {
 		s := StepRecord{Step: math.MaxInt, Command: strings.Repeat("x", 40000), Purpose: purpose, Resolved: true, Observation: Observation{
 			Execution: core.ExecutionFailedToStart, ExitCode: &exit, Preview: strings.Repeat("x", 40000),
-			Retrieval: &Retrieval{Sources: make([]SourceRange, 32), NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024),
-				Error: strings.Repeat("\x00", 40000), Incomplete: true, SkippedCount: 3 * retrievalMaxEntries, Skipped: []DiscoverySkip{
-					{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}, {Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}}},
+			Retrieval: &archive.Retrieval{Sources: make([]archive.SourceRange, 32), NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024),
+				Error: strings.Repeat("\x00", 40000), Incomplete: true, SkippedCount: 3 * archive.MaxEntries, Skipped: []archive.Skip{
+					{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"}, {Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"}}},
 		}}
 		if actual, bound := len(f.step(s, l)), f.stepShellBytes(l); actual > bound {
 			t.Fatalf("purpose of %d bytes: step %d exceeds reserve %d", len(purpose), actual, bound)
 		}
+	}
+}
+
+func TestDiscoveryCoverageFitsStepReserve(t *testing.T) {
+	frame, limits := budgetFrame(), DefaultPromptLimits()
+	exit := math.MinInt
+	step := StepRecord{Step: math.MaxInt, Command: strings.Repeat("`", 40000), Resolved: true,
+		Observation: Observation{Execution: "failed_to_start", ExitCode: &exit, Preview: strings.Repeat("`", 40000),
+			Retrieval: &archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/run/steps", Query: "needle", Reason: "recover"}, Sources: make([]archive.SourceRange, 32), Incomplete: true,
+				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
+				SkippedCount: 3 * archive.MaxEntries, Skipped: []archive.Skip{{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"}, {Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"}}}}}
+	if actual, bound := len(frame.step(step, limits)), frame.stepShellBytes(limits); actual > bound {
+		t.Fatalf("coverage shell %d exceeds %d", actual, bound)
 	}
 }

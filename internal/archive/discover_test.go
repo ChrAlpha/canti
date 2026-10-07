@@ -1,11 +1,10 @@
-package harness
+package archive
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +13,7 @@ import (
 
 func discoveryFixture(t *testing.T) Reader {
 	t.Helper()
-	r := Reader{History: t.TempDir(), Artifacts: t.TempDir()}
+	r := Reader{History: t.TempDir(), Artifacts: t.TempDir(), Excluded: []string{"canti:retrieve ", "canti:handover ", "# canti:discovery"}}
 	if err := os.MkdirAll(filepath.Join(r.History, "run", "steps"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +156,7 @@ func TestDiscoveryFrozenCursorAndBudgets(t *testing.T) {
 			}
 		}
 		refs, _ := json.Marshal(result.Sources)
-		if bytes > q.Limit || len(refs) > RetrievalMaxBytes || len(result.Sources) > 32 {
+		if bytes > q.Limit || len(refs) > MaxBytes || len(result.Sources) > 32 {
 			t.Fatalf("exceeded source or reference bounds: %d %d %+v", bytes, len(refs), result)
 		}
 	}
@@ -291,11 +290,6 @@ func TestDiscoverySkipsNonTextSourcesAcrossPages(t *testing.T) {
 			if err := json.Unmarshal(encoded, &persisted); err != nil || persisted.SkippedCount != 2 || len(persisted.Skipped) != 2 {
 				t.Fatalf("lost durable gap: %+v %v", persisted, err)
 			}
-			frame, limits := budgetFrame(), DefaultPromptLimits()
-			rendered := frame.step(StepRecord{Step: 1, Observation: Observation{Retrieval: &persisted}}, limits)
-			if !strings.Contains(rendered, `"skipped_count":2`) || !strings.Contains(rendered, `"field":"preview"`) || !strings.Contains(rendered, "candidate ranges") {
-				t.Fatalf("gap not rendered: %s", rendered)
-			}
 		})
 	}
 }
@@ -405,12 +399,12 @@ func TestDiscoveryRejectsMalformedCursorAndMissingSteps(t *testing.T) {
 	for label, mutate := range map[string]func(map[string]any){
 		"false_incomplete": func(c map[string]any) {
 			c["step"], c["field"], c["skipped_count"] = 1, 0, 1
-			c["skipped"] = []DiscoverySkip{{Step: 2, Field: "preview", Reason: "nul"}}
+			c["skipped"] = []Skip{{Step: 2, Field: "preview", Reason: "nul"}}
 			c["incomplete"] = false
 		},
 		"missing_sample": func(c map[string]any) {
 			c["step"], c["field"], c["skipped_count"] = 1, 0, 2
-			c["skipped"] = []DiscoverySkip{{Step: 2, Field: "preview", Reason: "nul"}}
+			c["skipped"] = []Skip{{Step: 2, Field: "preview", Reason: "nul"}}
 			c["incomplete"] = true
 		},
 	} {
@@ -472,24 +466,6 @@ func TestDiscoveryNoMatchRetainsIncompleteCoverageAcrossPages(t *testing.T) {
 			if last.More || !last.Incomplete || len(last.Sources) != 0 {
 				t.Fatalf("terminal cursor lost earlier output gap: %+v", last)
 			}
-			frame, limits := budgetFrame(), DefaultPromptLimits()
-			step := StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: &last}}
-			if rendered := frame.step(step, limits); !strings.Contains(rendered, `"incomplete":true`) || !strings.Contains(rendered, `"more":false`) {
-				t.Fatalf("coverage not delivered: %s", rendered)
-			}
 		})
-	}
-}
-
-func TestDiscoveryCoverageFitsStepReserve(t *testing.T) {
-	frame, limits := budgetFrame(), DefaultPromptLimits()
-	exit := math.MinInt
-	step := StepRecord{Step: math.MaxInt, Command: strings.Repeat("`", 40000), Resolved: true,
-		Observation: Observation{Execution: "failed_to_start", ExitCode: &exit, Preview: strings.Repeat("`", 40000),
-			Retrieval: &Retrieval{Query: discoveryQuery(), Sources: make([]SourceRange, 32), Incomplete: true,
-				NextOffset: math.MaxInt64, NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
-				SkippedCount: 3 * retrievalMaxEntries, Skipped: []DiscoverySkip{{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}, {Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"}}}}}
-	if actual, bound := len(frame.step(step, limits)), frame.stepShellBytes(limits); actual > bound {
-		t.Fatalf("coverage shell %d exceeds %d", actual, bound)
 	}
 }

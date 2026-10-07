@@ -1,14 +1,14 @@
-package harness
+package archive
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,27 +18,28 @@ import (
 const discoveryScanBytes = 8 << 20
 
 type discoveryCursor struct {
-	Binding      string          `json:"binding"`
-	Through      int             `json:"through"`
-	Step         int             `json:"step"`
-	Field        int             `json:"field"`
-	Offset       int64           `json:"offset"`
-	Incomplete   bool            `json:"incomplete,omitempty"`
-	SkippedCount int             `json:"skipped_count,omitempty"`
-	Skipped      []DiscoverySkip `json:"skipped,omitempty"`
+	Binding      string `json:"binding"`
+	Through      int    `json:"through"`
+	Step         int    `json:"step"`
+	Field        int    `json:"field"`
+	Offset       int64  `json:"offset"`
+	Incomplete   bool   `json:"incomplete,omitempty"`
+	SkippedCount int    `json:"skipped_count,omitempty"`
+	Skipped      []Skip `json:"skipped,omitempty"`
 }
 
 func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *Retrieval) error {
 	q := result.Query
-	parts := strings.Split(q.Path, "/")
-	if len(parts) != 5 || parts[1] != "canti" || parts[2] != "runs" || parts[3] == "" || parts[4] != "steps" || q.Offset != 0 {
+	run, ok := strings.CutPrefix(q.Path, RunsRoot+"/")
+	run, ok2 := strings.CutSuffix(run, "/steps")
+	if !ok || !ok2 || run == "" || strings.Contains(run, "/") || q.Offset != 0 {
 		return errors.New("discover requires /canti/runs/<run>/steps and uses cursor, not offset")
 	}
-	entries, err := dir.ReadDir(retrievalMaxEntries + 1)
+	entries, err := dir.ReadDir(MaxEntries + 1)
 	if err != nil && err != io.EOF {
 		return err
 	}
-	if len(entries) > retrievalMaxEntries {
+	if len(entries) > MaxEntries {
 		return errors.New("discover exceeds 32768 step directories")
 	}
 	names := make([]string, len(entries))
@@ -57,9 +58,8 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 	bound, _ := json.Marshal([]any{"discover", q.Path, q.Query, q.IgnoreCase})
 	cursor := discoveryCursor{Binding: digest(bound), Through: len(names), Step: len(names)}
 	if q.Cursor != "" {
-		encoded, err := base64.RawURLEncoding.DecodeString(q.Cursor)
 		cursor = discoveryCursor{}
-		if err != nil || decodeAction(string(encoded), &cursor) != nil || cursor.Binding != digest(bound) ||
+		if decodeCursor(q.Cursor, &cursor) != nil || cursor.Binding != digest(bound) ||
 			cursor.Through < 1 || cursor.Through > len(names) || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
 			cursor.SkippedCount < 0 || cursor.SkippedCount > 3*(cursor.Through-cursor.Step)+cursor.Field ||
 			cursor.SkippedCount > 0 && !cursor.Incomplete || len(cursor.Skipped) != min(cursor.SkippedCount, 2) {
@@ -73,14 +73,14 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		}
 	}
 	result.Incomplete = cursor.Incomplete
-	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]DiscoverySkip(nil), cursor.Skipped...)
-	remaining, references := discoveryScanBytes, RetrievalMaxBytes-2
+	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]Skip(nil), cursor.Skipped...)
+	remaining, references := discoveryScanBytes, MaxBytes-2
 	matchBytes := queryMatchBytes(q)
 	for examined := 0; cursor.Step > 0 && examined < 256; examined++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if remaining < RetrievalMaxBytes+65+matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
+		if remaining < MaxBytes+65+matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
 			break
 		}
 		stepPath := path.Join(q.Path, fmt.Sprintf("%08d", cursor.Step))
@@ -89,7 +89,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 			return fmt.Errorf("discover command %d: %w", cursor.Step, err)
 		}
 		remaining -= len(command)
-		if strings.HasPrefix(string(command), RetrievePrefix) || strings.HasPrefix(string(command), HandoverPrefix) || strings.HasPrefix(string(command), "# canti:discovery") {
+		if slices.ContainsFunc(r.Excluded, func(prefix string) bool { return strings.HasPrefix(string(command), prefix) }) {
 			cursor.Step--
 			cursor.Field, cursor.Offset = 0, 0
 			continue
@@ -128,7 +128,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 					if partQuery.Path == stepPath+"/preview" {
 						field = "preview"
 					}
-					skip := DiscoverySkip{Step: cursor.Step, Field: field, Reason: reason}
+					skip := Skip{Step: cursor.Step, Field: field, Reason: reason}
 					result.SkippedCount++
 					if len(result.Skipped) == 0 {
 						result.Skipped = append(result.Skipped, skip)
@@ -181,9 +181,8 @@ func finishDiscovery(result *Retrieval, cursor discoveryCursor) error {
 	if cursor.Step > 0 {
 		cursor.Incomplete = result.Incomplete
 		cursor.SkippedCount, cursor.Skipped = result.SkippedCount, result.Skipped
-		encoded, _ := json.Marshal(cursor)
 		result.More = true
-		result.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+		result.NextCursor = encodeCursor(cursor)
 	}
 	return nil
 }
@@ -215,7 +214,7 @@ func (r Reader) discoveryData(ctx context.Context, name string, limit int, whole
 }
 
 func (r Reader) discoverySources(ctx context.Context, stepPath string, step int) ([]byte, []string, bool, error) {
-	meta, err := r.discoveryData(ctx, stepPath+"/meta", RetrievalMaxBytes, true)
+	meta, err := r.discoveryData(ctx, stepPath+"/meta", MaxBytes, true)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -237,7 +236,7 @@ func (r Reader) discoverySources(ctx context.Context, stepPath string, step int)
 	if output == "unavailable" {
 		return meta, append(files, stepPath+"/preview"), true, nil
 	}
-	if !strings.HasPrefix(output, "/canti/artifacts/") || path.Clean(output) != output {
+	if !strings.HasPrefix(output, ArtifactsRoot+"/") || path.Clean(output) != output {
 		return nil, nil, false, errors.New("original output must name an artifact path")
 	}
 	f, err := r.open(output)

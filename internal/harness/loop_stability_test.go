@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
@@ -138,7 +139,7 @@ func TestLoopLongStability(t *testing.T) {
 					sourceByStep[step] = source
 					nextSource++
 				}
-				query, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + source, Reason: "verify original source", Limit: 8192})
+				query, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + source, Reason: "verify original source", Limit: 8192})
 				answer = execReply("canti:retrieve " + string(query))
 			}
 			if attempts[step] == 0 && step%11 == 0 {

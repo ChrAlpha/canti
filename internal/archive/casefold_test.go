@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func BenchmarkRetrievalCasefold(b *testing.B) {
 		r := Reader{Imports: root}
 		for _, fold := range []bool{false, true} {
 			b.Run(fmt.Sprintf("%s/ignore_case=%t", tc.name, fold), func(b *testing.B) {
-				q := RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Query: tc.query, Reason: "benchmark", IgnoreCase: fold, Limit: RetrievalMaxBytes}
+				q := RetrievalQuery{Operation: "search", Path: "/canti/imports/evidence", Query: tc.query, Reason: "benchmark", IgnoreCase: fold, Limit: MaxBytes}
 				b.ReportAllocs()
 				for b.Loop() {
 					result, err := r.Retrieve(context.Background(), q)
@@ -119,7 +119,7 @@ func TestRetrievalCasefoldQuality(t *testing.T) {
 func casefoldQuery(t *testing.T, query string, limit int) RetrievalQuery {
 	t.Helper()
 	var q RetrievalQuery
-	err := decodeAction(fmt.Sprintf(`{"operation":"search","path":"/canti/imports/evidence","query":%q,"reason":"locate text with uncertain capitalization","ignore_case":true,"limit":%d}`, query, limit), &q)
+	err := json.Unmarshal(fmt.Appendf(nil, `{"operation":"search","path":"/canti/imports/evidence","query":%q,"reason":"locate text with uncertain capitalization","ignore_case":true,"limit":%d}`, query, limit), &q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRetrievalCasefoldValidationAndLiteralDefault(t *testing.T) {
 }
 
 func TestRetrievalCasefoldDirectoryCursorAndScanBoundary(t *testing.T) {
-	r, _ := retrievalFixture(t, strings.Repeat("-", retrievalScanBytes-2)+"K")
+	r, _ := retrievalFixture(t, strings.Repeat("-", scanBytes-2)+"K")
 	q := casefoldQuery(t, "k", 3)
 	q.Path = "/canti/imports"
 	first := retrieveOK(t, r, q)
@@ -211,11 +211,11 @@ func TestRetrievalCasefoldDirectoryCursorAndScanBoundary(t *testing.T) {
 	}
 	q.Cursor = first.NextCursor
 	second := retrieveOK(t, r, q)
-	if second.More || len(second.Sources) != 1 || second.Sources[0].Offset != retrievalScanBytes-2 || second.Sources[0].Length != 3 {
+	if second.More || len(second.Sources) != 1 || second.Sources[0].Offset != scanBytes-2 || second.Sources[0].Length != 3 {
 		t.Fatalf("folded match split by scan boundary: %+v", second)
 	}
 	var changed RetrievalQuery
-	if err := decodeAction(fmt.Sprintf(`{"operation":"search","path":"/canti/imports","query":"k","reason":"literal continuation","cursor":%q}`, q.Cursor), &changed); err != nil {
+	if err := json.Unmarshal(fmt.Appendf(nil, `{"operation":"search","path":"/canti/imports","query":"k","reason":"literal continuation","cursor":%q}`, q.Cursor), &changed); err != nil {
 		t.Fatal(err)
 	}
 	if result, err := r.Retrieve(context.Background(), changed); err != nil || result.Error == "" {

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -69,7 +70,7 @@ func sessionStressDecision(_ int, prompt string) (core.Decision, error) {
 		return core.Decision{Kind: core.Exec, Payload: "canti:handover " + string(h)}, nil
 	}
 	read := func(path string) (core.Decision, error) {
-		q, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: path, Reason: "verify original session evidence", Limit: 8192})
+		q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: path, Reason: "verify original session evidence", Limit: 8192})
 		return core.Decision{Kind: core.Exec, Payload: "canti:retrieve " + string(q)}, nil
 	}
 	root := "/canti/runs/" + runID

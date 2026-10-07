@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -35,7 +36,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	}
 	answer(1, 2, core.Exec, "printf evidence > proof.txt; cat proof.txt")
 	f.model.answer(2, 1, reply{status: 503, body: "temporary scripted failure"})
-	query, _ := json.Marshal(harness.RetrievalQuery{Operation: "read", Path: "/canti/runs/" + runID + "/steps/00000001/preview", Reason: "verify original evidence"})
+	query, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/runs/" + runID + "/steps/00000001/preview", Reason: "verify original evidence"})
 	answer(2, 2, core.Exec, "canti:retrieve "+string(query))
 	f.model.answer(3, 1, reply{text: "invalid decision"})
 	handover, _ := json.Marshal(harness.Handover{RunID: runID, FirstStep: 1, Text: "Verify proof.txt contains evidence and create done.txt; original evidence is step 1."})

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 )
@@ -48,8 +49,8 @@ func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 }
 
 func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
-	archive := t.TempDir()
-	file := filepath.Join(archive, "evidence")
+	imported := t.TempDir()
+	file := filepath.Join(imported, "evidence")
 	original := []byte("ORIGINAL_CAPTURE_EVIDENCE")
 	if err := os.WriteFile(file, original, 0600); err != nil {
 		t.Fatal(err)
@@ -62,7 +63,7 @@ func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
 			}
 		}},
 		reply{body: `{"wrong":"protocol"}`}, returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	ctx := f.bounded()
 	for i := 0; i < 40; i++ {
 		s, err := f.fresh().Step(ctx, runID)
@@ -145,16 +146,16 @@ func TestContextCaptureRecordsHandoverReasonsAndSkippedChecks(t *testing.T) {
 }
 
 func TestContextCaptureRecordsCapacityWithUnavailableSource(t *testing.T) {
-	archive := t.TempDir()
-	file := filepath.Join(archive, "evidence")
-	if err := os.WriteFile(file, []byte(strings.Repeat("x", harness.RetrievalMaxBytes)), 0600); err != nil {
+	imported := t.TempDir()
+	file := filepath.Join(imported, "evidence")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x", archive.MaxBytes)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"first","limit":8192}`),
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"second","limit":8192}`),
 		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Verify original references."}`), returnReply("done"))
-	f.cfg.Reader = &harness.Reader{Imports: archive}
+	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 96 << 10
 	ctx := f.bounded()

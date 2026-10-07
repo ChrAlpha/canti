@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"bytes"
@@ -17,11 +17,19 @@ import (
 	"unicode/utf8"
 )
 
+// RunsRoot, ArtifactsRoot, and ImportsRoot are where jobs and retrieval see
+// the step records of runs, the artifacts of jobs, and an imported history.
 const (
-	RetrievalDefaultBytes = 4096
-	RetrievalMaxBytes     = 8192
-	retrievalScanBytes    = 256 << 10
-	retrievalMaxEntries   = 32768
+	RunsRoot      = "/canti/runs"
+	ArtifactsRoot = "/canti/artifacts"
+	ImportsRoot   = "/canti/imports"
+)
+
+const (
+	DefaultBytes = 4096
+	MaxBytes     = 8192
+	scanBytes    = 256 << 10
+	MaxEntries   = 32768
 )
 
 type RetrievalQuery struct {
@@ -42,29 +50,34 @@ type SourceRange struct {
 	SHA256 string `json:"sha256"`
 }
 
-type DiscoverySkip struct {
+type Skip struct {
 	Step   int    `json:"step"`
 	Field  string `json:"field"`
 	Reason string `json:"reason"`
 }
 
 type Retrieval struct {
-	Query        RetrievalQuery  `json:"query"`
-	Sources      []SourceRange   `json:"sources,omitempty"`
-	Entries      []string        `json:"entries,omitempty"`
-	NextOffset   int64           `json:"next_offset"`
-	NextCursor   string          `json:"next_cursor,omitempty"`
-	More         bool            `json:"more"`
-	Incomplete   bool            `json:"incomplete,omitempty"`
-	SkippedCount int             `json:"skipped_count,omitempty"`
-	Skipped      []DiscoverySkip `json:"skipped,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	Query        RetrievalQuery `json:"query"`
+	Sources      []SourceRange  `json:"sources,omitempty"`
+	Entries      []string       `json:"entries,omitempty"`
+	NextOffset   int64          `json:"next_offset"`
+	NextCursor   string         `json:"next_cursor,omitempty"`
+	More         bool           `json:"more"`
+	Incomplete   bool           `json:"incomplete,omitempty"`
+	SkippedCount int            `json:"skipped_count,omitempty"`
+	Skipped      []Skip         `json:"skipped,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
 
+// Reader reads the archive under RunsRoot, ArtifactsRoot, and ImportsRoot
+// from the host directories History, Artifacts, and Imports; an empty one is
+// unavailable. Discovery skips the steps whose command begins with one of
+// Excluded, which must be shorter than 64 bytes.
 type Reader struct {
 	History   string
 	Artifacts string
 	Imports   string
+	Excluded  []string
 }
 
 func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, error) {
@@ -74,13 +87,13 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 	}
 	limit := q.Limit
 	if limit == 0 {
-		limit = RetrievalDefaultBytes
+		limit = DefaultBytes
 	}
 	if strings.TrimSpace(q.Reason) == "" || len(q.Reason) > 1024 || !utf8.ValidString(q.Reason) {
 		result.Error = "reason must be nonempty UTF-8 of at most 1024 bytes"
 		return result, nil
 	}
-	if q.Offset < 0 || limit < 1 || limit > RetrievalMaxBytes {
+	if q.Offset < 0 || limit < 1 || limit > MaxBytes {
 		result.Error = "offset must be nonnegative; limit must be 1..8192 bytes"
 		return result, nil
 	}
@@ -89,7 +102,7 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 		result.Error = "operation must be read, list, search, or discover"
 		return result, nil
 	}
-	if len(q.Query) > RetrievalMaxBytes || !utf8.ValidString(q.Query) || (!search && q.Query != "") {
+	if len(q.Query) > MaxBytes || !utf8.ValidString(q.Query) || (!search && q.Query != "") {
 		result.Error = "query must be UTF-8 of at most 8192 bytes and only applies to search or discover"
 		return result, nil
 	}
@@ -149,7 +162,7 @@ func (r Reader) Expand(ctx context.Context, source SourceRange) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if source.Offset < 0 || source.Length < 0 || source.Length > RetrievalMaxBytes {
+	if source.Offset < 0 || source.Length < 0 || source.Length > MaxBytes {
 		return "", errors.New("invalid source range")
 	}
 	f, err := r.open(source.Path)
@@ -190,7 +203,7 @@ func (r Reader) open(name string) (*os.File, error) {
 		}
 	}
 	for _, root := range []struct{ virtual, host string }{
-		{"/canti/runs", r.History}, {"/canti/artifacts", r.Artifacts}, {"/canti/imports", r.Imports},
+		{RunsRoot, r.History}, {ArtifactsRoot, r.Artifacts}, {ImportsRoot, r.Imports},
 	} {
 		if name != root.virtual && !strings.HasPrefix(name, root.virtual+"/") {
 			continue
@@ -278,7 +291,7 @@ func retrievalDirectory(ctx context.Context, f *os.File, filesOnly bool) ([]stri
 				names = append(names, entry.Name())
 			}
 		}
-		if scanned > retrievalMaxEntries {
+		if scanned > MaxEntries {
 			return nil, errors.New("directory exceeds 32768 entries; choose a narrower path")
 		}
 		if err == io.EOF {

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -21,7 +22,7 @@ func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 			r := harness.ContextRetrieval{Step: 7, Operation: operation, More: true, Incomplete: true}
 			if legacy {
 				r.Operation = ""
-				r.Query = &harness.RetrievalQuery{Operation: operation, Path: "/canti/imports/legacy", Reason: strings.Repeat("REASON", 1<<17)}
+				r.Query = &archive.RetrievalQuery{Operation: operation, Path: "/canti/imports/legacy", Reason: strings.Repeat("REASON", 1<<17)}
 			}
 			report := contextReport{RunID: "original-run", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Retrievals: []harness.ContextRetrieval{r}}}}
 			var out bytes.Buffer

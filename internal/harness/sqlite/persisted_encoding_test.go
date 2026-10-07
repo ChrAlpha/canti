@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
@@ -56,9 +57,9 @@ type commit struct {
 // plain run observes a retrieval and exhausts its single step.
 func persistedChains() (session, plain []commit) {
 	exit, zero := 2, 0
-	query := harness.RetrievalQuery{Operation: "search", Path: "/canti/runs/" + persistedRun + "/steps", Reason: "find the failing assertion",
+	query := archive.RetrievalQuery{Operation: "search", Path: "/canti/runs/" + persistedRun + "/steps", Reason: "find the failing assertion",
 		Offset: 128, Limit: 4096, Query: "FAIL", Cursor: "eyJiaW5kaW5nIjoiYSJ9", IgnoreCase: true}
-	source := harness.SourceRange{Path: "/canti/artifacts/" + persistedEffect + "/output", Offset: 512, Length: 64,
+	source := archive.SourceRange{Path: "/canti/artifacts/" + persistedEffect + "/output", Offset: 512, Length: 64,
 		SHA256: "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"}
 	full := &harness.Request{
 		Body: []byte(`{"model":"claude-opus-5","max_tokens":16000}`), Model: "claude-opus-5",
@@ -79,9 +80,9 @@ func persistedChains() (session, plain []commit) {
 	observed := &harness.Observation{
 		Execution: core.ExecutionExited, ExitCode: &exit, Preview: "--- FAIL: TestParse\n",
 		Output: harness.ArtifactRef{Path: persistedEffect + "/output", Bytes: 9000, Complete: true, Available: true, Detail: "kept 9000 of 9100 bytes"},
-		Retrieval: &harness.Retrieval{Query: query, Sources: []harness.SourceRange{source}, Entries: []string{"/canti/runs/run_prev/steps/00000001"},
+		Retrieval: &archive.Retrieval{Query: query, Sources: []archive.SourceRange{source}, Entries: []string{"/canti/runs/run_prev/steps/00000001"},
 			NextOffset: 8192, NextCursor: "eyJzdGVwIjoyfQ", More: true, Incomplete: true, SkippedCount: 3,
-			Skipped: []harness.DiscoverySkip{{Step: 1, Field: "artifact", Reason: "utf8"}}, Error: "directory contains a non-UTF-8 path"},
+			Skipped: []archive.Skip{{Step: 1, Field: "artifact", Reason: "utf8"}}, Error: "directory contains a non-UTF-8 path"},
 		Handover: &harness.Handover{RunID: persistedRun, FirstStep: 7, Text: "Rerun the parser tests."},
 	}
 	session = []commit{
@@ -125,7 +126,7 @@ func persistedChains() (session, plain []commit) {
 		{core.JobStarted{EffectID: plainEffect, JobID: plainJob}, harness.Facts{}},
 		{core.Observed{EffectID: plainEffect, Execution: core.ExecutionExited}, harness.Facts{Observation: &harness.Observation{
 			Execution: core.ExecutionExited, ExitCode: &zero,
-			Retrieval: &harness.Retrieval{Query: harness.RetrievalQuery{Operation: "read", Path: "/canti/runs", Reason: "check"}}}}},
+			Retrieval: &archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: "/canti/runs", Reason: "check"}}}}},
 	}
 	return session, plain
 }

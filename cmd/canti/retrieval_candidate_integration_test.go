@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -85,7 +86,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			t.Fatal("handover was not committed")
 		}
 	}
-	query := func(q harness.RetrievalQuery) harness.Retrieval {
+	query := func(q archive.RetrievalQuery) archive.Retrieval {
 		t.Helper()
 		body, _ := json.Marshal(q)
 		act("canti:retrieve " + string(body))
@@ -109,7 +110,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 	calls := 0
 	for window := 0; window < 2; window++ {
 		first := step
-		q := harness.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps",
+		q := archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps",
 			Reason: "find release candidates including amendments", Query: "Orchid", Limit: 1024}
 		found := map[string]bool{}
 		seenCursors := map[string]bool{}
@@ -162,7 +163,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			t.Fatal("fresh window already contained prior decisions")
 		}
 		for _, name := range []string{"draft", "approval"} {
-			query(harness.RetrievalQuery{Operation: "read", Path: paths[name], Reason: "inspect full decision and possible amendment", Limit: 4096})
+			query(archive.RetrievalQuery{Operation: "read", Path: paths[name], Reason: "inspect full decision and possible amendment", Limit: 4096})
 		}
 		checkStep := step
 		if window == 0 {

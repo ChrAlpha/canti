@@ -9,15 +9,16 @@ import (
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func retrievalExpansionReserve() int {
 	const sources = 32
 	// Directory source references fit 8192 JSON bytes; the rendered headers
 	// can add at most 16 bytes per source. File search has one repeated path.
-	return len("Retrieved original evidence:\n") + RetrievalMaxBytes + sources*16 +
-		RetrievalMaxBytes + sources*(len("Evidence unavailable: ")+512+truncationBytes()+1) +
-		2*(RetrievalMaxBytes+1) + 2
+	return len("Retrieved original evidence:\n") + archive.MaxBytes + sources*16 +
+		archive.MaxBytes + sources*(len("Evidence unavailable: ")+512+truncationBytes()+1) +
+		2*(archive.MaxBytes+1) + 2
 }
 
 func truncationBytes() int {
@@ -45,15 +46,15 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 	output := len(f.step(s, l)) + quotes + preview + truncationBytes() +
 		len(inline(f.ArtifactDir)) + 1 + refLimit + truncationBytes() -
 		len(path.Join(inline(f.ArtifactDir), s.Observation.Output.Path))
-	s.Observation.Retrieval = &Retrieval{NextOffset: math.MaxInt64, Incomplete: true,
+	s.Observation.Retrieval = &archive.Retrieval{NextOffset: math.MaxInt64, Incomplete: true,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
-		SkippedCount: 3 * retrievalMaxEntries, Skipped: []DiscoverySkip{
-			{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"},
-			{Step: retrievalMaxEntries, Field: "artifact", Reason: "utf8"},
+		SkippedCount: 3 * archive.MaxEntries, Skipped: []archive.Skip{
+			{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"},
+			{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"},
 		}}
 	retrieval := len(f.step(s, l)) + quotes + preview + truncationBytes() + 2*(len(strconv.Itoa(math.MaxInt))-1)
-	s.Observation.Retrieval = &Retrieval{Query: RetrievalQuery{Operation: "list"}, NextOffset: math.MaxInt64}
-	list := len(f.step(s, l)) + quotes + RetrievalMaxBytes - len("null") +
+	s.Observation.Retrieval = &archive.Retrieval{Query: archive.RetrievalQuery{Operation: "list"}, NextOffset: math.MaxInt64}
+	list := len(f.step(s, l)) + quotes + archive.MaxBytes - len("null") +
 		2*(len(strconv.Itoa(math.MaxInt))-1)
 	return max(output, retrieval, list) + purposeBytes(l)
 }
@@ -129,7 +130,7 @@ func (f Frame) workCapacity(l PromptLimits) (int, error) {
 
 // fit accounts for f as the first page of its run.
 func (f Frame) fit(l PromptLimits) (Fit, error) {
-	if f.HandoverBytes < 1 || f.HandoverBytes > RetrievalMaxBytes {
+	if f.HandoverBytes < 1 || f.HandoverBytes > archive.MaxBytes {
 		return Fit{}, errors.New("harness: handover bytes must be 1..8192")
 	}
 	page := l

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
@@ -136,7 +137,7 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 func contextConfig(c config, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
 		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Limits: promptLimits(c),
-		Reader: &harness.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+		Reader: &archive.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
 		DecisionTool: c.DecisionFormat == "tool",
 	}
 }

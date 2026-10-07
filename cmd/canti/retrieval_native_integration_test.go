@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -74,7 +75,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 	act("# canti:discovery\nprintf 'Orchid approved wait is 999 seconds.\\n'")
 	act("printf 'unrelated checkpoint\\n'")
 	handover(1)
-	q, _ := json.Marshal(harness.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps", Reason: "locate original approval", Query: "Orchid", Limit: 4096})
+	q, _ := json.Marshal(archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps", Reason: "locate original approval", Query: "Orchid", Limit: 4096})
 	for page := 0; page < 2; page++ {
 		discoveryStep := step
 		act("canti:retrieve " + string(q))

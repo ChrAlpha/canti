@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 const maxBackoff = 30 * time.Second
@@ -30,7 +31,7 @@ type LoopConfig struct {
 	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
 	Now            func() time.Time // clock of the wall-time and job budgets; time.Now
 	Logger         *slog.Logger     // discards
-	Reader         *Reader
+	Reader         *archive.Reader
 	DecisionTool   bool // Frame.DecisionTool
 	WindowSteps    int
 	WindowBytes    int
@@ -105,6 +106,11 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
+	if cfg.Reader != nil {
+		r := *cfg.Reader
+		r.Excluded = []string{RetrievePrefix, HandoverPrefix, DiscoveryMarker}
+		cfg.Reader = &r
 	}
 	return cfg, nil
 }

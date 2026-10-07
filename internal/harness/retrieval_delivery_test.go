@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
@@ -24,9 +25,9 @@ func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	r := Reader{Imports: root}
-	for _, limit := range []int{RetrievalDefaultBytes, RetrievalMaxBytes} {
-		q := RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "locate a step", Limit: limit}
+	r := archive.Reader{Imports: root}
+	for _, limit := range []int{archive.DefaultBytes, archive.MaxBytes} {
+		q := archive.RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "locate a step", Limit: limit}
 		var shown []string
 		for {
 			result := retrieveOK(t, r, q)
@@ -83,8 +84,8 @@ func TestAcceptedHandoverPreservedWithInnerFence(t *testing.T) {
 }
 
 func TestEmptyListEncodingFitsLimit(t *testing.T) {
-	r := Reader{Imports: t.TempDir()}
-	q := RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "check empty directory", Limit: 2}
+	r := archive.Reader{Imports: t.TempDir()}
+	q := archive.RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "check empty directory", Limit: 2}
 	result := retrieveOK(t, r, q)
 	encoded, err := json.Marshal(result.Entries)
 	if err != nil || string(encoded) != "[]" || result.More {
@@ -94,5 +95,25 @@ func TestEmptyListEncodingFitsLimit(t *testing.T) {
 	result, err = r.Retrieve(context.Background(), q)
 	if err != nil || result.Error == "" {
 		t.Fatalf("accepted a list limit below array framing: %+v, %v", result, err)
+	}
+}
+
+func retrieveOK(t *testing.T, r archive.Reader, q archive.RetrievalQuery) archive.Retrieval {
+	t.Helper()
+	result, err := r.Retrieve(t.Context(), q)
+	if err != nil || result.Error != "" {
+		t.Fatalf("Retrieve(%+v) = %+v, %v", q, result, err)
+	}
+	return result
+}
+
+func TestStepRendersDiscoveryCoverage(t *testing.T) {
+	r := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/run/steps", Query: "needle", Reason: "recover"},
+		Incomplete: true, SkippedCount: 2, Skipped: []archive.Skip{{Step: 257, Field: "artifact", Reason: "nul"}, {Step: 2, Field: "preview", Reason: "utf8"}}}
+	rendered := budgetFrame().step(StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: &r}}, DefaultPromptLimits())
+	for _, want := range []string{`"skipped_count":2`, `"field":"preview"`, "candidate ranges", `"incomplete":true`, `"more":false`} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("coverage lacks %s:\n%s", want, rendered)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -405,7 +405,7 @@ func qualitySynthetic() qualityCorpus {
 	add("no-approved-duration", "synthetic-control", "Orchid timeout", []string{"Orchid timeout planning discussion; no approved duration was recorded."}, map[int][]string{0: {"no approved duration was recorded."}})
 	add("case-sensitive", "synthetic-control", "HTTP", []string{"http lower case is a distinct identifier.", "HTTP deadline: 20 seconds."}, map[int][]string{1: {"20 seconds"}})
 	add("second-hit-right-context", "synthetic-adversarial", "checkpoint", []string{"checkpoint" + strings.Repeat("-", 100) + "checkpoint" + strings.Repeat("-", 40) + "approved answer: durable."}, map[int][]string{0: {"durable"}})
-	add("scan-boundary", "synthetic-control", "中文", []string{strings.Repeat("-", retrievalScanBytes-2) + "中文恢复已验证。"}, map[int][]string{0: {"恢复已验证"}})
+	add("scan-boundary", "synthetic-control", "中文", []string{strings.Repeat("-", scanBytes-2) + "中文恢复已验证。"}, map[int][]string{0: {"恢复已验证"}})
 	for _, answer := range []int{0, 99} {
 		bodies := make([]string, 100)
 		for i := range bodies {

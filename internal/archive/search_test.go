@@ -1,4 +1,4 @@
-package harness
+package archive
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func TestRetrievalDirectorySearchAcrossFiles(t *testing.T) {
 
 func TestRetrievalDirectorySearchAggregateScanBudget(t *testing.T) {
 	r := directoryFixture(t, map[string]string{
-		"a": strings.Repeat("x", retrievalScanBytes-10),
+		"a": strings.Repeat("x", scanBytes-10),
 		"b": "xxxxxxxneedle",
 	})
 	q := directoryQuery()
@@ -86,7 +86,7 @@ func TestRetrievalDirectorySearchAggregateScanBudget(t *testing.T) {
 
 func TestRetrievalDirectorySearchUnicodeBoundary(t *testing.T) {
 	r := directoryFixture(t, map[string]string{
-		"a": strings.Repeat("x", retrievalScanBytes-2) + "中文证据",
+		"a": strings.Repeat("x", scanBytes-2) + "中文证据",
 	})
 	q := directoryQuery()
 	q.Query = "中文"
@@ -185,12 +185,12 @@ func TestRetrievalDirectorySearchReferencesAndBytesBounded(t *testing.T) {
 	}
 	q := directoryQuery()
 	q.Path += "/" + filepath.ToSlash(rel)
-	q.Limit = RetrievalMaxBytes
+	q.Limit = MaxBytes
 	var found int
 	for attempts := 0; attempts < 10; attempts++ {
 		result := retrieveOK(t, r, q)
 		encoded, err := json.Marshal(result.Sources)
-		if err != nil || len(encoded) > RetrievalMaxBytes || len(result.Sources) > 32 {
+		if err != nil || len(encoded) > MaxBytes || len(result.Sources) > 32 {
 			t.Fatalf("reference presentation exceeded budget: %d %v", len(encoded), err)
 		}
 		total := 0

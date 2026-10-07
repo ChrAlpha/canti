@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 // PromptLimits bounds a prompt in bytes. Goal and Constraints cap the
@@ -230,13 +232,13 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	}
 	if r := o.Retrieval; r != nil {
 		status, _ := json.Marshal(struct {
-			NextOffset   int64           `json:"next_offset"`
-			NextCursor   string          `json:"next_cursor,omitempty"`
-			More         bool            `json:"more"`
-			Incomplete   bool            `json:"incomplete,omitempty"`
-			SkippedCount int             `json:"skipped_count,omitempty"`
-			Skipped      []DiscoverySkip `json:"skipped,omitempty"`
-			Error        string          `json:"error,omitempty"`
+			NextOffset   int64          `json:"next_offset"`
+			NextCursor   string         `json:"next_cursor,omitempty"`
+			More         bool           `json:"more"`
+			Incomplete   bool           `json:"incomplete,omitempty"`
+			SkippedCount int            `json:"skipped_count,omitempty"`
+			Skipped      []archive.Skip `json:"skipped,omitempty"`
+			Error        string         `json:"error,omitempty"`
 		}{r.NextOffset, r.NextCursor, r.More, r.Incomplete, r.SkippedCount, r.Skipped, clip(r.Error, 512)})
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}

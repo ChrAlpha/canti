@@ -9,8 +9,8 @@ import (
 )
 
 func TestContextConfigurationSurvivesResume(t *testing.T) {
-	archive := t.TempDir()
-	s := parseSpec(t, "-history-imports", archive, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
+	imported := t.TempDir()
+	s := parseSpec(t, "-history-imports", imported, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
 	s.config.Workspace = t.TempDir()
 	run, _, err := newRun("goal", "constraints", s, time.Now())
 	if err != nil {
@@ -20,7 +20,7 @@ func TestContextConfigurationSurvivesResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ContextVersion != contextVersion || c.HistoryImports != archive || c.WindowSteps != 3 || c.WindowBytes != 32768 || c.HandoverBytes != 1024 {
+	if c.ContextVersion != contextVersion || c.HistoryImports != imported || c.WindowSteps != 3 || c.WindowBytes != 32768 || c.HandoverBytes != 1024 {
 		t.Fatalf("config lost on resume: %#v", c)
 	}
 }

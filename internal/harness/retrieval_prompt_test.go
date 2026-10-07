@@ -6,17 +6,18 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 	for _, operation := range []string{"read", "search", "list"} {
 		t.Run(operation, func(t *testing.T) {
-			r := Retrieval{Query: RetrievalQuery{Operation: operation, Path: "/canti/runs/R/steps/00000001/preview", Reason: "verify approved timeout"},
+			r := archive.Retrieval{Query: archive.RetrievalQuery{Operation: operation, Path: "/canti/runs/R/steps/00000001/preview", Reason: "verify approved timeout"},
 				NextOffset: 321, NextCursor: "continuation-token", More: true}
 			if operation == "list" {
 				r.Entries = []string{"first", "second"}
 			} else {
-				r.Sources = []SourceRange{{Path: r.Query.Path, Offset: 123, Length: 30, SHA256: strings.Repeat("a", 64)}}
+				r.Sources = []archive.SourceRange{{Path: r.Query.Path, Offset: 123, Length: 30, SHA256: strings.Repeat("a", 64)}}
 			}
 			body, _ := json.Marshal(r)
 			query, _ := json.Marshal(r.Query)
@@ -50,7 +51,7 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 
 func TestRetrievalPromptKeepsFailureWithoutPreview(t *testing.T) {
 	f := testFrame()
-	r := &Retrieval{Error: "source unavailable: permission denied"}
+	r := &archive.Retrieval{Error: "source unavailable: permission denied"}
 	s := StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: r, Preview: "duplicate failure"}}
 	text := f.step(s, DefaultPromptLimits())
 	if !strings.Contains(text, r.Error) || strings.Contains(text, "duplicate failure") {
@@ -64,12 +65,12 @@ func TestRetrievalPromptKeepsFailureWithoutPreview(t *testing.T) {
 }
 
 func TestRetrievalPromptKeepsQueryWhenCommandIsClipped(t *testing.T) {
-	for _, query := range []RetrievalQuery{
+	for _, query := range []archive.RetrievalQuery{
 		{Operation: "search", Path: "/canti/runs/R/steps/00000001/preview", Query: strings.Repeat("x", 2500), Reason: "check the original scope"},
 		{Operation: "read", Path: "/canti/imports/" + strings.Repeat("segment/", 375) + "evidence", Reason: "check the original scope"},
 		{Operation: "search", Path: "/canti/imports/evidence", Query: strings.Repeat("`", 800), Reason: "check the original scope"},
 	} {
-		r := Retrieval{Query: query}
+		r := archive.Retrieval{Query: query}
 		body, _ := json.Marshal(r)
 		command, _ := json.Marshal(query)
 		s := StepRecord{Step: 1, Command: RetrievePrefix + string(command), Observation: Observation{Retrieval: &r, Preview: string(body)}}
