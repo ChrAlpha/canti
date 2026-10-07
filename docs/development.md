@@ -42,6 +42,8 @@ Cloning requires repository access while the repository is private.
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
 | `make ci-pty` | The tests listed in `PTY_TESTS`, which open a pseudo-terminal, alone in one test binary; needs Docker |
 | `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
+| `make lint` | The cognitive complexity limit of `.golangci.yml`, through a pinned golangci-lint fetched by `go run` |
+| `make commits BASE=main` | Build and vet, without and with the tags, every commit after `BASE` in a temporary worktree; `scripts/check-commits.sh BASE` takes a base whose name contains `$` |
 | `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
@@ -273,9 +275,15 @@ Keep large outputs, credentials, databases, and local task state outside Git.
 
 ## CI and delivery
 
-The CI workflow runs on pushes to `main` and pull requests in four parallel
-jobs. `check` runs `make fmt vet`, `make test-names`, `make ci-unit`, and a
-CLI version smoke test. `integration`, `long`, and `pty` each pull
+The CI workflow runs on pushes to `main` and pull requests in parallel jobs.
+`check` runs `make fmt vet`, `make test-names`, `make lint`, `make ci-unit`,
+and a CLI version smoke test. `make lint` runs golangci-lint's `gocognit` at
+a cognitive complexity of 30 over the production code, without and with the
+`integration,live` tags; `.golangci.yml` lists the only exceptions, core's
+`State.Next` and `State.Validate` and the chat input decoder. For a pull
+request, `commits` runs `scripts/check-commits.sh` with the base branch,
+which builds and vets every commit after it in a temporary worktree.
+`integration`, `long`, and `pty` each pull
 `alpine:3.23`, run `make ci-integration`, `make ci-long`, or `make ci-pty`,
 and fail if any container labelled `canti.effect` is left; together they run
 each test of `make integration` once. The Makefile lists the tests of the last

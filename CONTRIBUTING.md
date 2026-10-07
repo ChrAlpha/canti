@@ -33,8 +33,9 @@ dependencies should have a concrete purpose and a compatible license.
    tests must be deterministic. Harness tests should exercise affected commit,
    cancellation, unknown-result, and restart boundaries.
 3. Format changed Go files with `gofmt -w`. Run relevant tests during iteration,
-   then `make check`, `go test -count=1 -race ./...`, and `git diff --check` for delivery,
-   plus `make integration` for storage, execution, adapter, or CLI changes.
+   then `make check lint`, `go test -count=1 -race ./...`, `git diff --check`,
+   and `make commits BASE=main` for delivery, plus `make integration` for
+   storage, execution, adapter, or CLI changes.
 4. Inspect the diff and use a Conventional Commit subject such as
    `fix(core): reject duplicate decision fields`.
 5. Fill in the PR template with the problem, resulting behavior, commands and
