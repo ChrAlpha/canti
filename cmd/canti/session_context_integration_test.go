@@ -105,6 +105,14 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	if err != nil || !strings.Contains(string(meta), `"previous_run_id":"`+priorID+`"`) {
 		t.Fatalf("session navigation: %q, %v", meta, err)
 	}
+	var executed []entry
+	for _, e := range f.history("-run", runID) {
+		if !strings.HasPrefix(e.State.Decision.Payload, "canti:handover") {
+			executed = append(executed, e)
+		}
+	}
+	checkReleased(t, f, executed)
+
 	steps := "/canti/runs/" + runID + "/steps/"
 	if r := f.cli(nil, "run", "-once", "-session", "s", "-input", "third", "-goal", "Continue the session.", "-image", image, "-wall-time", "3m", "-job-timeout", "10s"); r.code != exitActive {
 		t.Fatalf("third session run: %+v", r)
@@ -131,15 +139,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	if report.code != exitOK || !strings.Contains(report.stdout, "Earlier dialogue: run "+runID+" sequence 2, returned, goal included true, latest handover step 4\n") {
 		t.Fatalf("the context report of the third run does not name the handover step it points to: %+v", report)
 	}
-	var executed []entry
-	for _, run := range []string{runID, f.status().Run.ID} {
-		for _, e := range f.history("-run", run) {
-			if !strings.HasPrefix(e.State.Decision.Payload, "canti:handover") {
-				executed = append(executed, e)
-			}
-		}
-	}
-	checkReleased(t, f, executed)
+	checkReleased(t, f, append(executed, f.history("-run", f.status().Run.ID)...))
 	t.Logf("SCRIPTED_SESSION context_limit=98304 previous_answer_bytes=%d windows=3 step3_transport_attempts=2 continued_from_handover_step=4; real CLI/SQLite/Docker, process-per-transition resume", len(priorAnswer))
 }
 
