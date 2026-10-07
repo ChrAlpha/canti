@@ -37,8 +37,12 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 ## Runtime invariants
 
 Retry, termination, and cancellation rules live in `core.State.Next`; change
-them there with a transition-table test. Before changing a harness boundary,
-specify its durable commit point, attached facts, and behavior after restart.
+them there with a transition-table test. The transitions a run can reach are
+recorded per semantics version in `core/testdata/semantics-v<N>.txt`, so a
+rule change fails until `core.SemanticsVersion` is bumped and its
+transitions are recorded with `-record-semantics`. Before changing a harness
+boundary, specify its durable commit point, attached facts, and behavior
+after restart.
 Model request bytes and provenance must be committed before sending; decisions
 and effects before binding; the bound job before starting; observations
 together with run progress in one `Transition`. Events carry the step,

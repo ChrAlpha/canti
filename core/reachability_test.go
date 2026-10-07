@@ -1,0 +1,162 @@
+package core_test
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/ChrAlpha/canti/core"
+)
+
+var recordSemantics = flag.Bool("record-semantics", false, "record the transitions of a semantics version that has none")
+
+// candidates returns every event a harness could report from s: the
+// identities s holds, a next attempt, each decision body, execution, and
+// reportable stop reason.
+func candidates(s core.State) []core.Event {
+	job := s.JobID
+	if job == "" {
+		job = "job-1"
+	}
+	out := []core.Event{
+		core.RequestFrozen{},
+		core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}, core.AttemptStarted{Step: s.Step, Attempt: s.Attempt + 1},
+		core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, core.ResponseIncomplete{Step: s.Step, Attempt: s.Attempt},
+		core.JobBound{EffectID: s.EffectID, JobID: job}, core.JobStarted{EffectID: s.EffectID, JobID: job},
+		core.OutcomeUnknown{EffectID: s.EffectID},
+	}
+	for _, body := range [][]byte{execBody, returnBody, invalidBody} {
+		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
+	}
+	for _, e := range []core.ExecutionState{core.ExecutionExited, core.ExecutionTimedOut, core.ExecutionCancelled, core.ExecutionFailedToStart, core.ExecutionUnknown} {
+		out = append(out, core.Observed{EffectID: s.EffectID, Execution: e}, core.Resolved{EffectID: s.EffectID, Execution: e})
+	}
+	for _, r := range []core.StopReason{core.StopCancelled, core.StopTimedOut, core.StopBudgetExhausted, core.StopUnrecoverable} {
+		out = append(out, core.StopRequested{Reason: r})
+	}
+	return out
+}
+
+func label(e core.Event) string {
+	switch e := e.(type) {
+	case core.ResponseLoaded:
+		switch string(e.Body) {
+		case string(execBody):
+			return "response_loaded(exec)"
+		case string(returnBody):
+			return "response_loaded(return)"
+		}
+		return "response_loaded(invalid)"
+	case core.Observed:
+		return "observed(" + string(e.Execution) + ")"
+	case core.Resolved:
+		return "resolved(" + string(e.Execution) + ")"
+	case core.StopRequested:
+		return "stop_requested(" + string(e.Reason) + ")"
+	}
+	return e.Kind()
+}
+
+// reachable explores every state Next reaches from a new run under limits,
+// following at most depth events, and returns the transitions it took.
+func reachable(t *testing.T, limits core.Limits, depth int) map[string]bool {
+	t.Helper()
+	start, err := core.NewState("run-1", limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[core.State]int{start: 0}
+	table := map[string]bool{}
+	for queue := []core.State{start}; len(queue) > 0; queue = queue[1:] {
+		s := queue[0]
+		if err := s.Validate(); err != nil {
+			t.Fatalf("limits %+v reach an invalid state %+v: %v", limits, s, err)
+		}
+		if seen[s] == depth {
+			continue
+		}
+		for _, e := range candidates(s) {
+			next, err := s.Next(e)
+			if err != nil {
+				if !errors.Is(err, core.ErrIllegalTransition) && !errors.Is(err, core.ErrInvalidEvent) {
+					t.Fatalf("Next(%+v, %+v) = %v", s, e, err)
+				}
+				if next != s {
+					t.Fatalf("Next(%+v, %+v) failed and changed the state to %+v", s, e, next)
+				}
+				continue
+			}
+			line := fmt.Sprintf("%s %s -> %s", s.Phase, label(e), next.Phase)
+			if next.Reason != "" {
+				line += " " + string(next.Reason)
+			}
+			table[line] = true
+			if _, ok := seen[next]; !ok {
+				seen[next] = seen[s] + 1
+				queue = append(queue, next)
+			}
+		}
+	}
+	return table
+}
+
+// TestReachableStatesAreValidAndPinTheirSemantics requires that every state
+// a run reaches from NewState under small and unlimited limits passes
+// Validate, that the explored legal pairs are exactly the transition table's,
+// and that the transitions are those recorded for SemanticsVersion: changing
+// any requires a new semantics version, recorded once with
+// -record-semantics.
+func TestReachableStatesAreValidAndPinTheirSemantics(t *testing.T) {
+	table := map[string]bool{}
+	for _, limits := range []core.Limits{{MaxSteps: 1, MaxAttempts: 1}, {MaxSteps: 2, MaxAttempts: 2}, {MaxSteps: 3, MaxAttempts: 3}, {MaxSteps: 0, MaxAttempts: 2}} {
+		for line := range reachable(t, limits, 40) {
+			table[line] = true
+		}
+	}
+	pairs := map[string]bool{}
+	for line := range table {
+		fields := strings.Fields(line)
+		pairs[fields[0]+" "+strings.Split(fields[1], "(")[0]] = true
+	}
+	want := map[string]bool{}
+	for _, tt := range legalTransitions() {
+		want[string(tt.from.Phase)+" "+tt.event.Kind()] = true
+	}
+	if len(want) != legalPairs || !reflect.DeepEqual(pairs, want) {
+		t.Errorf("explored pairs %d differ from the %d of the transition table:\n%v\n%v", len(pairs), len(want), sorted(pairs), sorted(want))
+	}
+	got := fmt.Sprintf("semantics version %d\n%s\n", core.SemanticsVersion, strings.Join(sorted(table), "\n"))
+	file := filepath.Join("testdata", fmt.Sprintf("semantics-v%d.txt", core.SemanticsVersion))
+	recorded, err := os.ReadFile(file)
+	switch {
+	case *recordSemantics && errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	case err != nil:
+		t.Fatalf("semantics version %d has no recorded transitions: %v", core.SemanticsVersion, err)
+	}
+	if got != string(recorded) {
+		t.Fatalf("the transitions are not those of semantics version %d; bump SemanticsVersion and record its transitions with -record-semantics.\ngot:\n%s", core.SemanticsVersion, got)
+	}
+}
+
+func sorted(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	slices.Sort(out)
+	return out
+}

@@ -1,0 +1,154 @@
+semantics version 3
+awaiting_observation observed(cancelled) -> idle
+awaiting_observation observed(cancelled) -> stopped steps_exhausted
+awaiting_observation observed(exited) -> idle
+awaiting_observation observed(exited) -> stopped steps_exhausted
+awaiting_observation observed(failed_to_start) -> idle
+awaiting_observation observed(failed_to_start) -> stopped steps_exhausted
+awaiting_observation observed(timed_out) -> idle
+awaiting_observation observed(timed_out) -> stopped steps_exhausted
+awaiting_observation outcome_unknown -> needs_resolution
+awaiting_observation stop_requested(budget_exhausted) -> cancelling budget_exhausted
+awaiting_observation stop_requested(cancelled) -> cancelling cancelled
+awaiting_observation stop_requested(timed_out) -> cancelling timed_out
+awaiting_observation stop_requested(unrecoverable) -> cancelling unrecoverable
+cancelling job_bound -> cancelling budget_exhausted
+cancelling job_bound -> cancelling cancelled
+cancelling job_bound -> cancelling timed_out
+cancelling job_bound -> cancelling unrecoverable
+cancelling observed(cancelled) -> stopped budget_exhausted
+cancelling observed(cancelled) -> stopped cancelled
+cancelling observed(cancelled) -> stopped timed_out
+cancelling observed(cancelled) -> stopped unrecoverable
+cancelling observed(exited) -> stopped budget_exhausted
+cancelling observed(exited) -> stopped cancelled
+cancelling observed(exited) -> stopped timed_out
+cancelling observed(exited) -> stopped unrecoverable
+cancelling observed(failed_to_start) -> stopped budget_exhausted
+cancelling observed(failed_to_start) -> stopped cancelled
+cancelling observed(failed_to_start) -> stopped timed_out
+cancelling observed(failed_to_start) -> stopped unrecoverable
+cancelling observed(timed_out) -> stopped budget_exhausted
+cancelling observed(timed_out) -> stopped cancelled
+cancelling observed(timed_out) -> stopped timed_out
+cancelling observed(timed_out) -> stopped unrecoverable
+cancelling outcome_unknown -> needs_resolution budget_exhausted
+cancelling outcome_unknown -> needs_resolution cancelled
+cancelling outcome_unknown -> needs_resolution timed_out
+cancelling outcome_unknown -> needs_resolution unrecoverable
+cancelling stop_requested(budget_exhausted) -> cancelling budget_exhausted
+cancelling stop_requested(budget_exhausted) -> cancelling cancelled
+cancelling stop_requested(budget_exhausted) -> cancelling timed_out
+cancelling stop_requested(budget_exhausted) -> cancelling unrecoverable
+cancelling stop_requested(cancelled) -> cancelling budget_exhausted
+cancelling stop_requested(cancelled) -> cancelling cancelled
+cancelling stop_requested(cancelled) -> cancelling timed_out
+cancelling stop_requested(cancelled) -> cancelling unrecoverable
+cancelling stop_requested(timed_out) -> cancelling budget_exhausted
+cancelling stop_requested(timed_out) -> cancelling cancelled
+cancelling stop_requested(timed_out) -> cancelling timed_out
+cancelling stop_requested(timed_out) -> cancelling unrecoverable
+cancelling stop_requested(unrecoverable) -> cancelling budget_exhausted
+cancelling stop_requested(unrecoverable) -> cancelling cancelled
+cancelling stop_requested(unrecoverable) -> cancelling timed_out
+cancelling stop_requested(unrecoverable) -> cancelling unrecoverable
+effect_saved job_bound -> job_bound
+effect_saved observed(failed_to_start) -> idle
+effect_saved observed(failed_to_start) -> stopped steps_exhausted
+effect_saved outcome_unknown -> needs_resolution
+effect_saved stop_requested(budget_exhausted) -> cancelling budget_exhausted
+effect_saved stop_requested(cancelled) -> cancelling cancelled
+effect_saved stop_requested(timed_out) -> cancelling timed_out
+effect_saved stop_requested(unrecoverable) -> cancelling unrecoverable
+idle request_frozen -> request_frozen
+idle stop_requested(budget_exhausted) -> stopped budget_exhausted
+idle stop_requested(cancelled) -> stopped cancelled
+idle stop_requested(timed_out) -> stopped timed_out
+idle stop_requested(unrecoverable) -> stopped unrecoverable
+job_bound job_started -> awaiting_observation
+job_bound observed(cancelled) -> idle
+job_bound observed(cancelled) -> stopped steps_exhausted
+job_bound observed(exited) -> idle
+job_bound observed(exited) -> stopped steps_exhausted
+job_bound observed(failed_to_start) -> idle
+job_bound observed(failed_to_start) -> stopped steps_exhausted
+job_bound observed(timed_out) -> idle
+job_bound observed(timed_out) -> stopped steps_exhausted
+job_bound outcome_unknown -> needs_resolution
+job_bound stop_requested(budget_exhausted) -> cancelling budget_exhausted
+job_bound stop_requested(cancelled) -> cancelling cancelled
+job_bound stop_requested(timed_out) -> cancelling timed_out
+job_bound stop_requested(unrecoverable) -> cancelling unrecoverable
+needs_resolution job_bound -> awaiting_observation
+needs_resolution job_bound -> cancelling budget_exhausted
+needs_resolution job_bound -> cancelling cancelled
+needs_resolution job_bound -> cancelling timed_out
+needs_resolution job_bound -> cancelling unrecoverable
+needs_resolution job_bound -> job_bound
+needs_resolution resolved(cancelled) -> idle
+needs_resolution resolved(cancelled) -> stopped budget_exhausted
+needs_resolution resolved(cancelled) -> stopped cancelled
+needs_resolution resolved(cancelled) -> stopped steps_exhausted
+needs_resolution resolved(cancelled) -> stopped timed_out
+needs_resolution resolved(cancelled) -> stopped unrecoverable
+needs_resolution resolved(exited) -> idle
+needs_resolution resolved(exited) -> stopped budget_exhausted
+needs_resolution resolved(exited) -> stopped cancelled
+needs_resolution resolved(exited) -> stopped steps_exhausted
+needs_resolution resolved(exited) -> stopped timed_out
+needs_resolution resolved(exited) -> stopped unrecoverable
+needs_resolution resolved(failed_to_start) -> idle
+needs_resolution resolved(failed_to_start) -> stopped budget_exhausted
+needs_resolution resolved(failed_to_start) -> stopped cancelled
+needs_resolution resolved(failed_to_start) -> stopped steps_exhausted
+needs_resolution resolved(failed_to_start) -> stopped timed_out
+needs_resolution resolved(failed_to_start) -> stopped unrecoverable
+needs_resolution resolved(timed_out) -> idle
+needs_resolution resolved(timed_out) -> stopped budget_exhausted
+needs_resolution resolved(timed_out) -> stopped cancelled
+needs_resolution resolved(timed_out) -> stopped steps_exhausted
+needs_resolution resolved(timed_out) -> stopped timed_out
+needs_resolution resolved(timed_out) -> stopped unrecoverable
+needs_resolution resolved(unknown) -> stopped budget_exhausted
+needs_resolution resolved(unknown) -> stopped cancelled
+needs_resolution resolved(unknown) -> stopped timed_out
+needs_resolution resolved(unknown) -> stopped unrecoverable
+needs_resolution resolved(unknown) -> stopped unresolved
+needs_resolution stop_requested(budget_exhausted) -> needs_resolution budget_exhausted
+needs_resolution stop_requested(budget_exhausted) -> needs_resolution cancelled
+needs_resolution stop_requested(budget_exhausted) -> needs_resolution timed_out
+needs_resolution stop_requested(budget_exhausted) -> needs_resolution unrecoverable
+needs_resolution stop_requested(cancelled) -> needs_resolution budget_exhausted
+needs_resolution stop_requested(cancelled) -> needs_resolution cancelled
+needs_resolution stop_requested(cancelled) -> needs_resolution timed_out
+needs_resolution stop_requested(cancelled) -> needs_resolution unrecoverable
+needs_resolution stop_requested(timed_out) -> needs_resolution budget_exhausted
+needs_resolution stop_requested(timed_out) -> needs_resolution cancelled
+needs_resolution stop_requested(timed_out) -> needs_resolution timed_out
+needs_resolution stop_requested(timed_out) -> needs_resolution unrecoverable
+needs_resolution stop_requested(unrecoverable) -> needs_resolution budget_exhausted
+needs_resolution stop_requested(unrecoverable) -> needs_resolution cancelled
+needs_resolution stop_requested(unrecoverable) -> needs_resolution timed_out
+needs_resolution stop_requested(unrecoverable) -> needs_resolution unrecoverable
+request_frozen attempt_started -> request_sent
+request_frozen stop_requested(budget_exhausted) -> stopped budget_exhausted
+request_frozen stop_requested(cancelled) -> stopped cancelled
+request_frozen stop_requested(timed_out) -> stopped timed_out
+request_frozen stop_requested(unrecoverable) -> stopped unrecoverable
+request_sent attempt_started -> request_sent
+request_sent attempt_started -> stopped attempts_exhausted
+request_sent response_incomplete -> request_frozen
+request_sent response_incomplete -> stopped attempts_exhausted
+request_sent response_saved -> response_saved
+request_sent stop_requested(budget_exhausted) -> stopped budget_exhausted
+request_sent stop_requested(cancelled) -> stopped cancelled
+request_sent stop_requested(timed_out) -> stopped timed_out
+request_sent stop_requested(unrecoverable) -> stopped unrecoverable
+response_saved response_loaded(exec) -> effect_saved
+response_saved response_loaded(invalid) -> idle
+response_saved response_loaded(invalid) -> stopped protocol_failure
+response_saved response_loaded(return) -> returned
+response_saved stop_requested(budget_exhausted) -> stopped budget_exhausted
+response_saved stop_requested(cancelled) -> stopped cancelled
+response_saved stop_requested(timed_out) -> stopped timed_out
+response_saved stop_requested(unrecoverable) -> stopped unrecoverable
