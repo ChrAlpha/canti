@@ -368,7 +368,7 @@ func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
 		t.Fatalf("docker ps (hung, caller's deadline first) = %v, want the caller's error", err)
 	}
 	f.latch(latchStart)
-	f.unset("inspect.sh", "rm.sh", "ps.sh")
+	f.unset("inspect.sh", "rm.sh")
 	f.exited(0)
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || job.Output.Detail != "logs unavailable: no response within 150ms" {
@@ -552,7 +552,7 @@ func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
 	}
 }
 
-func TestRecordingAJobReleasesRecordedJobsOfOtherEffects(t *testing.T) {
+func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	f := newFake(t)
 	for id, job := range map[string]string{"old": "c-old", "moved": "c-moved"} {
 		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
@@ -570,27 +570,24 @@ func TestRecordingAJobReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending || len(f.calls("create")) != 1 {
 		t.Fatalf("Bind() = %+v, %v, creates %q; want the created job pending", job, err, f.calls("create"))
 	}
-	if _, err := f.x.Start(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	f.set("inspect.out", f.container("running", 0))
-	if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 0 || len(rms) != 0 {
-		t.Fatalf("ps %q, rms %q before a job was recorded; want no sweep", ps, rms)
-	}
-	f.exited(0)
-	for range 2 {
-		if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if rms := f.calls("rm"); !slices.Equal(rms, []string{"rm rm -v c-e", "rm rm -v c-old", "rm rm -v c-e"}) {
-		t.Fatalf("rms = %q, want the recorded job, then only the recorded job of another effect, released", rms)
+	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-old" {
+		t.Fatalf("rms = %q, want only the recorded job of another effect released", rms)
 	}
 	if ps := f.calls("ps"); len(ps) != 1 || strings.Contains(ps[0], " -q") || strings.Contains(ps[0], " -aq") {
 		t.Fatalf("ps calls = %q, want one listing whose --format is not overridden by --quiet", ps)
+	}
+	if _, err := f.x.Bind(t.Context(), effect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.x.Start(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	f.exited(0)
+	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded {
+		t.Fatalf("Inspect() = %+v, %v; want the job recorded", job, err)
+	}
+	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 1 || !slices.Equal(rms, []string{"rm rm -v c-old", "rm rm -v c-e"}) {
+		t.Fatalf("ps %q, rms %q; want only a Bind that creates a container to sweep", ps, rms)
 	}
 }
 

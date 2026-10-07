@@ -428,8 +428,7 @@ func (o observation) snapshot() harness.Job {
 }
 
 // finalize derives the job, reading its exit record when its result needs
-// one, and records it once it is finished; recording a job then sweeps the
-// state directory.
+// one, and records it once it is finished.
 func (x *Executor) finalize(ctx context.Context, id string, o observation) (harness.Job, error) {
 	var recorded *int
 	if file := o.exitRecord(); file != "" {
@@ -439,14 +438,10 @@ func (x *Executor) finalize(ctx context.Context, id string, o observation) (harn
 		}
 	}
 	job := derive(o.latch, o.c, o.marked, recorded)
-	if !terminal(job.Status) {
-		return job, nil
+	if terminal(job.Status) {
+		return x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
 	}
-	job, err := x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
-	if err == nil {
-		x.sweep(ctx)
-	}
-	return job, err
+	return job, nil
 }
 
 // Bind creates the effect's container without starting it, or reports the
@@ -468,6 +463,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 			if o.latch == latchCancel {
 				return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
 			}
+			x.sweep(ctx)
 			if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
 				o, err = x.bound(ctx, effect.ID)
 			}

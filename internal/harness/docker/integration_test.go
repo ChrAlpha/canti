@@ -231,7 +231,7 @@ func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
 	}
 }
 
-func TestRecordingAJobReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
+func TestBindReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
 	cfg, name := setup(t, docker.Config{})
 	real, err := exec.LookPath("docker")
 	if err != nil {
@@ -258,18 +258,11 @@ func TestRecordingAJobReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
 	if err := os.Remove(failing); err != nil {
 		t.Fatal(err)
 	}
-	second := harness.Effect{ID: name("second"), Command: "echo second"}
-	if _, err := x.Bind(ctx, second); err != nil {
+	if _, err := x.Bind(ctx, harness.Effect{ID: name("second"), Command: "echo second"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := containers(t, first.ID); len(got) != 1 {
-		t.Fatalf("containers of the first effect = %q after the next bind, want it left to the next record", got)
-	}
-	if job := run(ctx, t, x, second); job.Status != harness.JobSucceeded {
-		t.Fatalf("second job = %+v", job)
-	}
 	if got := containers(t, first.ID); len(got) != 0 {
-		t.Fatalf("containers of the first effect = %q after the next job was recorded, want none", got)
+		t.Fatalf("containers of the first effect = %q after the next bind, want none", got)
 	}
 }
 

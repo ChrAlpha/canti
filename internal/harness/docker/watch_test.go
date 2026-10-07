@@ -167,3 +167,23 @@ func TestLoopObservesAnEffectFencedBeforeItsBind(t *testing.T) {
 		}
 	}
 }
+
+func TestLoopStopIsNotHeldByAHungListing(t *testing.T) {
+	lf := newLoop(t, newFake(t))
+	lf.set("ps.sh", "exec sleep 30\n")
+	lf.set("stopped.json", lf.containerOf(lf.effect, "true", "exited", 143))
+	lf.set("stop.sh", `cp "$ctl/stopped.json" "$ctl/inspect.out"`+"\n")
+	ctx, cancel := context.WithTimeout(lf.ctx, 2*time.Second)
+	defer cancel()
+	snap, err := lf.loop.Stop(ctx, "run-1", core.StopCancelled)
+	if err != nil || snap.State.Phase != core.PhaseStopped {
+		t.Fatalf("Stop() = %+v, %v; want the cancelled job observed within the cleanup deadline", snap.State, err)
+	}
+	ts, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := ts[len(ts)-1].Event.(core.Observed); !ok || e.Execution != core.ExecutionCancelled {
+		t.Fatalf("last transition = %+v, want the cancelled job observed", ts[len(ts)-1])
+	}
+}
