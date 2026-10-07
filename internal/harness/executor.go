@@ -23,8 +23,8 @@ var ErrJobLost = errors.New("harness: job of a started effect is lost")
 // launch or exit is uncertain reports JobUnknown. A job reported succeeded,
 // failed, cancelled, or failed to start keeps that status and never begins
 // running afterwards. Bind and Start report the job's ID and a snapshot of
-// its status, which may be JobUnknown for a job that has finished; only
-// Inspect establishes a finished job's final status and output.
+// its status, which may be JobUnknown for a job that has finished, so a
+// caller takes a finished job's final status and output from Inspect.
 //
 // Start must fail for an unbound effect and start nothing but the bound job;
 // once the latch is set it is a no-op reporting the job, even for a

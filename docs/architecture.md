@@ -711,8 +711,8 @@ state directory, and each target a clean absolute path that overlaps neither
   under Docker's json-file log driver with rotation disabled
   (`max-size=1p`) and `mode=blocking`, so no output is dropped. `Bind` and
   `Start` report the job without reading its exit record or output, so a
-  job that already exited is `unknown` until inspected. The first `Inspect`
-  of a finished job reads the record and copies `docker logs` through a tap
+  job whose result needs that record is `unknown` until `Inspect` reads it.
+  The first `Inspect` of a finished job copies `docker logs` through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
   `artifacts/<effect ID>/output`, counts every byte, and keeps a preview of at
   most `PreviewLimit` bytes (4 KiB by default; the CLI sets it to the
@@ -727,7 +727,7 @@ state directory, and each target a clean absolute path that overlaps neither
   json-file log replaces invalid UTF-8 with U+FFFD, so the artifact of binary
   output is not byte-exact and its byte count is that of the replaced text.
 - **Release.** After the capture, the job's final record — status, exit
-  code, times, container ID, spec hash, preview, and artifact reference — is
+  code, times, job ID, spec hash, preview, and artifact reference — is
   published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
   Docker log; a failed removal is retried by the next report of the effect

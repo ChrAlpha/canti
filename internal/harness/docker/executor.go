@@ -83,9 +83,9 @@ type Mount struct{ Source, Target string }
 // the effect's file lock, so callers in any goroutine or process never
 // observe a half-done start. A container that exits without the exit status
 // its shell records, as when it is killed outside canti, reports JobUnknown.
-// Only Inspect reads that record, captures a finished job's output, and
-// records the job; once recorded, it is reported from its record alone. Host
-// environment variables never reach a job.
+// Only Inspect reads that record and captures and records the job of a
+// finished container; once recorded, a job is reported from its record
+// alone. Host environment variables never reach a job.
 type Executor struct {
 	cfg      Config
 	timeouts timeouts
