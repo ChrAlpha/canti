@@ -231,7 +231,7 @@ type errNoInputFits struct{ error }
 // inherited returns the constraints the next input of session inherits.
 func inherited(ctx context.Context, a *app, session string) (string, error) {
 	path := filepath.Join(a.state, "canti.db")
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	if fi, err := os.Stat(path); errors.Is(err, os.ErrNotExist) || err == nil && fi.Size() == 0 {
 		return "", nil
 	}
 	store, err := sqlite.OpenReadOnly(ctx, path)

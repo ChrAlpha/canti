@@ -207,3 +207,39 @@ func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionRetryReportsAnInputThatNoLongerFits(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-context-bytes", "80000"}
+	if r := f.cli(nil, "run", first...); r.code != exitOK {
+		t.Fatalf("first: %+v", r)
+	}
+	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "120000"); r.code != exitOK {
+		t.Fatalf("second: %+v", r)
+	}
+	if r := f.cli(nil, "run", first...); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 2 {
+		t.Fatalf("retry of the accepted first input: %+v, calls=%d", r, len(f.model.requests()))
+	}
+}
+
+func TestSessionInputInitializesAnEmptyJournal(t *testing.T) {
+	for _, chat := range []bool{false, true} {
+		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+		if err := os.Mkdir(f.state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.state, "canti.db"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var r result
+		if chat {
+			_, wait := f.startWith(strings.NewReader("g\n"), nil, "chat")
+			r = wait()
+		} else {
+			r = f.cli(nil, "run", "-session", "s", "-input", "i", "-goal", "g")
+		}
+		if r.code != exitOK || r.stdout != "done\n" {
+			t.Errorf("chat=%v over an empty journal: %+v", chat, r)
+		}
+	}
+}

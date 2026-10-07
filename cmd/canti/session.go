@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -13,12 +15,8 @@ import (
 )
 
 func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s spec, url string, once bool) (int, error) {
-	if code, err := a.checkSession(ctx, session, input, goal, constraints, explicitConstraints, s); err != nil {
+	if code, err := a.checkSession(session, input, goal, constraints, s, url); err != nil {
 		return code, err
-	}
-	m, err := newModel(s.config, url, a.cred)
-	if err != nil {
-		return exitError, err
 	}
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
 		return exitError, err
@@ -60,6 +58,13 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	if err != nil {
 		return exitUsage, err
 	}
+	if a.credErr != nil {
+		return exitError, a.credErr
+	}
+	m, err := newModel(s.config, url, a.cred)
+	if err != nil {
+		return exitError, err
+	}
 	x, err := newExecutor(s.config, a.state)
 	if err != nil {
 		return exitError, err
@@ -84,7 +89,10 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	return a.report(snap, nil, exitActive, s.config)
 }
 
-func (a *app) checkSession(ctx context.Context, session, input, goal, constraints string, explicit bool, s spec) (int, error) {
+// checkSession refuses an invalid session input before submitSession
+// touches the state, and one that a state without a journal refuses before
+// it creates the state.
+func (a *app) checkSession(session, input, goal, constraints string, s spec, url string) (int, error) {
 	if session == "" || input == "" {
 		return exitUsage, errors.New("-session and -input are required together")
 	}
@@ -94,17 +102,17 @@ func (a *app) checkSession(ctx context.Context, session, input, goal, constraint
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
 		return exitError, err
 	}
-	if !explicit {
-		var err error
-		if constraints, err = inherited(ctx, a, session); err != nil {
-			return exitError, err
-		}
+	if _, err := os.Stat(filepath.Join(a.state, "canti.db")); !errors.Is(err, fs.ErrNotExist) {
+		return exitOK, nil
 	}
 	if _, _, err := newRun(goal, constraints, s, time.Now()); err != nil {
 		return exitUsage, err
 	}
 	if a.credErr != nil {
 		return exitError, a.credErr
+	}
+	if _, err := newModel(s.config, url, a.cred); err != nil {
+		return exitError, err
 	}
 	return exitOK, nil
 }
