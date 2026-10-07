@@ -711,9 +711,9 @@ state directory, and each target a clean absolute path that overlaps neither
   report of a finished job the executor copies `docker logs` through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
   `artifacts/<effect ID>/output`, counts every byte, and keeps a preview of at
-  most `PreviewLimit` bytes (4 KiB by default): the head, a
-  `... N bytes omitted ...` marker, and the true tail, cut at rune
-  boundaries. A truncated or cancelled job's output is marked incomplete,
+  most `PreviewLimit` bytes (4 KiB by default; the CLI sets it to the
+  prompt's preview limit): the head, a `... N bytes omitted ...` marker, and
+  the true tail, cut at rune boundaries. A truncated or cancelled job's output is marked incomplete,
   with details such as `kept N of M bytes`. A failed `docker logs` call or
   artifact write is recorded as an unavailable artifact with the error as
   its detail, because the report of a finished job is final. Only a capture

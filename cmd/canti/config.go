@@ -184,7 +184,7 @@ func historyRoot(state string) string { return filepath.Join(state, "history") }
 func executorConfig(c config, state string) docker.Config {
 	return docker.Config{
 		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
-		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit,
+		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit, PreviewLimit: promptLimits(c).Preview,
 		Mounts: []docker.Mount{{Source: historyRoot(state), Target: archive.RunsRoot}},
 	}
 }

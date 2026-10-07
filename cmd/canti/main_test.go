@@ -1174,7 +1174,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	}
 	x := executorConfig(c, "/state")
 	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
-		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
+		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, PreviewLimit: harness.DefaultPromptLimits().Preview, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
 	if l := promptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {
