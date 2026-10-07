@@ -201,12 +201,20 @@ func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := x.Start(ctx, e.ID)
-	if err != nil || job.ID != bound.ID || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() ||
-		!strings.HasPrefix(job.Output.Detail, "job never started: ") || !strings.Contains(job.Output.Detail, "nosuchuser") {
-		t.Fatalf("Start(rejected) = %+v, %v; want the bound job failed to start with the daemon's reason", job, err)
+	started, err := x.Start(ctx, e.ID)
+	if err != nil || started.ID != bound.ID || started.Status != harness.JobFailedToStart || started.ExitCode != nil || !started.StartedAt.IsZero() ||
+		!strings.HasPrefix(started.Output.Detail, "job never started: ") || !strings.Contains(started.Output.Detail, "nosuchuser") {
+		t.Fatalf("Start(rejected) = %+v, %v; want the bound job failed to start with the daemon's reason", started, err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.State, "jobs", e.ID, "output.json")); err != nil {
+	record := filepath.Join(cfg.State, "jobs", e.ID, "output.json")
+	if _, err := os.Stat(record); !errors.Is(err, fs.ErrNotExist) || len(containers(t, e.ID)) != 1 {
+		t.Fatalf("record %v, containers %q after Start; want both left to Inspect", err, containers(t, e.ID))
+	}
+	job := inspect(ctx, t, open(t, cfg), e.ID)
+	if job.ID != bound.ID || job.Status != harness.JobFailedToStart || job.Output != (harness.ArtifactRef{Path: e.ID + "/output", Available: true, Detail: started.Output.Detail}) {
+		t.Fatalf("Inspect(rejected) = %+v, want the failed start with its empty output", job)
+	}
+	if _, err := os.Stat(record); err != nil {
 		t.Fatalf("record of the failed start: %v", err)
 	}
 	if ids := containers(t, e.ID); len(ids) != 0 {

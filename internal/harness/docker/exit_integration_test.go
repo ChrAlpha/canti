@@ -100,11 +100,9 @@ func TestOnlyARecordedExitIsFinal(t *testing.T) {
 	if err := restarted.Cancel(ctx, killed.ID); err != nil {
 		t.Fatal(err)
 	}
-	job, err := restarted.Start(ctx, killed.ID)
-	if err != nil {
-		t.Fatal(err)
+	if job, err := restarted.Start(ctx, killed.ID); err != nil || job.ID != bound.ID || job.Status != harness.JobUnknown || job.Output != (harness.ArtifactRef{}) {
+		t.Fatalf("Start() = %+v, %v; want job %s unknown without reading its exit record", job, err, bound.ID)
 	}
-	unknown("Start()", job)
 	unknown("Inspect() after Cancel", inspect(ctx, t, open(t, cfg), killed.ID))
 	if _, err := os.Stat(filepath.Join(cfg.State, "jobs", killed.ID, "output.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the unknown job was recorded: %v", err)

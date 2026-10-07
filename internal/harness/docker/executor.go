@@ -377,45 +377,70 @@ func (x *Executor) inspect(ctx context.Context, id string) (container, bool, err
 	return cs[0], true, nil
 }
 
-// find is inspect, except that the container of a started effect is never
-// reported missing: its removal before a record leaves the outcome unknown.
-func (x *Executor) find(ctx context.Context, id string) (container, bool, error) {
-	c, found, err := x.inspect(ctx, id)
-	if err == nil && !found {
-		var latch string
-		if latch, err = readLatch(x.dir(id)); err == nil && latch == latchStart {
-			err = fmt.Errorf("%w: container of effect %s is gone", harness.ErrJobLost, id)
-		}
-	}
-	return c, found, err
+// observation is what the job of an effect is derived from: its latch,
+// whether Cancel marked it, and its container.
+type observation struct {
+	latch  string
+	marked bool
+	c      container
 }
 
-func (x *Executor) bound(ctx context.Context, id string) (container, error) {
-	c, found, err := x.find(ctx, id)
+// observe reads the latch and cancel marker of an effect and inspects its
+// container. The container of a started effect is never reported missing:
+// its removal before a record leaves the outcome unknown.
+func (x *Executor) observe(ctx context.Context, id string) (o observation, found bool, err error) {
+	if o.latch, err = readLatch(x.dir(id)); err != nil {
+		return o, false, err
+	}
+	if o.marked, err = exists(filepath.Join(x.dir(id), "cancel")); err != nil {
+		return o, false, err
+	}
+	if o.c, found, err = x.inspect(ctx, id); err == nil && !found && o.latch == latchStart {
+		err = fmt.Errorf("%w: container of effect %s is gone", harness.ErrJobLost, id)
+	}
+	return o, found, err
+}
+
+func (x *Executor) bound(ctx context.Context, id string) (observation, error) {
+	o, found, err := x.observe(ctx, id)
 	if err == nil && !found {
 		err = fmt.Errorf("docker: no job is bound to effect %s", id)
 	}
-	return c, err
+	return o, err
 }
 
-func (x *Executor) report(ctx context.Context, id string, c container) (harness.Job, error) {
-	latch, err := readLatch(x.dir(id))
-	if err != nil {
-		return harness.Job{}, err
+// exitRecord is the file holding the exit record that decides the result of
+// an exited job, or "" when its result needs none.
+func (o observation) exitRecord() string {
+	if o.latch != latchStart || o.marked || o.c.State.Status != "exited" && o.c.State.Status != "dead" {
+		return ""
 	}
-	marked, err := exists(filepath.Join(x.dir(id), "cancel"))
-	if err != nil {
-		return harness.Job{}, err
+	return o.c.Config.Labels[exitLabel]
+}
+
+// snapshot is the job derived without reading its exit record or output: an
+// exited job whose result needs the record is unknown until Inspect reads it.
+func (o observation) snapshot() harness.Job {
+	job := derive(o.latch, o.c, o.marked, nil)
+	if o.exitRecord() != "" {
+		job.Output = harness.ArtifactRef{}
 	}
+	return job
+}
+
+// finalize derives the job, reading its exit record when its result needs
+// one, and records it once it is finished.
+func (x *Executor) finalize(ctx context.Context, id string, o observation) (harness.Job, error) {
 	var recorded *int
-	if file := c.Config.Labels[exitLabel]; file != "" && latch == latchStart && !marked && (c.State.Status == "exited" || c.State.Status == "dead") {
-		if recorded, err = x.exitStatus(ctx, c.ID, file); err != nil {
+	if file := o.exitRecord(); file != "" {
+		var err error
+		if recorded, err = x.exitStatus(ctx, o.c.ID, file); err != nil {
 			return harness.Job{}, err
 		}
 	}
-	job := derive(latch, c, marked, recorded)
+	job := derive(o.latch, o.c, o.marked, recorded)
 	if terminal(job.Status) {
-		return x.finish(ctx, id, job, c.Config.Labels["canti.spec"])
+		return x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
 	}
 	return job, nil
 }
@@ -431,15 +456,16 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	x.sweep(ctx)
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
-	c, spec := container{}, rec.Spec
+	var o observation
+	spec := rec.Spec
 	if err == nil && !done {
 		var found bool
-		if c, found, err = x.find(ctx, effect.ID); err == nil && !found {
+		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found {
 			if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
-				c, err = x.bound(ctx, effect.ID)
+				o, err = x.bound(ctx, effect.ID)
 			}
 		}
-		spec = c.Config.Labels["canti.spec"]
+		spec = o.c.Config.Labels["canti.spec"]
 	}
 	if err != nil {
 		return harness.Job{}, err
@@ -450,17 +476,16 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	if done {
 		return rec.Job, nil
 	}
-	return x.report(ctx, effect.ID, c)
+	return x.finalize(ctx, effect.ID, o)
 }
 
 // Start sets the effect's latch and starts its never-started container,
-// unless the latch was already set, in which case it only reports the job.
-// Once the latch is set the launch finishes even if ctx is done, each of its
-// calls within its own deadline. A start the daemon rejected before the job's
-// process began reports the job, failed to start, rather than the error. A
-// report that fails after the start, such as an unreadable exit record of a
-// job that already exited, reports the job as unknown and leaves its result
-// to Inspect, which the loop retries.
+// unless the latch was already set. Once the latch is set the launch
+// finishes even if ctx is done, each of its calls within its own deadline.
+// Start reports a snapshot of the job, so a job that already exited is
+// unknown until Inspect reads its exit record. A start the daemon rejected
+// before the job's process began reports the job, failed to start, rather
+// than the error.
 func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effectID)
 	if err != nil {
@@ -470,17 +495,13 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
 		return rec.Job, err
 	}
-	c, err := x.bound(ctx, effectID)
+	o, err := x.bound(ctx, effectID)
 	if err != nil {
 		return harness.Job{}, err
 	}
-	latch, err := readLatch(x.dir(effectID))
-	if err != nil {
-		return harness.Job{}, err
-	}
-	if latch == "" {
-		if c.State.Status != "created" {
-			return harness.Job{}, fmt.Errorf("docker: container %s of effect %s is %s without a start latch", c.ID, effectID, c.State.Status)
+	if o.latch == "" {
+		if o.c.State.Status != "created" {
+			return harness.Job{}, fmt.Errorf("docker: container %s of effect %s is %s without a start latch", o.c.ID, effectID, o.c.State.Status)
 		}
 		if err := ctx.Err(); err != nil {
 			return harness.Job{}, err
@@ -489,20 +510,16 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 			return harness.Job{}, err
 		}
 		launch := context.WithoutCancel(ctx)
-		_, started := x.docker(launch, "start", c.ID)
-		c, err = x.bound(launch, effectID)
-		if started != nil && (err != nil || !rejected(c)) {
+		_, started := x.docker(launch, "start", o.c.ID)
+		o, err = x.bound(launch, effectID)
+		if started != nil && (err != nil || !rejected(o.c)) {
 			return harness.Job{}, started
 		}
 		if err != nil {
 			return harness.Job{}, err
 		}
 	}
-	job, err := x.report(ctx, effectID, c)
-	if err != nil && ctx.Err() == nil {
-		return harness.Job{ID: c.ID, Status: harness.JobUnknown}, nil
-	}
-	return job, err
+	return o.snapshot(), nil
 }
 
 // Inspect reports the effect's job; found is false only when Docker reports
@@ -516,11 +533,11 @@ func (x *Executor) Inspect(ctx context.Context, effectID string) (harness.Job, b
 	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
 		return rec.Job, done, err
 	}
-	c, found, err := x.find(ctx, effectID)
+	o, found, err := x.observe(ctx, effectID)
 	if err != nil || !found {
 		return harness.Job{}, false, err
 	}
-	job, err := x.report(ctx, effectID, c)
+	job, err := x.finalize(ctx, effectID, o)
 	return job, err == nil, err
 }
 

@@ -22,10 +22,12 @@ var ErrJobLost = errors.New("harness: job of a started effect is lost")
 // reports JobPending exactly until its latch is set; a latched job whose
 // launch or exit is uncertain reports JobUnknown. A job reported succeeded,
 // failed, cancelled, or failed to start keeps that status and never begins
-// running afterwards.
+// running afterwards. Bind and Start report the job's ID and a snapshot of
+// its status, which may be JobUnknown for a job that has finished; only
+// Inspect establishes a finished job's final status and output.
 //
 // Start must fail for an unbound effect and start nothing but the bound job;
-// once the latch is set it is a no-op reporting the job as-is, even for a
+// once the latch is set it is a no-op reporting the job, even for a
 // finished job — a naive backend restart, such as docker start on an exited
 // container, does not satisfy this, so the executor must gate on its own
 // record. A Start whose launch a concurrent Cancel stops also reports the job

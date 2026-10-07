@@ -99,7 +99,9 @@ func TestUnrecordedExitStaysUnknown(t *testing.T) {
 			job, err = f.x.Bind(t.Context(), effect)
 			unknown("Bind()", job, err)
 			job, err = f.x.Start(t.Context(), "e")
-			unknown("Start()", job, err)
+			if err != nil || job.ID != "c-e" || job.Status != harness.JobUnknown || job.ExitCode != nil || job.Output != (harness.ArtifactRef{}) {
+				t.Fatalf("Start() = %+v, %v; want unknown without the detail of a record it did not read", job, err)
+			}
 			if err := f.x.Cancel(t.Context(), "e"); err != nil {
 				t.Fatal(err)
 			}
@@ -171,21 +173,29 @@ func TestJobOfAnEarlierRevisionIsDerivedFromDocker(t *testing.T) {
 	}
 }
 
-func TestStartLeavesAFailedReportToInspection(t *testing.T) {
+func TestStartLeavesAnExitedJobToInspection(t *testing.T) {
 	f := newFake(t)
 	f.set("inspect.out", f.container("created", 0))
 	f.set("exited.json", f.container("exited", 3))
 	f.set("start.sh", `cp "$ctl/exited.json" "$ctl/inspect.out"`+"\n")
-	f.set("cp.sh", `[ -e "$ctl/cp.failed" ] || { touch "$ctl/cp.failed"; echo "Error response from daemon: boom" >&2; exit 1; }`+"\n")
-	f.set("cp.out", exitArchive(t, "3\n"))
+	f.set("cp.err", "Error response from daemon: boom\n")
+	f.set("cp.exit", "1")
 	f.set("logs.out", "quick\n")
 	job, err := f.x.Start(t.Context(), "e")
-	if err != nil || job.ID != "c-e" || job.Status != harness.JobUnknown {
-		t.Fatalf("Start() with a failing report = %+v, %v; want the started job, its result left to Inspect", job, err)
+	if err != nil || job.ID != "c-e" || job.Status != harness.JobUnknown || job.Output != (harness.ArtifactRef{}) || job.Preview != "" {
+		t.Fatalf("Start() of a job that exited at once = %+v, %v; want the bound job, its result left to Inspect", job, err)
+	}
+	if cps, logs, rms := f.calls("cp"), f.calls("logs"), f.calls("rm"); len(cps) != 0 || len(logs) != 0 || len(rms) != 0 {
+		t.Fatalf("cps %q, logs %q, rms %q; want Start to read no exit record and capture nothing", cps, logs, rms)
 	}
 	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("record after the failed report: %v", err)
+		t.Fatalf("record after Start: %v", err)
 	}
+	if job, found, err := f.x.Inspect(t.Context(), "e"); found || err == nil {
+		t.Fatalf("Inspect(exit record unreadable) = %+v, %v, %v; want an error", job, found, err)
+	}
+	f.unset("cp.err", "cp.exit")
+	f.set("cp.out", exitArchive(t, "3\n"))
 	job, _, err = f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 3 || job.Preview != "quick\n" {
 		t.Fatalf("Inspect() = %+v, %v; want failed with the recorded exit status 3", job, err)
