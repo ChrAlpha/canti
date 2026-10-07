@@ -40,6 +40,23 @@ func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 	}
 }
 
+func TestContextTextNamesTheHandoverPathOfEarlierDialogue(t *testing.T) {
+	report := contextReport{RunID: "current", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Session: []harness.ContextSessionSource{
+		{RunID: "r1", SessionSeq: 1, Status: "returned", IncludedGoal: true},
+		{RunID: "r2", SessionSeq: 2, Status: "stopped", HandoverStep: 7},
+	}}}}
+	var out bytes.Buffer
+	if err := report.writeText(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"Earlier dialogue: run r1 sequence 1, returned, goal included true\n",
+		"Earlier dialogue: run r2 sequence 2, stopped, goal included false, latest handover step 7\n"} {
+		if !strings.Contains(out.String(), line) {
+			t.Fatalf("report lacks %q:\n%s", line, out.String())
+		}
+	}
+}
+
 func TestContextInspectFrozenRequest(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	if r := f.cli(nil, "run", "-goal", "inspect me"); r.code != exitOK {

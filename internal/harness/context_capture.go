@@ -27,6 +27,7 @@ type ContextSessionSource struct {
 	SessionSeq   int64
 	Status       string
 	IncludedGoal bool
+	HandoverStep int `json:",omitempty"`
 }
 
 type ContextRetrieval struct {

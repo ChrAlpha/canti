@@ -44,7 +44,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	}
 	handover(2, 1)
 	f.model.answer(3, 1, reply{status: 503, body: "temporary transport failure"})
-	decision(3, 2, core.Decision{Kind: core.Exec, Payload: "test \"$(cat mode.txt)\" = async && printf sync > mode.txt"})
+	decision(3, 2, core.Decision{Kind: core.Exec, Purpose: "Switch the mode from async to sync.", Payload: "test \"$(cat mode.txt)\" = async && printf sync > mode.txt"})
 	handover(4, 3)
 	decision(5, 1, core.Decision{Kind: core.Return, Payload: "Sync correction completed."})
 
@@ -112,7 +112,30 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 		}
 	}
 	checkReleased(t, f, executed)
-	t.Logf("SCRIPTED_SESSION context_limit=98304 previous_answer_bytes=%d windows=3 step3_transport_attempts=2; real CLI/SQLite/Docker, process-per-transition resume", len(priorAnswer))
+
+	steps := "/canti/runs/" + runID + "/steps/"
+	if r := f.cli(nil, "run", "-once", "-session", "s", "-input", "third", "-goal", "Continue the session.", "-image", image, "-wall-time", "3m", "-job-timeout", "10s"); r.code != exitActive {
+		t.Fatalf("third session run: %+v", r)
+	}
+	decision(1, 3, core.Decision{Kind: core.Exec, Payload: "cat " + steps + "00000004/command " + steps + "00000003/purpose"})
+	decision(2, 2, core.Decision{Kind: core.Return, Payload: "Continued from the handover."})
+	for n := 0; f.status().Phase != core.PhaseReturned; n++ {
+		if r := f.cli(nil, "resume", "-once"); n == 20 || r.code != exitActive && r.code != exitOK {
+			t.Fatalf("third session run, process %d: %+v", n, r)
+		}
+	}
+	var third []string
+	for _, body := range f.model.requests() {
+		if _, prompt, err := promptOf(body); err == nil && strings.Contains(prompt, "Continue the session.") {
+			third = append(third, prompt)
+		}
+	}
+	path := "Latest handover of this run, agent-written and possibly overtaken by later steps: " + steps + "00000004/command\n"
+	if len(third) != 2 || !strings.Contains(third[0], "; returned):\n"+path) ||
+		!strings.Contains(third[1], "Current correction is sync. Verify the workspace and finish the request.") || !strings.Contains(third[1], "Switch the mode from async to sync.") {
+		t.Fatalf("the third run did not find and read the handover and purpose records from its container: %q", third)
+	}
+	t.Logf("SCRIPTED_SESSION context_limit=98304 previous_answer_bytes=%d windows=3 step3_transport_attempts=2 continued_from_handover_step=4; real CLI/SQLite/Docker, process-per-transition resume", len(priorAnswer))
 }
 
 func TestOversizedPreviousAnswerKeepsSessionNavigation(t *testing.T) {

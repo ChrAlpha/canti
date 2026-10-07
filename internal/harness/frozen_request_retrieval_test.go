@@ -1,7 +1,11 @@
 package harness_test
 
 import (
+	"slices"
+	"testing"
+
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 // retrievalScenarios page through retrieval results with their cursors and
@@ -34,6 +38,46 @@ func retrievalScenarios() []frozenScenario {
 				"run2-step03-rev1.json": {"Source " + earlier + "/goal:\n", "Name the build target.\n"},
 				"run2-step04-rev1.json": {"Source " + current + "/session:\n",
 					`{"session_id":"session-1","sequence":2,"input_id":"input-2","previous_run_id":"` + corpusRun + `"}` + "\n"},
+			},
+		},
+		{
+			name: "session-handover-paths", limits: core.Limits{MaxSteps: 3, MaxAttempts: 3}, windowSteps: 1,
+			outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n", "cat go.mod": "module example\n"},
+			runs: []frozenRun{
+				{id: corpusRun, goal: "List /workspace.", replies: []string{
+					corpusDecision(core.Exec, "ls /workspace"),
+					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed go.mod and main.go."}`),
+					corpusDecision(core.Return, "go.mod and main.go."),
+				}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}},
+				{id: corpusNextRun, goal: "Name the module.", replies: []string{
+					corpusDecision(core.Exec, "cat go.mod"),
+					corpusDecision(core.Exec, "cat go.mod"),
+					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusNextRun+`","first_step":1,"text":"go.mod names module example; report it."}`),
+				}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}, stop: core.StopStepsExhausted},
+				{id: corpusThirdRun, goal: "Continue where the session stopped.", replies: []string{
+					corpusRetrieve("read", current+"/steps/00000003/command", "", "Read where the stopped run handed over."),
+					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusThirdRun+`","first_step":1,"text":"The module is example."}`),
+					corpusDecision(core.Return, "The module is example."),
+				}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 handover"}},
+			},
+			marks: map[string][]string{
+				"run3-step01-rev1.json": {
+					"; returned):\nLatest handover of this run, agent-written and possibly overtaken by later steps: " + earlier + "/steps/00000002/command\nEarlier user goal:\n",
+					"no assistant return.\nLatest handover of this run, agent-written and possibly overtaken by later steps: " + current + "/steps/00000003/command\nEarlier user goal:\n",
+				},
+				"run3-step02-rev1.json": {"Source " + current + "/steps/00000003/command:\n", "go.mod names module example; report it."},
+			},
+			edge: func(t *testing.T, requests map[string]harness.Request) {
+				if w := requests["run2-step03-rev1.json"].Window; w == nil || w.FirstStep != 1 || !w.Requested {
+					t.Errorf("run 2 handed over in its final step under window %+v; want the first window still requesting", w)
+				}
+				var got []int
+				for _, s := range requests["run3-step01-rev1.json"].Context.Session {
+					got = append(got, s.HandoverStep)
+				}
+				if !slices.Equal(got, []int{2, 3}) {
+					t.Errorf("run 3 points to handover steps %v; want [2 3]", got)
+				}
 			},
 		},
 		{

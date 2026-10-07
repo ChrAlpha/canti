@@ -3,8 +3,11 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,11 +16,38 @@ import (
 
 type sessionFixture struct {
 	Journal
-	runs   []Run
-	states map[string]core.State
-	steps  map[string]int
-	before int64
-	limit  int
+	runs     []Run
+	states   map[string]core.State
+	steps    map[string]int
+	requests map[string]Request
+	recent   map[string]StepRecord
+	failing  string
+	before   int64
+	limit    int
+}
+
+func (j *sessionFixture) LatestRequest(_ context.Context, id string) (Request, error) {
+	r, ok := j.requests[id]
+	switch {
+	case j.failing == "LatestRequest":
+		return Request{}, errors.New("journal read failed")
+	case !ok:
+		return Request{}, ErrNotFound
+	}
+	return r, nil
+}
+
+func (j *sessionFixture) Recent(_ context.Context, id string, before int64, limit int) ([]StepRecord, error) {
+	r, ok := j.recent[id]
+	switch {
+	case j.failing == "Recent":
+		return nil, errors.New("journal read failed")
+	case before != 0 || limit != 1:
+		return nil, fmt.Errorf("Recent(%d, %d) reads more than the latest step", before, limit)
+	case !ok:
+		return nil, nil
+	}
+	return []StepRecord{r}, nil
 }
 
 func (j *sessionFixture) SessionRuns(_ context.Context, _ string, before int64, limit int) ([]Run, error) {
@@ -236,6 +266,196 @@ func TestSessionContextStoppedStatusFitsWithNewerDialogue(t *testing.T) {
 		if got := regime(n); got != want {
 			t.Fatalf("answer of %d bytes: regime %d, want %d", n, got, want)
 		}
+	}
+}
+
+func handoverPath(run string, step int) string {
+	return fmt.Sprintf("Latest handover of this run, agent-written and possibly overtaken by later steps: /canti/runs/%s/steps/%08d/command\n", run, step)
+}
+
+// handoverSession is a session of six earlier runs: r6 returned after a
+// window its handover in step 5 opened; r5 stopped right after its handover
+// in step 4 was accepted; r4 stopped after a failed handover in a window
+// opened by step 2; r3 never handed over; r2 stopped before any request; r1
+// holds a request of a journal without windows.
+func handoverSession() *sessionFixture {
+	ok, failed := 0, 1
+	exited := func(code *int, h *Handover) Observation {
+		return Observation{Execution: core.ExecutionExited, ExitCode: code, Handover: h}
+	}
+	return &sessionFixture{
+		runs: []Run{{ID: "r6", Goal: "sixth", SessionID: "s", SessionSeq: 6}, {ID: "r5", Goal: "fifth", SessionID: "s", SessionSeq: 5},
+			{ID: "r4", Goal: "fourth", SessionID: "s", SessionSeq: 4}, {ID: "r3", Goal: "third", SessionID: "s", SessionSeq: 3},
+			{ID: "r2", Goal: "second", SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "first", SessionID: "s", SessionSeq: 1}},
+		states: map[string]core.State{
+			"r6": returned("sixth answer"), "r5": {Phase: core.PhaseStopped, Reason: core.StopStepsExhausted},
+			"r4": {Phase: core.PhaseStopped, Reason: core.StopCancelled}, "r3": returned("third answer"),
+			"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled}, "r1": returned("first answer"),
+		},
+		requests: map[string]Request{
+			"r6": {Window: &Window{FirstStep: 6, SourceStep: 5, Handover: "h6"}},
+			"r5": {Window: &Window{FirstStep: 1, Requested: true, Failures: 1}},
+			"r4": {Window: &Window{FirstStep: 3, SourceStep: 2, Handover: "h4", Requested: true, Failures: 1}},
+			"r3": {Window: &Window{FirstStep: 1}},
+			"r1": {},
+		},
+		recent: map[string]StepRecord{
+			"r6": {Step: 7, Observation: exited(&ok, nil)},
+			"r5": {Step: 4, Observation: exited(&ok, &Handover{RunID: "r5", FirstStep: 1, Text: "h5"})},
+			"r4": {Step: 5, Observation: exited(&failed, nil)},
+			"r3": {Step: 2, Observation: exited(&ok, nil)},
+			"r1": {Step: 9, Observation: exited(&ok, nil)},
+		},
+	}
+}
+
+func TestSessionContextPointsToTheLatestHandover(t *testing.T) {
+	j := handoverSession()
+	l := &Loop{journal: j, cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+	f := budgetFrame()
+	if err := l.sessionContext(context.Background(), Run{ID: "r7", SessionID: "s", SessionSeq: 7}, &f); err != nil {
+		t.Fatal(err)
+	}
+	c := f.SessionContext
+	for run, step := range map[string]int{"r6": 5, "r5": 4, "r4": 2} {
+		path := handoverPath(run, step)
+		header := strings.Index(c, "Run "+run+" ")
+		if strings.Count(c, path) != 1 || header < 0 || !strings.HasPrefix(c[strings.Index(c[header:], "\n")+header+1:], path) {
+			t.Errorf("run %s: want its header followed by %q in\n%s", run, path, c)
+		}
+	}
+	if n := strings.Count(c, "Latest handover of this run"); n != 3 {
+		t.Errorf("%d handover paths; want none for runs that never handed over or hold no window", n)
+	}
+	want := map[string]int{"r6": 5, "r5": 4, "r4": 2, "r3": 0, "r2": 0, "r1": 0}
+	if len(f.sessionSources) != len(want) {
+		t.Fatalf("sources %+v", f.sessionSources)
+	}
+	for _, src := range f.sessionSources {
+		if !src.IncludedGoal || src.HandoverStep != want[src.RunID] {
+			t.Errorf("source %+v; want goal included and handover step %d", src, want[src.RunID])
+		}
+	}
+	if err := f.ValidateContext(l.cfg.Limits); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionContextReturnsAFailedHandoverRead(t *testing.T) {
+	for _, method := range []string{"Recent", "LatestRequest"} {
+		j := handoverSession()
+		j.failing = method
+		l := &Loop{journal: j, cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+		f := budgetFrame()
+		err := l.sessionContext(context.Background(), Run{ID: "r7", SessionID: "s", SessionSeq: 7}, &f)
+		if err == nil || errors.As(err, new(contextError)) || f.SessionContext != "" {
+			t.Errorf("failing %s: err %v, context %q; want the read error to retry, with no context", method, err, f.SessionContext)
+		}
+	}
+}
+
+// TestSessionContextAddsHandoverPathsOnlyWhereTheyFit grows the newest run's
+// answer, or a stopped run's goal, across the edges where each handover path
+// and each unit stop fitting: paths never change which runs and goals are
+// selected, and each is left out only where it would not fit.
+func TestSessionContextAddsHandoverPathsOnlyWhereTheyFit(t *testing.T) {
+	l := &Loop{cfg: LoopConfig{Limits: DefaultPromptLimits()}}
+	paths := map[string]int{"r6": 5, "r5": 4, "r4": 2}
+	selection := func(j *sessionFixture) Frame {
+		t.Helper()
+		l.journal = j
+		f := budgetFrame()
+		if err := l.sessionContext(context.Background(), Run{ID: "r7", SessionID: "s", SessionSeq: 7}, &f); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.ValidateContext(l.cfg.Limits); err != nil {
+			t.Fatalf("optional history rejected legal current input: %v", err)
+		}
+		return f
+	}
+	sized := func(size func(*sessionFixture), handovers bool) *sessionFixture {
+		j := handoverSession()
+		size(j)
+		if !handovers {
+			j.requests, j.recent = nil, nil
+		}
+		return j
+	}
+	pointed := func(f Frame, run string) bool {
+		for _, src := range f.sessionSources {
+			if src.RunID == run {
+				return src.HandoverStep != 0
+			}
+		}
+		return false
+	}
+	dropped := 0
+	check := func(size func(*sessionFixture)) {
+		t.Helper()
+		f, want := selection(sized(size, true)), selection(sized(size, false)).sessionSources
+		got := slices.Clone(f.sessionSources)
+		if len(got) != len(want) {
+			t.Fatalf("paths changed the selection: %+v, without paths %+v", got, want)
+		}
+		for i := range got {
+			step := got[i].HandoverStep
+			got[i].HandoverStep = 0
+			if got[i] != want[i] || step != 0 && step != paths[got[i].RunID] {
+				t.Fatalf("paths changed the selection or point elsewhere: %+v, without paths %+v", f.sessionSources, want)
+			}
+			if step != 0 || paths[got[i].RunID] == 0 {
+				continue
+			}
+			dropped++
+			path := handoverPath(got[i].RunID, paths[got[i].RunID])
+			header := strings.Index(f.SessionContext, "Run "+got[i].RunID+" ")
+			end := header + strings.Index(f.SessionContext[header:], "\n") + 1
+			g := f
+			g.SessionContext = f.SessionContext[:end] + path + f.SessionContext[end:]
+			if g.ValidateContext(l.cfg.Limits) == nil {
+				t.Fatalf("run %s left out a handover path that fits", got[i].RunID)
+			}
+		}
+	}
+	// edge returns the least n below 1<<16 at which stop holds, which it must
+	// not at 0, or 0 when there is none.
+	edge := func(stop func(n int) bool) int {
+		lo, hi := 0, 1<<16
+		for lo < hi {
+			if mid := (lo + hi) / 2; stop(mid) {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		if lo == 0 {
+			t.Fatal("the edge is at 0")
+		}
+		return lo % (1 << 16)
+	}
+	answer := func(n int) func(*sessionFixture) {
+		return func(j *sessionFixture) { j.states["r6"] = returned(strings.Repeat("Ω", n)) }
+	}
+	goal := func(n int) func(*sessionFixture) {
+		return func(j *sessionFixture) { j.runs[1].Goal = strings.Repeat("Ψ", n) }
+	}
+	for _, size := range []func(int) func(*sessionFixture){answer, goal} {
+		edges := []int{edge(func(n int) bool { return len(selection(sized(size(n), false)).sessionSources) < 6 })}
+		for run := range paths {
+			edges = append(edges, edge(func(n int) bool { return !pointed(selection(sized(size(n), true)), run) }))
+		}
+		for _, n := range edges {
+			if n > 0 {
+				check(size(n - 1))
+				check(size(n))
+			}
+		}
+		for n := 0; n < 1<<16; n += 4099 {
+			check(size(n))
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("no edge reached a selection that leaves a handover path out")
 	}
 }
 

@@ -187,7 +187,11 @@ func (t *textLines) capture(c *harness.ContextCapture) {
 		t.line("Handover check not evaluated: %s", c.Handover.Status)
 	}
 	for _, s := range c.Session {
-		t.line("Earlier dialogue: run %s sequence %d, %s, goal included %t", s.RunID, s.SessionSeq, s.Status, s.IncludedGoal)
+		handover := ""
+		if s.HandoverStep != 0 {
+			handover = fmt.Sprintf(", latest handover step %d", s.HandoverStep)
+		}
+		t.line("Earlier dialogue: run %s sequence %d, %s, goal included %t%s", s.RunID, s.SessionSeq, s.Status, s.IncludedGoal, handover)
 	}
 	for _, retrieval := range c.Retrievals {
 		t.line("Retrieval at step %d: %s; original query in observation; more %t; incomplete %t", retrieval.Step, retrieval.OperationName(), retrieval.More, retrieval.Incomplete)

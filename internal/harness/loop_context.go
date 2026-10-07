@@ -65,7 +65,7 @@ func (l *Loop) advanceWindow(snap Snapshot, f *Frame) error {
 	w := *f.Window
 	if snap.State.RequestRev == 0 && w.Requested && len(f.Steps) > 0 {
 		last := f.Steps[len(f.Steps)-1]
-		if h := last.Observation.Handover; h != nil && last.Observation.Execution == core.ExecutionExited && last.Observation.ExitCode != nil && *last.Observation.ExitCode == 0 {
+		if h := last.Observation.acceptedHandover(); h != nil {
 			if err := h.Validate(snap.State.RunID, w.FirstStep, l.cfg.HandoverBytes); err != nil {
 				return err
 			}

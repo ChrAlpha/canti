@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/ChrAlpha/canti/core"
 )
 
 type Window struct {
@@ -44,4 +46,13 @@ func (h Handover) Validate(runID string, firstStep, limit int) error {
 		return fmt.Errorf("harness: handover text is %d UTF-8 bytes; maximum %d. Shorten the text and retry", len(h.Text), limit)
 	}
 	return nil
+}
+
+// acceptedHandover returns the handover o recorded when its action succeeded,
+// or nil.
+func (o Observation) acceptedHandover() *Handover {
+	if o.Execution != core.ExecutionExited || o.ExitCode == nil || *o.ExitCode != 0 {
+		return nil
+	}
+	return o.Handover
 }

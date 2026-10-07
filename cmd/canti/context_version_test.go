@@ -288,8 +288,27 @@ func sessionRules(t *testing.T) string {
 			t.Fatalf("earlier session run %d: %+v", i, r)
 		}
 	}
-	if r := f.cli(nil, "run", "-session", "s", "-input", "in10", "-goal", "Current goal.", "-once"); r.code != exitActive {
-		t.Fatalf("session run 10: %+v", r)
+	decision := func(step, call int, payload string) {
+		body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: payload})
+		f.model.answer(step, call, reply{text: string(body)})
+	}
+	f.model.answer(3, 1, reply{text: `{"kind":"return","payload":"Handed over, then answered."}`})
+	for i, ending := range []struct {
+		maxSteps string
+		want     int
+	}{{"3", exitOK}, {"2", exitStopped}} {
+		args := []string{"-session", "s", "-input", fmt.Sprintf("in%d", 10+i), "-goal", fmt.Sprintf("Earlier goal %d.", 10+i), "-window-steps", "1", "-max-steps", ending.maxSteps, "-once"}
+		if r := f.cli(nil, "run", args...); r.code != exitActive {
+			t.Fatalf("earlier session run %d: %+v", 10+i, r)
+		}
+		decision(1, 10+i, `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"Look around."}`)
+		decision(2, 1+i, `canti:handover {"run_id":"`+f.status().Run.ID+`","first_step":1,"text":"Listed the runs."}`)
+		if r := f.cli(nil, "resume"); r.code != ending.want {
+			t.Fatalf("earlier session run %d: %+v", 10+i, r)
+		}
+	}
+	if r := f.cli(nil, "run", "-session", "s", "-input", "in12", "-goal", "Current goal.", "-once"); r.code != exitActive {
+		t.Fatalf("session run 12: %+v", r)
 	}
 	store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
 	if err != nil {
@@ -297,7 +316,7 @@ func sessionRules(t *testing.T) string {
 	}
 	defer store.Close()
 	var named []string
-	for seq := int64(1); seq <= 10; seq++ {
+	for seq := int64(1); seq <= 12; seq++ {
 		runs, err := store.SessionRuns(context.Background(), "s", seq+1, 1)
 		if err != nil || len(runs) != 1 || runs[0].SessionSeq != seq {
 			t.Fatalf("session run %d: %+v, %v", seq, runs, err)
@@ -311,12 +330,12 @@ func sessionRules(t *testing.T) string {
 	}
 	req, err := store.Request(context.Background(), last.ID, 1, 1)
 	if err != nil || req.Context == nil {
-		t.Fatalf("frozen request of session run 10: %+v, %v", req, err)
+		t.Fatalf("frozen request of session run 12: %+v, %v", req, err)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "session run 10 of 10: request %s, navigation %s\n", digest(name(string(req.Body))), name(req.Context.SessionNavigation))
+	fmt.Fprintf(&b, "session run 12 of 12: request %s, navigation %s\n", digest(name(string(req.Body))), name(req.Context.SessionNavigation))
 	for _, src := range req.Context.Session {
-		fmt.Fprintf(&b, "  earlier %s, sequence %d, %s, goal %v\n", name(src.RunID), src.SessionSeq, src.Status, src.IncludedGoal)
+		fmt.Fprintf(&b, "  earlier %s, sequence %d, %s, goal %v, handover step %d\n", name(src.RunID), src.SessionSeq, src.Status, src.IncludedGoal, src.HandoverStep)
 	}
 	return b.String()
 }
