@@ -11,7 +11,7 @@ import (
 
 func TestAdmissionPlanDoesNotSearchEarlierTransitions(t *testing.T) {
 	s := open(t, tempPath(t))
-	rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + admissionBlockSQL)
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + latestRunsSQL)
 	if err != nil {
 		t.Fatal(err)
 	}

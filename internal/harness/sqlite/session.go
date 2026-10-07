@@ -10,13 +10,9 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-const admissionBlockSQL = `SELECT r.id FROM runs r
+const latestRunsSQL = `SELECT r.id, r.semantics, r.initial, t.kind, t.semantics, t.event, t.to_state FROM runs r
 LEFT JOIN transitions t ON t.run_id = r.id AND t.seq = (SELECT max(seq) FROM transitions WHERE run_id = r.id)
-WHERE COALESCE(json_extract(t.to_state, '$.Phase'), json_extract(r.initial, '$.Phase')) NOT IN ('returned', 'stopped')
-OR (json_extract(t.to_state, '$.Phase') = 'stopped'
-	AND json_extract(t.to_state, '$.EffectID') != ''
-	AND t.kind = 'resolved'
-	AND json_extract(t.event, '$.Execution') = 'unknown') LIMIT 1`
+ORDER BY r.n`
 
 // ErrNoSessions reports a session read of a schema-1 journal opened
 // read-only: the journal predates sessions and has no session table.
@@ -44,20 +40,41 @@ func (s *Store) CheckAdmission(ctx context.Context) error {
 }
 
 func (s *Store) checkAdmission(ctx context.Context, tx *sql.Tx) error {
-	var blocked string
-	var err error
-	if tx == nil {
-		err = s.db.QueryRowContext(ctx, admissionBlockSQL).Scan(&blocked)
-	} else {
-		err = tx.QueryRowContext(ctx, admissionBlockSQL).Scan(&blocked)
+	query := s.db.QueryContext
+	if tx != nil {
+		query = tx.QueryContext
 	}
-	if err == nil {
-		return fmt.Errorf("sqlite: run %q is unfinished or has an unknown effect", blocked)
+	rows, err := query(ctx, latestRunsSQL)
+	if err != nil {
+		return err
 	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	defer rows.Close()
+	for rows.Next() {
+		var id, initial string
+		var runSemantics int
+		var kind, event, to sql.NullString
+		var semantics sql.NullInt64
+		if err := rows.Scan(&id, &runSemantics, &initial, &kind, &semantics, &event, &to); err != nil {
+			return err
+		}
+		var state core.State
+		var last core.Event
+		if kind.Valid {
+			last, err = decodeEvent(kind.String, event.String)
+			if err == nil {
+				err = decodeState(int(semantics.Int64), to.String, &state)
+			}
+		} else {
+			err = decodeState(runSemantics, initial, &state)
+		}
+		if err != nil {
+			return fmt.Errorf("sqlite: run %q: %w", id, err)
+		}
+		if harness.Blocks(state, last) {
+			return fmt.Errorf("sqlite: run %q is unfinished or has an unknown effect", id)
+		}
 	}
-	return err
+	return rows.Err()
 }
 
 // Submit creates one durable session input and its run in a single write transaction.

@@ -116,15 +116,23 @@ func (r record) decode() (harness.Transition, error) {
 
 func (r record) decodeEventStates() (harness.Transition, error) {
 	var t harness.Transition
-	if err := known(r.kind); err != nil {
+	event, err := decodeEvent(r.kind, r.event)
+	if err := cmp.Or(err, decodeState(r.semantics, r.from, &t.From), decodeState(r.semantics, r.to, &t.To)); err != nil {
 		return t, err
 	}
-	event := reflect.New(events[r.kind])
-	if err := cmp.Or(strict(r.event, event.Interface()), decodeState(r.semantics, r.from, &t.From), decodeState(r.semantics, r.to, &t.To)); err != nil {
-		return t, err
-	}
-	t.Event = event.Elem().Interface().(core.Event)
+	t.Event = event
 	return t, nil
+}
+
+func decodeEvent(kind, data string) (core.Event, error) {
+	if err := known(kind); err != nil {
+		return nil, err
+	}
+	event := reflect.New(events[kind])
+	if err := strict(data, event.Interface()); err != nil {
+		return nil, err
+	}
+	return event.Elem().Interface().(core.Event), nil
 }
 
 // Request returns the request frozen at revision rev of step.

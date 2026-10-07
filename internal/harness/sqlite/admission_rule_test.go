@@ -1,0 +1,84 @@
+package sqlite
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
+)
+
+// TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown requires that a
+// new run is admitted only when every run of the journal has returned or
+// stopped and none was abandoned with an effect whose outcome stays unknown.
+func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
+	type stepFn func(d *driver)
+	ex := func(d *driver) { d.decide(execBody("printf ok"), harness.Usage{}) }
+	bind := func(d *driver) { d.call(harness.Runner.Bind) }
+	start := func(d *driver) { d.call(harness.Runner.Start) }
+	unknown := func(d *driver) {
+		d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "lost"})
+	}
+	stop := func(r core.StopReason) stepFn {
+		return func(d *driver) { d.do(core.StopRequested{Reason: r}, harness.Facts{}) }
+	}
+	resolve := func(e core.ExecutionState) stepFn {
+		return func(d *driver) {
+			d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: e}, harness.Facts{Observation: observation(e, 0)})
+		}
+	}
+	scenarios := map[string][]stepFn{
+		"fresh":                  nil,
+		"frozen":                 {func(d *driver) { d.freeze() }},
+		"sent":                   {func(d *driver) { d.freeze(); d.send() }},
+		"saved":                  {func(d *driver) { d.freeze(); d.send(); d.save(execBody("x"), harness.Usage{}) }},
+		"effect":                 {ex},
+		"bound":                  {ex, bind},
+		"started":                {ex, bind, start},
+		"next step":              {ex, bind, start, func(d *driver) { d.observe(core.ExecutionExited, 0) }},
+		"returned":               {func(d *driver) { d.decide([]byte(`{"kind":"return","payload":"done"}`), harness.Usage{}) }},
+		"stopped idle":           {stop(core.StopCancelled)},
+		"cancelling":             {ex, bind, start, stop(core.StopCancelled)},
+		"cancelled":              {ex, bind, start, stop(core.StopCancelled), func(d *driver) { d.observe(core.ExecutionCancelled, 0) }},
+		"needs resolution":       {ex, bind, start, unknown},
+		"abandoned":              {ex, bind, start, unknown, resolve(core.ExecutionUnknown)},
+		"abandoned after a stop": {ex, bind, start, unknown, stop(core.StopTimedOut), resolve(core.ExecutionUnknown)},
+		"resolved after a stop":  {ex, bind, start, unknown, stop(core.StopTimedOut), resolve(core.ExecutionExited)},
+		"resolved and continued": {ex, bind, start, unknown, resolve(core.ExecutionExited)},
+		"jobless abandoned":      {ex, unknown, resolve(core.ExecutionUnknown)},
+	}
+	blocks := map[string]bool{"": false, "returned": false, "stopped idle": false, "cancelled": false, "resolved after a stop": false}
+	for name, steps := range scenarios {
+		for _, later := range []string{"", "returned", "abandoned"} {
+			t.Run(fmt.Sprintf("%s then %q", name, later), func(t *testing.T) {
+				s := open(t, tempPath(t))
+				ctx := context.Background()
+				drive := func(id string, steps []stepFn) {
+					if _, err := s.db.Exec(`INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`, id, core.SemanticsVersion,
+						`{"ID":"`+id+`","Goal":"g","Constraints":"","Budget":{"WallTime":0,"Tokens":0,"OutputBytes":0,"JobTimeout":0},"Created":"0001-01-01T00:00:00Z","Config":null}`,
+						`{"RunID":"`+id+`","Step":1,"Attempt":1,"RequestRev":0,"Phase":"idle","Limits":{"MaxSteps":3,"MaxAttempts":2},"Decision":{"kind":"","payload":""},"EffectID":"","JobID":"","Started":false,"Reason":""}`); err != nil {
+						t.Fatal(err)
+					}
+					d := newDriver(t, s, harness.Snapshot{State: fresh(t, id, limits)})
+					for _, step := range steps {
+						step(d)
+					}
+				}
+				drive("run-a", steps)
+				if later != "" {
+					drive("run-b", scenarios[later])
+				}
+				want := blocksOf(blocks, name) || blocksOf(blocks, later)
+				if err := s.CheckAdmission(ctx); (err != nil) != want {
+					t.Fatalf("CheckAdmission = %v, want blocked %v", err, want)
+				}
+			})
+		}
+	}
+}
+
+func blocksOf(closed map[string]bool, scenario string) bool {
+	blocked, listed := closed[scenario]
+	return !listed || blocked
+}
