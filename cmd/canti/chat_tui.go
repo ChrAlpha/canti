@@ -133,148 +133,28 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steps.SetHeight(max(1, m.height-8))
 		return m, nil
 	case chatTick:
-		m.drainOutput()
-		select {
-		case sig := <-m.signals:
-			return m.Update(chatSignal{sig: sig})
-		default:
-		}
-		select {
-		case err := <-m.outputFailure:
-			return m.Update(chatOutputFailure{err: err})
-		default:
-		}
-		return m, chatPoll()
+		return m.tick()
 	case chatSignal:
-		if msg.sig == syscall.SIGHUP {
-			return m.Update(chatInputFailure{err: errors.New("hung up")})
-		}
-		if m.busy {
-			m.stop(msg.sig)
-			if msg.sig == syscall.SIGTERM {
-				m.exitAfterRun = true
-			}
-			return m, chatPoll()
-		}
-		m.code = exitOK
-		if msg.sig == syscall.SIGTERM {
-			m.code = exitStopped
-		}
-		return m, tea.Quit
+		return m.signal(msg.sig)
 	case chatOutputFailure:
 		if msg.err == nil {
 			return m, nil
 		}
-		m.err = msg.err
-		m.code = exitError
-		if m.busy {
-			m.exitAfterRun = true
-			m.cancel()
-			return m, chatPoll()
-		}
-		return m, tea.Quit
+		return m.fail(msg.err)
 	case chatInputFailure:
-		m.err = fmt.Errorf("terminal input: %w", msg.err)
-		m.code = exitError
-		if m.busy {
-			m.exitAfterRun = true
-			m.cancel()
-			return m, chatPoll()
-		}
-		return m, tea.Quit
+		return m.fail(fmt.Errorf("terminal input: %w", msg.err))
 	case chatDone:
-		m.drainOutput()
-		m.busy, m.stopping = false, false
-		m.stopCount = 0
-		if m.err == nil {
-			m.code = msg.code
-		}
-		if msg.err != nil {
-			m.addTranscript("\nerror: " + msg.err.Error() + "\n")
-		}
-		if m.exitAfterRun || msg.sig != nil && msg.sig != os.Interrupt || msg.err != nil && msg.code != exitUsage || msg.code != exitOK && msg.code != exitStopped && msg.code != exitUsage || errors.As(msg.err, new(errNoInputFits)) {
-			if m.err == nil {
-				m.err = msg.err
-			}
-			return m, tea.Quit
-		}
-		m.code = exitOK
-		if m.inputGate != nil {
-			if err := m.inputGate.reopen(); err != nil {
-				m.err = fmt.Errorf("resetting terminal input: %w", err)
-				m.code = exitError
-				return m, tea.Quit
-			}
-		}
-		m.busy = false
-		return m, nil
+		return m.done(msg)
 	case chatKeys:
-		stale := m.inputGate != nil && msg.epoch != m.inputGate.currentEpoch()
-		var cmds []tea.Cmd
-		for _, event := range msg.events {
-			if stale {
-				key, ok := event.(tea.KeyPressMsg)
-				if !ok || key.String() != "ctrl+c" {
-					continue
-				}
-			}
-			idleQuit := false
-			if key, ok := event.(tea.KeyPressMsg); ok {
-				idleQuit = !m.busy && key.String() == "ctrl+c"
-			}
-			next, cmd := m.Update(event)
-			m = next.(chatTUI)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			if idleQuit {
-				break
-			}
-		}
-		return m, tea.Batch(cmds...)
+		return m.keys(msg)
 	case chatPasteOverflow:
 		if !m.busy {
 			m.addTranscript("\nerror: pasted input exceeds the goal limit\n")
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			if m.busy {
-				m.stop(os.Interrupt)
-				return m, nil
-			}
-			return m, tea.Quit
-		case "enter":
-			if m.busy {
-				return m, nil
-			}
-			goal := strings.TrimSpace(m.editor.Value())
-			if goal == "" {
-				return m, nil
-			}
-			if m.prepare != nil {
-				m.prepare()
-			}
-			m.addTranscript("\n› " + goal + "\n")
-			m.editor.SetValue("")
-			if m.inputGate != nil {
-				m.inputGate.enterBusy()
-			}
-			m.busy = true
-			m.stopCount = 0
-			return m, func() tea.Msg {
-				if m.submit == nil {
-					return chatDone{code: exitError, err: errors.New("chat submit is unavailable")}
-				}
-				code, err, sig := m.submit(goal)
-				return chatDone{code: code, err: err, sig: sig}
-			}
-		case "alt+enter":
-			if !m.busy {
-				m.editor.InsertString("\n")
-			}
-			return m, nil
+		if next, cmd, handled := m.key(msg); handled {
+			return next, cmd
 		}
 	}
 	if key, ok := msg.(tea.KeyPressMsg); ok && (key.String() == "pgup" || key.String() == "pgdown") {
@@ -288,6 +168,145 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	return m, cmd
+}
+
+func (m chatTUI) tick() (tea.Model, tea.Cmd) {
+	m.drainOutput()
+	select {
+	case sig := <-m.signals:
+		return m.Update(chatSignal{sig: sig})
+	default:
+	}
+	select {
+	case err := <-m.outputFailure:
+		return m.Update(chatOutputFailure{err: err})
+	default:
+	}
+	return m, chatPoll()
+}
+
+func (m chatTUI) signal(sig os.Signal) (tea.Model, tea.Cmd) {
+	if sig == syscall.SIGHUP {
+		return m.Update(chatInputFailure{err: errors.New("hung up")})
+	}
+	if m.busy {
+		m.stop(sig)
+		if sig == syscall.SIGTERM {
+			m.exitAfterRun = true
+		}
+		return m, chatPoll()
+	}
+	m.code = exitOK
+	if sig == syscall.SIGTERM {
+		m.code = exitStopped
+	}
+	return m, tea.Quit
+}
+
+func (m chatTUI) fail(err error) (tea.Model, tea.Cmd) {
+	m.err = err
+	m.code = exitError
+	if m.busy {
+		m.exitAfterRun = true
+		m.cancel()
+		return m, chatPoll()
+	}
+	return m, tea.Quit
+}
+
+func (m chatTUI) done(msg chatDone) (tea.Model, tea.Cmd) {
+	m.drainOutput()
+	m.busy, m.stopping = false, false
+	m.stopCount = 0
+	if m.err == nil {
+		m.code = msg.code
+	}
+	if msg.err != nil {
+		m.addTranscript("\nerror: " + msg.err.Error() + "\n")
+	}
+	if m.exitAfterRun || msg.sig != nil && msg.sig != os.Interrupt || msg.err != nil && msg.code != exitUsage || msg.code != exitOK && msg.code != exitStopped && msg.code != exitUsage || errors.As(msg.err, new(errNoInputFits)) {
+		if m.err == nil {
+			m.err = msg.err
+		}
+		return m, tea.Quit
+	}
+	m.code = exitOK
+	if m.inputGate != nil {
+		if err := m.inputGate.reopen(); err != nil {
+			m.err = fmt.Errorf("resetting terminal input: %w", err)
+			m.code = exitError
+			return m, tea.Quit
+		}
+	}
+	m.busy = false
+	return m, nil
+}
+
+func (m chatTUI) keys(msg chatKeys) (tea.Model, tea.Cmd) {
+	stale := m.inputGate != nil && msg.epoch != m.inputGate.currentEpoch()
+	var cmds []tea.Cmd
+	for _, event := range msg.events {
+		key, isKey := event.(tea.KeyPressMsg)
+		if stale && (!isKey || key.String() != "ctrl+c") {
+			continue
+		}
+		idleQuit := isKey && !m.busy && key.String() == "ctrl+c"
+		next, cmd := m.Update(event)
+		m = next.(chatTUI)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if idleQuit {
+			break
+		}
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m chatTUI) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "ctrl+c":
+		if m.busy {
+			m.stop(os.Interrupt)
+			return m, nil, true
+		}
+		return m, tea.Quit, true
+	case "enter":
+		if m.busy {
+			return m, nil, true
+		}
+		goal := strings.TrimSpace(m.editor.Value())
+		if goal == "" {
+			return m, nil, true
+		}
+		return m.start(goal)
+	case "alt+enter":
+		if !m.busy {
+			m.editor.InsertString("\n")
+		}
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func (m chatTUI) start(goal string) (tea.Model, tea.Cmd, bool) {
+	if m.prepare != nil {
+		m.prepare()
+	}
+	m.addTranscript("\n› " + goal + "\n")
+	m.editor.SetValue("")
+	if m.inputGate != nil {
+		m.inputGate.enterBusy()
+	}
+	m.busy = true
+	m.stopCount = 0
+	return m, func() tea.Msg {
+		if m.submit == nil {
+			return chatDone{code: exitError, err: errors.New("chat submit is unavailable")}
+		}
+		code, err, sig := m.submit(goal)
+		return chatDone{code: code, err: err, sig: sig}
+	}, true
 }
 
 func (m *chatTUI) stop(sig os.Signal) {
