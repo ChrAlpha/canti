@@ -14,7 +14,12 @@ import (
 	"unicode/utf8"
 )
 
-const discoveryScanBytes = 8 << 20
+// DiscoveryScanBytes and DiscoverySteps bound the bytes and the steps one
+// discover call scans.
+const (
+	DiscoveryScanBytes = 8 << 20
+	DiscoverySteps     = 256
+)
 
 type discoveryCursor struct {
 	Binding      string `json:"binding"`
@@ -45,8 +50,8 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 	result.Incomplete = cursor.Incomplete
 	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]Skip(nil), cursor.Skipped...)
 	d := discovery{r: r, q: q, cursor: cursor, result: result, matchBytes: queryMatchBytes(q),
-		remaining: discoveryScanBytes, limit: limit, references: MaxBytes - 2}
-	for examined := 0; d.cursor.Step > 0 && examined < 256; examined++ {
+		remaining: DiscoveryScanBytes, limit: limit, references: MaxBytes - 2}
+	for examined := 0; d.cursor.Step > 0 && examined < DiscoverySteps; examined++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
