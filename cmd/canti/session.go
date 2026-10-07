@@ -9,13 +9,34 @@ import (
 
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s spec, url string, once bool) (int, error) {
 	if session == "" || input == "" {
 		return exitUsage, errors.New("-session and -input are required together")
 	}
+	if !sqlite.ValidKey(session) || !sqlite.ValidKey(input) {
+		return exitUsage, errors.New("-session and -input must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
+	}
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
+		return exitError, err
+	}
+	fixed := constraints
+	if !explicitConstraints {
+		var err error
+		if fixed, err = inherited(ctx, a, session); err != nil {
+			return exitError, err
+		}
+	}
+	if _, _, err := newRun(goal, fixed, s, time.Now()); err != nil {
+		return exitUsage, err
+	}
+	if a.credErr != nil {
+		return exitError, a.credErr
+	}
+	m, err := newModel(s.config, url, a.cred)
+	if err != nil {
 		return exitError, err
 	}
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
@@ -57,13 +78,6 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	run, initial, err := newRun(goal, constraints, s, time.Now())
 	if err != nil {
 		return exitUsage, err
-	}
-	if a.credErr != nil {
-		return exitError, a.credErr
-	}
-	m, err := newModel(s.config, url, a.cred)
-	if err != nil {
-		return exitError, err
 	}
 	x, err := newExecutor(s.config, a.state)
 	if err != nil {

@@ -150,7 +150,7 @@ func TestUsageAndVersion(t *testing.T) {
 
 func TestCommandsWithoutACredentialTouchNothing(t *testing.T) {
 	f := newFixture(t, nil)
-	for _, args := range [][]string{{"run", "-goal", "g"}, {"resume"}} {
+	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}, {"resume"}} {
 		r := runCLI(t, nil, append(args, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)...)
 		if r.code != exitError || !strings.Contains(r.stderr, "ANTHROPIC_API_KEY") {
 			t.Errorf("canti %q = %d\nstderr: %s", args, r.code, r.stderr)
@@ -530,6 +530,28 @@ func setConfig(t *testing.T, state, id, field, value string) {
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRefusedSessionInputsTouchNothing(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		code   int
+		stderr string
+	}{
+		{[]string{"-session", "s s", "-input", "i"}, exitUsage, "-session and -input must be"},
+		{[]string{"-session", "s", "-input", "i/i"}, exitUsage, "-session and -input must be"},
+		{[]string{"-session", "s", "-input", "i", "-context-bytes", "65535"}, exitUsage, "-context-bytes: "},
+		{[]string{"-session", "s", "-input", "i", "-model-url", "ftp://model"}, exitError, "BaseURL"},
+	} {
+		f := newFixture(t, nil)
+		r := f.cli(nil, "run", append([]string{"-goal", "g"}, tc.args...)...)
+		if r.code != tc.code || !strings.Contains(r.stderr, tc.stderr) {
+			t.Errorf("canti run %q = %d\nstderr: %s", tc.args, r.code, r.stderr)
+		}
+		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
+			t.Errorf("state directory after refusing %q: %v", tc.args, err)
+		}
 	}
 }
 
