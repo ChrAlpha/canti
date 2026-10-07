@@ -407,10 +407,10 @@ func TestBindAfterFenceRecordsCancelledJobWithoutAContainer(t *testing.T) {
 	if _, err := f.x.Bind(t.Context(), harness.Effect{ID: "e", Command: "false"}); err == nil {
 		t.Fatal("Bind(changed) succeeded")
 	}
-	if inspects := f.calls("inspect"); len(inspects) != 2 {
-		t.Fatalf("inspects = %q, want only the lookups that found no container", inspects)
+	if inspects, ps := f.calls("inspect"), f.calls("ps"); len(inspects) != 2 || len(ps) != 4 {
+		t.Fatalf("inspects %q, ps %q; want only the lookups that found no container and each Bind's sweep", inspects, ps)
 	}
-	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm", "ps"} {
+	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
 		if calls := f.calls(cmd); len(calls) != 0 {
 			t.Fatalf("%s calls = %q, want none for a job that never had a container", cmd, calls)
 		}
@@ -595,6 +595,29 @@ func TestBindOfARecordedEffectReleasesOtherRecordedJobs(t *testing.T) {
 	}
 	if rms := f.calls("rm"); !slices.Contains(rms, "rm rm -v c-a") {
 		t.Fatalf("rms = %q, want the recorded job of another effect released too", rms)
+	}
+}
+
+func TestBindReleasesOtherJobsBeforeItsOwnHungRelease(t *testing.T) {
+	f := newFake(t)
+	for id, job := range map[string]string{"a": "c-a", "e": "c-e"} {
+		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: specHash(f.x.runArgs("true"))})
+		if err := publish(f.x.record(id), data, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.set("ps.out", "c-a a\nc-e e\n")
+	f.set("rm.sh", `[ "$3" = c-e ] && exec sleep 30`+"\n")
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	if job, err := f.x.Bind(ctx, effect); err != nil || job.ID != "c-e" {
+		t.Fatalf("Bind() = %+v, %v; want the recorded job", job, err)
+	}
+	if rms := f.calls("rm"); !slices.Contains(rms, "rm rm -v c-a") {
+		t.Fatalf("rms = %q, want the recorded job of another effect released before the effect's own hung removal", rms)
 	}
 }
 

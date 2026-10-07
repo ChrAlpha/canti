@@ -455,6 +455,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 		return harness.Job{}, err
 	}
 	defer unlock()
+	x.sweep(ctx)
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
 	o, found := observation{}, false
@@ -462,9 +463,6 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found && o.latch == latchCancel {
 			return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
 		}
-	}
-	if rec.ID != fenced(effect.ID) {
-		x.sweep(ctx)
 	}
 	if err == nil && !done && !found {
 		if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
