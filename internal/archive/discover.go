@@ -34,146 +34,210 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 	if !ok || !ok2 || run == "" || strings.Contains(run, "/") || q.Offset != 0 {
 		return errors.New("discover requires /canti/runs/<run>/steps and uses cursor, not offset")
 	}
-	entries, err := dir.ReadDir(MaxEntries + 1)
-	if err != nil && err != io.EOF {
+	through, err := stepCount(dir)
+	if err != nil {
 		return err
 	}
+	cursor, err := discoveryStart(q, through)
+	if err != nil {
+		return err
+	}
+	result.Incomplete = cursor.Incomplete
+	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]Skip(nil), cursor.Skipped...)
+	d := discovery{r: r, q: q, cursor: cursor, result: result, matchBytes: queryMatchBytes(q),
+		remaining: discoveryScanBytes, limit: limit, references: MaxBytes - 2}
+	for examined := 0; d.cursor.Step > 0 && examined < 256; examined++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.remaining < MaxBytes+65+d.matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
+			break
+		}
+		if stop, err := d.step(ctx); stop || err != nil {
+			if err != nil {
+				return err
+			}
+			break
+		}
+		d.cursor.Step--
+		d.cursor.Field, d.cursor.Offset = 0, 0
+	}
+	return finishDiscovery(result, d.cursor)
+}
+
+// stepCount returns how many step directories dir holds, which must be
+// named 1 to that count in eight digits.
+func stepCount(dir *os.File) (int, error) {
+	entries, err := dir.ReadDir(MaxEntries + 1)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
 	if len(entries) > MaxEntries {
-		return errors.New("discover exceeds 32768 step directories")
+		return 0, errors.New("discover exceeds 32768 step directories")
 	}
 	names := make([]string, len(entries))
 	for i, entry := range entries {
 		if !entry.IsDir() {
-			return errors.New("discover requires original step directories without symlinks")
+			return 0, errors.New("discover requires original step directories without symlinks")
 		}
 		names[i] = entry.Name()
 	}
 	sort.Strings(names)
 	for i, name := range names {
 		if name != StepDir(i+1) {
-			return errors.New("discover requires consecutive original step directories")
+			return 0, errors.New("discover requires consecutive original step directories")
 		}
 	}
+	return len(names), nil
+}
+
+// discoveryStart returns the cursor that q continues, or the one that starts
+// at the newest of through steps.
+func discoveryStart(q RetrievalQuery, through int) (discoveryCursor, error) {
 	bound, _ := json.Marshal([]any{"discover", q.Path, q.Query, q.IgnoreCase})
-	cursor := discoveryCursor{Binding: digest(bound), Through: len(names), Step: len(names)}
-	if q.Cursor != "" {
-		cursor = discoveryCursor{}
-		if decodeCursor(q.Cursor, &cursor) != nil || cursor.Binding != digest(bound) ||
-			cursor.Through < 1 || cursor.Through > len(names) || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
-			cursor.SkippedCount < 0 || cursor.SkippedCount > 3*(cursor.Through-cursor.Step)+cursor.Field ||
-			cursor.SkippedCount > 0 && !cursor.Incomplete || len(cursor.Skipped) != min(cursor.SkippedCount, 2) {
-			return errors.New("invalid discovery cursor or changed path/query/history")
-		}
-		for _, skip := range cursor.Skipped {
-			if skip.Step < 1 || skip.Step > cursor.Through || (skip.Field != "command" && skip.Field != "preview" && skip.Field != "artifact") ||
-				(skip.Reason != "nul" && skip.Reason != "utf8") {
-				return errors.New("invalid discovery cursor or changed path/query/history")
-			}
+	if q.Cursor == "" {
+		return discoveryCursor{Binding: digest(bound), Through: through, Step: through}, nil
+	}
+	var cursor discoveryCursor
+	invalid := errors.New("invalid discovery cursor or changed path/query/history")
+	if decodeCursor(q.Cursor, &cursor) != nil || cursor.Binding != digest(bound) ||
+		cursor.Through < 1 || cursor.Through > through || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
+		cursor.SkippedCount < 0 || cursor.SkippedCount > 3*(cursor.Through-cursor.Step)+cursor.Field ||
+		cursor.SkippedCount > 0 && !cursor.Incomplete || len(cursor.Skipped) != min(cursor.SkippedCount, 2) {
+		return cursor, invalid
+	}
+	for _, skip := range cursor.Skipped {
+		if skip.Step < 1 || skip.Step > cursor.Through || (skip.Field != "command" && skip.Field != "preview" && skip.Field != "artifact") ||
+			(skip.Reason != "nul" && skip.Reason != "utf8") {
+			return cursor, invalid
 		}
 	}
-	result.Incomplete = cursor.Incomplete
-	result.SkippedCount, result.Skipped = cursor.SkippedCount, append([]Skip(nil), cursor.Skipped...)
-	remaining, references := discoveryScanBytes, MaxBytes-2
-	matchBytes := queryMatchBytes(q)
-	for examined := 0; cursor.Step > 0 && examined < 256; examined++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if remaining < MaxBytes+65+matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
-			break
-		}
-		stepPath := path.Join(q.Path, StepDir(cursor.Step))
-		command, err := r.discoveryData(ctx, stepPath+"/"+CommandFile, 64, false)
-		if err != nil {
-			return fmt.Errorf("discover command %d: %w", cursor.Step, err)
-		}
-		remaining -= len(command)
-		if slices.ContainsFunc(r.Excluded, func(prefix string) bool { return strings.HasPrefix(string(command), prefix) }) {
-			cursor.Step--
-			cursor.Field, cursor.Offset = 0, 0
-			continue
-		}
-		meta, files, incomplete, err := r.discoverySources(ctx, stepPath, cursor.Step)
-		if err != nil {
-			return fmt.Errorf("discover step %d: %w", cursor.Step, err)
-		}
-		remaining -= len(meta)
-		result.Incomplete = result.Incomplete || incomplete
-		if cursor.Field >= len(files) {
-			return errors.New("discovery cursor field is no longer available")
-		}
-		metaSource := sourceRange(stepPath+"/"+MetaFile, 0, meta)
-		metaJSON, _ := json.Marshal(metaSource)
-		metaBytes, metaRefs, metaSlots := len(meta), len(metaJSON)+1, 1
-		for cursor.Field < len(files) {
-			if remaining < matchBytes+utf8.UTFMax || len(result.Sources)+metaSlots >= 32 {
-				return finishDiscovery(result, cursor)
-			}
-			partQuery := q
-			partQuery.Operation, partQuery.Path, partQuery.Offset, partQuery.Cursor = "search", files[cursor.Field], cursor.Offset, ""
-			part := Retrieval{Query: partQuery}
-			partLimit, partRefs := min(max(matchBytes, limit-metaBytes), max(matchBytes, 512)), max(0, references-metaRefs)
-			left, refs, read, err := r.searchDirectoryFile(ctx, remaining, partLimit, 1, partRefs, &part)
-			if err != nil {
-				if errors.Is(err, errTextNUL) || errors.Is(err, errTextUTF8) {
-					reason := "utf8"
-					if errors.Is(err, errTextNUL) {
-						reason = "nul"
-					}
-					field := "artifact"
-					if partQuery.Path == stepPath+"/"+CommandFile {
-						field = "command"
-					}
-					if partQuery.Path == stepPath+"/"+PreviewFile {
-						field = "preview"
-					}
-					skip := Skip{Step: cursor.Step, Field: field, Reason: reason}
-					result.SkippedCount++
-					if len(result.Skipped) == 0 {
-						result.Skipped = append(result.Skipped, skip)
-					} else if len(result.Skipped) == 1 {
-						result.Skipped = append(result.Skipped, skip)
-					} else {
-						result.Skipped[1] = skip
-					}
-					result.Incomplete = true
-					cursor.Field++
-					cursor.Offset = 0
-					remaining -= read
-					continue
-				}
-				return fmt.Errorf("discover %s: %w", partQuery.Path, err)
-			}
-			remaining -= read
-			if len(part.Sources) > 0 {
-				if metaBytes+partLimit-left > limit || metaRefs > references {
-					if len(result.Sources) == 0 {
-						return errors.New("discover limit is too small for original metadata and a match")
-					}
-					return finishDiscovery(result, cursor)
-				}
-				if metaSlots != 0 {
-					result.Sources = append(result.Sources, metaSource)
-				}
-				result.Sources = append(result.Sources, part.Sources...)
-				limit -= metaBytes + partLimit - left
-				references = refs
-				metaBytes, metaRefs, metaSlots = 0, 0, 0
-			}
-			if part.More && len(part.Sources) == 0 {
-				if len(result.Sources) == 0 && part.NextOffset == cursor.Offset {
-					return errors.New("discover source reference exceeds presentation limit")
-				}
-				cursor.Offset = part.NextOffset
-				return finishDiscovery(result, cursor)
-			}
-			cursor.Field++
-			cursor.Offset = 0
-		}
-		cursor.Step--
-		cursor.Field, cursor.Offset = 0, 0
+	return cursor, nil
+}
+
+// discovery is the progress of one discover call: where it continues, the
+// bytes it may still scan, present, and spend on source references, and
+// its result.
+type discovery struct {
+	r                                        Reader
+	q                                        RetrievalQuery
+	cursor                                   discoveryCursor
+	result                                   *Retrieval
+	matchBytes, remaining, limit, references int
+}
+
+// pendingMeta is the meta source of a step, presented before the step's
+// first match, and what presenting it costs.
+type pendingMeta struct {
+	source             SourceRange
+	bytes, refs, slots int
+}
+
+// step searches the fields of the cursor's step from its field and offset,
+// and reports whether discovery stops in it.
+func (d *discovery) step(ctx context.Context) (bool, error) {
+	stepPath := path.Join(d.q.Path, StepDir(d.cursor.Step))
+	command, err := d.r.discoveryData(ctx, stepPath+"/"+CommandFile, 64, false)
+	if err != nil {
+		return false, fmt.Errorf("discover command %d: %w", d.cursor.Step, err)
 	}
-	return finishDiscovery(result, cursor)
+	d.remaining -= len(command)
+	if slices.ContainsFunc(d.r.Excluded, func(prefix string) bool { return strings.HasPrefix(string(command), prefix) }) {
+		return false, nil
+	}
+	meta, files, incomplete, err := d.r.discoverySources(ctx, stepPath, d.cursor.Step)
+	if err != nil {
+		return false, fmt.Errorf("discover step %d: %w", d.cursor.Step, err)
+	}
+	d.remaining -= len(meta)
+	d.result.Incomplete = d.result.Incomplete || incomplete
+	if d.cursor.Field >= len(files) {
+		return false, errors.New("discovery cursor field is no longer available")
+	}
+	source := sourceRange(stepPath+"/"+MetaFile, 0, meta)
+	encoded, _ := json.Marshal(source)
+	m := pendingMeta{source: source, bytes: len(meta), refs: len(encoded) + 1, slots: 1}
+	for ; d.cursor.Field < len(files); d.cursor.Field, d.cursor.Offset = d.cursor.Field+1, 0 {
+		if d.remaining < d.matchBytes+utf8.UTFMax || len(d.result.Sources)+m.slots >= 32 {
+			return true, nil
+		}
+		if stop, err := d.search(ctx, stepPath, files[d.cursor.Field], &m); stop || err != nil {
+			return stop, err
+		}
+	}
+	return false, nil
+}
+
+// search looks for one match in file from the cursor's offset, presenting
+// it after m, and reports whether discovery stops at it.
+func (d *discovery) search(ctx context.Context, stepPath, file string, m *pendingMeta) (bool, error) {
+	partQuery := d.q
+	partQuery.Operation, partQuery.Path, partQuery.Offset, partQuery.Cursor = "search", file, d.cursor.Offset, ""
+	part := Retrieval{Query: partQuery}
+	partLimit, partRefs := min(max(d.matchBytes, d.limit-m.bytes), max(d.matchBytes, 512)), max(0, d.references-m.refs)
+	left, refs, read, err := d.r.searchDirectoryFile(ctx, d.remaining, partLimit, 1, partRefs, &part)
+	d.remaining -= read
+	if err != nil {
+		reason := textFailure(err)
+		if reason == "" {
+			return false, fmt.Errorf("discover %s: %w", file, err)
+		}
+		field := "artifact"
+		switch file {
+		case stepPath + "/" + CommandFile:
+			field = "command"
+		case stepPath + "/" + PreviewFile:
+			field = "preview"
+		}
+		d.skip(Skip{Step: d.cursor.Step, Field: field, Reason: reason})
+		return false, nil
+	}
+	if len(part.Sources) > 0 {
+		if m.bytes+partLimit-left > d.limit || m.refs > d.references {
+			if len(d.result.Sources) == 0 {
+				return false, errors.New("discover limit is too small for original metadata and a match")
+			}
+			return true, nil
+		}
+		if m.slots != 0 {
+			d.result.Sources = append(d.result.Sources, m.source)
+		}
+		d.result.Sources = append(d.result.Sources, part.Sources...)
+		d.limit -= m.bytes + partLimit - left
+		d.references = refs
+		*m = pendingMeta{}
+	}
+	if part.More && len(part.Sources) == 0 {
+		if len(d.result.Sources) == 0 && part.NextOffset == d.cursor.Offset {
+			return false, errors.New("discover source reference exceeds presentation limit")
+		}
+		d.cursor.Offset = part.NextOffset
+		return true, nil
+	}
+	return false, nil
+}
+
+// skip records a source discovery could not search as text, keeping the
+// first and the latest of them.
+func (d *discovery) skip(s Skip) {
+	d.result.SkippedCount++
+	if len(d.result.Skipped) < 2 {
+		d.result.Skipped = append(d.result.Skipped, s)
+	} else {
+		d.result.Skipped[1] = s
+	}
+	d.result.Incomplete = true
+}
+
+// textFailure names why err refused a source as text, or is empty.
+func textFailure(err error) string {
+	switch {
+	case errors.Is(err, errTextNUL):
+		return "nul"
+	case errors.Is(err, errTextUTF8):
+		return "utf8"
+	}
+	return ""
 }
 
 func finishDiscovery(result *Retrieval, cursor discoveryCursor) error {
