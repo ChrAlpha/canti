@@ -61,15 +61,17 @@ case-sensitive, non-null string fields, `kind`, `payload`, and `purpose`:
 ```
 
 `exec` requests execution in the configured environment. The core neither
-executes nor authorizes the payload. Empty strings are permitted by the
-protocol; execution policy belongs to the harness. `return` hands back control
-and may contain a result, question, or unresolved blocker. It is not a success
-flag. `purpose` is the model's note on what the step is for and what it will
+executes nor authorizes the payload, but an `exec` payload must not be empty
+or only whitespace, so a reply that would run nothing is repaired like any
+other invalid decision instead of consuming a step; other execution policy
+belongs to the harness. `return` hands back control and may contain a result,
+question, or unresolved blocker, or be empty. It is not a success flag. `purpose` is the model's note on what the step is for and what it will
 do next; it is advisory text, never executed or authorized, and the harness
 shows it with the step in later requests.
 
 The decoder rejects unknown or duplicate fields, wrong types, missing
-`kind` or `payload`, a null `purpose`, unsupported kinds, invalid UTF-8,
+`kind` or `payload`, a null `purpose`, unsupported kinds, a blank `exec`
+payload, invalid UTF-8,
 malformed or incomplete JSON, and trailing values. It does not extract JSON
 from Markdown. Transport completeness is a separate adapter responsibility:
 valid JSON alone does not prove that a model response completed.
