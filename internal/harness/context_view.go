@@ -99,10 +99,15 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 			v.RequestedAttempt, v.Outcome = e.Attempt, "attempt_not_started"
 		}
 	case core.ResponseLoaded:
-		if _, err := core.Decode(e.Body); err != nil {
-			v.Outcome, v.Failure = "protocol_rejected", err.Error()
-		} else if t.To.Phase == core.PhaseReturned {
+		switch t.To.Phase {
+		case core.PhaseReturned:
 			v.Outcome = "returned"
+		case core.PhaseEffectSaved:
+		default:
+			v.Outcome = "protocol_rejected"
+			if _, err := core.Decode(e.Body); err != nil {
+				v.Failure = err.Error()
+			}
 		}
 	}
 	return v

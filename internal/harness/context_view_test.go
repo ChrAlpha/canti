@@ -81,3 +81,34 @@ func TestContextRequestComparisonKeepsLegacyUnknown(t *testing.T) {
 		}
 	}
 }
+
+// TestContextEventsReportTheCommittedDecodeOutcome requires that a loaded
+// response is reported as the journal committed it, not as the current
+// decoder would decide its body: a journal of an earlier semantics version
+// rejected a decision with a purpose and accepted a blank exec payload.
+func TestContextEventsReportTheCommittedDecodeOutcome(t *testing.T) {
+	saved := core.State{RunID: "inspection", Step: 1, Attempt: 1, RequestRev: 1, Phase: core.PhaseResponseSaved, Limits: core.Limits{MaxSteps: 3, MaxAttempts: 2}}
+	retried, stopped, effect, returned := saved, saved, saved, saved
+	retried.Phase, retried.Attempt = core.PhaseIdle, 2
+	stopped.Phase, stopped.Reason = core.PhaseStopped, core.StopProtocolFailure
+	effect.Phase, effect.Decision, effect.EffectID = core.PhaseEffectSaved, core.Decision{Kind: core.Exec, Payload: " \t\n"}, "effect"
+	returned.Phase, returned.Decision = core.PhaseReturned, core.Decision{Kind: core.Return, Payload: "done"}
+	for _, tc := range []struct {
+		name, body       string
+		to               core.State
+		outcome, failure string
+	}{
+		{"purpose rejected by an earlier decoder", `{"kind":"exec","purpose":"inspect","payload":"true"}`, retried, "protocol_rejected", ""},
+		{"blank payload accepted by an earlier decoder", `{"kind":"exec","payload":" \t\n"}`, effect, "response_loaded", ""},
+		{"rejected", `{"kind":"exec"}`, retried, "protocol_rejected", "core: invalid decision: expected kind and payload"},
+		{"rejected at the last attempt", `not json`, stopped, "protocol_rejected", "core: invalid decision: invalid character 'o' in literal null (expecting 'u')"},
+		{"returned", `{"kind":"return","payload":"done"}`, returned, "returned", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := harness.Transition{Seq: 4, From: saved, To: tc.to, Event: core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(tc.body)}}
+			if v := harness.DescribeContextEvent(tr, false); v.Outcome != tc.outcome || v.Failure != tc.failure {
+				t.Fatalf("event = %+v, want outcome %q and failure %q", v, tc.outcome, tc.failure)
+			}
+		})
+	}
+}
