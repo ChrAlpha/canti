@@ -22,9 +22,8 @@ var stderrTruncated = []byte("... [stderr entry truncated]\n")
 var errStderrEntryTooLarge = errors.New("stderr entry exceeds 4096 bytes")
 
 type stderrEntry struct {
-	data    []byte
-	ack     chan error
-	inputFD *int
+	data []byte
+	ack  chan error
 }
 
 type stderrWriter struct {
@@ -45,9 +44,7 @@ func newStderrWriter(out io.Writer) *stderrWriter {
 		defer close(w.done)
 		write := func(entry stderrEntry) bool {
 			var err error
-			if entry.inputFD != nil {
-				err = writePrompt(out, entry.data, *entry.inputFD, w.closing)
-			} else if len(entry.data) > 0 {
+			if len(entry.data) > 0 {
 				_, err = out.Write(entry.data)
 			}
 			if err == nil {
@@ -118,18 +115,14 @@ func (w *stderrWriter) Write(p []byte) (int, error) {
 }
 
 func (w *stderrWriter) WriteSync(p []byte) error {
-	return w.writeSync(p, nil, nil)
+	return w.writeSync(p, nil)
 }
 
-func (w *stderrWriter) Prompt(inputFD int) error {
-	return w.writeSync([]byte("> "), &inputFD, nil)
-}
-
-func (w *stderrWriter) writeSync(p []byte, inputFD *int, timeout <-chan time.Time) error {
+func (w *stderrWriter) writeSync(p []byte, timeout <-chan time.Time) error {
 	if len(p) > stderrEntryBytes {
 		return errStderrEntryTooLarge
 	}
-	entry := stderrEntry{data: append([]byte(nil), p...), ack: make(chan error, 1), inputFD: inputFD}
+	entry := stderrEntry{data: append([]byte(nil), p...), ack: make(chan error, 1)}
 	select {
 	case <-w.closing:
 		return io.ErrClosedPipe
@@ -151,24 +144,13 @@ func (w *stderrWriter) writeSync(p []byte, inputFD *int, timeout <-chan time.Tim
 	}
 }
 
-func (w *stderrWriter) Flush() error { return w.WriteSync(nil) }
-
-type syncStderr struct{ w *stderrWriter }
-
-func (s syncStderr) Write(p []byte) (int, error) {
-	if err := s.w.WriteSync(p); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
 // finalStderr writes a command's outcome and the operator's next step
 // synchronously, as WriteSync does, but waits at most stderrFinalTime for each
 // write so that a stderr nobody reads still lets the command exit.
 type finalStderr struct{ w *stderrWriter }
 
 func (s finalStderr) Write(p []byte) (int, error) {
-	if err := s.w.writeSync(stderrBytes(p), nil, time.After(stderrFinalTime)); err != nil {
+	if err := s.w.writeSync(stderrBytes(p), time.After(stderrFinalTime)); err != nil {
 		return 0, err
 	}
 	return len(p), nil

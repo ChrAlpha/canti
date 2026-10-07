@@ -173,24 +173,14 @@ func TestChatExitsWhenATurnNeedsResolution(t *testing.T) {
 
 func TestChatSignals(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		terminal bool
-		signal   os.Signal
-		code     int
-	}{
-		{"interrupt from a pipe", false, os.Interrupt, exitStopped},
-		{"terminate on a terminal", true, syscall.SIGTERM, exitStopped},
-		{"interrupt on a terminal", true, os.Interrupt, exitOK},
-	} {
+		name   string
+		signal os.Signal
+	}{{"interrupt from a pipe", os.Interrupt}, {"terminate from a pipe", syscall.SIGTERM}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
 			held := f.model.holdRequests()
-			var env []string
-			if tc.terminal {
-				env = []string{"CANTI_TEST_TERMINAL=1"}
-			}
 			in, w := io.Pipe()
-			cmd, wait := f.startWith(in, env, "chat")
+			cmd, wait := f.startWith(in, nil, "chat")
 			io.WriteString(w, "slow\n")
 			waitFor(t, func() bool { return len(held) > 0 })
 			if err := cmd.Process.Signal(tc.signal); err != nil {
@@ -203,16 +193,8 @@ func TestChatSignals(t *testing.T) {
 			go func() { io.WriteString(w, "again\n"); w.Close() }()
 			r := wait()
 			in.Close()
-			if r.code != tc.code || !strings.Contains(r.stderr, "stopped: cancelled") {
-				t.Fatalf("chat: %+v", r)
-			}
-			s := f.status()
-			if tc.code == exitOK {
-				if r.stdout != "answer\n" || s.Run.SessionSeq != 2 || s.Run.Goal != "again" || s.Phase != core.PhaseReturned {
-					t.Fatalf("after interrupt: %+v, %+v", r, s)
-				}
-			} else if r.stdout != "" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
-				t.Fatalf("chat continued after the signal: %+v, %+v", r, s)
+			if r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") || r.stdout != "" || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+				t.Fatalf("chat continued after the signal: %+v, %+v", r, f.status())
 			}
 		})
 	}
@@ -236,7 +218,7 @@ func TestChatSignals(t *testing.T) {
 			}
 			defer r.Close()
 			fillPipe(t, w)
-			cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, []string{"CANTI_TEST_TERMINAL=1"}, "chat")
+			cmd, wait := f.startIO(strings.NewReader("one\ntwo\n"), w, nil, "chat")
 			w.Close()
 			deadline := time.Now().Add(5 * time.Second)
 			for {
@@ -272,7 +254,7 @@ func TestChatSignals(t *testing.T) {
 	t.Run("interrupt at the prompt", func(t *testing.T) {
 		f := newFixture(t, nil)
 		in, w := io.Pipe()
-		cmd, wait := f.startWith(in, []string{"CANTI_TEST_TERMINAL=1"}, "chat")
+		cmd, wait := f.startWith(in, nil, "chat")
 		waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
 			t.Fatal(err)
@@ -290,13 +272,14 @@ func TestChatSignals(t *testing.T) {
 func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "last answer"}})
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
-	terminal := []string{"CANTI_TEST_TERMINAL=1"}
-	in, w := io.Pipe()
-	cmd, wait := f.startWith(in, terminal, "chat", "-session", "s")
-	io.WriteString(w, "first request\n")
-	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
+	_, wait := f.startWith(strings.NewReader("first request\n"), nil, "chat", "-session", "s")
+	if r := wait(); r.code != exitOK || r.stdout != "first answer\n" {
+		t.Fatalf("first chat: %+v", r)
+	}
 	held := f.model.holdRequests()
 	for i, input := range []string{"interrupted request\n", "interrupted again\n"} {
+		in, w := io.Pipe()
+		cmd, wait := f.startWith(in, nil, "chat", "-session", "s")
 		io.WriteString(w, input)
 		waitFor(t, func() bool { return len(held) > 0 })
 		<-held
@@ -304,15 +287,16 @@ func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitFor(t, func() bool { s := f.status(); return s.Run.SessionSeq == int64(i+2) && s.Phase == core.PhaseStopped })
+		w.Close()
+		if r := wait(); r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") {
+			t.Fatalf("interrupted chat %d: %+v", i+1, r)
+		}
+		in.Close()
 	}
 	f.model.mu.Lock()
 	f.model.hold = nil
 	f.model.mu.Unlock()
-	w.Close()
-	if r := wait(); r.code != exitOK || strings.Count(r.stderr, "stopped: cancelled") != 2 {
-		t.Fatalf("interrupted chat: %+v", r)
-	}
-	_, wait = f.startWith(strings.NewReader("last request\n"), terminal, "chat", "-session", "s")
+	_, wait = f.startWith(strings.NewReader("last request\n"), nil, "chat", "-session", "s")
 	if r := wait(); r.code != exitOK || r.stdout != "last answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}

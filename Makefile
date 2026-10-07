@@ -25,7 +25,6 @@ PTY_TESTS = \
 	TestChatInputReadsItsOwnNonblockingDescription \
 	TestChatInputTerminalReadNeverWaitsForInput \
 	TestChatKeepsInheritedDescriptorsBlocking \
-	TestChatPromptWriteBackpressure \
 	TestChatPTYBusyInputDoesNotBecomeNextRun \
 	TestChatPTYBusyPasteTailAfterReturnIsDiscarded \
 	TestChatPTYBusyScrollDoesNotQueueInput \
@@ -40,12 +39,8 @@ PTY_TESTS = \
 	TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal \
 	TestChatPTYStderrBackpressureCancelsActiveRun \
 	TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded \
-	TestChatTerminalDiscardsBusyInput \
-	TestChatTerminalReopensPromptAfterStderrBackpressure \
 	TestChatTUIRejectsQueuedPreviousEpoch \
-	TestChatTUITeardownCancellation \
-	TestPromptFlushBarrierAndImmediateInput \
-	TestPromptOutputBoundaries
+	TestChatTUITeardownCancellation
 
 LONG = $(call anchored,$(LONG_TESTS))
 PTY = $(call anchored,$(PTY_TESTS))

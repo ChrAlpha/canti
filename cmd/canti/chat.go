@@ -28,10 +28,6 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
-var stdinTerminal = func() bool {
-	return isatty.IsTerminal(os.Stdin.Fd())
-}
-
 func chatCommand(fs *flag.FlagSet, a *app) action {
 	session := fs.String("session", "", "conversation `ID` to continue (default a new one)")
 	constraints := fs.String("constraints", "", "rules the agent must follow")
@@ -118,38 +114,14 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 			fmt.Fprintf(terminalOutput, "canti: continue session with \"canti chat -session %s\"; new runs use the current launch flags.\n", id)
 			return code, err
 		}
-		terminal := stdinTerminal()
-		prompt := a.stderr
-		if terminal {
-			prompt = syncStderr{a.display}
-		}
 		fmt.Fprintf(a.stderr, "canti: session %s; continue it with \"canti chat -session %[1]s\".\n", id)
-		if terminal {
-			fmt.Fprintln(a.stderr, "canti: input typed during a run is discarded; wait for the next prompt.")
-		}
 		a.steps, a.stdout = a.stderr, cleaned{a.stdout}
 		in := bufio.NewReader(os.Stdin)
-		discardInput := false
 		for {
-			if terminal {
-				if err := a.display.Flush(); err != nil {
-					return exitError, fmt.Errorf("showing chat prompt: %w", err)
-				}
+			if _, err := fmt.Fprint(a.stderr, "> "); err != nil {
+				return exitError, fmt.Errorf("showing chat prompt: %w", err)
 			}
-			if discardInput {
-				in.Reset(os.Stdin)
-				discardInput = false
-			}
-			var promptErr error
-			if terminal {
-				promptErr = a.display.Prompt(int(os.Stdin.Fd()))
-			} else {
-				_, promptErr = fmt.Fprint(prompt, "> ")
-			}
-			if promptErr != nil {
-				return exitError, fmt.Errorf("showing chat prompt: %w", promptErr)
-			}
-			goal, readErr := readInput(in, prompt)
+			goal, readErr := readInput(in, a.stderr)
 			var opener *openerError
 			if errors.As(readErr, &opener) {
 				fmt.Fprintf(a.stderr, "canti chat: %v\n", readErr)
@@ -160,14 +132,13 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					fmt.Fprintf(a.stderr, "canti chat: %v\n", err)
 				} else {
 					code, err := a.submitSession(ctx, id, "in_"+rand.Text(), goal, *constraints, explicit, s, *url, false)
-					discardInput = terminal
 					select {
 					case displayErr := <-a.displayFailure:
 						return exitError, fmt.Errorf("chat display: %w", displayErr)
 					default:
 					}
 					switch {
-					case a.signal != nil && (a.signal != os.Interrupt || !terminal):
+					case a.signal != nil:
 						return code, err
 					case code == exitUsage:
 						if !explicit {
@@ -183,7 +154,6 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 					case err != nil || code != exitOK && code != exitStopped:
 						return code, err
 					}
-					a.signal = nil
 				}
 			}
 			switch {

@@ -60,7 +60,7 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
 	f.model.answer(1, 2, reply{text: `{"kind":"exec","payload":"echo started > started; sleep 60"}`})
 	in, w := io.Pipe()
-	cmd, wait := f.startWith(in, []string{"CANTI_TEST_TERMINAL=1"}, "chat", "-session", "s", "-image", image)
+	cmd, wait := f.startWith(in, nil, "chat", "-session", "s", "-image", image)
 	io.WriteString(w, "first request\n")
 	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
 	io.WriteString(w, "interrupted request\n")
@@ -70,12 +70,16 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	}
 	waitFor(t, func() bool { return f.status().Phase == core.PhaseStopped })
 	s := f.status()
-	io.WriteString(w, "third request\n")
 	w.Close()
 	r := wait()
-	if r.code != exitOK || r.stdout != "first answer\nthird answer\n" || !strings.Contains(r.stderr, "$ echo started > started; sleep 60\n") || !strings.Contains(r.stderr, "\n└ cancelled (") ||
+	in.Close()
+	if r.code != exitStopped || r.stdout != "first answer\n" || !strings.Contains(r.stderr, "$ echo started > started; sleep 60\n") || !strings.Contains(r.stderr, "\n└ cancelled (") ||
 		!strings.Contains(r.stderr, "stopped: cancelled") {
 		t.Fatalf("chat: %+v", r)
+	}
+	_, wait = f.startWith(strings.NewReader("third request\n"), nil, "chat", "-session", "s", "-image", image)
+	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
+		t.Fatalf("continued chat: %+v", r)
 	}
 	if s.Reason != core.StopCancelled || s.Totals.Steps != 1 || f.status().Run.SessionSeq != 3 {
 		t.Fatalf("interrupted run: %+v", s)

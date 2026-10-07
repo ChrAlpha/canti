@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -197,4 +198,26 @@ func TestChatTUITeardownCancellation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func openPTY(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	if err := unix.IoctlSetPointerInt(int(m.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		t.Fatal(err)
+	}
+	n, err := unix.IoctlGetInt(int(m.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return m, s
 }
