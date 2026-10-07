@@ -1,4 +1,4 @@
-.PHONY: check ci-integration ci-long ci-pty ci-unit fmt integration test test-names vet
+.PHONY: check ci-integration ci-long ci-pty ci-unit commits fmt integration lint test test-names vet
 
 empty :=
 space := $(empty) $(empty)
@@ -48,6 +48,7 @@ PTY_TESTS = \
 LONG = $(call anchored,$(LONG_TESTS))
 PTY = $(call anchored,$(PTY_TESTS))
 CI_TEST = scripts/test-report.sh go test -json -count=1 -race
+GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
 check: fmt vet test-names test
 
@@ -57,6 +58,13 @@ fmt:
 vet:
 	go vet ./...
 	go vet -tags integration,live ./...
+
+lint:
+	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run --build-tags integration,live ./...
+
+commits:
+	scripts/check-commits.sh "$$BASE"
 
 test:
 	go test ./...

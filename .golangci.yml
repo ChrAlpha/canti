@@ -1,0 +1,22 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - gocognit
+  settings:
+    gocognit:
+      min-complexity: 30
+  exclusions:
+    generated: disable
+    rules:
+      - path: _test\.go$
+        linters: [gocognit]
+      - path: ^core/state\.go$
+        text: "func `\\(State\\)\\.(Next|Validate)`"
+        linters: [gocognit]
+      - path: ^cmd/canti/chat_input\.go$
+        text: "func `\\(\\*chatInputGate\\)\\.decodeLocked`"
+        linters: [gocognit]
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

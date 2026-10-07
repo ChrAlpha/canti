@@ -29,10 +29,31 @@ jobs:
         run: make fmt vet
       - name: Check test names
         run: make test-names
+      - name: Check function complexity
+        run: make lint
       - name: Run race-enabled unit tests
         run: make ci-unit
       - name: Smoke-test CLI
         run: test "$(go run ./cmd/canti -version)" = dev
+
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build and vet every commit
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: scripts/check-commits.sh "$BASE"
 
   integration:
     runs-on: ubuntu-latest
