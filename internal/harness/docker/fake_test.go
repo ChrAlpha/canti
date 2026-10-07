@@ -435,6 +435,31 @@ func TestBindAfterFenceRecordsCancelledJobWithoutAContainer(t *testing.T) {
 	}
 }
 
+func TestBindAfterFenceKeepsTheJobBoundBeforeIt(t *testing.T) {
+	f := newFake(t)
+	f.missing()
+	f.set("created.json", f.container("created", 0))
+	f.set("create.sh", `cp "$ctl/created.json" "$ctl/inspect.out"; rm -f "$ctl/inspect.err" "$ctl/inspect.exit"`+"\n")
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending {
+		t.Fatalf("Bind() = %+v, %v; want the created job pending", job, err)
+	}
+	if err := f.x.Cancel(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobCancelled {
+		t.Fatalf("Bind() after the fence = %+v, %v; want the job bound before it, cancelled", job, err)
+	}
+	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatalf("record %v, rms %q after Bind; want the job left to Inspect", err, f.calls("rm"))
+	}
+	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || job.ID != "c-e" || job.Status != harness.JobCancelled {
+		t.Fatalf("Inspect() = %+v, %v, %v; want the job bound before the fence, cancelled", job, found, err)
+	}
+	if creates, rms := f.calls("create"), f.calls("rm"); len(creates) != 1 || len(rms) != 1 || rms[0] != "rm rm -v c-e" {
+		t.Fatalf("creates %q, rms %q; want one container, recorded and released", creates, rms)
+	}
+}
+
 func same(a, b harness.Job) bool {
 	x, errx := json.Marshal(a)
 	y, erry := json.Marshal(b)
