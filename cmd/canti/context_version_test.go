@@ -79,15 +79,14 @@ func contextRules(t *testing.T) string {
 	fmt.Fprintf(&b, "loop defaults: handover %d, total %d\n", fit.Handover, fit.Limit)
 	transports := []anthropic.Config{{DecisionFormat: "text", StructuredOutput: true, Fallbacks: true}, {DecisionFormat: "text"}, {DecisionFormat: "tool", Fallbacks: true}}
 	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
-		f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
-			ArtifactDir: docker.ArtifactDir, RunsDir: runsDir, RunID: run.ID, Window: &harness.Window{FirstStep: 1},
-			RetrievalEnabled: flags[0], ImportsEnabled: flags[1], HandoverBytes: 2048}
-		p, err := f.Prompt(harness.DefaultPromptLimits())
-		if err != nil {
-			t.Fatal(err)
-		}
-		fmt.Fprintf(&b, "system, retrieval %v, imports %v: %s\n", flags[0], flags[1], digest(p.System))
 		for _, c := range transports {
+			f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
+				ArtifactDir: docker.ArtifactDir, RunsDir: runsDir, RunID: run.ID, Window: &harness.Window{FirstStep: 1},
+				DecisionTool: c.DecisionFormat == "tool", RetrievalEnabled: flags[0], ImportsEnabled: flags[1], HandoverBytes: 2048}
+			p, err := f.Prompt(harness.DefaultPromptLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
 			c.APIKey, c.Model, c.MaxTokens = "key", "claude-opus-5", 16000
 			m, err := anthropic.New(c)
 			if err != nil {
@@ -97,7 +96,8 @@ func contextRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(&b, "  request, %s, structured %v, fallbacks %v: %s %s %s\n", c.DecisionFormat, c.StructuredOutput, c.Fallbacks, req.Protocol, req.Adapter, digest(string(req.Body)))
+			fmt.Fprintf(&b, "request, %s, structured %v, fallbacks %v, retrieval %v, imports %v: system %s, %s %s %s\n", c.DecisionFormat, c.StructuredOutput, c.Fallbacks,
+				flags[0], flags[1], digest(p.System), req.Protocol, req.Adapter, digest(string(req.Body)))
 		}
 	}
 	page := everyBlock(run)
