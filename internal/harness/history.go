@@ -9,10 +9,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 // PublishHistory publishes the projection of run runID that jobs read under
@@ -141,7 +141,7 @@ func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) err
 			return err
 		}
 		for _, r := range page {
-			step := filepath.Join(tmp, fmt.Sprintf("%08d", r.Step))
+			step := filepath.Join(tmp, archive.StepDir(r.Step))
 			if err := os.Mkdir(step, 0o755); err != nil {
 				return err
 			}
@@ -166,9 +166,9 @@ func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) err
 // putStep publishes the records of r in steps unless they exist, writing
 // them in a temporary directory of dir.
 func putStep(dir, steps, artifactDir string, r StepRecord) error {
-	target := filepath.Join(steps, fmt.Sprintf("%08d", r.Step))
+	target := filepath.Join(steps, archive.StepDir(r.Step))
 	if found, err := exists(target, true); err != nil || found {
-		for _, name := range [...]string{"meta", "command", "preview"} {
+		for _, name := range [...]string{archive.MetaFile, archive.CommandFile, archive.PreviewFile} {
 			if err == nil {
 				_, err = exists(filepath.Join(target, name), false)
 			}
@@ -191,7 +191,7 @@ func writeStep(path, artifactDir string, r StepRecord) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	for _, file := range [...]struct{ name, data string }{{"meta", meta(r, artifactDir)}, {"command", r.Command}, {"preview", r.Observation.Preview}} {
+	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r, artifactDir)}, {archive.CommandFile, r.Command}, {archive.PreviewFile, r.Observation.Preview}} {
 		f, err := os.Create(filepath.Join(path, file.name))
 		if err == nil {
 			err = fill(f, file.data)
@@ -242,25 +242,12 @@ func install(tmp, target string) error {
 
 func meta(r StepRecord, artifactDir string) string {
 	o := r.Observation
-	var b strings.Builder
-	line := func(key, value string) { b.WriteString(key + ": " + lineBreaks.Replace(value) + "\n") }
-	line("step", strconv.Itoa(r.Step))
-	line("execution", string(o.Execution))
-	if o.ExitCode != nil {
-		line("exit_code", strconv.Itoa(*o.ExitCode))
-	}
-	line("resolved", strconv.FormatBool(r.Resolved))
-	output := "unavailable"
+	m := archive.StepMeta{Step: r.Step, Execution: string(o.Execution), ExitCode: o.ExitCode, Resolved: r.Resolved,
+		OutputBytes: o.Output.Bytes, OutputComplete: o.Output.Complete, OutputDetail: o.Output.Detail}
 	if o.Output.Available {
-		output = path.Join(artifactDir, o.Output.Path)
+		m.Output = path.Join(artifactDir, o.Output.Path)
 	}
-	line("output", output)
-	line("output_bytes", strconv.FormatInt(o.Output.Bytes, 10))
-	line("output_complete", strconv.FormatBool(o.Output.Complete))
-	if o.Output.Detail != "" {
-		line("output_detail", o.Output.Detail)
-	}
-	return b.String()
+	return m.Encode()
 }
 
 // exists reports whether path exists, failing unless it is a directory when

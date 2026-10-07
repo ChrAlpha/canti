@@ -10,7 +10,6 @@ import (
 	"path"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -51,7 +50,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 	}
 	sort.Strings(names)
 	for i, name := range names {
-		if name != fmt.Sprintf("%08d", i+1) {
+		if name != StepDir(i+1) {
 			return errors.New("discover requires consecutive original step directories")
 		}
 	}
@@ -83,8 +82,8 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		if remaining < MaxBytes+65+matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
 			break
 		}
-		stepPath := path.Join(q.Path, fmt.Sprintf("%08d", cursor.Step))
-		command, err := r.discoveryData(ctx, stepPath+"/command", 64, false)
+		stepPath := path.Join(q.Path, StepDir(cursor.Step))
+		command, err := r.discoveryData(ctx, stepPath+"/"+CommandFile, 64, false)
 		if err != nil {
 			return fmt.Errorf("discover command %d: %w", cursor.Step, err)
 		}
@@ -103,7 +102,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		if cursor.Field >= len(files) {
 			return errors.New("discovery cursor field is no longer available")
 		}
-		metaSource := sourceRange(stepPath+"/meta", 0, meta)
+		metaSource := sourceRange(stepPath+"/"+MetaFile, 0, meta)
 		metaJSON, _ := json.Marshal(metaSource)
 		metaBytes, metaRefs, metaSlots := len(meta), len(metaJSON)+1, 1
 		for cursor.Field < len(files) {
@@ -122,10 +121,10 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 						reason = "nul"
 					}
 					field := "artifact"
-					if partQuery.Path == stepPath+"/command" {
+					if partQuery.Path == stepPath+"/"+CommandFile {
 						field = "command"
 					}
-					if partQuery.Path == stepPath+"/preview" {
+					if partQuery.Path == stepPath+"/"+PreviewFile {
 						field = "preview"
 					}
 					skip := Skip{Step: cursor.Step, Field: field, Reason: reason}
@@ -214,27 +213,17 @@ func (r Reader) discoveryData(ctx context.Context, name string, limit int, whole
 }
 
 func (r Reader) discoverySources(ctx context.Context, stepPath string, step int) ([]byte, []string, bool, error) {
-	meta, err := r.discoveryData(ctx, stepPath+"/meta", MaxBytes, true)
+	meta, err := r.discoveryData(ctx, stepPath+"/"+MetaFile, MaxBytes, true)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	fields := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSuffix(string(meta), "\n"), "\n") {
-		key, value, ok := strings.Cut(line, ": ")
-		if _, duplicate := fields[key]; !ok || duplicate {
-			return nil, nil, false, errors.New("invalid original step metadata")
-		}
-		fields[key] = value
+	output, bytes, complete, err := decodeOutput(meta, step)
+	if err != nil {
+		return nil, nil, false, err
 	}
-	complete, err := strconv.ParseBool(fields["output_complete"])
-	bytes, sizeErr := strconv.ParseInt(fields["output_bytes"], 10, 64)
-	if err != nil || sizeErr != nil || bytes < 0 || fields["step"] != strconv.Itoa(step) {
-		return nil, nil, false, errors.New("invalid original step metadata")
-	}
-	files := []string{stepPath + "/command"}
-	output := fields["output"]
-	if output == "unavailable" {
-		return meta, append(files, stepPath+"/preview"), true, nil
+	files := []string{stepPath + "/" + CommandFile}
+	if output == unavailable {
+		return meta, append(files, stepPath+"/"+PreviewFile), true, nil
 	}
 	if !strings.HasPrefix(output, ArtifactsRoot+"/") || path.Clean(output) != output {
 		return nil, nil, false, errors.New("original output must name an artifact path")
@@ -252,7 +241,7 @@ func (r Reader) discoverySources(ctx context.Context, stepPath string, step int)
 		return nil, nil, false, errors.New("original output is unavailable or its retained size changed")
 	}
 	if !complete {
-		files = append(files, stepPath+"/preview")
+		files = append(files, stepPath+"/"+PreviewFile)
 	}
 	return meta, append(files, output), !complete, nil
 }

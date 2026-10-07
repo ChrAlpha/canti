@@ -22,11 +22,11 @@ func discoveryFixture(t *testing.T) Reader {
 
 func discoveryStep(t *testing.T, r Reader, step int, command, preview, output string, complete bool) string {
 	t.Helper()
-	dir := filepath.Join(r.History, "run", "steps", fmt.Sprintf("%08d", step))
+	dir := filepath.Join(r.History, "run", "steps", StepDir(step))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	artifact := "unavailable"
+	artifact := ""
 	if output != "" {
 		name := fmt.Sprintf("step-%d", step)
 		if err := os.WriteFile(filepath.Join(r.Artifacts, name), []byte(output), 0o600); err != nil {
@@ -34,8 +34,9 @@ func discoveryStep(t *testing.T, r Reader, step int, command, preview, output st
 		}
 		artifact = "/canti/artifacts/" + name
 	}
-	meta := fmt.Sprintf("step: %d\nexecution: exited\nexit_code: 0\nresolved: false\noutput: %s\noutput_bytes: %d\noutput_complete: %t\n", step, artifact, len(output), complete)
-	for name, body := range map[string]string{"command": command, "preview": preview, "meta": meta} {
+	exit := 0
+	meta := StepMeta{Step: step, Execution: "exited", ExitCode: &exit, Output: artifact, OutputBytes: int64(len(output)), OutputComplete: complete}.Encode()
+	for name, body := range map[string]string{CommandFile: command, PreviewFile: preview, MetaFile: meta} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
