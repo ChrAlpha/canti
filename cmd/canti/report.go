@@ -17,7 +17,7 @@ import (
 func statusCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
-		store, run, err := a.read(ctx)
+		store, run, _, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
@@ -66,7 +66,7 @@ const historyPage = 8
 func historyCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
-		store, run, err := a.read(ctx)
+		store, run, _, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
@@ -99,21 +99,21 @@ func (a *app) encoder() *json.Encoder {
 }
 
 // read opens the workspace journal read-only, without the lock, and finds
-// the run.
-func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, error) {
+// the run and its stored config.
+func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, config, error) {
 	path := filepath.Join(a.state, "canti.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, harness.Run{}, fmt.Errorf("no runs in workspace %s", a.workspace)
+		return nil, harness.Run{}, config{}, fmt.Errorf("no runs in workspace %s", a.workspace)
 	}
 	store, err := sqlite.OpenReadOnly(ctx, path)
 	if err != nil {
-		return nil, harness.Run{}, err
+		return nil, harness.Run{}, config{}, err
 	}
-	run, _, err := a.find(ctx, store)
+	run, c, err := a.find(ctx, store)
 	if err != nil {
 		store.Close()
 	}
-	return store, run, err
+	return store, run, c, err
 }
 
 // report prints the outcome of the run at snap, of config c, and returns its

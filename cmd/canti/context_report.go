@@ -46,7 +46,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if *raw && (*text || *bodies || *after != 0) || *text && *bodies {
 			return exitUsage, errors.New("raw cannot be combined with text/responses/after; responses requires JSON")
 		}
-		store, run, err := a.read(ctx)
+		store, run, c, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
@@ -68,7 +68,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
-		report, err := describeContext(page, *bodies)
+		report, err := describeContext(page, *bodies, c.ContextVersion == contextVersion)
 		if err != nil {
 			return exitError, err
 		}
@@ -79,7 +79,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-func describeContext(p sqlite.ContextPage, bodies bool) (contextReport, error) {
+func describeContext(p sqlite.ContextPage, bodies, currentRules bool) (contextReport, error) {
 	r := contextReport{RunID: p.Run.ID, SessionID: p.Run.SessionID, SessionSeq: p.Run.SessionSeq, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}, EventBytes: p.EventBytes, EventByteLimit: sqlite.ContextEventPageBytes}
 	var err error
 	if r.Request, err = harness.DescribeContextRequest(p.Request); err != nil {
@@ -102,7 +102,7 @@ func describeContext(p sqlite.ContextPage, bodies bool) (contextReport, error) {
 		r.Delta = &delta
 	}
 	for _, event := range p.Events {
-		r.Events = append(r.Events, harness.DescribeContextEvent(event, bodies))
+		r.Events = append(r.Events, harness.DescribeContextEvent(event, bodies, currentRules))
 		r.NextAfter = event.Seq
 	}
 	if !r.More {

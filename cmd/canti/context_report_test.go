@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -190,5 +191,40 @@ func TestContextTextPreservesStopReason(t *testing.T) {
 	}
 	if r := f.cli(nil, "context", "-text"); r.code != exitOK || !strings.Contains(r.stdout, "cancelled") {
 		t.Fatalf("missing durable stop reason: %+v", r)
+	}
+}
+
+// TestContextNamesTheDecoderOfTheRunsOwnRulesOnly requires that context
+// gives a rejected response the current decoder's diagnostic only for a run
+// of the current context version, whose rules include the decoder's
+// diagnostics; for a run of another version the rejection keeps no cause.
+func TestContextNamesTheDecoderOfTheRunsOwnRulesOnly(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	f.model.answer(1, 1, reply{text: `{"kind":"exec","purpose":1,"payload":"true"}`})
+	if r := f.cli(nil, "run", "-goal", "inspect repair"); r.code != exitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	id := f.status().Run.ID
+	rejection := func() harness.ContextEvent {
+		t.Helper()
+		r := f.cli(nil, "context", "-step", "1", "-revision", "1")
+		var page contextReport
+		if err := json.Unmarshal([]byte(r.stdout), &page); r.code != exitOK || err != nil {
+			t.Fatalf("context: %+v, %v", r, err)
+		}
+		for _, e := range page.Events {
+			if e.Kind == "response_loaded" {
+				return e
+			}
+		}
+		t.Fatalf("no loaded response in %+v", page)
+		return harness.ContextEvent{}
+	}
+	if e := rejection(); e.Outcome != "protocol_rejected" || e.Failure != "core: invalid decision: purpose must be a string" {
+		t.Fatalf("current run: %+v", e)
+	}
+	setContextVersion(t, f.state, id, strconv.Itoa(contextVersion-1))
+	if e := rejection(); e.Outcome != "protocol_rejected" || e.Failure != "" {
+		t.Fatalf("run of version %d: %+v", contextVersion-1, e)
 	}
 }

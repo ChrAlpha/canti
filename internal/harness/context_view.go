@@ -76,7 +76,11 @@ func CompareContextRequests(previous, current ContextRequest) ContextDelta {
 	return d
 }
 
-func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
+// DescribeContextEvent describes t, with the body of its response when
+// bodies is set. A rejected response carries the current decoder's
+// diagnostic only when currentRules reports that the run was committed under
+// this binary's context rules, which include the decoder's diagnostics.
+func DescribeContextEvent(t Transition, bodies, currentRules bool) ContextEvent {
 	v := ContextEvent{
 		Seq: t.Seq, Kind: t.Event.Kind(), Step: t.From.Step, Revision: t.From.RequestRev,
 		Attempt: t.From.Attempt, Phase: t.To.Phase, Outcome: t.Event.Kind(),
@@ -105,7 +109,7 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 		case core.PhaseEffectSaved:
 		default:
 			v.Outcome = "protocol_rejected"
-			if _, err := core.Decode(e.Body); err != nil {
+			if _, err := core.Decode(e.Body); err != nil && currentRules {
 				v.Failure = err.Error()
 			}
 		}

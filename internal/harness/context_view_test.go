@@ -29,27 +29,27 @@ func TestContextEventsPreserveAttemptIdentity(t *testing.T) {
 	commit(core.AttemptStarted{Step: 1, Attempt: 1}, harness.Facts{})
 	partial := []byte{0xff, '{', '"'}
 	tr := commit(core.ResponseIncomplete{Step: 1, Attempt: 1}, harness.Facts{Failure: "truncated", Response: &harness.Response{Body: partial, Usage: harness.Usage{InputTokens: 11}}})
-	v := harness.DescribeContextEvent(tr, true)
+	v := harness.DescribeContextEvent(tr, true, true)
 	if v.Attempt != 1 || v.Revision != 1 || state.Attempt != 2 || v.Failure != "truncated" || v.Response.Complete || !bytes.Equal(v.Response.Body, partial) || v.Response.Usage.InputTokens != 11 {
 		t.Fatalf("partial attributed to wrong attempt: %+v", v)
 	}
-	if hidden := harness.DescribeContextEvent(tr, false); hidden.Response.Body != nil || hidden.Response.BodyBytes != len(partial) {
+	if hidden := harness.DescribeContextEvent(tr, false, true); hidden.Response.Body != nil || hidden.Response.BodyBytes != len(partial) {
 		t.Fatal("summary copied body or lost size")
 	}
 	commit(core.AttemptStarted{Step: 1, Attempt: 2}, harness.Facts{})
 	commit(core.ResponseSaved{Step: 1, Attempt: 2}, harness.Facts{})
 	tr = commit(core.ResponseLoaded{Step: 1, Attempt: 2, Body: []byte("malformed")}, harness.Facts{})
-	v = harness.DescribeContextEvent(tr, false)
+	v = harness.DescribeContextEvent(tr, false, true)
 	if v.Attempt != 2 || v.Revision != 1 || v.Outcome != "protocol_rejected" || v.Failure == "" || state.Attempt != 3 {
 		t.Fatalf("repair misattributed: %+v", v)
 	}
 	commit(core.RequestFrozen{}, harness.Facts{})
 	tr = commit(core.AttemptStarted{Step: 1, Attempt: 3}, harness.Facts{})
-	if v = harness.DescribeContextEvent(tr, false); v.Attempt != 3 || v.Revision != 2 {
+	if v = harness.DescribeContextEvent(tr, false, true); v.Attempt != 3 || v.Revision != 2 {
 		t.Fatalf("repair start: %+v", v)
 	}
 	tr = commit(core.AttemptStarted{Step: 1, Attempt: 4}, harness.Facts{})
-	v = harness.DescribeContextEvent(tr, false)
+	v = harness.DescribeContextEvent(tr, false, true)
 	if v.Attempt != 3 || v.RequestedAttempt != 4 || v.LostAttempt != 3 || v.Outcome != "attempt_not_started" || v.Reason != core.StopAttemptsExhausted {
 		t.Fatalf("invented a fourth attempt: %+v", v)
 	}
@@ -106,7 +106,7 @@ func TestContextEventsReportTheCommittedDecodeOutcome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := harness.Transition{Seq: 4, From: saved, To: tc.to, Event: core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(tc.body)}}
-			if v := harness.DescribeContextEvent(tr, false); v.Outcome != tc.outcome || v.Failure != tc.failure {
+			if v := harness.DescribeContextEvent(tr, false, true); v.Outcome != tc.outcome || v.Failure != tc.failure {
 				t.Fatalf("event = %+v, want outcome %q and failure %q", v, tc.outcome, tc.failure)
 			}
 		})
