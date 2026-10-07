@@ -378,8 +378,6 @@ func (x *Executor) inspect(ctx context.Context, id string) (container, bool, err
 	return cs[0], true, nil
 }
 
-// observation is what the job of an effect is derived from: its latch,
-// whether Cancel marked it, and its container.
 type observation struct {
 	latch  string
 	marked bool
@@ -463,8 +461,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	defer unlock()
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
-	var o observation
-	spec := rec.Spec
+	o, spec := observation{}, rec.Spec
 	if err == nil && !done {
 		var found bool
 		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found {

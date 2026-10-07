@@ -97,7 +97,6 @@ func rejected(c container) bool {
 	return c.State.Status == "created" && c.State.Error != "" && c.State.StartedAt.IsZero()
 }
 
-// running reports a container whose process may be running.
 func running(c container) bool {
 	s := c.State.Status
 	return s == "running" || s == "paused" || s == "restarting"
