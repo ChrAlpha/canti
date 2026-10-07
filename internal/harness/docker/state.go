@@ -45,22 +45,22 @@ const (
 
 func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 	job := harness.Job{ID: c.ID, Status: harness.JobUnknown, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt}
-	switch c.State.Status {
-	case "created":
+	switch s := c.State.Status; {
+	case s == "created":
 		switch {
 		case latch == "":
 			job.Status = harness.JobPending
 		case latch == latchCancel:
 			job.Status = harness.JobCancelled
-		case c.State.Error != "" && c.State.StartedAt.IsZero():
+		case rejected(c):
 			job.Status = harness.JobFailedToStart
 			job.Output.Detail = "job never started: " + c.State.Error
 		}
-	case "running", "paused", "restarting":
+	case running(c):
 		if latch == latchStart {
 			job.Status = harness.JobRunning
 		}
-	case "exited", "dead":
+	case s == "exited" || s == "dead":
 		if latch != latchStart {
 			break
 		}
@@ -89,6 +89,18 @@ func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 		}
 	}
 	return job
+}
+
+// rejected reports a container whose start the daemon refused before its
+// process began.
+func rejected(c container) bool {
+	return c.State.Status == "created" && c.State.Error != "" && c.State.StartedAt.IsZero()
+}
+
+// running reports a container whose process may be running.
+func running(c container) bool {
+	s := c.State.Status
+	return s == "running" || s == "paused" || s == "restarting"
 }
 
 func terminal(status harness.JobStatus) bool {

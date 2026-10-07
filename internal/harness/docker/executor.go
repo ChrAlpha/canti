@@ -491,7 +491,7 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 		launch := context.WithoutCancel(ctx)
 		_, started := x.docker(launch, "start", c.ID)
 		c, err = x.bound(launch, effectID)
-		if started != nil && (err != nil || derive(latchStart, c, false, nil).Status != harness.JobFailedToStart) {
+		if started != nil && (err != nil || !rejected(c)) {
 			return harness.Job{}, started
 		}
 		if err != nil {
@@ -544,7 +544,7 @@ func (x *Executor) Cancel(ctx context.Context, effectID string) error {
 		return err
 	}
 	c, found, err := x.inspect(ctx, effectID)
-	if err != nil || !found || derive(latch, c, false, nil).Status != harness.JobRunning {
+	if err != nil || !found || !running(c) {
 		return err
 	}
 	if err := mark(dir); err != nil {
