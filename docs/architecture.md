@@ -354,7 +354,8 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
 - Every read decodes strictly: an unknown field, trailing data, an unknown
   kind, or a semantics version other than 1, 2, and the current 3 fails with
   `ErrIncompatible`, as does a version 1 state without positive max steps or
-  a state before version 3 with a decision purpose. New records are written
+  a state before version 3 with a decision purpose (`core.KnownSemantics`,
+  `core.Compatible`). New records are written
   with the current version, so a resumed run may mix versions.
 - Each recovery read is an index search bounded by its limit, never a scan
   of the history. `Latest` and `Transitions` search the primary key; `Request`, `Response`, and `Recent`
@@ -363,6 +364,12 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
   (run, sequence); `Totals` reads the run row. `Recent` pages backward by
   commit sequence: it returns the latest steps completed below a given
   sequence, each with the sequence of the transition that completed it.
+- `CreateRun` and `Submit` record a new run in the same transaction that
+  admits it: they refuse while any run of the journal is open or was
+  abandoned with an effect whose outcome stays unknown (`harness.Blocks`,
+  applied to every run's latest state and event); an identical retry of a
+  recorded run is confirmed without admission. `CheckAdmission` applies the
+  same rule without writing.
 - Several `Store`s, in one or several processes, may share a file; the
   sequence check admits exactly one commit per sequence.
 

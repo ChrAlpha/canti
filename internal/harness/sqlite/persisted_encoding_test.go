@@ -177,12 +177,6 @@ func TestPersistedRecordsKeepTheirEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session, err = s.Submit(ctx, session, sessionInitial); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateRun(ctx, plain, plainInitial); err != nil {
-		t.Fatal(err)
-	}
 	r := &recorder{Store: s}
 	runner, err := harness.NewRunner(r, noExecutor{})
 	if err != nil {
@@ -193,6 +187,14 @@ func TestPersistedRecordsKeepTheirEncoding(t *testing.T) {
 		initial core.State
 		chain   []commit
 	}{{sessionInitial, sessionChain}, {plainInitial, plainChain}} {
+		if run.initial.RunID == session.ID {
+			session, err = s.Submit(ctx, session, sessionInitial)
+		} else {
+			err = s.CreateRun(ctx, plain, plainInitial)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 		snap := harness.Snapshot{State: run.initial}
 		for _, c := range run.chain {
 			if snap, err = runner.Commit(ctx, snap, c.event, c.facts); err != nil {

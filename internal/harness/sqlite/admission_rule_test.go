@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -81,4 +83,27 @@ func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 func blocksOf(closed map[string]bool, scenario string) bool {
 	blocked, listed := closed[scenario]
 	return !listed || blocked
+}
+
+// TestCreateRunAdmitsInItsTransaction requires that CreateRun, like Submit,
+// refuses a new run while another blocks, writing nothing, and still
+// confirms an identical retry of a run that is itself open.
+func TestCreateRunAdmitsInItsTransaction(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	first := createRun(t, s, "run-1", limits)
+	if err := s.CreateRun(ctx, testRun("run-1"), first.State); err != nil {
+		t.Fatalf("identical retry of the open run: %v", err)
+	}
+	if err := s.CreateRun(ctx, testRun("run-2"), fresh(t, "run-2", limits)); err == nil || !strings.Contains(err.Error(), `run "run-1" is unfinished`) {
+		t.Fatalf("CreateRun beside an open run = %v", err)
+	}
+	if _, err := s.Run(ctx, "run-2"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("refused run was recorded: %v", err)
+	}
+	d := newDriver(t, s, first)
+	d.do(core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})
+	if err := s.CreateRun(ctx, testRun("run-2"), fresh(t, "run-2", limits)); err != nil {
+		t.Fatalf("CreateRun after the run stopped: %v", err)
+	}
 }

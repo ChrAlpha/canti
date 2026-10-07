@@ -258,9 +258,7 @@ func TestCheckAdmissionFindsOlderActiveRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	newer := testRun("newer-stopped")
-	if err := s.CreateRun(ctx, newer, fresh(t, newer.ID, limits)); err != nil {
-		t.Fatal(err)
-	}
+	unadmitted(t, s, newer.ID, limits)
 	stopRun(t, s, newer)
 	if err := s.CheckAdmission(ctx); err == nil {
 		t.Fatal("CheckAdmission missed an older active run")

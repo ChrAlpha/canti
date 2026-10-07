@@ -252,7 +252,7 @@ func TestCommitRequiresTheRun(t *testing.T) {
 	snap := createRun(t, s, "run-1", limits)
 	moved := derive(t, snap, core.RequestFrozen{}, harness.Facts{Request: requestFor(snap.State)})
 	moved.To.RunID = "run-2"
-	createRun(t, s, "run-2", limits)
+	unadmitted(t, s, "run-2", limits)
 	if err := s.Commit(ctx, moved); err == nil {
 		t.Fatal("Commit(To of another run) succeeded, want error")
 	}
@@ -338,6 +338,12 @@ func TestConcurrentStoresCommitOneTransitionPerSeq(t *testing.T) {
 		}
 		for _, s := range stores {
 			unchanged(t, s, runID, candidates[winner:winner+1], harness.Totals{})
+		}
+		if winner == 0 {
+			next := harness.Snapshot{Seq: 1, State: candidates[0].To}
+			if err := stores[0].Commit(ctx, derive(t, next, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }

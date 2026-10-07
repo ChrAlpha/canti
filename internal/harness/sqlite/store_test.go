@@ -60,6 +60,21 @@ func createRun(t testing.TB, s *Store, id string, limits core.Limits) harness.Sn
 	return harness.Snapshot{State: initial}
 }
 
+// unadmitted records a run beside the open runs of s without admission, as
+// journals written before CreateRun admitted could hold.
+func unadmitted(t testing.TB, s *Store, id string, limits core.Limits) harness.Snapshot {
+	t.Helper()
+	initial := fresh(t, id, limits)
+	data, state, err := encodeRun(testRun(id), initial)
+	if err == nil {
+		_, err = s.db.Exec(insertRunSQL, id, core.SemanticsVersion, data, state)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return harness.Snapshot{State: initial}
+}
+
 func sameRun(got, want harness.Run) bool {
 	if !got.Created.Equal(want.Created) {
 		return false
@@ -230,6 +245,7 @@ func TestCreateRunIsIdempotentAndRoundTrips(t *testing.T) {
 	if err := s.CreateRun(ctx, run, fresh(t, "run-1", core.Limits{MaxSteps: 9, MaxAttempts: 2})); err == nil {
 		t.Fatal("CreateRun(changed limits) succeeded, want conflict")
 	}
+	stopRun(t, s, run)
 	second := testRun("run-2")
 	second.Created = run.Created.Add(-time.Hour)
 	if err := s.CreateRun(ctx, second, fresh(t, "run-2", limits)); err != nil {

@@ -246,6 +246,9 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
+		if err := s.checkAdmission(ctx, tx); err != nil {
+			return err
+		}
 		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state)
 		return err
 	})

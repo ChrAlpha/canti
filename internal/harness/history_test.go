@@ -65,6 +65,19 @@ func runner(t *testing.T, f *fixture) harness.Runner {
 	return r
 }
 
+// stop stops run id from its latest state, so that the store admits
+// another run.
+func stop(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	snap, err := f.store.Latest(context.Background(), id)
+	if err == nil {
+		_, err = runner(t, f).Commit(context.Background(), snap, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func publish(t *testing.T, f *fixture, j harness.Journal, id string) {
 	t.Helper()
 	if err := harness.PublishHistory(context.Background(), j, f.cfg.History, id); err != nil {
@@ -167,6 +180,7 @@ func TestPublishHistoryLaysOutTheCommittedSteps(t *testing.T) {
 func TestPublishHistoryRecordsAStoppedRunWithoutConstraints(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{})
 	ctx := context.Background()
+	stop(t, f, runID)
 	state, err := core.NewState("run-2", limits)
 	if err == nil {
 		err = f.store.CreateRun(ctx, harness.Run{ID: "run-2", Goal: " Stop at once. ", Created: created}, state)
@@ -182,6 +196,7 @@ func TestPublishHistoryRecordsAStoppedRunWithoutConstraints(t *testing.T) {
 	wantTree(t, f.cfg.History, map[string]string{
 		"run-2/": "/", "run-2/goal": " Stop at once. ", "run-2/steps/": "/", "run-2/result": "phase: stopped\nreason: cancelled\n",
 		runID + "/": "/", runID + "/goal": "Count the Go files.", runID + "/constraints": "Do not modify files.", runID + "/steps/": "/",
+		runID + "/result": "phase: stopped\nreason: cancelled\n",
 	})
 }
 
@@ -313,6 +328,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 	if err := harness.PublishHistory(ctx, f.store, root, "run-missing"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("PublishHistory(run-missing) = %v, want %v", err, harness.ErrNotFound)
 	}
+	stop(t, f, runID)
 	for _, id := range []string{"..", "a/b"} {
 		state, err := core.NewState(id, limits)
 		if err == nil {
@@ -324,6 +340,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 		if err := harness.PublishHistory(ctx, f.store, root, id); err == nil {
 			t.Fatalf("PublishHistory(%q) succeeded", id)
 		}
+		stop(t, f, id)
 	}
 	if _, err := os.Stat(filepath.Join(root, "a")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a run ID with a separator created %v", err)
