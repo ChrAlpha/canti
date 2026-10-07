@@ -697,7 +697,11 @@ state directory, and each target a clean absolute path that overlaps neither
   is never recorded or released: the loop commits `outcome_unknown` with the
   detail, and its container stays for inspection with
   `docker logs canti-<effect ID>` until it is removed by hand. A started effect whose container Docker reports missing, with no final
-  record, is `ErrJobLost`, never "not found".
+  record, is `ErrJobLost`, never "not found". A container removed outside
+  canti before its job is recorded takes the job's identity with it: a
+  later `Bind` creates a new container or, after a fence, records
+  `fenced:<effect ID>`, and a run that already committed the removed job
+  reaches `outcome_unknown`, which `resolve -job` cannot settle.
 - **Output.** Jobs run `/bin/sh -c` with standard error merged into standard
   output, as a child of a wrapper shell that, once the child returns, writes
   its exit status to `/tmp/.canti-exit` in the container's writable layer,
