@@ -97,7 +97,7 @@ func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, erro
 	}
 	err := r.perform(ctx, limit, &result)
 	if ctx.Err() != nil {
-		return result, ctx.Err()
+		return Retrieval{Query: q}, ctx.Err()
 	}
 	if err != nil {
 		result = Retrieval{Query: q, NextOffset: result.NextOffset, Error: err.Error()}

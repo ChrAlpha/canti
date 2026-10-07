@@ -105,7 +105,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 		t.Fatalf("frozen revisions: %d", len(reports))
 	}
 	requested := reports[2].Request.Capture
-	if !slices.Contains(requested.Handover.Reasons, "window_steps") || len(requested.Sources) != 1 || !requested.Sources[0].Available || requested.Retrievals[0].Step != 2 || requested.Retrievals[0].Operation != "read" || requested.Retrievals[0].Query != nil {
+	if !slices.Contains(requested.Handover.Reasons, "window_steps") || len(requested.Sources) != 0 || requested.Retrievals[0].Step != 2 || requested.Retrievals[0].Operation != "read" || requested.Retrievals[0].Query != nil {
 		t.Fatalf("handover/evidence: %+v", requested)
 	}
 	if reports[3].Request.Capture.Handover.Status != "request_revision" || reports[4].Request.Window.FirstStep != 4 || reports[4].Delta.WindowChanged == nil || !*reports[4].Delta.WindowChanged || len(reports[4].Request.Capture.Sources) != 0 {

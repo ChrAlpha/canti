@@ -227,3 +227,37 @@ func TestRetrievalCancellation(t *testing.T) {
 		t.Fatalf("Retrieve: %v", err)
 	}
 }
+
+// cancelling is a context that cancels itself at its nth Err call.
+type cancelling struct {
+	context.Context
+	cancel func()
+	calls  *int
+	at     int
+}
+
+func (c cancelling) Err() error {
+	if *c.calls++; *c.calls >= c.at {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// TestRetrievalCancelledAtAnyPointReturnsNoEvidence requires that a
+// retrieval cancelled at any check returns its context's error and neither
+// sources nor evidence.
+func TestRetrievalCancelledAtAnyPointReturnsNoEvidence(t *testing.T) {
+	r, name := retrievalFixture(t, "known evidence")
+	for at := 1; at <= 12; at++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		result, err := r.Retrieve(cancelling{ctx, cancel, &calls, at}, RetrievalQuery{Operation: "read", Path: name, Reason: "inspect"})
+		cancel()
+		if err != nil && (len(result.Sources) != 0 || len(result.Evidence) != 0) {
+			t.Fatalf("cancelled at check %d: %v with %d sources and evidence %q", at, err, len(result.Sources), result.Evidence)
+		}
+		if err == nil {
+			checkEvidence(t, result)
+		}
+	}
+}
