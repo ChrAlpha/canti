@@ -17,8 +17,8 @@ import (
 
 // PublishHistory publishes the projection of run runID that jobs read under
 // root/runID: goal, constraints when set, steps/<step number in 8 digits>/
-// with meta, command, and preview for completed steps, and result once the
-// run is closed. meta names an available output under
+// with meta, command, purpose, and preview for completed steps, and result
+// once the run is closed. meta names an available output under
 // archive.ArtifactsRoot, where jobs read the artifacts.
 //
 // The projection is derived from the journal and never an authority. Each
@@ -165,7 +165,7 @@ func rebuild(ctx context.Context, j Journal, dir, runID string) error {
 func putStep(dir, steps string, r StepRecord) error {
 	target := filepath.Join(steps, archive.StepDir(r.Step))
 	if found, err := exists(target, true); err != nil || found {
-		for _, name := range [...]string{archive.MetaFile, archive.CommandFile, archive.PreviewFile} {
+		for _, name := range [...]string{archive.MetaFile, archive.CommandFile, archive.PurposeFile, archive.PreviewFile} {
 			if err == nil {
 				_, err = exists(filepath.Join(target, name), false)
 			}
@@ -188,7 +188,7 @@ func writeStep(path string, r StepRecord) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PreviewFile, r.Observation.Preview}} {
+	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PurposeFile, r.Purpose}, {archive.PreviewFile, r.Observation.Preview}} {
 		f, err := os.Create(filepath.Join(path, file.name))
 		if err == nil {
 			err = fill(f, file.data)

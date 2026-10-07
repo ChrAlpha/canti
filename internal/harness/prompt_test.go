@@ -106,7 +106,7 @@ func shownSteps(user string) []int {
 }
 
 const records = "Every completed step of this run, shown or not, is recorded read-only under /canti/runs/run_x/steps/<step number in 8 digits>/ " +
-	"as meta (its execution, exit code, and output path), command (the full command), and preview.\n" +
+	"as meta (its execution, exit code, and output path), command (the full command), purpose (the full purpose), and preview.\n" +
 	"Every run of this state directory, including this one, is recorded under /canti/runs/<run ID>/ with its goal, its steps, and its result once it ends.\n"
 
 func TestPromptRendersSectionsInOrder(t *testing.T) {

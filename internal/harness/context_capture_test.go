@@ -197,14 +197,14 @@ func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Captured from the provider adapter at 956232c before context diagnostics,
-	// then with the decision purpose system text and the description of the
-	// current window, which are the only changes: restoring the earlier
-	// system string reproduces the 956232c bodies.
+	// then with the decision purpose system text, the description of the
+	// current window, and the purpose record of each step, which are the only
+	// changes: restoring the earlier texts reproduces the 956232c bodies.
 	want := []string{
-		"b6cbfe00bc52ea0456734e47a91fad81eeab03b4f399bbdcab81fa153ed5f2b0",
-		"0dd4097517f3b9efa1fe73030ac74b1bfa5e1ade670425e90b0c70f4c284a456",
-		"2efcd2483687c752266d3fe5d42c8d86b14ecf9b4b0eb96e78f416aa7fae0c1e",
-		"028348f6fc0e90d774dd6c87d9b56aeab022d2f7623e15c71761e9222fde1a80",
+		"1316ac77d4efbcafc075051563f3d101613b0a35fa1c083f915b18c0c9b188b5",
+		"61a0388f3e4656c308033c9720d5f7325a2a4bbea47c32ef2d4778644993e999",
+		"33ed63f7b61d38cbbaf01bc22deea6039acdd00fc578a1837a94ae167e178965",
+		"11aa869d5e905cf2844b4a287f3c7220db8eab4b70a37e5c7addba9c53881cd0",
 	}
 	if len(f.model.prompts) != len(want) {
 		t.Fatalf("prompts = %d", len(f.model.prompts))

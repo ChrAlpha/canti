@@ -63,5 +63,20 @@ func retrievalScenarios() []frozenScenario {
 				"run1-step04-rev1.json": {`Retrieval continuation: {"next_offset":0,"more":false}`, "Source " + step1 + "/preview:\n"},
 			},
 		},
+		{
+			name: "purpose-across-windows", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Report why the workspace was listed.", replies: []string{
+				corpusPurpose(core.Exec, "List the workspace,\nthen check go.mod for the module name.", "ls /workspace"),
+				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed /workspace. Next: recall why."}`),
+				corpusRetrieve("read", step1+"/purpose", "", "Recall why step 1 ran."),
+				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":3,"text":"Step 1 listed /workspace to find go.mod."}`),
+				corpusDecision(core.Return, "Step 1 listed /workspace to find go.mod and its module name."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover", "3 exited 0 retrieval 1 sources 0 entries", "4 exited 0 handover"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then check go.mod for the module name.\n"},
+				"run1-step04-rev1.json": {"This window begins at step 3.", "Source " + step1 + "/purpose:\n",
+					"List the workspace,\nthen check go.mod for the module name.\n"},
+			},
+		},
 	}
 }

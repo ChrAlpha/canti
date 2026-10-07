@@ -10,11 +10,13 @@ import (
 
 // A published step is the directory StepDir(step) under
 // RunsRoot/<run ID>/StepsDir holding MetaFile, the whole command as
-// CommandFile, and the preview as PreviewFile.
+// CommandFile, the whole decision purpose as PurposeFile, and the preview as
+// PreviewFile. A step published before PurposeFile existed lacks it.
 const (
 	StepsDir    = "steps"
 	MetaFile    = "meta"
 	CommandFile = "command"
+	PurposeFile = "purpose"
 	PreviewFile = "preview"
 )
 

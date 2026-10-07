@@ -429,10 +429,14 @@ publishes a derived projection of a run's committed facts under
 once the run is closed. A step's `meta` holds one `key: value` line each,
 line breaks replaced, for the step, execution, exit code when recorded,
 whether it was set by explicit resolution, the output's container path or
-`unavailable`, its bytes, whether it is complete, and any detail; `command`
-and `preview` hold the committed command and preview verbatim, so the
-command is whole where the prompt cuts it, and the preview holds the
-output's head and true tail even when its artifact kept only a prefix.
+`unavailable`, its bytes, whether it is complete, and any detail; `command`,
+`purpose`, and `preview` hold the committed command, decision purpose, and
+preview verbatim, so the command and purpose are whole where the prompt cuts
+them, and the preview holds the output's head and true tail even when its
+artifact kept only a prefix. `purpose` is empty when the decision had none; a
+step directory published before canti recorded purposes has no `purpose`,
+and no publication adds one. A record holding NUL or invalid UTF-8 stays verbatim, so
+native retrieval refuses to read it and fails a directory search over it.
 `result` is `phase: returned`, a blank line, and the payload, or
 `phase: stopped` and `reason: <stop reason>`. The content is a pure function
 of committed facts.

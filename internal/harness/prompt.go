@@ -126,7 +126,7 @@ func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
 	capture.Environment = section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
 		"Full step outputs are readable under "+archive.ArtifactsRoot+".\n"+
 		"Every completed step of this run, shown or not, is recorded read-only under "+archive.RunsRoot+"/"+inline(f.RunID)+"/"+archive.StepsDir+"/<step number in 8 digits>/ "+
-		"as "+archive.MetaFile+" (its execution, exit code, and output path), "+archive.CommandFile+" (the full command), and "+archive.PreviewFile+".\n"+
+		"as "+archive.MetaFile+" (its execution, exit code, and output path), "+archive.CommandFile+" (the full command), "+archive.PurposeFile+" (the full purpose), and "+archive.PreviewFile+".\n"+
 		"Every run of this state directory, including this one, is recorded under "+archive.RunsRoot+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
 	if f.SessionContext != "" {
 		capture.Session = section(&b, "Earlier session dialogue", f.SessionContext)

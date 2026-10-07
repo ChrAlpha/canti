@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -141,24 +142,24 @@ func TestPublishHistoryLaysOutTheCommittedSteps(t *testing.T) {
 
 	ok, killed := 0, 143
 	steps := []struct {
-		command, meta string
-		obs           harness.Observation
-		resolved      bool
+		command, purpose, meta string
+		obs                    harness.Observation
+		resolved               bool
 	}{
-		{"printf '%s\\n' \"日本語\"\r\necho two", "step: 1\nexecution: exited\nexit_code: 0\nresolved: false\noutput: /canti/artifacts/e1/output\noutput_bytes: 14\noutput_complete: true\n",
+		{"printf '%s\\n' \"日本語\"\r\necho two", "Print the word,\r\nthen count 日本語 lines.", "step: 1\nexecution: exited\nexit_code: 0\nresolved: false\noutput: /canti/artifacts/e1/output\noutput_bytes: 14\noutput_complete: true\n",
 			harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: "日本語\ntwo\n", Output: harness.ArtifactRef{Path: "e1/output", Bytes: 14, Complete: true, Available: true}}, false},
-		{"true", "step: 2\nexecution: failed_to_start\nresolved: false\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\noutput_detail: job never started: unable to find user nosuchuser\n",
+		{"true", "", "step: 2\nexecution: failed_to_start\nresolved: false\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\noutput_detail: job never started: unable to find user nosuchuser\n",
 			harness.Observation{Execution: core.ExecutionFailedToStart, Output: harness.ArtifactRef{Path: "e2/output", Detail: "job never started: unable to find user nosuchuser"}}, false},
-		{"sleep 600", "step: 3\nexecution: timed_out\nexit_code: 143\nresolved: false\noutput: /canti/artifacts/e3/output\noutput_bytes: 8\noutput_complete: false\noutput_detail: kept 8 of 9 bytes; job was  cancelled\n",
+		{"sleep 600", "Wait for the build.", "step: 3\nexecution: timed_out\nexit_code: 143\nresolved: false\noutput: /canti/artifacts/e3/output\noutput_bytes: 8\noutput_complete: false\noutput_detail: kept 8 of 9 bytes; job was  cancelled\n",
 			harness.Observation{Execution: core.ExecutionTimedOut, ExitCode: &killed, Preview: "partial\n", Output: harness.ArtifactRef{Path: "e3/output", Bytes: 8, Available: true, Detail: "kept 8 of 9 bytes;\njob was\r\ncancelled"}}, false},
-		{"make test", "step: 4\nexecution: exited\nexit_code: 0\nresolved: true\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\noutput_detail: resolved by operator\n",
+		{"make test", "Run the tests.", "step: 4\nexecution: exited\nexit_code: 0\nresolved: true\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\noutput_detail: resolved by operator\n",
 			harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: "checked by hand", Output: harness.ArtifactRef{Detail: "resolved by operator"}}, true},
 	}
 	for i, s := range steps {
-		seed(t, f, r, execDecision(s.command), s.obs, s.resolved)
+		seed(t, f, r, core.Decision{Kind: core.Exec, Payload: s.command, Purpose: s.purpose}, s.obs, s.resolved)
 		publish(t, f, f.store, runID)
 		name := fmt.Sprintf("steps/%08d/", i+1)
-		want[name], want[name+"meta"], want[name+"command"], want[name+"preview"] = "/", s.meta, s.command, s.obs.Preview
+		want[name], want[name+"meta"], want[name+"command"], want[name+"purpose"], want[name+"preview"] = "/", s.meta, s.command, s.purpose, s.obs.Preview
 		wantTree(t, dir, want)
 	}
 
@@ -206,12 +207,12 @@ func TestPublishHistoryRebuildsALostProjection(t *testing.T) {
 	r, dir := runner(t, f), filepath.Join(f.cfg.History, runID)
 	for i := 1; i <= n; i++ {
 		code := i % 3
-		seed(t, f, r, execDecision(fmt.Sprintf("echo %d", i)), harness.Observation{Execution: core.ExecutionExited, ExitCode: &code, Preview: fmt.Sprintf("%d\n", i),
+		seed(t, f, r, core.Decision{Kind: core.Exec, Payload: fmt.Sprintf("echo %d", i), Purpose: strings.Repeat("Echo the number. ", i%3)}, harness.Observation{Execution: core.ExecutionExited, ExitCode: &code, Preview: fmt.Sprintf("%d\n", i),
 			Output: harness.ArtifactRef{Path: fmt.Sprintf("e%d/output", i), Bytes: int64(len(fmt.Sprint(i)) + 1), Complete: true, Available: true}}, i%5 == 0)
 		publish(t, f, f.store, runID)
 	}
 	want := tree(t, dir)
-	if len(want) != 3+4*n {
+	if len(want) != 3+5*n {
 		t.Fatalf("%d records for %d steps", len(want), n)
 	}
 	for _, lose := range []string{dir, filepath.Join(dir, "steps")} {
@@ -262,6 +263,59 @@ func TestPublishHistoryAddsOnlyTheLatestStep(t *testing.T) {
 		}
 	}
 	wantTree(t, dir, want)
+}
+
+func TestPublishHistoryKeepsAStepPublishedWithoutAPurpose(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{})
+	r, dir := runner(t, f), filepath.Join(f.cfg.History, runID)
+	ok := 0
+	seed(t, f, r, core.Decision{Kind: core.Exec, Payload: "true", Purpose: "Check the shell."}, harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok}, false)
+	publish(t, f, f.store, runID)
+	if err := os.Remove(filepath.Join(dir, "steps/00000001/purpose")); err != nil {
+		t.Fatal(err)
+	}
+	want := tree(t, dir)
+	publish(t, f, f.store, runID)
+	wantTree(t, dir, want)
+
+	seed(t, f, r, core.Decision{Kind: core.Exec, Payload: "false", Purpose: "Check the failure."}, harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok}, false)
+	publish(t, f, f.store, runID)
+	want["steps/00000002/"], want["steps/00000002/meta"], want["steps/00000002/command"], want["steps/00000002/purpose"], want["steps/00000002/preview"] =
+		"/", "step: 2\nexecution: exited\nexit_code: 0\nresolved: false\noutput: unavailable\noutput_bytes: 0\noutput_complete: false\n", "false", "Check the failure.", ""
+	wantTree(t, dir, want)
+}
+
+func TestPublishHistoryKeepsAPurposeThatIsNotText(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{})
+	ok := 0
+	seed(t, f, runner(t, f), core.Decision{Kind: core.Exec, Payload: "printf needle", Purpose: "next\x00read"},
+		harness.Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: "needle\n"}, false)
+	publish(t, f, f.store, runID)
+	if data, err := os.ReadFile(filepath.Join(f.cfg.History, runID, "steps/00000001/purpose")); err != nil || string(data) != "next\x00read" {
+		t.Fatalf("purpose record = %q, %v", data, err)
+	}
+	r := archive.Reader{History: f.cfg.History}
+	step := archive.RunsRoot + "/" + runID + "/steps/00000001"
+	retrieve := func(q archive.RetrievalQuery) archive.Retrieval {
+		t.Helper()
+		q.Reason = "check"
+		got, err := r.Retrieve(context.Background(), q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := retrieve(archive.RetrievalQuery{Operation: "read", Path: step + "/purpose"}); !strings.Contains(got.Error, "NUL") || len(got.Evidence) != 0 {
+		t.Fatalf("read of a purpose with NUL = %+v; want the explicit text error", got)
+	}
+	for file, want := range map[string]string{"command": "printf needle", "preview": "needle\n"} {
+		if got := retrieve(archive.RetrievalQuery{Operation: "read", Path: step + "/" + file}); got.Error != "" || len(got.Evidence) != 1 || got.Evidence[0] != want {
+			t.Fatalf("read of %s beside a purpose with NUL = %+v", file, got)
+		}
+	}
+	if got := retrieve(archive.RetrievalQuery{Operation: "search", Path: step, Query: "needle"}); !strings.Contains(got.Error, "NUL") || len(got.Sources) != 0 {
+		t.Fatalf("directory search over a purpose with NUL = %+v; want the whole batch to fail explicitly", got)
+	}
 }
 
 func TestPublishHistoryReportsFailures(t *testing.T) {
@@ -354,8 +408,8 @@ func TestPublishHistoryRefusesRecordsOfAnotherType(t *testing.T) {
 	ok := 0
 	for _, tc := range []struct{ entry, plant string }{
 		{".", "link"}, {"goal", "link"}, {"constraints", "link"}, {"result", "link"}, {"steps", "link"},
-		{"steps/00000001", "link"}, {"steps/00000001/meta", "link"}, {"steps/00000001/command", "link"}, {"steps/00000001/preview", "link"},
-		{"goal", "dir"}, {"result", "dir"}, {"steps/00000001/preview", "dir"},
+		{"steps/00000001", "link"}, {"steps/00000001/meta", "link"}, {"steps/00000001/command", "link"}, {"steps/00000001/purpose", "link"}, {"steps/00000001/preview", "link"},
+		{"goal", "dir"}, {"result", "dir"}, {"steps/00000001/purpose", "dir"}, {"steps/00000001/preview", "dir"},
 		{".", "file"}, {"steps", "file"}, {"steps/00000001", "file"},
 	} {
 		t.Run(tc.plant+" "+tc.entry, func(t *testing.T) {
