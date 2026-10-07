@@ -573,8 +573,43 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded {
 		t.Fatalf("Inspect() = %+v, %v; want the job recorded", job, err)
 	}
-	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 1 || !slices.Equal(rms, []string{"rm rm -v c-old", "rm rm -v c-e"}) {
-		t.Fatalf("ps %q, rms %q; want only a Bind that creates a container to sweep", ps, rms)
+	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 2 || !slices.Equal(rms, []string{"rm rm -v c-old", "rm rm -v c-old", "rm rm -v c-e"}) {
+		t.Fatalf("ps %q, rms %q; want each Bind, and neither Start nor Inspect, to sweep", ps, rms)
+	}
+}
+
+func TestRebindingRetriesAFailedRelease(t *testing.T) {
+	f := newFake(t)
+	if err := os.MkdirAll(f.x.dir("a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(record{Job: harness.Job{ID: "c-a", Status: harness.JobSucceeded}, Spec: "spec"})
+	if err := publish(f.x.record("a"), data, false); err != nil {
+		t.Fatal(err)
+	}
+	f.set("ps.out", "c-a a\n")
+	f.set("rm.err", "Error response from daemon: boom\n")
+	f.set("rm.exit", "1")
+	f.missing()
+	f.set("created.json", f.container("created", 0))
+	f.set("create.sh", `cp "$ctl/created.json" "$ctl/inspect.out"; rm -f "$ctl/inspect.err" "$ctl/inspect.exit"`+"\n")
+	if _, err := f.x.Bind(t.Context(), effect); err != nil {
+		t.Fatal(err)
+	}
+	f.unset("rm.err", "rm.exit")
+	failed := len(f.calls("rm"))
+	if _, err := f.x.Bind(t.Context(), effect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.x.Start(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	f.exited(0)
+	if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if rms := f.calls("rm")[failed:]; !slices.Contains(rms, "rm rm -v c-a") {
+		t.Fatalf("rms after the daemon recovered = %q, want the recorded job of another effect released", rms)
 	}
 }
 

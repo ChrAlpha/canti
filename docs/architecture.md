@@ -731,19 +731,21 @@ state directory, and each target a clean absolute path that overlaps neither
   published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
   Docker log; a failed removal is retried by the next report of the effect
-  and by every `Bind` that creates a container in the state directory. From
-  then on the record is the authority: `Inspect`, `Bind`, and `Start` report
-  the recorded job, `Bind` still rejects a changed spec, `Cancel` does
-  nothing, and a record that does not decode strictly is an error, never a
-  missing job. Every report re-checks the artifact, and a missing or resized
-  file makes it unavailable with a detail.
+  and by every `Bind` in the state directory that creates or finds the
+  container of an effect without a record, before creating the container
+  or reporting the job. From then on the record is the authority: `Inspect`,
+  `Bind`, and `Start` report the recorded job, `Bind` still rejects a
+  changed spec, `Cancel` does nothing, and a record that does not decode
+  strictly is an error, never a missing job. Every report re-checks the
+  artifact, and a missing or resized file makes it unavailable with a
+  detail.
 
 Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
 plus Docker's log and the writable container layer of each job that is still
 running or awaiting capture, which only that job's run time bounds, and the
 container of a finished job whose removal failed, until a later report of the
-effect or a `Bind` that creates a container in the state directory retries
-it; for the last job of a run, none may come.
+effect or such a `Bind` in the state directory retries it; for the last job
+of a run, none may come.
 
 Every docker CLI call has its own deadline: 30 s, plus the stop grace for
 `docker stop`, and 10 min for a create, which may pull the image, and for

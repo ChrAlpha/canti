@@ -460,13 +460,15 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	o, spec := observation{}, rec.Spec
 	if err == nil && !done {
 		var found bool
-		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found {
-			if o.latch == latchCancel {
+		if o, found, err = x.observe(ctx, effect.ID); err == nil {
+			if !found && o.latch == latchCancel {
 				return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
 			}
 			x.sweep(ctx)
-			if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
-				o, err = x.bound(ctx, effect.ID)
+			if !found {
+				if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
+					o, err = x.bound(ctx, effect.ID)
+				}
 			}
 		}
 		spec = o.c.Config.Labels["canti.spec"]
