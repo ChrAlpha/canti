@@ -531,15 +531,15 @@ locations, window state, and any rejected response for protocol repair.
 `Frame.Validate` checks the window boundary and contiguous step coverage.
 Workspace notes are not automatically read or injected.
 
-A run of a session also quotes the earlier runs of its session, newest
-first while they fit: each one's goal and return, or a stopped run's reason
-and step count with its goal where that fits, after a line that points to
-older records. Where room remains after that selection, newest first, each
-quoted run also names the path of the command of its latest accepted
-handover: its final step when that was one, otherwise the source of the
-window of its latest request. A path never displaces dialogue, and the
-handover it names is agent-written and may be overtaken by later steps of
-that run.
+A run of a session also quotes, oldest first, the earlier runs of its
+session that it selects newest first while they fit: each one's goal and
+return, or a stopped run's reason and step count with its goal where that
+fits, after a line that points to older records. Where room remains after
+that selection, the quoted runs, newest first, also name the path of the
+command of their latest accepted handover: the final step when that was
+one, otherwise the source of the window of the latest request. A path never
+displaces dialogue, and the handover it names is agent-written and may be
+overtaken by later steps of that run.
 
 `Frame.Prompt` renders a system message and user content blocks. The system
 message states the decision protocol of the run's transport: one JSON object
