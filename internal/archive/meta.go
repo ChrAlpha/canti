@@ -9,9 +9,10 @@ import (
 )
 
 // A published step is the directory StepDir(step) under
-// RunsRoot/<run ID>/steps holding MetaFile, the whole command as
+// RunsRoot/<run ID>/StepsDir holding MetaFile, the whole command as
 // CommandFile, and the preview as PreviewFile.
 const (
+	StepsDir    = "steps"
 	MetaFile    = "meta"
 	CommandFile = "command"
 	PreviewFile = "preview"

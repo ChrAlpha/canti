@@ -13,7 +13,7 @@ import (
 )
 
 func retrievalExpansionReserve() int {
-	const sources = 32
+	const sources = archive.MaxSources
 	// Directory source references fit 8192 JSON bytes; the rendered headers
 	// can add at most 16 bytes per source. File search has one repeated path.
 	return len("Retrieved original evidence:\n") + archive.MaxBytes + sources*16 +
@@ -47,7 +47,7 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 		len(archive.ArtifactsRoot) + 1 + refLimit + truncationBytes() -
 		len(path.Join(archive.ArtifactsRoot, s.Observation.Output.Path))
 	s.Observation.Retrieval = &archive.Retrieval{NextOffset: math.MaxInt64, Incomplete: true,
-		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
+		NextCursor: strings.Repeat("x", archive.MaxCursorBytes), Error: strings.Repeat("\x00", 512),
 		SkippedCount: 3 * archive.MaxEntries, Skipped: []archive.Skip{
 			{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"},
 			{Step: archive.MaxEntries, Field: "artifact", Reason: "utf8"},

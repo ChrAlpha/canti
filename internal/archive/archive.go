@@ -25,11 +25,16 @@ const (
 	ImportsRoot   = "/canti/imports"
 )
 
+// DefaultBytes and MaxBytes are the default and largest byte limit of a
+// query; a result holds at most MaxSources sources, a directory at most
+// MaxEntries entries, and a continuation cursor at most MaxCursorBytes.
 const (
-	DefaultBytes = 4096
-	MaxBytes     = 8192
-	scanBytes    = 256 << 10
-	MaxEntries   = 32768
+	DefaultBytes   = 4096
+	MaxBytes       = 8192
+	MaxSources     = 32
+	MaxEntries     = 32768
+	MaxCursorBytes = 1024
+	scanBytes      = 256 << 10
 )
 
 type RetrievalQuery struct {
@@ -122,7 +127,7 @@ func (q RetrievalQuery) check() (int, string) {
 		return limit, "ignore_case only applies to search or discover"
 	case q.IgnoreCase && queryMatchBytes(q) > limit:
 		return limit, fmt.Sprintf("ignore_case requires a limit of at least %d bytes for folded matches", queryMatchBytes(q))
-	case len(q.Cursor) > 1024 || (q.Cursor != "" && (!search || q.Offset != 0)):
+	case len(q.Cursor) > MaxCursorBytes || (q.Cursor != "" && (!search || q.Offset != 0)):
 		return limit, "cursor is only valid for directory search or discover with offset zero and at most 1024 bytes"
 	}
 	return limit, ""

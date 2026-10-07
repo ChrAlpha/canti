@@ -75,7 +75,7 @@ func publishHistory(ctx context.Context, j Journal, root string, run Run, s core
 	if err == nil && run.SessionID != "" {
 		err = publishSession(ctx, j, dir, run)
 	}
-	steps, found := filepath.Join(dir, "steps"), false
+	steps, found := filepath.Join(dir, archive.StepsDir), false
 	if err == nil {
 		found, err = exists(steps, true)
 	}
@@ -157,7 +157,7 @@ func rebuild(ctx context.Context, j Journal, dir, runID string) error {
 	if err := errors.Join(os.Chmod(tmp, 0o755), syncDir(tmp)); err != nil {
 		return err
 	}
-	if err := install(tmp, filepath.Join(dir, "steps")); err != nil {
+	if err := install(tmp, filepath.Join(dir, archive.StepsDir)); err != nil {
 		return err
 	}
 	return syncDir(filepath.Dir(dir))

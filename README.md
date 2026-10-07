@@ -35,8 +35,8 @@ observable.
   limits, commits one transition per fact, and drives committed intents to a
   halt with step, attempt, wall-time, token, output-byte, and job-time budgets.
 - `internal/archive` reads the step records, artifacts, and imported history
-  that jobs see, for the harness's retrieval action, without following
-  symlinks or reading environment files.
+  that jobs see, for the harness's retrieval action, without following a
+  symlink below its root directories or reading environment files.
 - `internal/harness/sqlite` is the journal: one row per transition with its
   facts, a sequence compare-and-set, idempotent retries, and strict decoding,
   on WAL with `synchronous=FULL`.

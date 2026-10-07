@@ -48,7 +48,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 			return err
 		}
 		cursor.File = names[index]
-		if limit < matchBytes || len(result.Sources) == 32 || remaining < matchBytes+utf8.UTFMax || examined == 256 {
+		if limit < matchBytes || len(result.Sources) == MaxSources || remaining < matchBytes+utf8.UTFMax || examined == 256 {
 			break
 		}
 		fileQuery := q
@@ -56,7 +56,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 		part := Retrieval{Query: fileQuery}
 		examined++
 		var read int
-		limit, references, read, err = r.searchDirectoryFile(ctx, remaining, limit, 32-len(result.Sources), references, &part)
+		limit, references, read, err = r.searchDirectoryFile(ctx, remaining, limit, MaxSources-len(result.Sources), references, &part)
 		if err != nil {
 			return fmt.Errorf("directory search %s: %w", cursor.File, err)
 		}

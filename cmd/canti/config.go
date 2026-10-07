@@ -71,7 +71,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
 	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window and the reserves its next step and handover need")
-	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under /canti/imports")
+	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under "+archive.ImportsRoot)
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
 	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
 	fs.IntVar(&c.HandoverBytes, "handover-bytes", 2048, "maximum handover UTF-8 `bytes` (1..8192)")

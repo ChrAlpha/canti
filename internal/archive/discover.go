@@ -55,7 +55,7 @@ func (r Reader) discover(ctx context.Context, dir *os.File, limit int, result *R
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if d.remaining < MaxBytes+65+d.matchBytes+utf8.UTFMax || len(result.Sources) >= 31 {
+		if d.remaining < MaxBytes+65+d.matchBytes+utf8.UTFMax || len(result.Sources) >= MaxSources-1 {
 			break
 		}
 		if stop, err := d.step(ctx); stop || err != nil {
@@ -163,7 +163,7 @@ func (d *discovery) step(ctx context.Context) (bool, error) {
 	encoded, _ := json.Marshal(source)
 	m := pendingMeta{source: source, bytes: len(meta), refs: len(encoded) + 1, slots: 1}
 	for ; d.cursor.Field < len(files); d.cursor.Field, d.cursor.Offset = d.cursor.Field+1, 0 {
-		if d.remaining < d.matchBytes+utf8.UTFMax || len(d.result.Sources)+m.slots >= 32 {
+		if d.remaining < d.matchBytes+utf8.UTFMax || len(d.result.Sources)+m.slots >= MaxSources {
 			return true, nil
 		}
 		if stop, err := d.search(ctx, stepPath, files[d.cursor.Field], &m); stop || err != nil {
