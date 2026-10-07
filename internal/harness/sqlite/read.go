@@ -83,24 +83,30 @@ func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error
 func (s *Store) Transitions(ctx context.Context, runID string, after int64, limit int) ([]harness.Transition, error) {
 	var out []harness.Transition
 	err := s.each(ctx, runID, limit, transitionsSQL, []any{runID, after, limit}, func(rows *sql.Rows) error {
-		var r record
-		var seq int64
-		var eventID string
-		if err := rows.Scan(&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts); err != nil {
-			return err
+		t, err := scanTransition(rows)
+		if err == nil {
+			out = append(out, t)
 		}
-		t, err := r.decode()
-		if err != nil {
-			return err
-		}
-		t.Seq, t.EventID = seq, eventID
-		out = append(out, t)
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// scanTransition decodes a row of seq, event ID, kind, semantics, event,
+// both states, and facts.
+func scanTransition(rows *sql.Rows) (harness.Transition, error) {
+	var r record
+	var seq int64
+	var eventID string
+	if err := rows.Scan(&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts); err != nil {
+		return harness.Transition{}, err
+	}
+	t, err := r.decode()
+	t.Seq, t.EventID = seq, eventID
+	return t, err
 }
 
 func (r record) decode() (harness.Transition, error) {

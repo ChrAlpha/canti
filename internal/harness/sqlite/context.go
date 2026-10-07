@@ -193,20 +193,13 @@ func contextEvents(ctx context.Context, tx *sql.Tx, runID string, after, before 
 	defer rows.Close()
 	out := make([]harness.Transition, 0, limit)
 	for rows.Next() {
-		var r record
-		var seq int64
-		var eventID string
-		if err := rows.Scan(&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts); err != nil {
-			return nil, err
-		}
-		t, err := r.decode()
+		t, err := scanTransition(rows)
 		if err != nil {
 			return nil, err
 		}
 		if t.From.RunID != runID || t.To.RunID != runID {
-			return nil, fmt.Errorf("%w: context event run identity at seq %d", ErrIncompatible, seq)
+			return nil, fmt.Errorf("%w: context event run identity at seq %d", ErrIncompatible, t.Seq)
 		}
-		t.Seq, t.EventID = seq, eventID
 		out = append(out, t)
 	}
 	return out, rows.Err()
