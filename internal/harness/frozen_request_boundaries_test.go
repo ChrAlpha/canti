@@ -246,7 +246,7 @@ func handoverThresholds() []frozenScenario {
 		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
 		sc := frozenScenario{
 			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 88739, windowBytes: 4937, outputs: map[string]string{"go test ./...": output},
+			contextBytes: 88764, windowBytes: 4937, outputs: map[string]string{"go test ./...": output},
 			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
 				corpusDecision(core.Exec, "go test ./..."),
 				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":64`, "Check the first result."),
@@ -296,12 +296,12 @@ func sessionBoundaries() []frozenScenario {
 	}
 	var out []frozenScenario
 	for _, b := range []boundary{
-		{"session-stopped-goal", 93533, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 93532, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 91626, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 91625, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 91410, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 91409, []frozenRun{small, stopped, current}, "none"},
+		{"session-stopped-goal", 93558, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
+		{"session-stopped-status", 93557, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-status-only", 91651, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-navigation-only", 91650, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-navigation", 91435, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-without-dialogue", 91434, []frozenRun{small, stopped, current}, "none"},
 	} {
 		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
 		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,

@@ -236,11 +236,15 @@ func TestPromptSystemStatesTheProtocol(t *testing.T) {
 		"canti:handover",
 		"artifact directory named in the Environment section",
 		"step records named there keep the full command",
-		"including steps no longer shown",
+		"the steps of the current context window",
+		"including the steps of earlier windows",
 	} {
 		if !strings.Contains(a.System, text) {
 			t.Errorf("System lacks %q", text)
 		}
+	}
+	if strings.Contains(a.System, "most recent steps") || strings.Contains(a.System, "no longer shown") {
+		t.Error("System describes a sliding window of recent steps")
 	}
 	if strings.Contains(a.System, "`") {
 		t.Error("System contains a code fence")

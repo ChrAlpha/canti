@@ -49,7 +49,7 @@ Ends the run and hands the payload to the user. It does not claim success: use i
 Keep purpose to one short line. It is shown with the step in later requests, so state the next action you intend once you see the result.`
 	systemContext = `
 
-The user message reports the goal, your progress, and the most recent steps with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including steps no longer shown.
+The user message reports the goal, your progress, and the steps of the current context window with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including the steps of earlier windows.
 
 Work continues across bounded context windows. The handover is the only automatically carried working state. Current goal and constraints remain authoritative. When asked to hand over, use the exact canti:handover action specified in the request; this records guidance and continues the same run.`
 
