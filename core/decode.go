@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -15,8 +16,8 @@ var errInvalidDecision = errors.New("invalid decision")
 //
 // The parser is intentionally strict: it rejects malformed JSON, trailing
 // values, duplicate fields, unknown fields, missing fields, and invalid field
-// types. Kind and payload are required; purpose is optional. It performs no
-// I/O and keeps no state between calls.
+// types. Kind and payload are required; purpose is optional. An exec payload
+// must not be blank. It performs no I/O and keeps no state between calls.
 func Decode(raw []byte) (Decision, error) {
 	if !utf8.Valid(raw) {
 		return Decision{}, fmt.Errorf("core: %w: invalid UTF-8", errInvalidDecision)
@@ -55,6 +56,9 @@ func Decode(raw []byte) (Decision, error) {
 	}
 	if decision.Kind != Exec && decision.Kind != Return {
 		return Decision{}, fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, *kind)
+	}
+	if decision.Kind == Exec && strings.TrimSpace(decision.Payload) == "" {
+		return Decision{}, fmt.Errorf("core: %w: exec payload is blank", errInvalidDecision)
 	}
 	return decision, nil
 }

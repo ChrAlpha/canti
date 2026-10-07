@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"unicode/utf8"
@@ -89,6 +90,8 @@ func TestDecodeRejectsInvalidProtocol(t *testing.T) {
 		{name: "case sensitive purpose", raw: `{"kind":"exec","payload":"x","Purpose":"p"}`},
 		{name: "invalid UTF-8 purpose", raw: "{\"kind\":\"exec\",\"payload\":\"x\",\"purpose\":\"\xff\"}"},
 		{name: "trailing value after purpose", raw: `{"kind":"exec","payload":"x","purpose":"p"} {}`},
+		{name: "empty exec", raw: `{"kind":"exec","payload":""}`},
+		{name: "blank exec", raw: `{"kind":"exec","purpose":"p","payload":" \t\r\n\u00a0\u3000"}`},
 	}
 
 	for _, tt := range tests {
@@ -117,6 +120,8 @@ func TestDecodeDiagnosticPriority(t *testing.T) {
 		{"purpose does not replace a required field", `{"kind":"exec","purpose":"x"}`, "core: invalid decision: expected kind and payload"},
 		{"extra field beside purpose", `{"kind":"exec","payload":"x","purpose":"p","extra":true}`, "core: invalid decision: expected kind and payload"},
 		{"unknown field beside purpose", `{"kind":"exec","purpose":"p","other":"x"}`, `core: invalid decision: unknown field "other"`},
+		{"blank exec", `{"kind":"exec","payload":" \n"}`, "core: invalid decision: exec payload is blank"},
+		{"unsupported kind before blank payload", `{"kind":"wait","payload":""}`, `core: invalid decision: unsupported kind "wait"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := core.Decode([]byte(tt.raw))
@@ -157,6 +162,7 @@ func FuzzDecodeAcceptedDecision(f *testing.F) {
 		[]byte(`{"kind":"exec","kind":"return","payload":"x"}`),
 		[]byte(`{"kind":null,"payload":"x"}`),
 		[]byte(`{"kind":"exec","payload":"x"} {}`),
+		[]byte(`{"kind":"exec","payload":" "}`),
 		[]byte{0xff},
 	} {
 		f.Add(raw)
@@ -190,6 +196,9 @@ func FuzzDecodeAcceptedDecision(f *testing.F) {
 		}
 		if got.Kind != core.Exec && got.Kind != core.Return {
 			t.Fatalf("Decode(%q) accepted unsupported kind %q", raw, got.Kind)
+		}
+		if got.Kind == core.Exec && strings.TrimSpace(got.Payload) == "" {
+			t.Fatalf("Decode(%q) accepted a blank exec payload", raw)
 		}
 	})
 }
