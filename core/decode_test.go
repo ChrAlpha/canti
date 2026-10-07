@@ -122,11 +122,16 @@ func TestDecodeDiagnosticPriority(t *testing.T) {
 		{"unknown field beside purpose", `{"kind":"exec","purpose":"p","other":"x"}`, `core: invalid decision: unknown field "other"`},
 		{"blank exec", `{"kind":"exec","payload":" \n"}`, "core: invalid decision: exec payload is blank"},
 		{"unsupported kind before blank payload", `{"kind":"wait","payload":""}`, `core: invalid decision: unsupported kind "wait"`},
+		{"first unknown field beside purpose", `{"purpose":"p","x":"a","y":"b"}`, `core: invalid decision: unknown field "x"`},
+		{"first unknown field in document order", `{"purpose":"p","y":"a","x":"b"}`, `core: invalid decision: unknown field "y"`},
+		{"first unknown field before kind", `{"z":"a","kind":"exec"}`, `core: invalid decision: unknown field "z"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := core.Decode([]byte(tt.raw))
-			if err == nil || err.Error() != tt.want {
-				t.Fatalf("Decode(%q) error = %v, want %q", tt.raw, err, tt.want)
+			for range 64 {
+				_, err := core.Decode([]byte(tt.raw))
+				if err == nil || err.Error() != tt.want {
+					t.Fatalf("Decode(%q) error = %v, want %q", tt.raw, err, tt.want)
+				}
 			}
 		})
 	}

@@ -22,7 +22,7 @@ func Decode(raw []byte) (Decision, error) {
 	if !utf8.Valid(raw) {
 		return Decision{}, fmt.Errorf("core: %w: invalid UTF-8", errInvalidDecision)
 	}
-	fields, err := decodeObject(raw)
+	fields, order, err := decodeObject(raw)
 	if err != nil {
 		return Decision{}, fmt.Errorf("core: %w: %v", errInvalidDecision, err)
 	}
@@ -34,7 +34,7 @@ func Decode(raw []byte) (Decision, error) {
 	if required != 2 {
 		return Decision{}, fmt.Errorf("core: %w: expected kind and payload", errInvalidDecision)
 	}
-	for field := range fields {
+	for _, field := range order {
 		if field != "kind" && field != "payload" && field != "purpose" {
 			return Decision{}, fmt.Errorf("core: %w: unknown field %q", errInvalidDecision, field)
 		}
@@ -63,50 +63,52 @@ func Decode(raw []byte) (Decision, error) {
 	return decision, nil
 }
 
-func decodeObject(raw []byte) (map[string]*string, error) {
+func decodeObject(raw []byte) (map[string]*string, []string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	delim, ok := token.(json.Delim)
 	if !ok || delim != '{' {
-		return nil, errors.New("top-level value must be an object")
+		return nil, nil, errors.New("top-level value must be an object")
 	}
 
-	fields := make(map[string]*string, 2)
+	fields := make(map[string]*string, 3)
+	var order []string
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return nil, errors.New("object key must be a string")
+			return nil, nil, errors.New("object key must be a string")
 		}
 		if _, exists := fields[key]; exists {
-			return nil, fmt.Errorf("duplicate field %q", key)
+			return nil, nil, fmt.Errorf("duplicate field %q", key)
 		}
 		var value *string
 		if err := decoder.Decode(&value); err != nil {
 			var typeErr *json.UnmarshalTypeError
 			if !errors.As(err, &typeErr) {
-				return nil, err
+				return nil, nil, err
 			}
 			value = nil
 		}
 		fields[key] = value
+		order = append(order, key)
 	}
 
 	if _, err := decoder.Token(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if token, err := decoder.Token(); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("trailing value %v", token)
+			return nil, nil, fmt.Errorf("trailing value %v", token)
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	return fields, nil
+	return fields, order, nil
 }

@@ -93,7 +93,7 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
-			name: "decode-diagnostics", limits: core.Limits{MaxSteps: 20, MaxAttempts: 11},
+			name: "decode-diagnostics", limits: core.Limits{MaxSteps: 20, MaxAttempts: 12},
 			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
 				`"just a string"`,
 				`{"kind":"exec","kind":"return","payload":"done"}`,
@@ -105,6 +105,7 @@ func boundaryScenarios() []frozenScenario {
 				`{"kind":"exec","payload":"x"`,
 				`{"kind":"exec","purpose":1,"payload":"x"}`,
 				`{"kind":"exec","purpose":"Run nothing.","payload":" \n"}`,
+				`{"purpose":"p","y":"a","x":"b"}`,
 				corpusDecision(core.Return, "Every malformed decision was rejected."),
 			}}},
 			marks: map[string][]string{
@@ -118,6 +119,7 @@ func boundaryScenarios() []frozenScenario {
 				"run1-step01-rev9.json":  {"core: invalid decision: EOF\n"},
 				"run1-step01-rev10.json": {"core: invalid decision: purpose must be a string"},
 				"run1-step01-rev11.json": {"core: invalid decision: exec payload is blank"},
+				"run1-step01-rev12.json": {"core: invalid decision: unknown field \"y\""},
 			},
 		},
 		{
