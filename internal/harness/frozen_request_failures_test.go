@@ -45,20 +45,31 @@ func failureScenarios() []frozenScenario {
 			},
 		},
 		{
-			// The gate records a command it refused as a bound and started job
-			// that exited 1, although the command never ran. Recording the refusal
-			// as failed_to_start without a job must change these records.
+			// A command the requested handover refuses never runs: it is
+			// recorded as failed to start, with no job bound or started.
 			name: "handover-gate", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Exec, "cat go.mod"),
 				handover(1),
 				corpusDecision(core.Return, "I have not read go.mod yet."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
 			marks: map[string][]string{
-				"run1-step03-rev1.json": {"### Step 2\nCommand:\n```\ncat go.mod\n```\nExecution: exited, exit code 1\n",
+				"run1-step03-rev1.json": {"### Step 2\nCommand:\n```\ncat go.mod\n```\nExecution: failed_to_start\n",
 					"Preview:\n```\nContext action failed: handover is required before any more work; use canti:handover\n```\n", "## Handover required\n"},
 				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n"},
+			},
+		},
+		{
+			name: "handover-gate-retrieval", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
+				corpusDecision(core.Exec, "ls /workspace"),
+				corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Reread the listing."),
+				handover(1),
+				corpusDecision(core.Return, "I have not read go.mod yet."),
+			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
+			marks: map[string][]string{
+				"run1-step03-rev1.json": {"Execution: failed_to_start\n", "Context action failed: handover is required before any more work; use canti:handover"},
 			},
 		},
 		{

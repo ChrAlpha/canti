@@ -100,7 +100,7 @@ func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 	}
 }
 
-func TestRequestedHandoverRejectsWorkAcrossReopen(t *testing.T) {
+func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
 	for _, command := range []string{"touch should-not-execute", `canti:retrieve {"operation":"read","path":"/canti/imports/missing","reason":"ignore handover"}`} {
 		t.Run(command, func(t *testing.T) {
 			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), execReply(command),
@@ -123,8 +123,17 @@ func TestRequestedHandoverRejectsWorkAcrossReopen(t *testing.T) {
 				t.Fatalf("steps=%v err=%v", steps, err)
 			}
 			obs := steps[1].Observation
-			if obs.Retrieval != nil || !strings.Contains(obs.Preview, "handover is required") || obs.ExitCode == nil || *obs.ExitCode != 1 {
-				t.Fatalf("work was not rejected: %+v", obs)
+			if obs.Retrieval != nil || !strings.Contains(obs.Preview, "handover is required") || obs.Execution != core.ExecutionFailedToStart || obs.ExitCode != nil || obs.Output.Available {
+				t.Fatalf("work was not refused as failed to start: %+v", obs)
+			}
+			history, err := f.store.Transitions(ctx, runID, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tr := range history {
+				if tr.From.Step == 2 && (tr.Event.Kind() == "job_bound" || tr.Event.Kind() == "job_started") {
+					t.Fatalf("the refused step %s a job", tr.Event.Kind())
+				}
 			}
 			if calls := f.exec.log(); len(calls) != 3 {
 				t.Fatalf("only first work step may reach executor: %v", calls)

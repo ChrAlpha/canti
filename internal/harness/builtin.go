@@ -23,16 +23,47 @@ const (
 
 const actionFailure, actionFailureBytes = "Context action failed: ", 2048
 
-func (l *Loop) isBuiltin(ctx context.Context, snap Snapshot) (bool, error) {
-	s := snap.State
-	if strings.HasPrefix(s.Decision.Payload, RetrievePrefix) || strings.HasPrefix(s.Decision.Payload, HandoverPrefix) || s.JobID == "read_"+s.EffectID {
-		return true, nil
+// route names who carries out the effect of an exec decision.
+type route int
+
+const (
+	byExecutor route = iota
+	inProcess
+	refused
+)
+
+const handoverRequired = "handover is required before any more work; use canti:handover"
+
+// route decides who carries out the effect of s. A bound job decides by its
+// ID. Before binding, an effect that a requested handover forbids is
+// refused, and the harness's own actions run in process.
+func (l *Loop) route(ctx context.Context, s core.State) (route, error) {
+	if s.JobID != "" {
+		if s.JobID == "read_"+s.EffectID {
+			return inProcess, nil
+		}
+		return byExecutor, nil
 	}
-	if s.Intent() != core.IntentBind {
-		return false, nil
+	if s.Intent() == core.IntentBind {
+		req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
+		if err != nil {
+			return byExecutor, err
+		}
+		if req.Window != nil && req.Window.Requested && !strings.HasPrefix(s.Decision.Payload, HandoverPrefix) {
+			return refused, nil
+		}
 	}
-	req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
-	return req.Window != nil && req.Window.Requested, err
+	if strings.HasPrefix(s.Decision.Payload, RetrievePrefix) || strings.HasPrefix(s.Decision.Payload, HandoverPrefix) {
+		return inProcess, nil
+	}
+	return byExecutor, nil
+}
+
+// refuseWork records the effect of snap, which a requested handover forbids,
+// as failed to start: no job is bound, started, or run.
+func (l *Loop) refuseWork(ctx context.Context, snap Snapshot) (Snapshot, error) {
+	obs := Observation{Execution: core.ExecutionFailedToStart, Preview: actionFailure + handoverRequired}
+	return l.runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart}, Facts{Observation: &obs})
 }
 
 func decodeAction(text string, value any) error {
@@ -83,9 +114,7 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 	if err != nil {
 		return obs, err
 	}
-	if req.Window != nil && req.Window.Requested && !strings.HasPrefix(command, HandoverPrefix) {
-		err = errors.New("handover is required before any more work; use canti:handover")
-	} else if strings.HasPrefix(command, RetrievePrefix) {
+	if strings.HasPrefix(command, RetrievePrefix) {
 		var q archive.RetrievalQuery
 		err = decodeAction(strings.TrimPrefix(command, RetrievePrefix), &q)
 		if l.cfg.Reader == nil {

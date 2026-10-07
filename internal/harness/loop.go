@@ -153,11 +153,12 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
 		}
 	}
-	builtin, err := l.isBuiltin(ctx, snap)
-	if err != nil {
+	switch r, err := l.route(ctx, snap.State); {
+	case err != nil:
 		return snap, err
-	}
-	if builtin {
+	case r == refused:
+		return l.refuseWork(ctx, snap)
+	case r == inProcess:
 		if next, handled, err := l.builtin(ctx, snap); handled {
 			return next, err
 		}
