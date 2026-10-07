@@ -1,5 +1,6 @@
 # Build and test outputs
 /bin/
+/canti
 /coverage/
 *.test
 
