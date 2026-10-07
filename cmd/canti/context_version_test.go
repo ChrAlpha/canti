@@ -146,8 +146,9 @@ func contextRules(t *testing.T) string {
 // by run -once and the next by a resume process that rebuilds the run from
 // its stored config, after the run read an imported file and its window
 // asked for a handover; the repairs of a run of the tool decision format,
-// which a resume process freezes when text answers it; and a run whose
-// window outgrows a page of the journal, after 65 reads.
+// which a resume process freezes when text answers it; a run of the text
+// decision format named explicitly, which a resume process returns; and a
+// run whose window outgrows a page of the journal, after 65 reads.
 func storedRules(t *testing.T) string {
 	t.Helper()
 	read := core.Decision{Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`}
@@ -173,6 +174,14 @@ func storedRules(t *testing.T) string {
 		t.Fatalf("resume of the tool run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	b += frozenRequests(t, f, "stored tool run")
+	f = newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-once", "-goal", "Report done.", "-decision-format", "text"); r.code != exitActive {
+		t.Fatalf("run -once -decision-format text = %d\nstderr: %s", r.code, r.stderr)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume of the text run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	b += frozenRequests(t, f, "stored text run")
 	long := map[int]core.Decision{66: {Kind: core.Return, Payload: "done"}}
 	for step := 1; step <= 65; step++ {
 		long[step] = read

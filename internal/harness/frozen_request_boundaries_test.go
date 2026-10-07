@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -54,7 +55,7 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
-			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 7},
+			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 9},
 			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
 				envelope("e1", "end_turn", toolBlock("toolu_e1", `"name":"canti_decision"`, "e1")),
 				envelope("e2", "tool_use", toolBlock("", `"name":"canti_decision"`, "e2")),
@@ -62,6 +63,8 @@ func boundaryScenarios() []frozenScenario {
 				envelope("e4", "tool_use", toolBlock("toolu_e4", `"name":"other_tool","name":"canti_decision"`, "e4")),
 				envelope("e5", "tool_use", `{"type":"mystery"},`+toolBlock("toolu_e5", `"name":"canti_decision"`, "e5")),
 				envelope("e6", "tool_use", toolBlock("toolu_e6a", `"name":"canti_decision"`, "e6")+","+toolBlock("toolu_e6b", `"name":"canti_decision"`, "e6")),
+				envelope("e8", "tool_use", `{"type":"tool_use","id":"toolu_e8a","name":"canti_decision"},`+toolBlock("toolu_e8b", `"name":"canti_decision"`, "e8")),
+				envelope("e9", "tool_use", `{"type":"tool_use","id":"toolu_e9","name":"canti_decision","input":{"kind":"bogus`+"\xff"+`","payload":"envelope e9"}}`),
 				envelope("e7", "tool_use", `{"type":"text","text":"Returning now."},{"type":"thinking","thinking":"Every envelope failed.","signature":"sig"},`+
 					`{"type":"redacted_thinking","data":"cmVkYWN0ZWQ="},`+
 					`{"type":"tool_use","id":"toolu_e7","name":"canti_decision","input":{"kind":"return","payload":"Every envelope was rejected."}}`),
@@ -73,6 +76,8 @@ func boundaryScenarios() []frozenScenario {
 				"run1-step01-rev5.json": {"Rejected reply:\n```\n{\"id\":\"msg_e4\""},
 				"run1-step01-rev6.json": {"Rejected reply:\n```\n{\"id\":\"msg_e5\""},
 				"run1-step01-rev7.json": {"Rejected reply:\n```\n{\"id\":\"msg_e6\""},
+				"run1-step01-rev8.json": {"Rejected reply:\n```\n{\"id\":\"msg_e8\""},
+				"run1-step01-rev9.json": {"core: invalid decision: invalid UTF-8", "Rejected reply:\n```\n{\"kind\":\"bogus\uFFFD\""},
 			},
 		},
 		{
@@ -84,6 +89,49 @@ func boundaryScenarios() []frozenScenario {
 			}}},
 			marks: map[string][]string{
 				"run1-step01-rev2.json": {"Rejected reply:\n```\n{\"kind\":\"bogus\",\"payload\":\"review-marker\"}\n```\n"},
+			},
+		},
+		{
+			name: "decode-diagnostics", limits: core.Limits{MaxSteps: 20, MaxAttempts: 9},
+			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
+				`"just a string"`,
+				`{"kind":"exec","kind":"return","payload":"done"}`,
+				`{"kind": }`,
+				`{"kind":"exec","payload":"x"} {}`,
+				`{"kind":"exec","extra":"x"}`,
+				`{"kind":1,"payload":"x"}`,
+				`{"kind":"exec","payload":2}`,
+				`{"kind":"exec","payload":"x"`,
+				corpusDecision(core.Return, "Every malformed decision was rejected."),
+			}}},
+			marks: map[string][]string{
+				"run1-step01-rev2.json": {"core: invalid decision: top-level value must be an object"},
+				"run1-step01-rev3.json": {"core: invalid decision: duplicate field \"kind\""},
+				"run1-step01-rev4.json": {"core: invalid decision: invalid character '}' looking for beginning of value"},
+				"run1-step01-rev5.json": {"core: invalid decision: trailing value {"},
+				"run1-step01-rev6.json": {"core: invalid decision: unknown field \"extra\""},
+				"run1-step01-rev7.json": {"core: invalid decision: kind must be a string"},
+				"run1-step01-rev8.json": {"core: invalid decision: payload must be a string"},
+				"run1-step01-rev9.json": {"core: invalid decision: EOF\n"},
+			},
+		},
+		{
+			name: "symlinked-evidence", limits: stepLimits, imports: map[string]string{"sub/note": "same original evidence\n"},
+			changes: map[string]func(*os.Root) error{"relink": func(r *os.Root) error {
+				if err := r.Rename("sub", "target"); err != nil {
+					return err
+				}
+				return r.Symlink("target", "sub")
+			}},
+			outputs: map[string]string{"relink": "done\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "What does the imported note say?", replies: []string{
+				corpusRetrieve("read", "/canti/imports/sub/note", "", "Read the note."),
+				corpusDecision(core.Exec, "relink"),
+				corpusDecision(core.Return, "The note was moved behind a symlink."),
+			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 output complete"}}},
+			marks: map[string][]string{
+				"run1-step02-rev1.json": {"same original evidence\n"},
+				"run1-step03-rev1.json": {"Evidence unavailable: archive symlinks are not readable"},
 			},
 		},
 		{
@@ -111,7 +159,8 @@ func boundaryScenarios() []frozenScenario {
 		{
 			name: "unavailable-evidence", limits: stepLimits,
 			imports: map[string]string{imported: "```go\nfunc parse() {}\n```\n" + strings.Repeat("The parser was rewritten in v2.\n", 40) + "func parse is the entry point.\n"},
-			deletes: map[string]string{"sleep 1": imported}, outputs: map[string]string{"sleep 1": "done\n"},
+			changes: map[string]func(*os.Root) error{"sleep 1": func(r *os.Root) error { return r.Remove(imported) }},
+			outputs: map[string]string{"sleep 1": "done\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "What do the imported notes say about the parser?", replies: []string{
 				corpusRetrieve("read", "/canti/imports/"+imported, "", strings.Repeat("Check the imported notes. ", 39)),
 				corpusRetrieve("search", "/canti/imports/"+imported, `,"query":"func parse","limit":64`, "Find every mention of parse."),

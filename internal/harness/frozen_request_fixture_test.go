@@ -79,7 +79,7 @@ type corpusExecutor struct {
 	jobs      map[string]*harness.Job
 	commands  map[string]string
 	finals    map[string]harness.Job
-	deletes   map[string]string
+	changes   map[string]func(*os.Root) error
 }
 
 func (x *corpusExecutor) Bind(_ context.Context, e harness.Effect) (harness.Job, error) {
@@ -121,8 +121,13 @@ func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Jo
 		}
 		*j = final
 	}
-	if name := x.deletes[x.commands[effectID]]; name != "" && j.Status == harness.JobRunning {
-		if err := os.Remove(filepath.Join(x.imports, name)); err != nil {
+	if change := x.changes[x.commands[effectID]]; change != nil && j.Status == harness.JobRunning {
+		root, err := os.OpenRoot(x.imports)
+		if err == nil {
+			err = change(root)
+			root.Close()
+		}
+		if err != nil {
 			return harness.Job{}, false, err
 		}
 	}
@@ -187,7 +192,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		t.Fatal(err)
 	}
 	history, artifacts := filepath.Join(dir, "history"), filepath.Join(dir, "artifacts")
-	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals, deletes: sc.deletes}
+	x := &corpusExecutor{artifacts: artifacts, outputs: sc.outputs, jobs: map[string]*harness.Job{}, commands: map[string]string{}, finals: sc.finals, changes: sc.changes}
 	reader := &harness.Reader{History: history, Artifacts: artifacts}
 	if sc.imports != nil {
 		reader.Imports, x.imports = filepath.Join(dir, "imports"), filepath.Join(dir, "imports")

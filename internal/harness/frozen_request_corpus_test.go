@@ -36,9 +36,9 @@ type frozenScenario struct {
 	windowSteps  int
 	windowBytes  int
 	outputs      map[string]string
-	finals       map[string]harness.Job // final job of a command instead of success
-	imports      map[string]string      // files of a read-only imported history archive
-	deletes      map[string]string      // imported file that disappears while a command runs
+	finals       map[string]harness.Job                  // final job of a command instead of success
+	imports      map[string]string                       // files of a read-only imported history archive
+	changes      map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
 	runs         []frozenRun
 	marks        map[string][]string
 	edge         func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
