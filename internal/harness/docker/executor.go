@@ -83,7 +83,8 @@ type Mount struct{ Source, Target string }
 // the effect's file lock, so callers in any goroutine or process never
 // observe a half-done start. A container that exits without the exit status
 // its shell records, as when it is killed outside canti, reports JobUnknown.
-// Once recorded, a finished job is reported from its record alone. Host
+// Only Inspect reads that record, captures a finished job's output, and
+// records the job; once recorded, it is reported from its record alone. Host
 // environment variables never reach a job.
 type Executor struct {
 	cfg      Config
@@ -429,7 +430,8 @@ func (o observation) snapshot() harness.Job {
 }
 
 // finalize derives the job, reading its exit record when its result needs
-// one, and records it once it is finished.
+// one, and records it once it is finished; recording a job then sweeps the
+// state directory.
 func (x *Executor) finalize(ctx context.Context, id string, o observation) (harness.Job, error) {
 	var recorded *int
 	if file := o.exitRecord(); file != "" {
@@ -439,22 +441,26 @@ func (x *Executor) finalize(ctx context.Context, id string, o observation) (harn
 		}
 	}
 	job := derive(o.latch, o.c, o.marked, recorded)
-	if terminal(job.Status) {
-		return x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
+	if !terminal(job.Status) {
+		return job, nil
 	}
-	return job, nil
+	job, err := x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
+	if err == nil {
+		x.sweep(ctx)
+	}
+	return job, err
 }
 
 // Bind creates the effect's container without starting it, or reports the
-// existing job if it was created for the same execution spec. An effect
-// fenced before it had a container is recorded cancelled without one.
+// existing job if it was created for the same execution spec; like Start,
+// it reports a snapshot of the job. An effect fenced before it had a
+// container is recorded cancelled without one.
 func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effect.ID)
 	if err != nil {
 		return harness.Job{}, err
 	}
 	defer unlock()
-	x.sweep(ctx)
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
 	var o observation
@@ -480,7 +486,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	if done {
 		return rec.Job, nil
 	}
-	return x.finalize(ctx, effect.ID, o)
+	return o.snapshot(), nil
 }
 
 // Start sets the effect's latch and starts its never-started container,

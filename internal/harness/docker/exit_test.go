@@ -96,11 +96,13 @@ func TestUnrecordedExitStaysUnknown(t *testing.T) {
 				t.Fatalf("Inspect() found no job: %v", err)
 			}
 			unknown("Inspect()", job, err)
-			job, err = f.x.Bind(t.Context(), effect)
-			unknown("Bind()", job, err)
-			job, err = f.x.Start(t.Context(), "e")
-			if err != nil || job.ID != "c-e" || job.Status != harness.JobUnknown || job.ExitCode != nil || job.Output != (harness.ArtifactRef{}) {
-				t.Fatalf("Start() = %+v, %v; want unknown without the detail of a record it did not read", job, err)
+			for name, report := range map[string]func() (harness.Job, error){
+				"Bind()":  func() (harness.Job, error) { return f.x.Bind(t.Context(), effect) },
+				"Start()": func() (harness.Job, error) { return f.x.Start(t.Context(), "e") },
+			} {
+				if job, err := report(); err != nil || job.ID != "c-e" || job.Status != harness.JobUnknown || job.ExitCode != nil || job.Output != (harness.ArtifactRef{}) {
+					t.Fatalf("%s = %+v, %v; want unknown without the detail of a record it did not read", name, job, err)
+				}
 			}
 			if err := f.x.Cancel(t.Context(), "e"); err != nil {
 				t.Fatal(err)
@@ -116,6 +118,9 @@ func TestUnrecordedExitStaysUnknown(t *testing.T) {
 				if calls := f.calls(cmd); len(calls) != 0 {
 					t.Fatalf("%s calls = %q", cmd, calls)
 				}
+			}
+			if cps := f.calls("cp"); len(cps) != 2 {
+				t.Fatalf("cp calls = %q, want one read for each Inspect", cps)
 			}
 		})
 	}

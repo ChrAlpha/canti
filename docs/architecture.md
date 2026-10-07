@@ -709,8 +709,10 @@ state directory, and each target a clean absolute path that overlaps neither
   record is read with `docker cp`, at most 64 KiB. A job can forge it, but a
   forged record that differs from Docker's exit code is not final. Jobs run
   under Docker's json-file log driver with rotation disabled
-  (`max-size=1p`) and `mode=blocking`, so no output is dropped. On the first
-  report of a finished job the executor copies `docker logs` through a tap
+  (`max-size=1p`) and `mode=blocking`, so no output is dropped. `Bind` and
+  `Start` report the job without reading its exit record or output, so a
+  job that already exited is `unknown` until inspected. The first `Inspect`
+  of a finished job reads the record and copies `docker logs` through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
   `artifacts/<effect ID>/output`, counts every byte, and keeps a preview of at
   most `PreviewLimit` bytes (4 KiB by default; the CLI sets it to the
@@ -729,19 +731,19 @@ state directory, and each target a clean absolute path that overlaps neither
   published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
   Docker log; a failed removal is retried by the next report of the effect
-  and by every `Bind` in the state directory. From then on the record is the
-  authority: `Inspect`, `Bind`, and `Start` report the recorded job, `Bind`
-  still rejects a changed spec, `Cancel` does nothing, and a record that
-  does not decode strictly is an error, never a missing job. Every report
-  re-checks the artifact, and a missing or resized file makes it unavailable
-  with a detail.
+  and whenever `Inspect` records a job in the state directory. From then on
+  the record is the authority: `Inspect`, `Bind`, and `Start` report the
+  recorded job, `Bind` still rejects a changed spec, `Cancel` does nothing,
+  and a record that does not decode strictly is an error, never a missing
+  job. Every report re-checks the artifact, and a missing or resized file
+  makes it unavailable with a detail.
 
 Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
 plus Docker's log and the writable container layer of each job that is still
 running or awaiting capture, which only that job's run time bounds, and the
 container of a finished job whose removal failed, until a later report of the
-effect or `Bind` in the state directory retries it; for the last job of a
-run, none may come.
+effect or the next job recorded in the state directory retries it; for the
+last job of a run, none may come.
 
 Every docker CLI call has its own deadline: 30 s, plus the stop grace for
 `docker stop`, and 10 min for a create, which may pull the image, and for

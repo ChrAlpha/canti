@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -236,8 +237,11 @@ func TestRejectedStartFailsToStart(t *testing.T) {
 	if err != nil || job.ID != "c-e" || job.Status != harness.JobFailedToStart || job.ExitCode != nil || !job.StartedAt.IsZero() || job.Output != reason {
 		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start with output %+v", job, err, reason)
 	}
+	if again, err := f.x.Bind(t.Context(), effect); err != nil || !same(again, job) {
+		t.Fatalf("Bind() after the failed start = %+v, %v; want %+v", again, err, job)
+	}
 	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("logs")) != 0 || len(f.calls("rm")) != 0 {
-		t.Fatalf("record %v, logs %q, rms %q; want Start to leave the failed start to Inspect", err, f.calls("logs"), f.calls("rm"))
+		t.Fatalf("record %v, logs %q, rms %q; want Start and Bind to leave the failed start to Inspect", err, f.calls("logs"), f.calls("rm"))
 	}
 	want, found, err := f.x.Inspect(t.Context(), "e")
 	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: reason.Detail}
@@ -364,7 +368,7 @@ func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
 		t.Fatalf("docker ps (hung, caller's deadline first) = %v, want the caller's error", err)
 	}
 	f.latch(latchStart)
-	f.unset("inspect.sh", "rm.sh")
+	f.unset("inspect.sh", "rm.sh", "ps.sh")
 	f.exited(0)
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || job.Output.Detail != "logs unavailable: no response within 150ms" {
@@ -424,7 +428,7 @@ func TestBindAfterFenceRecordsCancelledJobWithoutAContainer(t *testing.T) {
 	if inspects := f.calls("inspect"); len(inspects) != 2 {
 		t.Fatalf("inspects = %q, want only the lookups that found no container", inspects)
 	}
-	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
+	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm", "ps"} {
 		if calls := f.calls(cmd); len(calls) != 0 {
 			t.Fatalf("%s calls = %q, want none for a job that never had a container", cmd, calls)
 		}
@@ -523,7 +527,7 @@ func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
 	}
 }
 
-func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
+func TestRecordingAJobReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	f := newFake(t)
 	for id, job := range map[string]string{"old": "c-old", "moved": "c-moved"} {
 		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
@@ -536,13 +540,29 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	}
 	f.set("ps.out", "c-old old\nc-live live\nc-other moved\n")
 	f.missing()
-	f.set("create.sh", "rm -f \"$ctl/inspect.err\" \"$ctl/inspect.exit\"\n")
-	f.set("inspect.sh", fmt.Sprintf("[ -f \"$ctl/inspect.exit\" ] || printf '%%s' %q > \"$ctl/inspect.out\"\n", f.container("created", 0)))
-	if _, err := f.x.Bind(t.Context(), effect); err != nil {
+	f.set("created.json", f.container("created", 0))
+	f.set("create.sh", `cp "$ctl/created.json" "$ctl/inspect.out"; rm -f "$ctl/inspect.err" "$ctl/inspect.exit"`+"\n")
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending || len(f.calls("create")) != 1 {
+		t.Fatalf("Bind() = %+v, %v, creates %q; want the created job pending", job, err, f.calls("create"))
+	}
+	if _, err := f.x.Start(t.Context(), "e"); err != nil {
 		t.Fatal(err)
 	}
-	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-old" {
-		t.Fatalf("rms = %q, want only the recorded job of another effect released", rms)
+	f.set("inspect.out", f.container("running", 0))
+	if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 0 || len(rms) != 0 {
+		t.Fatalf("ps %q, rms %q before a job was recorded; want no sweep", ps, rms)
+	}
+	f.exited(0)
+	for range 2 {
+		if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rms := f.calls("rm"); !slices.Equal(rms, []string{"rm rm -v c-e", "rm rm -v c-old", "rm rm -v c-e"}) {
+		t.Fatalf("rms = %q, want the recorded job, then only the recorded job of another effect, released", rms)
 	}
 	if ps := f.calls("ps"); len(ps) != 1 || strings.Contains(ps[0], " -q") || strings.Contains(ps[0], " -aq") {
 		t.Fatalf("ps calls = %q, want one listing whose --format is not overridden by --quiet", ps)
@@ -670,7 +690,7 @@ func TestMalformedRecordIsAnError(t *testing.T) {
 			if found || inspectErr == nil || bindErr == nil || startErr == nil || cancelErr != nil {
 				t.Fatalf("found %v, errors %v, %v, %v, %v; want every report to fail and nothing to stop", found, inspectErr, bindErr, startErr, cancelErr)
 			}
-			f.x.Bind(t.Context(), harness.Effect{ID: "other", Command: "true"})
+			f.x.sweep(t.Context())
 			for _, cmd := range []string{"rm", "logs", "stop", "start", "create"} {
 				if calls := f.calls(cmd); len(calls) != 0 {
 					t.Fatalf("%s calls = %q", cmd, calls)
