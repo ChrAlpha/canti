@@ -116,7 +116,7 @@ func (r record) decode() (harness.Transition, error) {
 
 func (r record) decodeEventStates() (harness.Transition, error) {
 	var t harness.Transition
-	if err := cmp.Or(known(r.kind), current(r.semantics)); err != nil {
+	if err := known(r.kind); err != nil {
 		return t, err
 	}
 	event := reflect.New(events[r.kind])
@@ -242,26 +242,16 @@ func known(kind string) error {
 	return nil
 }
 
-func current(semantics int) error {
-	if semantics != 1 && semantics != 2 && semantics != core.SemanticsVersion {
-		return fmt.Errorf("%w: semantics version %d, want 1, 2, or %d", ErrIncompatible, semantics, core.SemanticsVersion)
-	}
-	return nil
-}
-
 func decodeState(semantics int, data string, state *core.State) error {
-	if err := current(semantics); err != nil {
-		return err
-	}
 	*state = core.State{}
+	if err := core.KnownSemantics(semantics); err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
 	if err := strict(data, state); err != nil {
 		return err
 	}
-	if semantics == 1 && state.Limits.MaxSteps <= 0 {
-		return fmt.Errorf("%w: semantics version 1 requires positive max steps", ErrIncompatible)
-	}
-	if semantics < 3 && state.Decision.Purpose != "" {
-		return fmt.Errorf("%w: semantics version %d has no decision purpose", ErrIncompatible, semantics)
+	if err := core.Compatible(semantics, *state); err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	return nil
 }

@@ -633,3 +633,26 @@ func TestIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestCompatibleSemanticsVersions(t *testing.T) {
+	bounded := core.State{Limits: core.Limits{MaxSteps: 3, MaxAttempts: 1}}
+	unlimited := core.State{Limits: core.Limits{MaxSteps: 0, MaxAttempts: 1}}
+	purposed := bounded
+	purposed.Decision = core.Decision{Kind: core.Exec, Purpose: "check", Payload: "true"}
+	for _, tc := range []struct {
+		version int
+		state   core.State
+		ok      bool
+	}{
+		{0, bounded, false}, {1, bounded, true}, {1, unlimited, false}, {1, purposed, false},
+		{2, bounded, true}, {2, unlimited, true}, {2, purposed, false},
+		{3, unlimited, true}, {3, purposed, true}, {core.SemanticsVersion + 1, bounded, false},
+	} {
+		if err := core.Compatible(tc.version, tc.state); (err == nil) != tc.ok {
+			t.Errorf("Compatible(%d, %+v) = %v, want ok %v", tc.version, tc.state, err, tc.ok)
+		}
+		if err := core.KnownSemantics(tc.version); (err == nil) != (tc.version >= 1 && tc.version <= core.SemanticsVersion) {
+			t.Errorf("KnownSemantics(%d) = %v", tc.version, err)
+		}
+	}
+}

@@ -80,6 +80,31 @@ var (
 	ErrInvalidState = errors.New("core: invalid state")
 )
 
+// KnownSemantics reports whether this package reads records of semantics
+// version: versions 1 to SemanticsVersion.
+func KnownSemantics(version int) error {
+	if version < 1 || version > SemanticsVersion {
+		return fmt.Errorf("core: semantics version %d, want 1 to %d", version, SemanticsVersion)
+	}
+	return nil
+}
+
+// Compatible reports whether s, committed under semantics version, keeps
+// its meaning under this package: version 1 had no unlimited steps and
+// versions before 3 no decision purpose.
+func Compatible(version int, s State) error {
+	if err := KnownSemantics(version); err != nil {
+		return err
+	}
+	switch {
+	case version == 1 && s.Limits.MaxSteps <= 0:
+		return errors.New("core: semantics version 1 requires positive max steps")
+	case version < 3 && s.Decision.Purpose != "":
+		return fmt.Errorf("core: semantics version %d has no decision purpose", version)
+	}
+	return nil
+}
+
 // NewState starts a run at its first step.
 func NewState(runID string, limits Limits) (State, error) {
 	if runID == "" {
