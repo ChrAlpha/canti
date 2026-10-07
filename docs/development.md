@@ -190,7 +190,8 @@ and recovery advice `run` would print.
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's
 resolved path>`, with `~/.local/state` when `XDG_STATE_HOME` is unset or
-relative; `-state` overrides it, and it must not overlap the workspace. It
+relative; `-state` overrides it, and it must not overlap the workspace or
+resolve to a path with a colon, which Docker cannot mount. It
 holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which jobs see

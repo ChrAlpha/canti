@@ -558,6 +558,20 @@ func TestRefusedSessionInputsTouchNothing(t *testing.T) {
 	}
 }
 
+func TestAStateDockerCannotMountIsRefusedBeforeItExists(t *testing.T) {
+	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}, {"chat"}} {
+		f := newFixture(t, nil)
+		state := filepath.Join(t.TempDir(), "a:b", "state")
+		r := f.cli(nil, args[0], slices.Concat(args[1:], []string{"-state", state})...)
+		if r.code != exitError || !strings.Contains(r.stderr, "can be mounted") {
+			t.Errorf("canti %q = %d\nstderr: %s", args, r.code, r.stderr)
+		}
+		if _, err := os.Stat(filepath.Dir(state)); !os.IsNotExist(err) {
+			t.Errorf("canti %q created %s: %v", args, filepath.Dir(state), err)
+		}
+	}
+}
+
 func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 	for _, layout := range []struct {
 		name     string

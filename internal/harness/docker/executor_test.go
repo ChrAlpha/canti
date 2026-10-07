@@ -130,6 +130,7 @@ func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
 		{"the workspace", func(_, ws, _ string) string { return ws }, true},
 		{"containing", func(root, _, _ string) string { return root }, true},
 		{"inside through a link", func(_, _, link string) string { return filepath.Join(link, "a", "state") }, true},
+		{"apart through a link named with a colon", func(root, _, _ string) string { return filepath.Join(root, "alias:x", "state") }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -138,6 +139,12 @@ func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := os.Symlink(ws, link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(root, "plain"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(root, "plain"), filepath.Join(root, "alias:x")); err != nil {
 				t.Fatal(err)
 			}
 			tree := func() (paths []string) {
@@ -177,7 +184,10 @@ func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for target, name := range map[string]string{ws: link, filepath.Join(ws, "missing"): dangling} {
+	if err := os.Mkdir(filepath.Join(root, "a:c"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for target, name := range map[string]string{ws: link, filepath.Join(ws, "missing"): dangling, filepath.Join(root, "a:c"): filepath.Join(root, "to-colon")} {
 		if err := os.Symlink(target, name); err != nil {
 			t.Fatal(err)
 		}
@@ -196,6 +206,8 @@ func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 		{"unclean, inside the workspace through a link", link + "/../ws/state", "not a clean absolute path"},
 		{"below a file", filepath.Join(file, "state"), filepath.Join(file, "state")},
 		{"below a link to a missing directory of the workspace", filepath.Join(dangling, "state"), filepath.Join(ws, "missing")},
+		{"with a colon", filepath.Join(root, "a:b", "state"), "is not a directory that can be mounted"},
+		{"below a link to a directory with a colon", filepath.Join(root, "to-colon", "state"), "is not a directory that can be mounted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := tree()

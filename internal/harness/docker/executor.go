@@ -161,8 +161,9 @@ func New(cfg Config) (*Executor, error) {
 	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}}, nil
 }
 
-// CheckLayout refuses a workspace and a state directory that overlap, as New
-// does, before the state directory exists and without touching the
+// CheckLayout refuses, as New does, a workspace and a state directory that
+// overlap and a state whose resolved path has a colon, which cannot be
+// mounted, before the state directory exists and without touching the
 // filesystem: the state, a clean absolute path, resolves as its nearest
 // existing ancestor followed by the missing components. A state below a
 // file or a dangling link is refused.
@@ -185,6 +186,9 @@ func CheckLayout(workspace, state string) error {
 	}
 	if p = filepath.Join(p, rest); within(ws, p) || within(p, ws) {
 		return fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)
+	}
+	if strings.Contains(p, ":") {
+		return fmt.Errorf("docker: state %s is not a directory that can be mounted", p)
 	}
 	return nil
 }
