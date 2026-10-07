@@ -219,13 +219,27 @@ func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {
 
 func TestFakeExecutorPassesStartLatchCheck(t *testing.T) {
 	x := &fakeExec{clock: &clock{now: created}, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
+	effect := func(name string) harness.Effect {
+		return harness.Effect{ID: fmt.Sprintf("effect_%x", sha256.Sum256([]byte(name))), Command: "run " + name}
+	}
+	held := effect("start-cancel").ID
+	x.inspect = func(effectID string) (harness.Job, bool, error) {
+		j := x.jobs[effectID]
+		if j == nil {
+			return harness.Job{}, false, nil
+		}
+		if j.Status == harness.JobRunning && effectID != held {
+			x.finish(j, harness.JobSucceeded)
+		}
+		return j.Job, true, nil
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	err := executortest.Check(ctx, executortest.Fixture{
-		Open: func(context.Context) (harness.Executor, error) { return x, nil },
-		Effect: func(name string) harness.Effect {
-			return harness.Effect{ID: fmt.Sprintf("effect_%x", sha256.Sum256([]byte(name))), Command: "run " + name}
-		},
+		// fakeExec keeps no state per controller, so every controller opens
+		// the same backend.
+		Open:   func(context.Context) (harness.Executor, error) { return x, nil },
+		Effect: effect,
 		Runs: func(_ context.Context, effectID string) (int, error) {
 			x.mu.Lock()
 			defer x.mu.Unlock()
