@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,10 +66,22 @@ func (f *fake) container(status string, exit int) string {
 	return f.containerOf("e", "true", status, exit)
 }
 
+// containerOf is the inspect output of the container Bind creates for id.
 func (f *fake) containerOf(id, command, status string, exit int) string {
+	return f.inspected(id, command, status, exit, map[string]string{exitLabel: exitFile})
+}
+
+// legacy is f.container as an earlier revision created it, without the exit
+// label.
+func (f *fake) legacy(status string, exit int) string {
+	return f.inspected("e", "true", status, exit, nil)
+}
+
+func (f *fake) inspected(id, command, status string, exit int, labels map[string]string) string {
 	var c container
 	c.ID = "c-" + id
 	c.Config.Labels = map[string]string{"canti.effect": id, "canti.state": f.x.cfg.State, "canti.spec": specHash(f.x.runArgs(command))}
+	maps.Copy(c.Config.Labels, labels)
 	c.State.Status, c.State.ExitCode = status, exit
 	c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
@@ -77,6 +90,12 @@ func (f *fake) containerOf(id, command, status string, exit int) string {
 		f.t.Fatal(err)
 	}
 	return string(b)
+}
+
+// exited makes the job of effect e exit with code, which its shell recorded.
+func (f *fake) exited(code int) {
+	f.set("inspect.out", f.container("exited", code))
+	f.set("cp.out", exitArchive(f.t, fmt.Sprintf("%d\n", code)))
 }
 
 func (f *fake) calls(cmd string) []string {
@@ -331,7 +350,7 @@ func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
 	}
 	f.latch(latchStart)
 	f.unset("inspect.sh", "rm.sh")
-	f.set("inspect.out", f.container("exited", 0))
+	f.exited(0)
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || job.Output.Detail != "logs unavailable: no response within 150ms" {
 		t.Fatalf("Inspect(capture hung) = %+v, %v; want the job recorded without output", job, err)
@@ -389,7 +408,7 @@ func same(a, b harness.Job) bool {
 func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.container("exited", 3))
+	f.exited(3)
 	f.set("logs.out", "hello\n")
 	f.set("rm.sh", fmt.Sprintf("test -s %q || touch \"$ctl/early\"\n", filepath.Join(f.x.dir("e"), "output.json")))
 	stale := filepath.Join(f.x.artifacts(), "e", ".tmp-crashed")
@@ -451,7 +470,7 @@ func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
 func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.container("exited", 0))
+	f.exited(0)
 	f.set("logs.out", "hello\n")
 	f.set("rm.err", "Error response from daemon: boom\n")
 	f.set("rm.exit", "1")
@@ -517,7 +536,7 @@ func TestFailedCaptureIsRecordedAndReleased(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFake(t)
 			f.latch(latchStart)
-			f.set("inspect.out", f.container("exited", 0))
+			f.exited(0)
 			tt.fail(f)
 			want, found, err := f.x.Inspect(t.Context(), "e")
 			if err != nil || !found || want.Status != harness.JobSucceeded || want.Output.Path != "e/output" ||
@@ -550,7 +569,7 @@ func TestFailedCaptureIsRecordedAndReleased(t *testing.T) {
 func TestInterruptedCaptureIsNotRecorded(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.container("exited", 0))
+	f.exited(0)
 	f.set("logs.sh", `touch "$ctl/began"; exec sleep 5`+"\n")
 	if _, _, err := f.x.Inspect(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Inspect(shutdown during capture) = %v, want cancellation", err)
@@ -569,7 +588,7 @@ func TestInterruptedCaptureIsNotRecorded(t *testing.T) {
 func TestUnpublishedRecordIsNotFinal(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.container("exited", 0))
+	f.exited(0)
 	f.set("logs.out", "hello\n")
 	f.set("logs.sh", fmt.Sprintf("mkdir -p %q\n", filepath.Join(f.x.record("e"), "blocked")))
 	if job, _, err := f.x.Inspect(t.Context(), "e"); err == nil || len(f.calls("rm")) != 0 {

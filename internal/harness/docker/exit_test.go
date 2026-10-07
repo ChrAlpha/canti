@@ -3,7 +3,6 @@ package docker
 import (
 	"archive/tar"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -13,20 +12,6 @@ import (
 
 	"github.com/ChrAlpha/canti/internal/harness"
 )
-
-// labeled is f.container labelled with the exit file its shell writes.
-func (f *fake) labeled(status string, exit int) string {
-	var cs []container
-	if err := json.Unmarshal([]byte(f.container(status, exit)), &cs); err != nil {
-		f.t.Fatal(err)
-	}
-	cs[0].Config.Labels[exitLabel] = exitFile
-	b, err := json.Marshal(cs)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	return string(b)
-}
 
 // tarEntry is the tar stream docker cp writes for one entry.
 func tarEntry(t *testing.T, h tar.Header, body string) string {
@@ -56,7 +41,7 @@ func exitArchive(t *testing.T, body string) string {
 func TestRecordedExitIsFinal(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.labeled("exited", 3))
+	f.set("inspect.out", f.container("exited", 3))
 	f.set("cp.out", exitArchive(t, "3\n"))
 	f.set("logs.out", "hello\n")
 	job, found, err := f.x.Inspect(t.Context(), "e")
@@ -98,7 +83,7 @@ func TestUnrecordedExitStaysUnknown(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			f.latch(latchStart)
-			f.set("inspect.out", f.labeled("exited", 255))
+			f.set("inspect.out", f.container("exited", 255))
 			set(f)
 			unknown := func(what string, job harness.Job, err error) {
 				t.Helper()
@@ -149,7 +134,7 @@ func TestFailedExitRecordReadIsAnError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			f.latch(latchStart)
-			f.set("inspect.out", f.labeled("exited", 0))
+			f.set("inspect.out", f.container("exited", 0))
 			set(f)
 			if job, found, err := f.x.Inspect(t.Context(), "e"); found || err == nil {
 				t.Fatalf("Inspect() = %+v, %v, %v; want an error", job, found, err)
@@ -167,7 +152,7 @@ func TestCancelledJobNeedsNoExitRecord(t *testing.T) {
 	if err := mark(f.x.dir("e")); err != nil {
 		t.Fatal(err)
 	}
-	f.set("inspect.out", f.labeled("exited", 143))
+	f.set("inspect.out", f.container("exited", 143))
 	f.set("cp.exit", "1")
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobCancelled || job.ExitCode == nil || *job.ExitCode != 143 || len(f.calls("cp")) != 0 {
@@ -178,7 +163,7 @@ func TestCancelledJobNeedsNoExitRecord(t *testing.T) {
 func TestJobOfAnEarlierRevisionIsDerivedFromDocker(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.set("inspect.out", f.container("exited", 255))
+	f.set("inspect.out", f.legacy("exited", 255))
 	f.set("cp.exit", "1")
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 255 || len(f.calls("cp")) != 0 {
@@ -189,7 +174,7 @@ func TestJobOfAnEarlierRevisionIsDerivedFromDocker(t *testing.T) {
 func TestStartLeavesAFailedReportToInspection(t *testing.T) {
 	f := newFake(t)
 	f.set("inspect.out", f.container("created", 0))
-	f.set("exited.json", f.labeled("exited", 3))
+	f.set("exited.json", f.container("exited", 3))
 	f.set("start.sh", `cp "$ctl/exited.json" "$ctl/inspect.out"`+"\n")
 	f.set("cp.sh", `[ -e "$ctl/cp.failed" ] || { touch "$ctl/cp.failed"; echo "Error response from daemon: boom" >&2; exit 1; }`+"\n")
 	f.set("cp.out", exitArchive(t, "3\n"))
