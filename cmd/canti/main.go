@@ -447,7 +447,7 @@ func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
 	switch p := snap.State.Phase; {
 	case err != nil:
 		return err
-	case p == core.PhaseReturned || p == core.PhaseStopped:
+	case snap.State.Closed():
 		if err := store.CheckAdmission(ctx); err != nil {
 			return err
 		}

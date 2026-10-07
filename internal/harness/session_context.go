@@ -66,7 +66,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 		if err != nil {
 			return err
 		}
-		if snap.State.Phase != core.PhaseReturned && snap.State.Phase != core.PhaseStopped {
+		if !snap.State.Closed() {
 			return contextError{fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)}
 		}
 		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, archive.RunsRoot, inline(p.ID))

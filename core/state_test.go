@@ -656,3 +656,12 @@ func TestCompatibleSemanticsVersions(t *testing.T) {
 		}
 	}
 }
+
+func TestClosedPhases(t *testing.T) {
+	for _, p := range []core.Phase{core.PhaseIdle, core.PhaseRequestFrozen, core.PhaseRequestSent, core.PhaseResponseSaved, core.PhaseEffectSaved,
+		core.PhaseJobBound, core.PhaseAwaitingObservation, core.PhaseCancelling, core.PhaseNeedsResolution, core.PhaseReturned, core.PhaseStopped} {
+		if got := (core.State{Phase: p}).Closed(); got != (p == core.PhaseReturned || p == core.PhaseStopped) {
+			t.Errorf("phase %s closed = %v", p, got)
+		}
+	}
+}

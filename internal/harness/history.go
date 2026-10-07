@@ -86,7 +86,7 @@ func publishHistory(ctx context.Context, j Journal, root string, run Run, s core
 	case len(latest) > 0:
 		err = putStep(dir, steps, latest[len(latest)-1])
 	}
-	if err == nil && (s.Phase == core.PhaseReturned || s.Phase == core.PhaseStopped) {
+	if err == nil && s.Closed() {
 		result := "phase: returned\n\n" + s.Decision.Payload
 		if s.Phase == core.PhaseStopped {
 			result = "phase: stopped\nreason: " + string(s.Reason) + "\n"

@@ -116,6 +116,9 @@ func NewState(runID string, limits Limits) (State, error) {
 	return State{RunID: runID, Step: 1, Attempt: 1, Phase: PhaseIdle, Limits: limits}, nil
 }
 
+// Closed reports whether the run has ended, returned or stopped.
+func (s State) Closed() bool { return s.Phase == PhaseReturned || s.Phase == PhaseStopped }
+
 // Intent reports what the harness should do next. Unknown and closed phases
 // halt so that no run continues automatically without a known rule.
 func (s State) Intent() Intent {
