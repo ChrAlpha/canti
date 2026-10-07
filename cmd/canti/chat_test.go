@@ -66,7 +66,7 @@ func TestChatShowsBuiltinSteps(t *testing.T) {
 func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	l := harness.DefaultPromptLimits()
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-context-bytes", "100000")
+	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-context-bytes", "81600")
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") ||
 		!strings.Contains(r.stderr, "canti chat: the input does not fit -context-bytes (harness: ") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
@@ -117,7 +117,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if r.code != exitError || strings.Contains(r.stderr, "> ") {
 		t.Fatalf("unreadable journal: %+v", r)
 	}
-	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "90000"}} {
+	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "71600"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, "chat", args...)
 		if r := wait(); r.code != exitUsage && r.code != exitError || strings.Contains(r.stderr, "> ") {
 			t.Fatalf("chat %q: %+v", args, r)
@@ -146,7 +146,7 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	in, w := io.Pipe()
-	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-context-bytes", "90000")
+	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-context-bytes", "71600")
 	io.WriteString(w, "one\n")
 	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
 	if r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000)); r.code != exitOK {

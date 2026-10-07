@@ -121,7 +121,7 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					t.Fatal("protocol repair lost the original capture identity")
 				}
 				trigger := capturedRequest(t, f, 3, 1)
-				if !trigger.Window.Requested || len(trigger.Context.Retrievals) != 2 || !trigger.Context.Retrievals[1].More || len(trigger.Context.Sources) != 1 || trigger.Context.Sources[0].Step != 2 || !trigger.Context.Sources[0].Available || !strings.Contains(string(trigger.Body), "ORIGINAL") {
+				if !trigger.Window.Requested || len(trigger.Context.Retrievals) != 2 || !trigger.Context.Retrievals[1].More || len(trigger.Context.Sources) != 0 || !strings.Contains(string(trigger.Body), "ORIGINAL") {
 					t.Fatal("valid retrieval did not progress into the handover request")
 				}
 				next := capturedRequest(t, f, 4, 1)

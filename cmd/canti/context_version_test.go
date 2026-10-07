@@ -326,10 +326,10 @@ func sessionRules(t *testing.T) string {
 func everyBlock(run harness.Run) harness.Frame {
 	exit, failed := 0, 1
 	read := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: "/canti/runs/r/steps/00000002/preview", Reason: "check", Limit: 64},
-		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000002/preview", Length: 5, SHA256: strings.Repeat("a", 64)}}, NextOffset: 5}
+		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000002/preview", Length: 5, SHA256: strings.Repeat("a", 64)}}, Evidence: []string{"hello"}, NextOffset: 5}
 	list := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "list", Path: "/canti/runs"}, Entries: []string{"r/"}, NextOffset: 1}
 	discover := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/r/steps", Reason: "find", Query: "FAIL"},
-		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000003/preview", Length: 4, SHA256: strings.Repeat("b", 64)}}, More: true, NextCursor: "c"}
+		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000003/preview", Length: 4, SHA256: strings.Repeat("b", 64)}}, Evidence: []string{"FAIL"}, More: true, NextCursor: "c"}
 	steps := []harness.StepRecord{
 		{Step: 3, Command: "go test ./...", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "FAIL ```",
 			Output: harness.ArtifactRef{Path: "effect_x/output", Bytes: 8, Complete: true, Available: true}}},
@@ -345,7 +345,7 @@ func everyBlock(run harness.Run) harness.Frame {
 		Earlier: 2, Steps: steps, RunID: run.ID,
 		Rejected:         &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
 		Window:           &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1},
-		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096, Retrieved: map[int]string{4: "Source x:\nBytes [0,5), sha256 a:\nhello\n"},
+		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096,
 		SessionContext: "Run run_0 (session sequence 1; source /canti/runs/run_0/goal and result; returned):\n"}
 }
 

@@ -22,7 +22,6 @@ type Frame struct {
 	RetrievalEnabled                     bool
 	ImportsEnabled                       bool
 	HandoverBytes                        int
-	Retrieved                            map[int]string
 	SessionContext                       string
 	capture                              *ContextCapture
 	sessionSources                       []ContextSessionSource

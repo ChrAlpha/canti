@@ -12,12 +12,12 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 )
 
-func retrievalExpansionReserve() int {
-	const sources = archive.MaxSources
-	// Directory source references fit 8192 JSON bytes; the rendered headers
-	// can add at most 16 bytes per source. File search has one repeated path.
-	return len("Retrieved original evidence:\n") + archive.MaxBytes + sources*16 +
-		archive.MaxBytes + sources*(len("Evidence unavailable: ")+512+truncationBytes()+1) +
+// evidenceReserve bounds the evidence block of a retrieval step: its text
+// is at most the largest query limit, its source references fit that many
+// JSON bytes and render at most 16 bytes more per source, and its fence may
+// widen to the longest run of backticks in the text.
+func evidenceReserve() int {
+	return len("Retrieved original evidence:\n") + archive.MaxBytes + archive.MaxBytes + archive.MaxSources*16 +
 		2*(archive.MaxBytes+1) + 2
 }
 
@@ -34,7 +34,6 @@ func purposeBytes(l PromptLimits) int {
 }
 
 func (f Frame) stepShellBytes(l PromptLimits) int {
-	f.Retrieved = nil
 	exit := math.MinInt
 	s := StepRecord{Step: math.MaxInt, Resolved: true, Observation: Observation{
 		Execution: core.ExecutionFailedToStart, ExitCode: &exit,
@@ -60,7 +59,6 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 }
 
 func (f Frame) failedHandoverShellBytes(l PromptLimits) int {
-	f.Retrieved = nil
 	exit := 1
 	s := StepRecord{Step: math.MaxInt, Observation: Observation{Execution: core.ExecutionExited, ExitCode: &exit}}
 	preview := min(l.Preview, 3*(len(actionFailure)+actionFailureBytes+truncationBytes()))
@@ -115,7 +113,7 @@ func (f Frame) reserve(l PromptLimits) Fit {
 	fit := Fit{Limit: l.Total, Handover: f.HandoverBytes, System: len(f.contextSystem()), Head: len(f.head(l)),
 		Step: f.stepShellBytes(l), Failed: f.failedHandoverShellBytes(l), Tail: f.tailBytes(l)}
 	if f.RetrievalEnabled {
-		fit.Evidence = retrievalExpansionReserve()
+		fit.Evidence = evidenceReserve()
 	}
 	return fit
 }

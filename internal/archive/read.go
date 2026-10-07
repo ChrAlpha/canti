@@ -39,6 +39,7 @@ func readRetrieval(ctx context.Context, f *os.File, size int64, limit int, resul
 		}
 		if len(data) > 0 {
 			result.Sources = []SourceRange{sourceRange(q.Path, q.Offset, data)}
+			result.Evidence = []string{string(data)}
 		}
 		result.NextOffset += int64(len(data))
 	} else {
@@ -91,10 +92,13 @@ func searchRanges(data []byte, limit, end, maxSources, references int, result *R
 			pos = match + width
 		}
 	}
+	result.Evidence = result.Evidence[:min(len(result.Evidence), r.changed)]
 	for i := r.changed; i < len(result.Sources); i++ {
 		source := &result.Sources[i]
 		start := int(source.Offset - q.Offset)
-		source.SHA256 = digest(data[start : start+source.Length])
+		text := data[start : start+source.Length]
+		source.SHA256 = digest(text)
+		result.Evidence = append(result.Evidence, string(text))
 	}
 	result.NextOffset = q.Offset + int64(pos)
 	return r.limit, r.references

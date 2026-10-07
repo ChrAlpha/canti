@@ -2,7 +2,6 @@ package harness_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,7 +13,11 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-func TestRetrievalCommitsReferencesWithoutCopiedEvidence(t *testing.T) {
+// TestRetrievalCommitsItsEvidenceWithTheObservation requires that a
+// retrieval commits the bytes of each source it returns with its
+// observation, keeps them out of the published preview, runs no executor,
+// and shows those bytes in the next request even after the source changed.
+func TestRetrievalCommitsItsEvidenceWithTheObservation(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify prior result"}`), returnReply("done"))
 	imported := t.TempDir()
 	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("unique original evidence"), 0600); err != nil {
@@ -39,16 +42,21 @@ func TestRetrievalCommitsReferencesWithoutCopiedEvidence(t *testing.T) {
 	if r == nil || len(r.Sources) != 1 {
 		t.Fatalf("retrieval: %#v", r)
 	}
-	b, _ := json.Marshal(steps)
-	if strings.Contains(string(b), "unique original evidence") {
-		t.Fatal("copied evidence into observation")
+	if len(r.Evidence) != 1 || r.Evidence[0] != "unique original evidence" || strings.Contains(steps[0].Observation.Preview, "unique original evidence") {
+		t.Fatalf("committed evidence %q, preview %s", r.Evidence, steps[0].Observation.Preview)
 	}
 	if len(f.exec.calls) != 0 {
 		t.Fatalf("retrieval called external executor: %v", f.exec.calls)
 	}
-	text, err := f.cfg.Reader.Expand(ctx, r.Sources[0])
-	if err != nil || text != "unique original evidence" {
-		t.Fatalf("expand %q %v", text, err)
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("replaced afterwards"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.fresh().Step(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	last := string(f.frozen(2, 1))
+	if !strings.Contains(last, "unique original evidence") || strings.Contains(last, "replaced afterwards") {
+		t.Fatalf("the next request does not show the evidence frozen at observation:\n%s", last)
 	}
 }
 
@@ -151,7 +159,7 @@ func TestRetrievalLostObservationAckKeepsPinnedReference(t *testing.T) {
 		t.Fatalf("pinned reference changed: %+v %v", after, err)
 	}
 	last := string(f.model.sent[len(f.model.sent)-1])
-	if !strings.Contains(last, "sha256 mismatch") || strings.Contains(last, replacement) || len(f.exec.calls) != 0 {
-		t.Fatalf("replacement source was silently used or executor was called: %v", f.exec.calls)
+	if !strings.Contains(last, "original immutable evidence") || strings.Contains(last, replacement) || len(f.exec.calls) != 0 {
+		t.Fatalf("the frozen evidence was not shown, the replacement was, or the executor was called: %v", f.exec.calls)
 	}
 }

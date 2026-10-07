@@ -186,7 +186,8 @@ func (f Frame) progress(hidden int) string {
 func (f Frame) step(s StepRecord, l PromptLimits) string {
 	o := s.Observation
 	var b strings.Builder
-	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(s.Purpose), l.Purpose)) + max(0, min(len(o.Preview), l.Preview)) + len(f.Retrieved[s.Step]) + 256)
+	evidence := evidence(o.Retrieval)
+	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(s.Purpose), l.Purpose)) + max(0, min(len(o.Preview), l.Preview)) + len(evidence) + 256)
 	fmt.Fprintf(&b, "### Step %d\n", s.Step)
 	if s.Purpose != "" {
 		b.WriteString("Purpose: " + lineBreaks.Replace(clip(s.Purpose, l.Purpose)) + "\n")
@@ -242,9 +243,27 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 		}{r.NextOffset, r.NextCursor, r.More, r.Incomplete, r.SkippedCount, r.Skipped, clip(r.Error, 512)})
 		b.WriteString("Retrieval continuation: " + string(status) + "\n")
 	}
-	if text := f.Retrieved[s.Step]; text != "" {
+	if evidence != "" {
 		b.WriteString("Retrieved original evidence:\n")
-		writeBlock(&b, text, len(text)+2*max(0, fence(text)-3))
+		writeBlock(&b, evidence, len(evidence)+2*max(0, fence(evidence)-3))
+	}
+	return b.String()
+}
+
+// evidence renders the evidence r froze for each of its sources, with the
+// path of each new source and the range and hash of every one.
+func evidence(r *archive.Retrieval) string {
+	if r == nil || len(r.Evidence) != len(r.Sources) {
+		return ""
+	}
+	var b strings.Builder
+	previous := ""
+	for i, source := range r.Sources {
+		if source.Path != previous {
+			fmt.Fprintf(&b, "Source %s:\n", source.Path)
+		}
+		fmt.Fprintf(&b, "Bytes [%d,%d), sha256 %s:\n%s\n", source.Offset, source.Offset+int64(source.Length), source.SHA256, r.Evidence[i])
+		previous = source.Path
 	}
 	return b.String()
 }

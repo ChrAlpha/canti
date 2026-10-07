@@ -48,7 +48,7 @@ type config struct {
 
 // contextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const contextVersion = 3
+const contextVersion = 4
 
 type spec struct {
 	config config

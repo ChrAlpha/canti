@@ -152,7 +152,7 @@ func boundaryScenarios() []frozenScenario {
 			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"same original evidence\n"},
-				"run1-step03-rev1.json": {"Evidence unavailable: archive symlinks are not readable"},
+				"run1-step03-rev1.json": {"same original evidence\n"},
 			},
 		},
 		{
@@ -178,7 +178,7 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
-			name: "unavailable-evidence", limits: stepLimits,
+			name: "removed-evidence", limits: stepLimits,
 			imports: map[string]string{imported: "```go\nfunc parse() {}\n```\n" + strings.Repeat("The parser was rewritten in v2.\n", 40) + "func parse is the entry point.\n"},
 			changes: map[string]func(*os.Root) error{"sleep 1": func(r *os.Root) error { return r.Remove(imported) }},
 			outputs: map[string]string{"sleep 1": "done\n"},
@@ -186,29 +186,38 @@ func boundaryScenarios() []frozenScenario {
 				corpusRetrieve("read", "/canti/imports/"+imported, "", strings.Repeat("Check the imported notes. ", 39)),
 				corpusRetrieve("search", "/canti/imports/"+imported, `,"query":"func parse","limit":64`, "Find every mention of parse."),
 				corpusDecision(core.Exec, "sleep 1"),
-				corpusDecision(core.Return, "The notes said the parser was rewritten in v2, but they are no longer available."),
+				corpusDecision(core.Return, "The notes say the parser was rewritten in v2."),
 			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 retrieval 2 sources 0 entries", "3 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"…[truncated ", "Preview:\n```\n", "Retrieved original evidence:\n````\n", "```go\nfunc parse() {}\n```\n"},
-				"run1-step04-rev1.json": {"Evidence unavailable: archive path unavailable: "},
 			},
 			edge: func(t *testing.T, requests map[string]harness.Request) {
-				before, after := requests["run1-step03-rev1.json"].Context.Sources, requests["run1-step04-rev1.json"].Context.Sources
-				if len(before) != 3 || len(after) != 3 || before[0].Source.Length <= 1024 || before[1].Source.Path != before[2].Source.Path {
-					t.Fatalf("the evidence was %+v, then %+v; want a source over 1 KiB, then two of one path", before, after)
-				}
-				for i := range before {
-					if !before[i].Available || after[i].Available || len(after[i].Error) <= 256 {
-						t.Errorf("source %d was %+v, then %+v; want it available, then unavailable with an error over 256 bytes", i, before[i], after[i])
-					}
+				before, after := evidenceBlocks(requests["run1-step03-rev1.json"].Body), evidenceBlocks(requests["run1-step04-rev1.json"].Body)
+				if len(before) != 2 || !slices.Equal(before, after) || !strings.Contains(before[0], "The parser was rewritten in v2.") {
+					t.Errorf("the evidence after the source was removed is %q, before it %q; want the same two blocks", after, before)
 				}
 			},
 		},
 	})
 }
 
-// envelope is a raw response of content blocks, complete by its stop
-// reason.
+// evidenceBlocks returns the evidence blocks a frozen request body renders.
+func evidenceBlocks(body []byte) []string {
+	var req struct {
+		Messages []struct{ Content []struct{ Text string } }
+	}
+	if json.Unmarshal(body, &req) != nil || len(req.Messages) != 1 {
+		return nil
+	}
+	var out []string
+	for _, c := range req.Messages[0].Content {
+		if _, evidence, ok := strings.Cut(c.Text, "Retrieved original evidence:\n"); ok {
+			out = append(out, evidence)
+		}
+	}
+	return out
+}
+
 func corpusPurpose(kind core.Kind, purpose, payload string) string {
 	b, err := json.Marshal(core.Decision{Kind: kind, Purpose: purpose, Payload: payload})
 	if err != nil {
@@ -239,19 +248,19 @@ func capped(imported string, width int) string {
 	return corpusDecision(core.Exec, command("````"+strings.Repeat("r", fill)))
 }
 
-// handoverThresholds are twins whose third request has used+growth one byte
-// short of the capacity of its window and used one byte short of
-// -window-bytes, or both exactly reached, with retrieval growth.
+// handoverThresholds are twins whose third request, after a retrieval, has
+// used one byte short of both the capacity of its window and -window-bytes,
+// or both exactly reached.
 func handoverThresholds() []frozenScenario {
 	var out []frozenScenario
 	for _, reached := range []bool{false, true} {
 		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
 		sc := frozenScenario{
 			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 88764, windowBytes: 4937, outputs: map[string]string{"go test ./...": output},
+			contextBytes: 72792, windowBytes: 8975, outputs: map[string]string{"go test ./...": output},
 			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
 				corpusDecision(core.Exec, "go test ./..."),
-				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":64`, "Check the first result."),
+				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":4096`, "Check the first result."),
 				corpusDecision(core.Return, "Every package passes."),
 			}, steps: []string{"1 exited 0 output complete", "2 exited 0 retrieval 1 sources 0 entries more"}}},
 		}
@@ -267,8 +276,8 @@ func handoverThresholds() []frozenScenario {
 		}
 		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
 			h := requests["run1-step03-rev1.json"].Context.Handover
-			if h.Growth == 0 || h.Used+h.Growth != h.Capacity+off || h.Used != h.WindowBytes+off {
-				t.Errorf("step 3 evaluated %+v; want used+growth %d byte(s) from the capacity and used as far from window_bytes, with growth", h, off)
+			if h.Growth != 0 || h.Used != h.Capacity+off || h.Used != h.WindowBytes+off {
+				t.Errorf("step 3 evaluated %+v; want used %d byte(s) from the capacity and as far from window_bytes", h, off)
 			}
 			if w := requests["run1-step04-rev1.json"].Window; reached && (w == nil || w.FirstStep != 4 || len(w.Handover) != 2048) {
 				t.Errorf("step 4 has window %+v; want one opened by a handover of exactly 2048 bytes", w)
@@ -298,12 +307,12 @@ func sessionBoundaries() []frozenScenario {
 	}
 	var out []frozenScenario
 	for _, b := range []boundary{
-		{"session-stopped-goal", 93558, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 93557, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 91651, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 91650, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 91435, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 91434, []frozenRun{small, stopped, current}, "none"},
+		{"session-stopped-goal", 75208, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
+		{"session-stopped-status", 75207, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-status-only", 73301, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-navigation-only", 73300, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-navigation", 73085, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-without-dialogue", 73084, []frozenRun{small, stopped, current}, "none"},
 	} {
 		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
 		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,

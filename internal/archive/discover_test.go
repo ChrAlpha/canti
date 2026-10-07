@@ -72,10 +72,6 @@ func TestDiscoveryOriginalSourcesAndEchoExclusion(t *testing.T) {
 	if result.More || result.Incomplete || len(texts) != 2 || !strings.Contains(texts["/canti/artifacts/step-1"], "original approval") || !strings.Contains(texts["/canti/runs/run/steps/00000001/meta"], "output_complete: true") {
 		t.Fatalf("wrong original candidates: %+v %v", result, texts)
 	}
-	encoded, _ := json.Marshal(result)
-	if strings.Contains(string(encoded), "original approval") {
-		t.Fatal("discovery persisted original body")
-	}
 }
 
 func TestDiscoveryPartialArtifactAndTrueTailPreview(t *testing.T) {

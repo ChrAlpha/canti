@@ -558,9 +558,12 @@ Run identity, effect identity, step numbering, and execution recovery do not
 change when a window advances. `return` still ends the run.
 
 Native retrieval records its reason, original paths, byte ranges, hashes,
-continuation information, and errors. Original evidence is expanded only
-for the active context; retrieval observations and projected records do not
-copy that evidence under the retrieval step. Reading a past retrieval thus
+continuation information, and errors, and commits the bytes it read for
+each source with the step's observation, at most the query's byte limit.
+Every later request of the window renders that frozen evidence, so a
+source changed or removed after the retrieval changes no request, and the
+context reserves no growth for evidence that might change. The step's
+published preview keeps the references only: reading a past retrieval
 returns references rather than recursively duplicating history. Frozen
 request bodies still retain the actual bytes sent for exact retry. Old pages
 remain accessible through explicit retrieval, including imported history

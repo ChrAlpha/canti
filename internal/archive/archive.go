@@ -64,6 +64,7 @@ type Skip struct {
 type Retrieval struct {
 	Query        RetrievalQuery `json:"query"`
 	Sources      []SourceRange  `json:"sources,omitempty"`
+	Evidence     []string       `json:"evidence,omitempty"`
 	Entries      []string       `json:"entries,omitempty"`
 	NextOffset   int64          `json:"next_offset"`
 	NextCursor   string         `json:"next_cursor,omitempty"`

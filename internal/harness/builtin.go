@@ -96,7 +96,9 @@ func (l *Loop) readAction(ctx context.Context, snap Snapshot) (Observation, erro
 			r, err = l.cfg.Reader.Retrieve(ctx, q)
 			if err == nil {
 				obs.Retrieval = &r
-				body, _ := json.Marshal(r)
+				refs := r
+				refs.Evidence = nil
+				body, _ := json.Marshal(refs)
 				obs.Preview = string(body)
 				if r.Error != "" {
 					code = 1

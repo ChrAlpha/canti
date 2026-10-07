@@ -27,7 +27,7 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &r,
 			}}}
 			if operation != "list" {
-				f.Retrieved = map[int]string{1: "Source " + r.Query.Path + ":\nBytes [123,153), sha256 " + r.Sources[0].SHA256 + ":\nUse 47 seconds.\n```\nExact tail.\n"}
+				r.Evidence = []string{"Use 47 seconds.\n```\nExact tail."}
 			}
 			p := mustPrompt(t, f, DefaultPromptLimits()).User()
 			for _, text := range []string{r.Query.Reason, r.NextCursor} {
@@ -38,7 +38,8 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			if strings.Contains(p, "Preview:") || !strings.Contains(p, `"next_offset":321`) || !strings.Contains(p, `"more":true`) {
 				t.Fatalf("redundant preview or missing continuation: %s", p)
 			}
-			if operation != "list" && (!strings.Contains(p, f.Retrieved[1]) || strings.Count(p, r.Sources[0].SHA256) != 1) {
+			want := "Source " + r.Query.Path + ":\nBytes [123,153), sha256 " + strings.Repeat("a", 64) + ":\nUse 47 seconds.\n```\nExact tail.\n"
+			if operation != "list" && (!strings.Contains(p, want) || strings.Count(p, strings.Repeat("a", 64)) != 1) {
 				t.Fatalf("original evidence was changed or repeated: %s", p)
 			}
 			if f.Steps[0].Observation.Preview != string(body) {

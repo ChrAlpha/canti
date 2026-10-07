@@ -120,10 +120,11 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 		next.Step++
 	}
 	next.Command, next.Observation.Preview, next.Purpose = strings.Repeat("x", 40000), strings.Repeat("`", 40000), strings.Repeat("\n", 40000)
-	next.Observation.Retrieval = &archive.Retrieval{Sources: make([]archive.SourceRange, 32), NextOffset: math.MaxInt64,
+	r := &archive.Retrieval{Sources: make([]archive.SourceRange, 32), Evidence: make([]string, 32), NextOffset: math.MaxInt64,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512)}
+	r.Evidence[31] = strings.Repeat("x", evidenceReserve()-len("Retrieved original evidence:\n")-9-len(evidence(r)))
+	next.Observation.Retrieval = r
 	f.Steps = append(f.Steps, next)
-	f.Retrieved = map[int]string{next.Step: strings.Repeat("x", retrievalExpansionReserve()-len("Retrieved original evidence:\n")-9)}
 	next.Step++
 	exit = 1
 	next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &exit,
@@ -186,7 +187,7 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		next.Purpose = strings.Repeat("x", 40000)
 		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &ok, Preview: string(body), Retrieval: &read}
 		f.Steps = append(f.Steps, next)
-		f.Retrieved = map[int]string{next.Step: "Source " + path + ":\nBytes [0,8192), sha256 " + sum + ":\n" + strings.Repeat("x", archive.MaxBytes) + "\n"}
+		read.Evidence = []string{strings.Repeat("x", archive.MaxBytes)}
 		next.Step++
 		payload := `{"` + strings.Repeat(`\u0060`, 1352) + `":1}`
 		var h Handover

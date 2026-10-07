@@ -62,6 +62,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 		}
 		remaining -= read
 		result.Sources = append(result.Sources, part.Sources...)
+		result.Evidence = append(result.Evidence, part.Evidence...)
 		if part.More {
 			if len(result.Sources) == 0 && part.NextOffset == cursor.Offset {
 				return errors.New("source reference exceeds directory search presentation limit")

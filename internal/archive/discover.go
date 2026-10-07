@@ -135,6 +135,7 @@ type discovery struct {
 // first match, and what presenting it costs.
 type pendingMeta struct {
 	source             SourceRange
+	text               string
 	bytes, refs, slots int
 }
 
@@ -161,7 +162,7 @@ func (d *discovery) step(ctx context.Context) (bool, error) {
 	}
 	source := sourceRange(stepPath+"/"+MetaFile, 0, meta)
 	encoded, _ := json.Marshal(source)
-	m := pendingMeta{source: source, bytes: len(meta), refs: len(encoded) + 1, slots: 1}
+	m := pendingMeta{source: source, text: string(meta), bytes: len(meta), refs: len(encoded) + 1, slots: 1}
 	for ; d.cursor.Field < len(files); d.cursor.Field, d.cursor.Offset = d.cursor.Field+1, 0 {
 		if d.remaining < d.matchBytes+utf8.UTFMax || len(d.result.Sources)+m.slots >= MaxSources {
 			return true, nil
@@ -206,8 +207,10 @@ func (d *discovery) search(ctx context.Context, stepPath, file string, m *pendin
 		}
 		if m.slots != 0 {
 			d.result.Sources = append(d.result.Sources, m.source)
+			d.result.Evidence = append(d.result.Evidence, m.text)
 		}
 		d.result.Sources = append(d.result.Sources, part.Sources...)
+		d.result.Evidence = append(d.result.Evidence, part.Evidence...)
 		d.limit -= m.bytes + partLimit - left
 		d.references = refs
 		*m = pendingMeta{}

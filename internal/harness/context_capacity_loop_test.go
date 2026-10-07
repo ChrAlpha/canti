@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -58,7 +59,10 @@ func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
 	}
 }
 
-func TestUnavailableEvidenceTriggersHandoverAcrossSQLiteReopen(t *testing.T) {
+// TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen requires that evidence
+// a retrieval committed is shown, byte for byte, by every later request of
+// a loop reopened on the journal after its source was removed.
+func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 	imported := t.TempDir()
 	file := filepath.Join(imported, "evidence")
 	if err := os.WriteFile(file, []byte(strings.Repeat("x", archive.MaxBytes)), 0600); err != nil {
@@ -66,9 +70,7 @@ func TestUnavailableEvidenceTriggersHandoverAcrossSQLiteReopen(t *testing.T) {
 	}
 	q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/evidence", Reason: "inspect source", Limit: archive.MaxBytes})
 	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 3}, harness.Budget{},
-		execReply("canti:retrieve "+string(q)),
-		execReply("canti:retrieve "+string(q)),
-		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Resume after checking original evidence."}`), returnReply("done"))
+		execReply("canti:retrieve "+string(q)), execReply("canti:retrieve "+string(q)), returnReply("done"))
 	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 96 << 10
@@ -88,21 +90,13 @@ func TestUnavailableEvidenceTriggersHandoverAcrossSQLiteReopen(t *testing.T) {
 	if err := os.Remove(file); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			wantState(t, s, core.PhaseReturned, "")
-			break
-		}
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	if len(f.model.prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(f.model.prompts))
 	}
-	if len(f.model.prompts) != 4 || !strings.Contains(f.model.prompts[2].User(), "Evidence unavailable:") || !strings.Contains(f.model.prompts[2].User(), "Handover required") {
-		t.Fatal("changed source did not remain explicit and trigger safe handover")
-	}
-	if strings.Contains(f.model.prompts[3].User(), "### Step 1") || !strings.Contains(f.model.prompts[3].User(), "Resume after checking original evidence") {
-		t.Fatal("handover did not release old page across SQLite reopen")
+	evidence := "sha256 " + fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Repeat("x", archive.MaxBytes)))) + ":\n" + strings.Repeat("x", archive.MaxBytes) + "\n"
+	if last := f.model.prompts[2].User(); strings.Count(last, evidence) != 2 || strings.Contains(last, "Evidence unavailable") {
+		t.Fatalf("the request after removing the source does not show both frozen evidence blocks:\n%s", last)
 	}
 }
 
@@ -309,8 +303,8 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 	if !strings.Contains(last, "### Step 1") || !strings.Contains(last, "Retrieval continuation:") {
 		t.Fatal("source citation overhead caused the whole newest observation and its continuation to disappear")
 	}
-	if changed && !strings.Contains(last, "sha256 mismatch") {
-		t.Fatal("source change diagnostic did not reach the model")
+	if changed && (strings.Contains(last, "yyyy") || !strings.Contains(last, "xxxx")) {
+		t.Fatal("a source changed after its retrieval replaced the evidence frozen at observation")
 	}
 }
 

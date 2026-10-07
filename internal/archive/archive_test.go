@@ -2,7 +2,6 @@ package archive
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,10 +24,25 @@ func retrieveOK(t *testing.T, r Reader, q RetrievalQuery) Retrieval {
 	if err != nil || result.Error != "" {
 		t.Fatalf("Retrieve: result=%+v err=%v", result, err)
 	}
+	checkEvidence(t, result)
 	return result
 }
 
-func TestRetrievalReadContinuationAndNoBody(t *testing.T) {
+// checkEvidence requires that result carries, for each source, exactly the
+// bytes that source names.
+func checkEvidence(t *testing.T, result Retrieval) {
+	t.Helper()
+	if len(result.Evidence) != len(result.Sources) {
+		t.Fatalf("%d evidence texts for %d sources", len(result.Evidence), len(result.Sources))
+	}
+	for i, s := range result.Sources {
+		if e := result.Evidence[i]; len(e) != s.Length || digest([]byte(e)) != s.SHA256 {
+			t.Fatalf("evidence %d of %d bytes does not match source %+v", i, len(e), s)
+		}
+	}
+}
+
+func TestRetrievalReadContinuationCarriesItsEvidence(t *testing.T) {
 	body := strings.Repeat("unique original evidence ", 900)
 	r, name := retrievalFixture(t, body)
 	q := RetrievalQuery{Operation: "read", Path: name, Reason: "check original evidence"}
@@ -38,15 +52,7 @@ func TestRetrievalReadContinuationAndNoBody(t *testing.T) {
 		if len(result.Sources) != 1 || result.Sources[0].Length > DefaultBytes {
 			t.Fatalf("unbounded read: %+v", result)
 		}
-		encoded, err := json.Marshal(result)
-		if err != nil || strings.Contains(string(encoded), "unique original") {
-			t.Fatalf("body persisted: %s %v", encoded, err)
-		}
-		text, err := r.Expand(context.Background(), result.Sources[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		got.WriteString(text)
+		got.WriteString(result.Evidence[0])
 		if !result.More {
 			break
 		}

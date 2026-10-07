@@ -48,7 +48,7 @@ func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	}
 }
 
-func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
+func TestContextCapturePersistsFrozenEvidenceAndRetry(t *testing.T) {
 	imported := t.TempDir()
 	file := filepath.Join(imported, "evidence")
 	original := []byte("ORIGINAL_CAPTURE_EVIDENCE")
@@ -85,12 +85,12 @@ func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
 		checkCapturedBytes(t, req, f.model.prompts[i])
 	}
 	c := originalReq.Context
-	if len(c.Sources) != 1 || !c.Sources[0].Available || c.Sources[0].Step != 1 || c.Sources[0].Source.Path != "/canti/imports/evidence" || c.Sources[0].Source.Length != 8 {
-		t.Fatalf("original source = %+v", c.Sources)
+	if len(c.Sources) != 0 {
+		t.Fatalf("frozen evidence needs no source check, captured %+v", c.Sources)
 	}
 	steps, err := f.store.Recent(ctx, runID, 0, 1)
-	if err != nil || c.Sources[0].Source != steps[0].Observation.Retrieval.Sources[0] {
-		t.Fatalf("source lost provenance: %v", err)
+	if err != nil || len(steps) != 1 || len(steps[0].Observation.Retrieval.Evidence) != 1 || steps[0].Observation.Retrieval.Evidence[0] != "ORIGINAL" {
+		t.Fatalf("committed evidence = %+v, %v", steps, err)
 	}
 	if len(c.Retrievals) != 1 || !c.Retrievals[0].More || c.Retrievals[0].Operation != "read" || c.Retrievals[0].Query != nil || c.Retrievals[0].Step != 1 || steps[0].Observation.Retrieval.Query.Reason != "verify original" {
 		t.Fatalf("retrieval = %+v", c.Retrievals)
@@ -99,10 +99,10 @@ func TestContextCapturePersistsActualExpansionAndRetry(t *testing.T) {
 		t.Fatal("transport retry did not preserve original bytes")
 	}
 	r := repaired.Context
-	if len(r.Sources) != 1 || r.Sources[0].Available || r.Sources[0].Error == "" || r.Sources[0].Source != c.Sources[0].Source || !strings.Contains(string(repaired.Body), "Evidence unavailable:") {
-		t.Fatalf("repair source = %+v", r.Sources)
+	if len(r.Sources) != 0 || !strings.Contains(string(repaired.Body), "ORIGINAL") || strings.Contains(string(repaired.Body), "Evidence unavailable") {
+		t.Fatalf("the repair after the source was removed lost the frozen evidence: %+v", r.Sources)
 	}
-	if c.Handover.Status != "evaluated" || c.Handover.Capacity <= 0 || c.Handover.Growth <= 0 || r.Handover.Status != "request_revision" || r.Handover.Capacity != 0 || len(r.Handover.Reasons) != 0 || r.Bytes.Repair == 0 {
+	if c.Handover.Status != "evaluated" || c.Handover.Capacity <= 0 || c.Handover.Growth != 0 || r.Handover.Status != "request_revision" || r.Handover.Capacity != 0 || len(r.Handover.Reasons) != 0 || r.Bytes.Repair == 0 {
 		t.Fatalf("checks original=%+v repair=%+v", c.Handover, r.Handover)
 	}
 	if !reflect.DeepEqual(originalReq.Context, capturedRequest(t, f, 2, 1).Context) {
@@ -145,7 +145,7 @@ func TestContextCaptureRecordsHandoverReasonsAndSkippedChecks(t *testing.T) {
 	}
 }
 
-func TestContextCaptureRecordsCapacityWithUnavailableSource(t *testing.T) {
+func TestContextCaptureRecordsCapacityAfterTheSourceIsRemoved(t *testing.T) {
 	imported := t.TempDir()
 	file := filepath.Join(imported, "evidence")
 	if err := os.WriteFile(file, []byte(strings.Repeat("x", archive.MaxBytes)), 0600); err != nil {
@@ -177,11 +177,11 @@ func TestContextCaptureRecordsCapacityWithUnavailableSource(t *testing.T) {
 	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
 	r := capturedRequest(t, f, 3, 1)
 	c := r.Context.Handover
-	if c.Status != "evaluated" || !slices.Equal(c.Reasons, []string{"capacity"}) || c.Used+c.Growth < c.Capacity || !r.Window.Requested {
+	if c.Status != "evaluated" || c.Growth != 0 || slices.Contains(c.Reasons, "capacity") != (c.Used >= c.Capacity) || r.Window.Requested != (len(c.Reasons) > 0) {
 		t.Fatalf("capacity decision = %+v", c)
 	}
-	if len(r.Context.Sources) != 2 || r.Context.Sources[0].Available || r.Context.Sources[1].Available {
-		t.Fatalf("sources = %+v", r.Context.Sources)
+	if len(r.Context.Sources) != 0 || strings.Count(string(r.Body), strings.Repeat("x", archive.MaxBytes)) != 2 {
+		t.Fatalf("the request after the source was removed lost frozen evidence; sources %+v", r.Context.Sources)
 	}
 	checkCapturedBytes(t, r, f.model.prompts[2])
 }
