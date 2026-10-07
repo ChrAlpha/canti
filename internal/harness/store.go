@@ -60,6 +60,9 @@ type Journal interface {
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
+	// SessionRuns returns at most limit runs of the session, newest first,
+	// before session sequence before when positive.
+	SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]Run, error)
 }
 
 // Run is the immutable record a run is created with. Config is opaque host

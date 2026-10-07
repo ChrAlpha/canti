@@ -482,7 +482,7 @@ func halted(ctx context.Context, store *sqlite.Store, id string, c config) (harn
 func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
 	j = wrapJournal(j)
 	if a.steps != nil {
-		j = rendering{j.(harness.SessionJournal), a.steps}
+		j = rendering{j, a.steps}
 	}
 	cfg := contextConfig(c, b)
 	cfg.History, cfg.Logger = historyRoot(a.state), a.log

@@ -97,10 +97,7 @@ func publishHistory(ctx context.Context, j Journal, root string, run Run, s core
 }
 
 func publishSession(ctx context.Context, journal Journal, dir string, run Run) error {
-	j, ok := journal.(SessionJournal)
-	if !ok {
-		return errors.New("harness: session journal is required for a session run")
-	}
+	j := journal
 	if run.SessionSeq < 1 {
 		return errors.New("harness: session sequence is required")
 	}

@@ -191,8 +191,6 @@ func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
 			"harness: window configuration changed during a run"},
 		{"invalid window", alter("LatestRequest", sessionRun, request(func(r *harness.Request) { r.Window = &harness.Window{FirstStep: 3} })),
 			"harness: invalid context window at step 2"},
-		{"no session journal", func(s *sqlite.Store) harness.Journal { return struct{ harness.Journal }{s} },
-			"harness: session journal is required for a session run"},
 		{"no session sequence", alter("Run", sessionRun, func(v any) (any, error) {
 			r := v.(harness.Run)
 			r.SessionSeq = 0

@@ -268,12 +268,12 @@ func readInput(in *bufio.Reader, prompt io.Writer) (string, error) {
 // rendering prints each committed command and observation of the journal's
 // runs to w.
 type rendering struct {
-	harness.SessionJournal
+	harness.Journal
 	w io.Writer
 }
 
 func (r rendering) Commit(ctx context.Context, t harness.Transition) error {
-	if err := r.SessionJournal.Commit(ctx, t); err != nil {
+	if err := r.Journal.Commit(ctx, t); err != nil {
 		return err
 	}
 	if _, ok := t.Event.(core.ResponseLoaded); ok && t.To.Decision.Kind == core.Exec {

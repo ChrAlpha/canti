@@ -12,20 +12,11 @@ import (
 
 const sessionContextCandidates = 8
 
-// SessionJournal provides bounded, descending reads of earlier session runs.
-type SessionJournal interface {
-	Journal
-	SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]Run, error)
-}
-
 func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 	if run.SessionID == "" {
 		return nil
 	}
-	j, ok := l.journal.(SessionJournal)
-	if !ok {
-		return contextError{errors.New("harness: session journal is required for a session run")}
-	}
+	j := l.journal
 	if run.SessionSeq < 1 {
 		return contextError{errors.New("harness: session sequence is required")}
 	}
