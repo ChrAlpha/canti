@@ -1,6 +1,8 @@
 package core_test
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +15,11 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+)
+
+var (
+	purposeBody = []byte(`{"kind":"exec","purpose":"check","payload":"printf ok"}`)
+	blankBody   = []byte(`{"kind":"exec","payload":" "}`)
 )
 
 var recordSemantics = flag.Bool("record-semantics", false, "record the transitions of a semantics version that has none")
@@ -28,13 +35,18 @@ func candidates(s core.State) []core.Event {
 	out := []core.Event{
 		core.RequestFrozen{},
 		core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}, core.AttemptStarted{Step: s.Step, Attempt: s.Attempt + 1},
-		core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, core.ResponseIncomplete{Step: s.Step, Attempt: s.Attempt},
-		core.JobBound{EffectID: s.EffectID, JobID: job}, core.JobStarted{EffectID: s.EffectID, JobID: job},
-		core.OutcomeUnknown{EffectID: s.EffectID},
+		core.AttemptStarted{Step: s.Step + 1, Attempt: s.Attempt},
+		core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, core.ResponseSaved{Step: s.Step, Attempt: s.Attempt + 1},
+		core.ResponseIncomplete{Step: s.Step, Attempt: s.Attempt}, core.ResponseIncomplete{Step: s.Step + 1, Attempt: s.Attempt},
+		core.JobBound{EffectID: s.EffectID, JobID: job}, core.JobBound{EffectID: "other", JobID: job}, core.JobBound{EffectID: s.EffectID, JobID: "other"},
+		core.JobStarted{EffectID: s.EffectID, JobID: job}, core.JobStarted{EffectID: s.EffectID, JobID: "other"},
+		core.OutcomeUnknown{EffectID: s.EffectID}, core.OutcomeUnknown{EffectID: "other"},
+		core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited},
 	}
-	for _, body := range [][]byte{execBody, returnBody, invalidBody} {
+	for _, body := range [][]byte{execBody, returnBody, invalidBody, purposeBody, blankBody} {
 		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
 	}
+	out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt + 1, Body: execBody})
 	for _, e := range []core.ExecutionState{core.ExecutionExited, core.ExecutionTimedOut, core.ExecutionCancelled, core.ExecutionFailedToStart, core.ExecutionUnknown} {
 		out = append(out, core.Observed{EffectID: s.EffectID, Execution: e}, core.Resolved{EffectID: s.EffectID, Execution: e})
 	}
@@ -52,6 +64,10 @@ func label(e core.Event) string {
 			return "response_loaded(exec)"
 		case string(returnBody):
 			return "response_loaded(return)"
+		case string(purposeBody):
+			return "response_loaded(exec with purpose)"
+		case string(blankBody):
+			return "response_loaded(blank exec)"
 		}
 		return "response_loaded(invalid)"
 	case core.Observed:
@@ -65,8 +81,10 @@ func label(e core.Event) string {
 }
 
 // reachable explores every state Next reaches from a new run under limits,
-// following at most depth events, and returns the transitions it took.
-func reachable(t *testing.T, limits core.Limits, depth int) map[string]bool {
+// following at most depth events, and returns the transitions it took,
+// labelled, and the digest of every transition in full: its state, event,
+// and next state.
+func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, string) {
 	t.Helper()
 	start, err := core.NewState("run-1", limits)
 	if err != nil {
@@ -74,6 +92,7 @@ func reachable(t *testing.T, limits core.Limits, depth int) map[string]bool {
 	}
 	seen := map[core.State]int{start: 0}
 	table := map[string]bool{}
+	var full []string
 	for queue := []core.State{start}; len(queue) > 0; queue = queue[1:] {
 		s := queue[0]
 		if err := s.Validate(); err != nil {
@@ -98,27 +117,36 @@ func reachable(t *testing.T, limits core.Limits, depth int) map[string]bool {
 				line += " " + string(next.Reason)
 			}
 			table[line] = true
+			from, _ := json.Marshal(s)
+			event, _ := json.Marshal(e)
+			to, _ := json.Marshal(next)
+			full = append(full, fmt.Sprintf("%s %s %s -> %s", from, e.Kind(), event, to))
 			if _, ok := seen[next]; !ok {
 				seen[next] = seen[s] + 1
 				queue = append(queue, next)
 			}
 		}
 	}
-	return table
+	slices.Sort(full)
+	sum := sha256.Sum256([]byte(strings.Join(full, "\n")))
+	return table, fmt.Sprintf("%d states, %d transitions, sha256 %x", len(seen), len(full), sum)
 }
 
 // TestReachableStatesAreValidAndPinTheirSemantics requires that every state
-// a run reaches from NewState under small and unlimited limits passes
-// Validate, that the explored legal pairs are exactly the transition table's,
-// and that the transitions are those recorded for SemanticsVersion: changing
-// any requires a new semantics version, recorded once with
-// -record-semantics.
+// a run reaches from NewState under small, many-attempt, and unlimited limits
+// passes Validate, that the explored legal pairs are exactly the transition
+// table's, and that the transitions, in full per limit set and as a labelled
+// table, are those recorded for SemanticsVersion: changing any requires a new
+// semantics version, recorded once with -record-semantics.
 func TestReachableStatesAreValidAndPinTheirSemantics(t *testing.T) {
-	table := map[string]bool{}
-	for _, limits := range []core.Limits{{MaxSteps: 1, MaxAttempts: 1}, {MaxSteps: 2, MaxAttempts: 2}, {MaxSteps: 3, MaxAttempts: 3}, {MaxSteps: 0, MaxAttempts: 2}} {
-		for line := range reachable(t, limits, 40) {
+	table, digests := map[string]bool{}, []string{}
+	for _, limits := range []core.Limits{{MaxSteps: 1, MaxAttempts: 1}, {MaxSteps: 2, MaxAttempts: 2}, {MaxSteps: 3, MaxAttempts: 3},
+		{MaxSteps: 1, MaxAttempts: 5}, {MaxSteps: 0, MaxAttempts: 2}} {
+		lines, digest := reachable(t, limits, 40)
+		for line := range lines {
 			table[line] = true
 		}
+		digests = append(digests, fmt.Sprintf("limits %+v, depth 40: %s", limits, digest))
 	}
 	pairs := map[string]bool{}
 	for line := range table {
@@ -132,7 +160,7 @@ func TestReachableStatesAreValidAndPinTheirSemantics(t *testing.T) {
 	if len(want) != legalPairs || !reflect.DeepEqual(pairs, want) {
 		t.Errorf("explored pairs %d differ from the %d of the transition table:\n%v\n%v", len(pairs), len(want), sorted(pairs), sorted(want))
 	}
-	got := fmt.Sprintf("semantics version %d\n%s\n", core.SemanticsVersion, strings.Join(sorted(table), "\n"))
+	got := fmt.Sprintf("semantics version %d\n%s\n%s\n", core.SemanticsVersion, strings.Join(digests, "\n"), strings.Join(sorted(table), "\n"))
 	file := filepath.Join("testdata", fmt.Sprintf("semantics-v%d.txt", core.SemanticsVersion))
 	recorded, err := os.ReadFile(file)
 	switch {

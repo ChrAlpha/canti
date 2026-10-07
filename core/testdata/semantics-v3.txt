@@ -1,4 +1,9 @@
 semantics version 3
+limits {MaxSteps:1 MaxAttempts:1}, depth 40: 175 states, 1030 transitions, sha256 cb1fc88aa25f99d77edba562953567122407fa0a5b2916a2b1c09b8fab8ad6ac
+limits {MaxSteps:2 MaxAttempts:2}, depth 40: 998 states, 6170 transitions, sha256 810ac8299e4b27fe771d487cd14aa5ddfc7d3d23ad645f48a48770955b4b4d1b
+limits {MaxSteps:3 MaxAttempts:3}, depth 40: 2946 states, 18510 transitions, sha256 0f26aca9a848017145031cecd2fd458ebac4b1851a583047d1562caee93726dd
+limits {MaxSteps:1 MaxAttempts:5}, depth 40: 2545 states, 15430 transitions, sha256 43a414d75a2479d9f614da86136c9b259d8c77ba98dec393cfb28b6780b68c8e
+limits {MaxSteps:0 MaxAttempts:2}, depth 40: 3340 states, 20799 transitions, sha256 5ff01e36590b41a2331e0f3730901628688978c82fa2fdde8646a8fd40cb3abb
 awaiting_observation observed(cancelled) -> idle
 awaiting_observation observed(cancelled) -> stopped steps_exhausted
 awaiting_observation observed(exited) -> idle
@@ -144,6 +149,9 @@ request_sent stop_requested(budget_exhausted) -> stopped budget_exhausted
 request_sent stop_requested(cancelled) -> stopped cancelled
 request_sent stop_requested(timed_out) -> stopped timed_out
 request_sent stop_requested(unrecoverable) -> stopped unrecoverable
+response_saved response_loaded(blank exec) -> idle
+response_saved response_loaded(blank exec) -> stopped protocol_failure
+response_saved response_loaded(exec with purpose) -> effect_saved
 response_saved response_loaded(exec) -> effect_saved
 response_saved response_loaded(invalid) -> idle
 response_saved response_loaded(invalid) -> stopped protocol_failure
