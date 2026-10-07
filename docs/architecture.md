@@ -228,7 +228,8 @@ the last committed transition. `Runner.Commit` takes the snapshot, one event,
 and the facts that event permits. It checks cancellation once, validates the
 state, derives the next state with `core.State.Next`, validates the facts,
 and hands a single `Transition` to the store at sequence `Seq+1` with a
-deterministic event ID derived from run, sequence, and event content.
+deterministic event ID, `core.EventID`, derived from run, sequence, and event
+content.
 
 ```text
 Commit: check cancellation -> Validate -> Next -> check facts

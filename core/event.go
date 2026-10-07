@@ -1,5 +1,12 @@
 package core
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+)
+
 // ExecutionState is the process-level outcome of an effect. It says nothing
 // about business success or the absence of side effects.
 type ExecutionState string
@@ -129,3 +136,23 @@ func (Observed) Kind() string           { return "observed" }
 func (OutcomeUnknown) Kind() string     { return "outcome_unknown" }
 func (StopRequested) Kind() string      { return "stop_requested" }
 func (Resolved) Kind() string           { return "resolved" }
+
+// Events returns a zero value of every event kind, in protocol order.
+func Events() []Event {
+	return []Event{
+		RequestFrozen{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
+		ResponseLoaded{}, JobBound{}, JobStarted{}, Observed{},
+		OutcomeUnknown{}, StopRequested{}, Resolved{},
+	}
+}
+
+// EventID names the event committed as sequence seq of run runID. It is
+// part of the persisted protocol: changing it changes the semantics version.
+func EventID(runID string, seq int64, event Event) (string, error) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return "", fmt.Errorf("core: encode %s event: %w", event.Kind(), err)
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "%d:%s:%d:%s:%s", len(runID), runID, seq, event.Kind(), payload))
+	return "event_" + hex.EncodeToString(sum[:]), nil
+}

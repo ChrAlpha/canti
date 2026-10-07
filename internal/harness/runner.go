@@ -2,9 +2,6 @@ package harness
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -60,7 +57,7 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 			return snap, fmt.Errorf("%w: %v", ErrFacts, err)
 		}
 	}
-	id, err := eventID(snap.State.RunID, snap.Seq+1, event)
+	id, err := core.EventID(snap.State.RunID, snap.Seq+1, event)
 	if err != nil {
 		return snap, err
 	}
@@ -76,15 +73,6 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 		return snap, fmt.Errorf("harness: commit %T: %w", event, err)
 	}
 	return Snapshot{Seq: transition.Seq, State: next}, nil
-}
-
-func eventID(runID string, seq int64, event core.Event) (string, error) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return "", fmt.Errorf("harness: encode %s event: %w", event.Kind(), err)
-	}
-	sum := sha256.Sum256(fmt.Appendf(nil, "%d:%s:%d:%s:%s", len(runID), runID, seq, event.Kind(), payload))
-	return "event_" + hex.EncodeToString(sum[:]), nil
 }
 
 // Bind hands the committed effect to the executor and commits the job that

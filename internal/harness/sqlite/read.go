@@ -19,11 +19,7 @@ import (
 
 var events = func() map[string]reflect.Type {
 	m := make(map[string]reflect.Type)
-	for _, e := range []core.Event{
-		core.RequestFrozen{}, core.AttemptStarted{}, core.ResponseSaved{}, core.ResponseIncomplete{},
-		core.ResponseLoaded{}, core.JobBound{}, core.JobStarted{}, core.Observed{},
-		core.OutcomeUnknown{}, core.StopRequested{}, core.Resolved{},
-	} {
+	for _, e := range core.Events() {
 		m[e.Kind()] = reflect.TypeOf(e)
 	}
 	return m

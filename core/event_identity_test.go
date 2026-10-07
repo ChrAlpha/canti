@@ -1,4 +1,4 @@
-package harness
+package core_test
 
 import (
 	"encoding/json"
@@ -49,11 +49,11 @@ func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 		if got, err := json.Marshal(tc.event); err != nil || string(got) != tc.encoded {
 			t.Errorf("%s encoding = %s, %v; want %s", tc.kind, got, err, tc.encoded)
 		}
-		if got, err := eventID(run, 42, tc.event); err != nil || got != tc.id {
+		if got, err := core.EventID(run, 42, tc.event); err != nil || got != tc.id {
 			t.Errorf("%s event ID = %q, %v; want %q", tc.kind, got, err, tc.id)
 		}
 	}
-	if len(kinds) != 11 {
-		t.Fatalf("covered %d distinct event kinds, want all 11", len(kinds))
+	if len(kinds) != len(core.Events()) {
+		t.Fatalf("covered %d distinct event kinds, want all %d", len(kinds), len(core.Events()))
 	}
 }
