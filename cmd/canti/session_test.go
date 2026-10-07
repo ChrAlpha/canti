@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -208,17 +209,27 @@ func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
 	}
 }
 
-func TestSessionRetryReportsAnInputThatNoLongerFits(t *testing.T) {
+func TestSessionRetryReportsTheAcceptedInput(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-context-bytes", "80000"}
-	if r := f.cli(nil, "run", first...); r.code != exitOK {
-		t.Fatalf("first: %+v", r)
+	second := []string{"-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "120000"}
+	for _, args := range [][]string{first, second} {
+		if r := f.cli(nil, "run", args...); r.code != exitOK {
+			t.Fatalf("%q: %+v", args[3], r)
+		}
 	}
-	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "120000"); r.code != exitOK {
-		t.Fatalf("second: %+v", r)
-	}
-	if r := f.cli(nil, "run", first...); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 2 {
-		t.Fatalf("retry of the accepted first input: %+v, calls=%d", r, len(f.model.requests()))
+	for _, retry := range []struct {
+		name string
+		env  []string
+		args []string
+	}{
+		{"beside grown constraints", nil, first},
+		{"without a credential", []string{"ANTHROPIC_API_KEY="}, second},
+		{"with an invalid model URL", nil, append(slices.Clone(second), "-model-url", "ftp://model")},
+	} {
+		if r := f.cli(retry.env, "run", retry.args...); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 2 {
+			t.Errorf("retry %s: %+v, calls=%d", retry.name, r, len(f.model.requests()))
+		}
 	}
 }
 

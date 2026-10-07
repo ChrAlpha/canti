@@ -91,7 +91,8 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 
 // checkSession refuses an invalid session input before submitSession
 // touches the state, and one that a state without a journal refuses before
-// it creates the state.
+// it creates the state. A journal that exists once a check fails may hold
+// the input, whose retry the lookup under the lock reports.
 func (a *app) checkSession(session, input, goal, constraints string, s spec, url string) (int, error) {
 	if session == "" || input == "" {
 		return exitUsage, errors.New("-session and -input are required together")
@@ -102,9 +103,14 @@ func (a *app) checkSession(session, input, goal, constraints string, s spec, url
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
 		return exitError, err
 	}
-	if _, err := os.Stat(filepath.Join(a.state, "canti.db")); !errors.Is(err, fs.ErrNotExist) {
-		return exitOK, nil
+	code, err := a.checkNewInput(goal, constraints, s, url)
+	if _, statErr := os.Stat(filepath.Join(a.state, "canti.db")); err != nil && errors.Is(statErr, fs.ErrNotExist) {
+		return code, err
 	}
+	return exitOK, nil
+}
+
+func (a *app) checkNewInput(goal, constraints string, s spec, url string) (int, error) {
 	if _, _, err := newRun(goal, constraints, s, time.Now()); err != nil {
 		return exitUsage, err
 	}
