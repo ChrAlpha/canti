@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -230,6 +231,23 @@ func TestSessionRetryReportsTheAcceptedInput(t *testing.T) {
 		if r := f.cli(retry.env, "run", retry.args...); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 2 {
 			t.Errorf("retry %s: %+v, calls=%d", retry.name, r, len(f.model.requests()))
 		}
+	}
+}
+
+func TestSessionRetryReportsAnInputAcceptedDuringItsChecks(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	args := []string{"-session", "s", "-input", "i", "-goal", "g"}
+	checked := filepath.Join(t.TempDir(), "checked")
+	cmd, wait := f.start([]string{"ANTHROPIC_API_KEY=", "CANTI_TEST_SETUP=checked", "CANTI_TEST_BLOCKED=" + checked}, "run", args...)
+	waitFor(t, func() bool { _, err := os.Stat(checked); return err == nil })
+	if r := f.cli(nil, "run", args...); r.code != exitOK {
+		t.Fatalf("accepted input: %+v", r)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 1 {
+		t.Fatalf("retry checked before the input was accepted: %+v, calls=%d", r, len(f.model.requests()))
 	}
 }
 

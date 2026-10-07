@@ -35,8 +35,8 @@ import (
 // right before, or right after, it commits the first transition of KIND;
 // block:KIND holds that commit until its context is done, after creating the
 // file CANTI_TEST_BLOCKED names. CANTI_TEST_SETUP=signal holds the setup of
-// the loop, after creating that file, until the process receives SIGINT or
-// SIGTERM.
+// the loop, and CANTI_TEST_SETUP=checked a session input after its checks,
+// after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
@@ -54,6 +54,9 @@ func TestMain(m *testing.M) {
 				awaitSignal(os.Getenv("CANTI_TEST_BLOCKED"))
 				return wrap(j)
 			}
+		}
+		if os.Getenv("CANTI_TEST_SETUP") == "checked" {
+			inputChecked = func() { awaitSignal(os.Getenv("CANTI_TEST_BLOCKED")) }
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 	}

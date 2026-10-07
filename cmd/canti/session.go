@@ -89,6 +89,8 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	return a.report(snap, nil, exitActive, s.config)
 }
 
+var inputChecked = func() {}
+
 // checkSession refuses an invalid session input before submitSession
 // touches the state, and one that a state without a journal refuses before
 // it creates the state. A journal that exists once a check fails may hold
@@ -104,6 +106,7 @@ func (a *app) checkSession(session, input, goal, constraints string, s spec, url
 		return exitError, err
 	}
 	code, err := a.checkNewInput(goal, constraints, s, url)
+	inputChecked()
 	if _, statErr := os.Stat(filepath.Join(a.state, "canti.db")); err != nil && errors.Is(statErr, fs.ErrNotExist) {
 		return code, err
 	}
