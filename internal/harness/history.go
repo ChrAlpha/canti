@@ -18,8 +18,8 @@ import (
 // PublishHistory publishes the projection of run runID that jobs read under
 // root/runID: goal, constraints when set, steps/<step number in 8 digits>/
 // with meta, command, and preview for completed steps, and result once the
-// run is closed. meta names an available output under artifactDir, where
-// jobs read the artifacts.
+// run is closed. meta names an available output under
+// archive.ArtifactsRoot, where jobs read the artifacts.
 //
 // The projection is derived from the journal and never an authority. Each
 // file and step directory is published once, atomically, and never
@@ -31,7 +31,7 @@ import (
 // steps directory is not detected. An entry it looks at that is not a
 // regular file, or not a directory where one belongs, fails the call; a
 // symlink is neither. Callers must not publish one run concurrently.
-func PublishHistory(ctx context.Context, j Journal, root, artifactDir, runID string) error {
+func PublishHistory(ctx context.Context, j Journal, root, runID string) error {
 	run, err := j.Run(ctx, runID)
 	var snap Snapshot
 	var latest []StepRecord
@@ -44,12 +44,12 @@ func PublishHistory(ctx context.Context, j Journal, root, artifactDir, runID str
 	if err != nil {
 		return err
 	}
-	return publishHistory(ctx, j, root, artifactDir, run, snap.State, latest)
+	return publishHistory(ctx, j, root, run, snap.State, latest)
 }
 
 // publishHistory is PublishHistory for run at s, whose latest completed
 // step, if any, ends latest.
-func publishHistory(ctx context.Context, j Journal, root, artifactDir string, run Run, s core.State, latest []StepRecord) error {
+func publishHistory(ctx context.Context, j Journal, root string, run Run, s core.State, latest []StepRecord) error {
 	if strings.Trim(run.ID, ".") == "" || strings.ContainsRune(run.ID, filepath.Separator) {
 		return fmt.Errorf("harness: run ID %q cannot name a directory", run.ID)
 	}
@@ -82,9 +82,9 @@ func publishHistory(ctx context.Context, j Journal, root, artifactDir string, ru
 	switch {
 	case err != nil:
 	case !found:
-		err = rebuild(ctx, j, dir, artifactDir, run.ID)
+		err = rebuild(ctx, j, dir, run.ID)
 	case len(latest) > 0:
-		err = putStep(dir, steps, artifactDir, latest[len(latest)-1])
+		err = putStep(dir, steps, latest[len(latest)-1])
 	}
 	if err == nil && (s.Phase == core.PhaseReturned || s.Phase == core.PhaseStopped) {
 		result := "phase: returned\n\n" + s.Decision.Payload
@@ -129,7 +129,7 @@ func publishSession(ctx context.Context, journal Journal, dir string, run Run) e
 
 // rebuild publishes the steps directory of the run in dir with every
 // completed step and syncs the directory holding dir.
-func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) error {
+func rebuild(ctx context.Context, j Journal, dir, runID string) error {
 	tmp, err := os.MkdirTemp(dir, ".tmp-")
 	if err != nil {
 		return err
@@ -145,7 +145,7 @@ func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) err
 			if err := os.Mkdir(step, 0o755); err != nil {
 				return err
 			}
-			if err := writeStep(step, artifactDir, r); err != nil {
+			if err := writeStep(step, r); err != nil {
 				return err
 			}
 		}
@@ -165,7 +165,7 @@ func rebuild(ctx context.Context, j Journal, dir, artifactDir, runID string) err
 
 // putStep publishes the records of r in steps unless they exist, writing
 // them in a temporary directory of dir.
-func putStep(dir, steps, artifactDir string, r StepRecord) error {
+func putStep(dir, steps string, r StepRecord) error {
 	target := filepath.Join(steps, archive.StepDir(r.Step))
 	if found, err := exists(target, true); err != nil || found {
 		for _, name := range [...]string{archive.MetaFile, archive.CommandFile, archive.PreviewFile} {
@@ -180,18 +180,18 @@ func putStep(dir, steps, artifactDir string, r StepRecord) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	if err := writeStep(tmp, artifactDir, r); err != nil {
+	if err := writeStep(tmp, r); err != nil {
 		return err
 	}
 	return install(tmp, target)
 }
 
 // writeStep writes the records of r into the directory path and syncs it.
-func writeStep(path, artifactDir string, r StepRecord) error {
+func writeStep(path string, r StepRecord) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r, artifactDir)}, {archive.CommandFile, r.Command}, {archive.PreviewFile, r.Observation.Preview}} {
+	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PreviewFile, r.Observation.Preview}} {
 		f, err := os.Create(filepath.Join(path, file.name))
 		if err == nil {
 			err = fill(f, file.data)
@@ -240,12 +240,12 @@ func install(tmp, target string) error {
 	return syncDir(filepath.Dir(target))
 }
 
-func meta(r StepRecord, artifactDir string) string {
+func meta(r StepRecord) string {
 	o := r.Observation
 	m := archive.StepMeta{Step: r.Step, Execution: string(o.Execution), ExitCode: o.ExitCode, Resolved: r.Resolved,
 		OutputBytes: o.Output.Bytes, OutputComplete: o.Output.Complete, OutputDetail: o.Output.Detail}
 	if o.Output.Available {
-		m.Output = path.Join(artifactDir, o.Output.Path)
+		m.Output = path.Join(archive.ArtifactsRoot, o.Output.Path)
 	}
 	return m.Encode()
 }

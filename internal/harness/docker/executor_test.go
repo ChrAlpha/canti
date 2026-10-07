@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 func newTestExecutor(t *testing.T, cfg Config) *Executor {
@@ -99,7 +101,7 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		{"target with colon", mount(records, "/canti:run")},
 		{"target at workspace", mount(records, WorkDir)},
 		{"target in workspace", mount(records, WorkDir+"/records")},
-		{"target at artifacts", mount(records, ArtifactDir)},
+		{"target at artifacts", mount(records, archive.ArtifactsRoot)},
 		{"target over artifacts", mount(records, "/canti")},
 		{"root target", mount(records, "/")},
 	} {
@@ -226,7 +228,7 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 		Mounts: []Mount{{Source: runs, Target: "/canti/runs"}, {Source: link, Target: "/canti/run"}}})
 	run := x.runArgs("echo hi")
 	args := x.createArgs("effect_1", run)
-	mounts := []string{"-v", x.cfg.Workspace + ":" + WorkDir, "-v", filepath.Join(x.cfg.State, "artifacts") + ":" + ArtifactDir + ":ro",
+	mounts := []string{"-v", x.cfg.Workspace + ":" + WorkDir, "-v", filepath.Join(x.cfg.State, "artifacts") + ":" + archive.ArtifactsRoot + ":ro",
 		"-v", runs + ":/canti/runs:ro", "-v", records + ":/canti/run:ro", "alpine:3.23"}
 	if i := slices.Index(args, "-v"); i < 0 || !slices.Equal(args[i:i+len(mounts)], mounts) {
 		t.Errorf("create args do not mount %q in order: %q", mounts, args)

@@ -22,9 +22,7 @@ const historyPage = 64
 // noted on each field.
 type LoopConfig struct {
 	Environment    string           // Frame.Environment
-	ArtifactDir    string           // Frame.ArtifactDir, as the agent sees it
-	History        string           // host directory PublishHistory publishes the step records of every run under
-	RunsPath       string           // Frame.RunsDir: History as the agent sees it, such as "/canti/runs"
+	History        string           // host directory PublishHistory publishes the step records of every run under, which jobs see as archive.RunsRoot
 	Limits         PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
@@ -70,15 +68,13 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	return &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg}, nil
 }
 
-var errPaths = errors.New("harness: loop environment, artifact directory, and history paths are required")
+var errPaths = errors.New("harness: loop environment and history path are required")
 
 // normalize validates cfg, apart from its history directory, and applies its
 // defaults, for a loop and for an accounting of the context that it renders.
 func normalize(cfg LoopConfig) (LoopConfig, error) {
-	for _, v := range []string{cfg.Environment, cfg.ArtifactDir, cfg.RunsPath} {
-		if strings.TrimSpace(v) == "" {
-			return cfg, errPaths
-		}
+	if strings.TrimSpace(cfg.Environment) == "" {
+		return cfg, errPaths
 	}
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
 		return cfg, errors.New("harness: loop poll and inspect retries must not be negative")
@@ -125,7 +121,7 @@ func (l *Loop) Run(ctx context.Context, runID string) (Snapshot, error) {
 			return snap, err
 		}
 		if snap.State.Intent() == core.IntentHalt {
-			if err := PublishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, runID); err != nil {
+			if err := PublishHistory(ctx, l.journal, l.cfg.History, runID); err != nil {
 				l.note(ctx, slog.LevelWarn, "step records not published", snap, "error", err)
 			}
 			return snap, nil

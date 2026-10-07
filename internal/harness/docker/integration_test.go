@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/executortest"
@@ -446,7 +447,7 @@ touch %s/x 2>/dev/null && echo artifacts-writable
 test -e %s && echo state-visible
 cat /canti/run/meta
 touch /canti/run/x 2>/dev/null && echo records-writable
-echo ok > %s/trust && echo workspace-writable`, docker.ArtifactDir, cfg.State, docker.WorkDir)
+echo ok > %s/trust && echo workspace-writable`, archive.ArtifactsRoot, cfg.State, docker.WorkDir)
 	job := run(ctx, t, open(t, cfg), harness.Effect{ID: id("trust"), Command: script})
 	b, err := os.ReadFile(filepath.Join(cfg.State, "artifacts", job.Output.Path))
 	if err != nil || job.Status != harness.JobSucceeded || !job.Output.Complete {

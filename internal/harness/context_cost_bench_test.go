@@ -95,7 +95,7 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 	m := &contextCostModel{Model: model, commands: commands}
 	c := &clock{now: created}
 	x := &fakeExec{clock: c, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
-	cfg := harness.LoopConfig{Environment: "fixture shell", ArtifactDir: "/canti/artifacts", RunsPath: "/canti/runs",
+	cfg := harness.LoopConfig{Environment: "fixture shell",
 		History: filepath.Join(root, "history"), Reader: &archive.Reader{Imports: imported}, Now: c.Now,
 		Poll: time.Microsecond, Backoff: -1, Limits: harness.DefaultPromptLimits()}
 	cfg.Limits.Total = 256 << 10

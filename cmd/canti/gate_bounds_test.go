@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
-	"github.com/ChrAlpha/canti/internal/harness/docker"
 )
 
 // evFixture is a dockerFixture that fails the test when a container of its
@@ -253,7 +253,7 @@ func TestGateLargeOutput(t *testing.T) {
 		total := int64(lines*evLine + len("tail-marker\n"))
 		f, image := evFixture(t, map[int]core.Decision{
 			1: {Kind: core.Exec, Payload: evFlood(lines)},
-			2: {Kind: core.Exec, Payload: `for f in ` + docker.ArtifactDir + `/*/output; do echo "$f $(wc -c < "$f")"; done`},
+			2: {Kind: core.Exec, Payload: `for f in ` + archive.ArtifactsRoot + `/*/output; do echo "$f $(wc -c < "$f")"; done`},
 			3: {Kind: core.Return, Payload: "done"},
 		})
 		begin := time.Now()
@@ -268,7 +268,7 @@ func TestGateLargeOutput(t *testing.T) {
 		}
 		obs := h[6].Facts.Observation
 		evCheckFlood(t, f, obs, total, limit)
-		where := path.Join(docker.ArtifactDir, obs.Output.Path)
+		where := path.Join(archive.ArtifactsRoot, obs.Output.Path)
 		sent := f.model.requests()
 		if len(sent) != 3 {
 			t.Fatalf("%d requests", len(sent))

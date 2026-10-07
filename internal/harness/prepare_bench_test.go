@@ -72,13 +72,13 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 	limits := harness.DefaultPromptLimits()
 	limits.Total = 1 << 20
 	l, err := harness.NewLoop(p, exec, m, harness.LoopConfig{
-		Environment: "/workspace", ArtifactDir: "/canti/artifacts", History: filepath.Join(dir, "history"),
-		RunsPath: "/canti/runs", Limits: limits,
+		Environment: "/workspace", History: filepath.Join(dir, "history"),
+		Limits: limits,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := harness.PublishHistory(ctx, s, filepath.Join(dir, "history"), "/canti/artifacts", runID); err != nil {
+	if err := harness.PublishHistory(ctx, s, filepath.Join(dir, "history"), runID); err != nil {
 		t.Fatal(err)
 	}
 	return p, l

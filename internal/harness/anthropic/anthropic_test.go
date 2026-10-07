@@ -187,7 +187,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		}
 	}
 
-	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, ArtifactDir: "/a", RunsDir: "/r", RunID: "run_x", Window: &harness.Window{FirstStep: 1}}
+	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, RunID: "run_x", Window: &harness.Window{FirstStep: 1}}
 	for n := 1; n <= 3; n++ {
 		f.Step = n
 		p, err := f.Prompt(harness.DefaultPromptLimits())

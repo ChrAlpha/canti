@@ -112,7 +112,7 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 	if err := os.RemoveAll(filepath.Join(f.cfg.History, runID)); err != nil {
 		t.Fatal(err)
 	}
-	if err := harness.PublishHistory(ctx, f.store, f.cfg.History, f.cfg.ArtifactDir, runID); err != nil {
+	if err := harness.PublishHistory(ctx, f.store, f.cfg.History, runID); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -14,8 +14,8 @@ import (
 )
 
 func budgetFrame() Frame {
-	return Frame{Goal: "continue work", Environment: "test", ArtifactDir: "/canti/artifacts",
-		RunsDir: "/canti/runs", RunID: "run-1", Step: 1, MaxSteps: math.MaxInt,
+	return Frame{Goal: "continue work", Environment: "test",
+		RunID: "run-1", Step: 1, MaxSteps: math.MaxInt,
 		Attempt: 1, MaxAttempts: 3, Window: &Window{FirstStep: 1},
 		RetrievalEnabled: true, HandoverBytes: 2048}
 }

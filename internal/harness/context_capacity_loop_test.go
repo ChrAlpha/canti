@@ -331,7 +331,7 @@ func TestContextFitNormalizesAsNewLoop(t *testing.T) {
 	}
 	for _, bad := range []func(*harness.LoopConfig){
 		func(c *harness.LoopConfig) { c.HandoverBytes = -1 }, func(c *harness.LoopConfig) { c.HandoverBytes = 8193 },
-		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 1} }, func(c *harness.LoopConfig) { c.RunsPath = " " },
+		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 1} },
 		func(c *harness.LoopConfig) { c.Environment = "" }, func(c *harness.LoopConfig) { c.WindowSteps = -1 },
 	} {
 		c := f.cfg

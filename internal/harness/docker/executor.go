@@ -29,16 +29,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 // WorkDir is the working directory of every job, where Config.Workspace is
 // mounted read-write.
 const WorkDir = "/workspace"
-
-// ArtifactDir is where the executor's artifact root is mounted read-only, so
-// a job can read the retained output of earlier jobs.
-const ArtifactDir = "/canti/artifacts"
 
 // Config is the execution environment shared by every job of an executor.
 type Config struct {
@@ -76,7 +73,8 @@ type Config struct {
 // Mount mounts Source, an existing absolute host directory that neither
 // overlaps the workspace nor contains the state directory, read-only at
 // Target, a clean absolute container path that overlaps neither WorkDir nor
-// ArtifactDir.
+// archive.ArtifactsRoot, where the executor's artifact root is mounted
+// read-only so a job can read the retained output of earlier jobs.
 type Mount struct{ Source, Target string }
 
 // Executor runs each effect as one container named canti-<effect ID>,
@@ -145,8 +143,8 @@ func New(cfg Config) (*Executor, error) {
 		switch {
 		case within(ws, src) || within(src, ws) || within(src, state):
 			return nil, fmt.Errorf("docker: mount %s overlaps workspace %s or contains state %s", src, ws, state)
-		case !path.IsAbs(t) || path.Clean(t) != t || strings.Contains(t, ":") || within(t, WorkDir) || within(WorkDir, t) || within(t, ArtifactDir) || within(ArtifactDir, t):
-			return nil, fmt.Errorf("docker: mount target %q is not a clean absolute path apart from %s and %s", t, WorkDir, ArtifactDir)
+		case !path.IsAbs(t) || path.Clean(t) != t || strings.Contains(t, ":") || within(t, WorkDir) || within(WorkDir, t) || within(t, archive.ArtifactsRoot) || within(archive.ArtifactsRoot, t):
+			return nil, fmt.Errorf("docker: mount target %q is not a clean absolute path apart from %s and %s", t, WorkDir, archive.ArtifactsRoot)
 		}
 		mounts[i] = Mount{src, t}
 	}
@@ -226,7 +224,7 @@ func (x *Executor) runArgs(command string) []string {
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		args = append(args, "-e", k+"=", "-e", strings.ToLower(k)+"=")
 	}
-	args = append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+ArtifactDir+":ro")
+	args = append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+archive.ArtifactsRoot+":ro")
 	for _, m := range c.Mounts {
 		args = append(args, "-v", m.Source+":"+m.Target+":ro")
 	}

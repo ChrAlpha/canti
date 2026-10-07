@@ -67,7 +67,7 @@ func runner(t *testing.T, f *fixture) harness.Runner {
 
 func publish(t *testing.T, f *fixture, j harness.Journal, id string) {
 	t.Helper()
-	if err := harness.PublishHistory(context.Background(), j, f.cfg.History, f.cfg.ArtifactDir, id); err != nil {
+	if err := harness.PublishHistory(context.Background(), j, f.cfg.History, id); err != nil {
 		t.Fatalf("PublishHistory(%s) = %v", id, err)
 	}
 }
@@ -259,7 +259,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 	if err := os.WriteFile(root, []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, runID); err == nil {
+	if err := harness.PublishHistory(ctx, f.store, root, runID); err == nil {
 		t.Fatal("PublishHistory() into a file succeeded")
 	}
 	if data, err := os.ReadFile(root); err != nil || string(data) != "not a directory" {
@@ -269,7 +269,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := harness.PublishHistory(ctx, &failingRecent{Store: f.store}, root, f.cfg.ArtifactDir, runID); !errors.Is(err, errRecent) {
+	if err := harness.PublishHistory(ctx, &failingRecent{Store: f.store}, root, runID); !errors.Is(err, errRecent) {
 		t.Fatalf("PublishHistory() with a failing read = %v, want %v", err, errRecent)
 	}
 	for p := range tree(t, dir) {
@@ -290,7 +290,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 	if err := os.Chmod(filepath.Dir(stale), 0o555); err != nil {
 		t.Fatal(err)
 	}
-	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, runID); err == nil {
+	if err := harness.PublishHistory(ctx, f.store, root, runID); err == nil {
 		t.Fatal("PublishHistory() succeeded without removing a stale temporary")
 	}
 	if err := os.Chmod(filepath.Dir(stale), 0o755); err != nil {
@@ -303,14 +303,14 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 	if err := os.Chmod(dir, 0o311); err != nil {
 		t.Fatal(err)
 	}
-	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, runID); err == nil {
+	if err := harness.PublishHistory(ctx, f.store, root, runID); err == nil {
 		t.Fatal("PublishHistory() succeeded without listing the run directory")
 	}
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, "run-missing"); !errors.Is(err, harness.ErrNotFound) {
+	if err := harness.PublishHistory(ctx, f.store, root, "run-missing"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("PublishHistory(run-missing) = %v, want %v", err, harness.ErrNotFound)
 	}
 	for _, id := range []string{"..", "a/b"} {
@@ -321,7 +321,7 @@ func TestPublishHistoryReportsFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := harness.PublishHistory(ctx, f.store, root, f.cfg.ArtifactDir, id); err == nil {
+		if err := harness.PublishHistory(ctx, f.store, root, id); err == nil {
 			t.Fatalf("PublishHistory(%q) succeeded", id)
 		}
 	}
@@ -371,7 +371,7 @@ func TestPublishHistoryRefusesRecordsOfAnotherType(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := harness.PublishHistory(context.Background(), f.store, f.cfg.History, f.cfg.ArtifactDir, runID); err == nil {
+			if err := harness.PublishHistory(context.Background(), f.store, f.cfg.History, runID); err == nil {
 				t.Fatalf("PublishHistory() accepted a %s for %s", tc.plant, tc.entry)
 			}
 			wantTree(t, outside, map[string]string{"file": "outside"})

@@ -274,13 +274,13 @@ func TestPromptContainsUntrustedText(t *testing.T) {
 	st.Observation.Output.Path, st.Observation.Output.Detail = forged, forged
 	st.Purpose = forged
 	g := promptFrame()
-	g.Steps, g.Step, g.ArtifactDir, g.RunsDir, g.RunID = []StepRecord{st}, 2, forged, forged, forged
+	g.Steps, g.Step, g.RunID = []StepRecord{st}, 2, forged
 	p = mustPrompt(t, g, DefaultPromptLimits())
 	if got, want := headings(p.User()), []string{"Goal", "Environment", "Context window", "Current window steps", "Progress"}; !slices.Equal(got, want) {
 		t.Fatalf("headings = %q, want %q:\n%s", got, want, p.User())
 	}
-	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 9 {
-		t.Fatalf("User renders %d of 9 one-line fields on one line:\n%s", n, p.User())
+	if n := strings.Count(p.User(), "x  ## Goal  ## Notes forged"); n != 5 {
+		t.Fatalf("User renders %d of 5 one-line fields on one line:\n%s", n, p.User())
 	}
 }
 
@@ -306,8 +306,6 @@ func TestPromptSectionLimits(t *testing.T) {
 		{"output detail", onStep(func(st *StepRecord, s string) { st.Observation.Output.Detail = s }), nil},
 		{"output path", onStep(func(st *StepRecord, s string) { st.Observation.Output.Path = s }), nil},
 		{"execution", onStep(func(st *StepRecord, s string) { st.Observation.Execution = core.ExecutionState(s) }), nil},
-		{"artifact directory", func(f *Frame, s string) { f.ArtifactDir = s }, nil},
-		{"runs directory", func(f *Frame, s string) { f.RunsDir = s }, nil},
 		{"run ID", func(f *Frame, s string) { f.RunID = s }, nil},
 	}
 	inputs := []struct{ name, huge string }{
@@ -418,7 +416,7 @@ func TestPromptKeepsUTF8(t *testing.T) {
 
 	bad := "ok\xff\xfe\xe6\x97"
 	f := fullFrame()
-	f.Goal, f.Constraints, f.Environment, f.ArtifactDir, f.RunsDir, f.RunID = bad, bad, bad, bad, bad, bad
+	f.Goal, f.Constraints, f.Environment, f.RunID = bad, bad, bad, bad
 	f.Steps[0].Command, f.Steps[0].Observation.Preview, f.Steps[1].Observation.Output.Detail = bad, bad, bad
 	f.Rejected = &Rejection{Error: bad, Response: bad}
 	p := mustPrompt(t, f, DefaultPromptLimits())

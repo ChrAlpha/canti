@@ -136,7 +136,7 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 // of c with budget b; a loop adds the paths of its state directory.
 func contextConfig(c config, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
-		Environment: environment(c, b), ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Limits: promptLimits(c),
+		Environment: environment(c, b), Limits: promptLimits(c),
 		Reader: &archive.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
 		DecisionTool: c.DecisionFormat == "tool",
 	}
@@ -179,17 +179,13 @@ func promptLimits(c config) harness.PromptLimits {
 	return l
 }
 
-// runsDir is where every job reads, read-only, the step records of every run
-// in the state directory.
-const runsDir = "/canti/runs"
-
 func historyRoot(state string) string { return filepath.Join(state, "history") }
 
 func executorConfig(c config, state string) docker.Config {
 	return docker.Config{
 		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
 		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit,
-		Mounts: []docker.Mount{{Source: historyRoot(state), Target: runsDir}},
+		Mounts: []docker.Mount{{Source: historyRoot(state), Target: archive.RunsRoot}},
 	}
 }
 

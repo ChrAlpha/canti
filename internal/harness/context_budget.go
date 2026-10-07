@@ -44,8 +44,8 @@ func (f Frame) stepShellBytes(l PromptLimits) int {
 	quotes := quoteBytes("Command", l.Command) - len(quote("Command", "", l.Command))
 	preview := quoteBytes("Preview", l.Preview) - len(quote("Preview", "", l.Preview))
 	output := len(f.step(s, l)) + quotes + preview + truncationBytes() +
-		len(inline(f.ArtifactDir)) + 1 + refLimit + truncationBytes() -
-		len(path.Join(inline(f.ArtifactDir), s.Observation.Output.Path))
+		len(archive.ArtifactsRoot) + 1 + refLimit + truncationBytes() -
+		len(path.Join(archive.ArtifactsRoot, s.Observation.Output.Path))
 	s.Observation.Retrieval = &archive.Retrieval{NextOffset: math.MaxInt64, Incomplete: true,
 		NextCursor: strings.Repeat("x", 1024), Error: strings.Repeat("\x00", 512),
 		SkippedCount: 3 * archive.MaxEntries, Skipped: []archive.Skip{

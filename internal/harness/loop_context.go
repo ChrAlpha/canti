@@ -178,7 +178,7 @@ func (l *Loop) frame(run Run, s core.State) Frame {
 	return Frame{
 		Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts,
-		ArtifactDir: l.cfg.ArtifactDir, RunsDir: l.cfg.RunsPath, RunID: s.RunID,
+		RunID:        s.RunID,
 		DecisionTool: l.cfg.DecisionTool, RetrievalEnabled: l.cfg.Reader != nil, ImportsEnabled: l.cfg.Reader != nil && l.cfg.Reader.Imports != "",
 		HandoverBytes: l.cfg.HandoverBytes,
 	}
@@ -222,7 +222,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if f.Steps, err = l.windowSteps(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}
-	if err := publishHistory(ctx, l.journal, l.cfg.History, l.cfg.ArtifactDir, run, s, f.Steps); err != nil {
+	if err := publishHistory(ctx, l.journal, l.cfg.History, run, s, f.Steps); err != nil {
 		return snap, err
 	}
 	if err := l.advanceWindow(snap, &f); err != nil {

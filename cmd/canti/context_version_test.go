@@ -20,7 +20,6 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
-	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
@@ -73,7 +72,7 @@ func contextRules(t *testing.T) string {
 	fmt.Fprintf(&b, "context version %d\nactions %q %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	loop := harness.LoopConfig{Environment: "Linux", ArtifactDir: docker.ArtifactDir, RunsPath: runsDir, Reader: &archive.Reader{}}
+	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
 	fit, err := harness.ContextFit(loop, run, limits)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +82,7 @@ func contextRules(t *testing.T) string {
 	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
 		for _, c := range transports {
 			f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
-				ArtifactDir: docker.ArtifactDir, RunsDir: runsDir, RunID: run.ID, Window: &harness.Window{FirstStep: 1},
+				RunID: run.ID, Window: &harness.Window{FirstStep: 1},
 				DecisionTool: c.DecisionFormat == "tool", RetrievalEnabled: flags[0], ImportsEnabled: flags[1], HandoverBytes: 2048}
 			p, err := f.Prompt(harness.DefaultPromptLimits())
 			if err != nil {
@@ -343,7 +342,7 @@ func everyBlock(run harness.Run) harness.Frame {
 			Preview: "Handover recorded; the next request starts a new context window.", Handover: &harness.Handover{RunID: "r", FirstStep: 3, Text: "Go on."}}},
 	}
 	return harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 10, MaxSteps: 0, Attempt: 2, MaxAttempts: 3,
-		Earlier: 2, Steps: steps, ArtifactDir: docker.ArtifactDir, RunsDir: runsDir, RunID: run.ID,
+		Earlier: 2, Steps: steps, RunID: run.ID,
 		Rejected:         &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
 		Window:           &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1},
 		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096, Retrieved: map[int]string{4: "Source x:\nBytes [0,5), sha256 a:\nhello\n"},

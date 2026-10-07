@@ -124,10 +124,10 @@ func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
 		capture.Constraints = section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
 	}
 	capture.Environment = section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
-		"Full step outputs are readable under "+inline(f.ArtifactDir)+".\n"+
-		"Every completed step of this run, shown or not, is recorded read-only under "+inline(f.RunsDir)+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
+		"Full step outputs are readable under "+archive.ArtifactsRoot+".\n"+
+		"Every completed step of this run, shown or not, is recorded read-only under "+archive.RunsRoot+"/"+inline(f.RunID)+"/steps/<step number in 8 digits>/ "+
 		"as meta (its execution, exit code, and output path), command (the full command), and preview.\n"+
-		"Every run of this state directory, including this one, is recorded under "+inline(f.RunsDir)+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
+		"Every run of this state directory, including this one, is recorded under "+archive.RunsRoot+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
 	if f.SessionContext != "" {
 		capture.Session = section(&b, "Earlier session dialogue", f.SessionContext)
 	}
@@ -213,7 +213,7 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 			complete = "complete"
 		}
 		if o.Output.Available {
-			where = "at " + path.Join(inline(f.ArtifactDir), inline(o.Output.Path))
+			where = "at " + path.Join(archive.ArtifactsRoot, inline(o.Output.Path))
 		}
 		fmt.Fprintf(&b, "\nOutput: %d bytes, %s, %s", o.Output.Bytes, complete, where)
 		if o.Output.Detail != "" {

@@ -9,7 +9,7 @@ import (
 func testFrame() Frame {
 	return Frame{
 		Goal: "repair tests", Environment: "/workspace", Step: 1, MaxSteps: 10, Attempt: 1, MaxAttempts: 3,
-		ArtifactDir: "/canti/artifacts", RunsDir: "/canti/runs", RunID: "run_x", Window: &Window{FirstStep: 1},
+		RunID: "run_x", Window: &Window{FirstStep: 1},
 	}
 }
 
@@ -34,8 +34,6 @@ func TestFrameValidate(t *testing.T) {
 		{name: "blank goal", edit: func(f *Frame) { f.Goal = " \n\t" }, wantErr: true},
 		{name: "missing environment", edit: func(f *Frame) { f.Environment = "" }, wantErr: true},
 		{name: "blank environment", edit: func(f *Frame) { f.Environment = "  " }, wantErr: true},
-		{name: "missing artifact directory", edit: func(f *Frame) { f.ArtifactDir = " " }, wantErr: true},
-		{name: "missing runs directory", edit: func(f *Frame) { f.RunsDir = "\t" }, wantErr: true},
 		{name: "missing run ID", edit: func(f *Frame) { f.RunID = "" }, wantErr: true},
 		{name: "missing window", edit: func(f *Frame) { f.Window = nil }, wantErr: true},
 		{name: "missing page steps", edit: func(f *Frame) { f.Step, f.Earlier, f.Steps = 4, 1, []StepRecord{{Step: 2}, {Step: 3}} }, wantErr: true},

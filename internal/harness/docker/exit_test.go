@@ -28,8 +28,8 @@ func (f *fake) labeled(status string, exit int) string {
 	return string(b)
 }
 
-// archive is the tar stream docker cp writes for one entry.
-func archive(t *testing.T, h tar.Header, body string) string {
+// tarEntry is the tar stream docker cp writes for one entry.
+func tarEntry(t *testing.T, h tar.Header, body string) string {
 	t.Helper()
 	var b bytes.Buffer
 	w := tar.NewWriter(&b)
@@ -50,7 +50,7 @@ func archive(t *testing.T, h tar.Header, body string) string {
 }
 
 func exitArchive(t *testing.T, body string) string {
-	return archive(t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeReg, Mode: 0o644}, body)
+	return tarEntry(t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeReg, Mode: 0o644}, body)
 }
 
 func TestRecordedExitIsFinal(t *testing.T) {
@@ -82,10 +82,10 @@ func TestUnrecordedExitStaysUnknown(t *testing.T) {
 			f.set("cp.exit", "1")
 		},
 		"directory": func(f *fake) {
-			f.set("cp.out", archive(f.t, tar.Header{Name: ".canti-exit/", Typeflag: tar.TypeDir, Mode: 0o755}, ""))
+			f.set("cp.out", tarEntry(f.t, tar.Header{Name: ".canti-exit/", Typeflag: tar.TypeDir, Mode: 0o755}, ""))
 		},
 		"symlink": func(f *fake) {
-			f.set("cp.out", archive(f.t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeSymlink, Linkname: "/workspace/x"}, ""))
+			f.set("cp.out", tarEntry(f.t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeSymlink, Linkname: "/workspace/x"}, ""))
 		},
 		"empty":        func(f *fake) { f.set("cp.out", exitArchive(f.t, "")) },
 		"not a status": func(f *fake) { f.set("cp.out", exitArchive(f.t, "ok\n")) },

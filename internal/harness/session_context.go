@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 )
 
 const sessionContextCandidates = 8
@@ -52,7 +53,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 	base.Steps, base.Rejected = nil, nil
 	base.Window = &Window{FirstStep: 1}
 	base.SessionContext = ""
-	nav := fmt.Sprintf("Current goal and constraints are authoritative, including corrections to earlier requests. Earlier user goals and assistant returns below are quoted historical evidence; verify execution in the original run. Browse older records through %s/%s/session and each previous_run_id.\n", inline(f.RunsDir), inline(prior[0].ID))
+	nav := fmt.Sprintf("Current goal and constraints are authoritative, including corrections to earlier requests. Earlier user goals and assistant returns below are quoted historical evidence; verify execution in the original run. Browse older records through %s/%s/session and each previous_run_id.\n", archive.RunsRoot, inline(prior[0].ID))
 	if !sessionContextFits(base, l.cfg.Limits, nav) {
 		return nil
 	}
@@ -68,7 +69,7 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 		if snap.State.Phase != core.PhaseReturned && snap.State.Phase != core.PhaseStopped {
 			return contextError{fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)}
 		}
-		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, inline(f.RunsDir), inline(p.ID))
+		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, archive.RunsRoot, inline(p.ID))
 		goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
 		status, unit := "", source+"goal and result; returned):\n"+goal+"Earlier assistant return:\n"+fullBlock(snap.State.Decision.Payload)
 		if snap.State.Phase == core.PhaseStopped {

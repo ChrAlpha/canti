@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
@@ -1192,7 +1193,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 			t.Errorf("environment %q lacks %q", env, want)
 		}
 	}
-	if strings.Contains(env, docker.ArtifactDir) {
+	if strings.Contains(env, archive.ArtifactsRoot) {
 		t.Errorf("environment %q names the artifact directory, which the prompt states", env)
 	}
 	if _, _, err := newRun("goal", "", parseSpec(t, "-job-timeout", "-1s"), now); err == nil {

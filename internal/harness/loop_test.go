@@ -32,9 +32,7 @@ func TestNewLoopRequiresDependencies(t *testing.T) {
 	}
 	for _, edit := range []func(*harness.LoopConfig){
 		func(c *harness.LoopConfig) { c.Environment = " " },
-		func(c *harness.LoopConfig) { c.ArtifactDir = "" },
 		func(c *harness.LoopConfig) { c.History = "" },
-		func(c *harness.LoopConfig) { c.RunsPath = "" },
 		func(c *harness.LoopConfig) { c.Poll = -1 },
 		func(c *harness.LoopConfig) { c.InspectRetries = -1 },
 		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 64 << 10} },
@@ -126,7 +124,7 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 		whole := harness.Frame{
 			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
 			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Steps: all,
-			ArtifactDir: f.cfg.ArtifactDir, RunsDir: f.cfg.RunsPath, RunID: runID, Window: &harness.Window{FirstStep: 1},
+			RunID: runID, Window: &harness.Window{FirstStep: 1},
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]

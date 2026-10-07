@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 )
 
@@ -123,7 +124,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 			mounts[fields[4]] = fields[5]
 		}
 	}
-	for dir, mode := range map[string]string{docker.WorkDir: "rw", docker.ArtifactDir: "ro", runsDir: "ro"} {
+	for dir, mode := range map[string]string{docker.WorkDir: "rw", archive.ArtifactsRoot: "ro", archive.RunsRoot: "ro"} {
 		if got := strings.Split(mounts[dir], ","); got[0] != mode {
 			t.Errorf("mount %s = %q, want %s", dir, mounts[dir], mode)
 		}
@@ -163,7 +164,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	}
 	evLog(t, image, "trust boundary", "fixture key and CANTI_TRUST_PROBE in the CLI environment; job probes env, uid, caps, mounts, state, journal, network",
 		fmt.Sprintf("key and probe absent from output, requests, and state; uid %s; artifacts %s, workspace %s, runs %s; state and journal absent; interfaces %s only; model URL unreachable",
-			strings.TrimSpace(s["uid"]), mounts[docker.ArtifactDir], mounts[docker.WorkDir], mounts[runsDir], strings.TrimSpace(s["net"])),
+			strings.TrimSpace(s["uid"]), mounts[archive.ArtifactsRoot], mounts[docker.WorkDir], mounts[archive.RunsRoot], strings.TrimSpace(s["net"])),
 		fmt.Sprintf("output %d bytes, network %s, cap-drop %v, user %s", len(data), c.HostConfig.NetworkMode, c.HostConfig.CapDrop, c.Config.User))
 }
 
@@ -303,7 +304,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 			t.Errorf("workspace %s = %q, %v", name, data, err)
 		}
 	}
-	ref := fmt.Sprintf("Output: 9 bytes, complete, at %s", path.Join(docker.ArtifactDir, fact.Output.Path))
+	ref := fmt.Sprintf("Output: 9 bytes, complete, at %s", path.Join(archive.ArtifactsRoot, fact.Output.Path))
 	if p := f.model.prompts(3); len(p) != 1 || !strings.Contains(p[0], ref) || !strings.Contains(p[0], "fact-one") {
 		t.Errorf("step 3 prompt lacks %q: %q", ref, p)
 	}
@@ -323,7 +324,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
 	id := f.status().Run.ID
-	own := runsDir + "/" + id
+	own := archive.RunsRoot + "/" + id
 	probe := strings.Join([]string{
 		"cd " + own,
 		"echo '== meta'", "cat steps/00000001/meta",
@@ -336,8 +337,8 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 		`echo forged > steps/00000001/preview; echo "preview=$?"`,
 		`rm -rf steps/00000001; echo "rm=$?"`,
 		`mkdir steps/00000002; echo "mkdir=$?"`,
-		`mkdir ` + runsDir + `/forged; echo "runs=$?"`,
-		"echo '== runs'", "ls " + runsDir,
+		`mkdir ` + archive.RunsRoot + `/forged; echo "runs=$?"`,
+		"echo '== runs'", "ls " + archive.RunsRoot,
 	}, "\n")
 	text, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: probe})
 	f.model.answer(2, 1, reply{text: string(text)})
@@ -355,7 +356,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	}
 	s := evSections(string(data))
 	meta := fmt.Sprintf("step: 1\nexecution: exited\nexit_code: 0\nresolved: false\noutput: %s\noutput_bytes: %d\noutput_complete: true\n",
-		path.Join(docker.ArtifactDir, one.Output.Path), one.Output.Bytes)
+		path.Join(archive.ArtifactsRoot, one.Output.Path), one.Output.Bytes)
 	if s["meta"] != meta || s["command"] != long+"\n" || s["preview"] != "fact-one\n日本\n" || s["preview"] != one.Preview || s["goal"] != "records\n" || s["runs"] != id+"\n" {
 		t.Errorf("records read by step 2 = %q\nwant meta %q", s, meta)
 	}
@@ -375,11 +376,11 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	checkRecords(t, f, "records", h)
 
 	earlier := strings.Join([]string{
-		"cd " + runsDir + "/" + id,
+		"cd " + archive.RunsRoot + "/" + id,
 		"echo '== goal'", "cat goal; echo",
 		"echo '== result'", "cat result; echo",
 		"echo '== command'", "cat steps/00000002/command; echo",
-		"echo '== runs'", "ls " + runsDir,
+		"echo '== runs'", "ls " + archive.RunsRoot,
 	}, "\n")
 	for step, d := range map[int]core.Decision{1: {Kind: core.Exec, Payload: earlier}, 2: {Kind: core.Return, Payload: "second"}} {
 		text, _ := json.Marshal(d)
