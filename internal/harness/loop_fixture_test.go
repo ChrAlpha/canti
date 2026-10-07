@@ -3,8 +3,10 @@ package harness_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/executortest"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
@@ -119,6 +122,7 @@ func (m *fakeModel) calls() (prompts, sent int) {
 type fakeJob struct {
 	harness.Job
 	command string
+	runs    int
 }
 
 // fakeExec keeps its jobs across loops, as a backend outlives controllers.
@@ -149,6 +153,9 @@ func (x *fakeExec) Bind(_ context.Context, e harness.Effect) (harness.Job, error
 		}
 		x.jobs[e.ID] = j
 	}
+	if j.command != e.Command {
+		return harness.Job{}, errors.New("effect is bound to a different command")
+	}
 	return j.Job, nil
 }
 
@@ -162,6 +169,7 @@ func (x *fakeExec) Start(_ context.Context, effectID string) (harness.Job, error
 	}
 	if j.Status == harness.JobPending {
 		j.Status, j.StartedAt = harness.JobRunning, x.clock.Now()
+		j.runs++
 	}
 	return j.Job, nil
 }
@@ -207,6 +215,29 @@ func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {
 		j.ExitCode = &code
 	}
 	j.Output = harness.ArtifactRef{Path: j.ID + ".log", Bytes: int64(len(j.Preview)), Complete: true, Available: true}
+}
+
+func TestFakeExecutorPassesStartLatchCheck(t *testing.T) {
+	x := &fakeExec{clock: &clock{now: created}, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	err := executortest.Check(ctx, executortest.Fixture{
+		Open: func(context.Context) (harness.Executor, error) { return x, nil },
+		Effect: func(name string) harness.Effect {
+			return harness.Effect{ID: fmt.Sprintf("effect_%x", sha256.Sum256([]byte(name))), Command: "run " + name}
+		},
+		Runs: func(_ context.Context, effectID string) (int, error) {
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			if j := x.jobs[effectID]; j != nil {
+				return j.runs, nil
+			}
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (x *fakeExec) log() []string {
