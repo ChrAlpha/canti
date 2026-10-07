@@ -540,55 +540,18 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 // within the cleanup deadline; the second abandons the cleanup. release
 // records in a.signal SIGTERM if it was caught, else the first signal.
 func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
-	sig, seen := make(chan os.Signal, 2), make(chan os.Signal, 2)
-	if a.stopSignals == nil {
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		signal.Notify(seen, os.Interrupt, syscall.SIGTERM)
-	} else {
-		sig = a.stopSignals
-	}
+	c := a.stopControl()
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
+	c.cancels = []context.CancelFunc{shutdown, abandon}
 	startWatch := make(chan int, 1)
 	handled := make(chan struct{})
 	go func() {
 		defer close(handled)
-		var handledBeforeOp int
-		select {
-		case handledBeforeOp = <-startWatch:
-		case <-cleanupCtx.Done():
-			return
-		}
-		for _, cancel := range []context.CancelFunc{shutdown, abandon}[handledBeforeOp:] {
-			select {
-			case s := <-sig:
-				if a.stopSignals != nil {
-					seen <- s
-				}
-				cancel()
-			case <-cleanupCtx.Done():
-				return
-			}
-		}
-		signal.Stop(sig)
-		signal.Stop(seen)
+		c.watch(cleanupCtx.Done(), startWatch)
 	}()
 	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
-		handledBeforeOp := 0
-	preOp:
-		for _, cancel := range []context.CancelFunc{shutdown, abandon} {
-			select {
-			case s := <-sig:
-				if a.stopSignals != nil {
-					seen <- s
-				}
-				cancel()
-				handledBeforeOp++
-			default:
-				break preOp
-			}
-		}
-		startWatch <- handledBeforeOp
+		startWatch <- c.pending()
 		step := l.Run
 		if once {
 			step = l.Step
@@ -605,17 +568,75 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		abandon()
 		shutdown()
 		<-handled
-		signal.Stop(sig)
-		signal.Stop(seen)
-		for len(sig) > 0 {
-			if s := <-sig; a.signal != syscall.SIGTERM {
-				a.signal = s
-			}
+		signal.Stop(c.sig)
+		signal.Stop(c.seen)
+		a.record(c.sig)
+		a.record(c.seen)
+	}
+}
+
+// stopControl applies each stop signal of a drive to the next of its
+// cancels. Chat sends its signals on a.stopSignals, and each one handled is
+// kept on seen for release to record.
+type stopControl struct {
+	sig, seen chan os.Signal
+	relay     bool
+	cancels   []context.CancelFunc
+}
+
+func (a *app) stopControl() *stopControl {
+	c := &stopControl{sig: make(chan os.Signal, 2), seen: make(chan os.Signal, 2)}
+	if a.stopSignals == nil {
+		signal.Notify(c.sig, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(c.seen, os.Interrupt, syscall.SIGTERM)
+	} else {
+		c.sig, c.relay = a.stopSignals, true
+	}
+	return c
+}
+
+func (c *stopControl) handle(s os.Signal, cancel context.CancelFunc) {
+	if c.relay {
+		c.seen <- s
+	}
+	cancel()
+}
+
+func (c *stopControl) pending() int {
+	for n, cancel := range c.cancels {
+		select {
+		case s := <-c.sig:
+			c.handle(s, cancel)
+		default:
+			return n
 		}
-		for len(seen) > 0 {
-			if s := <-seen; a.signal != syscall.SIGTERM {
-				a.signal = s
-			}
+	}
+	return len(c.cancels)
+}
+
+func (c *stopControl) watch(done <-chan struct{}, start <-chan int) {
+	var handled int
+	select {
+	case handled = <-start:
+	case <-done:
+		return
+	}
+	for _, cancel := range c.cancels[handled:] {
+		select {
+		case s := <-c.sig:
+			c.handle(s, cancel)
+		case <-done:
+			return
+		}
+	}
+	signal.Stop(c.sig)
+	signal.Stop(c.seen)
+}
+
+func (a *app) record(signals chan os.Signal) {
+	for len(signals) > 0 {
+		if s := <-signals; a.signal != syscall.SIGTERM {
+			a.signal = s
 		}
 	}
 }

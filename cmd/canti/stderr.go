@@ -40,50 +40,53 @@ func newStderrWriter(out io.Writer) *stderrWriter {
 	w := &stderrWriter{
 		queue: make(chan stderrEntry, stderrQueueEntries), closing: make(chan struct{}), done: make(chan struct{}),
 	}
-	go func() {
-		defer close(w.done)
-		write := func(entry stderrEntry) bool {
-			var err error
-			if len(entry.data) > 0 {
-				_, err = out.Write(entry.data)
+	go w.drain(out)
+	return w
+}
+
+func (w *stderrWriter) drain(out io.Writer) {
+	defer close(w.done)
+	for {
+		select {
+		case entry := <-w.queue:
+			if !w.output(out, entry) {
+				return
 			}
-			if err == nil {
-				if lost := w.dropped.Swap(0); lost != 0 {
-					_, err = fmt.Fprintf(out, "canti: stderr dropped %d entries\n", lost)
-				}
-			}
-			if entry.ack != nil {
-				entry.ack <- err
-			}
-			if err != nil {
-				w.mu.Lock()
-				w.err = err
-				w.mu.Unlock()
-				return false
-			}
-			return true
-		}
-		for {
-			select {
-			case entry := <-w.queue:
-				if !write(entry) {
-					return
-				}
-			case <-w.closing:
-				for {
-					select {
-					case entry := <-w.queue:
-						if !write(entry) {
-							return
-						}
-					default:
+		case <-w.closing:
+			for {
+				select {
+				case entry := <-w.queue:
+					if !w.output(out, entry) {
 						return
 					}
+				default:
+					return
 				}
 			}
 		}
-	}()
-	return w
+	}
+}
+
+func (w *stderrWriter) output(out io.Writer, entry stderrEntry) bool {
+	var err error
+	if len(entry.data) > 0 {
+		_, err = out.Write(entry.data)
+	}
+	if err == nil {
+		if lost := w.dropped.Swap(0); lost != 0 {
+			_, err = fmt.Fprintf(out, "canti: stderr dropped %d entries\n", lost)
+		}
+	}
+	if entry.ack != nil {
+		entry.ack <- err
+	}
+	if err != nil {
+		w.mu.Lock()
+		w.err = err
+		w.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 func stderrBytes(p []byte) []byte {

@@ -112,30 +112,10 @@ func (w *chatOutput) Write(p []byte) (int, error) {
 		var n int
 		var err error
 		if congested && w.gate != nil {
-			g := w.gate
-			g.mu.Lock()
-			if !g.busy || g.draining {
-				if drainErr := g.drainAvailableLocked(); drainErr != nil {
-					g.mu.Unlock()
-					w.err = drainErr
-					break
-				}
-				g.epoch++
-				g.draining = g.draining || g.inPaste || len(g.pending) > 0
-				if g.draining {
-					g.paste = nil
-				}
-			}
-			if time.Until(deadline) <= 0 {
-				g.mu.Unlock()
-				w.err = os.ErrDeadlineExceeded
+			n, err = w.writeGated(p, deadline)
+			if w.err != nil {
 				break
 			}
-			n, err = w.write(p)
-			if err == nil && n == len(p) {
-				g.outputCongested = false
-			}
-			g.mu.Unlock()
 		} else {
 			n, err = w.write(p)
 		}
@@ -149,26 +129,14 @@ func (w *chatOutput) Write(p []byte) (int, error) {
 		if len(p) > 0 && !congested {
 			congested = true
 			if w.gate != nil {
-				w.gate.mu.Lock()
-				w.gate.outputCongested = true
-				if !w.gate.busy || w.gate.draining {
-					w.gate.epoch++
-				}
-				w.gate.mu.Unlock()
+				w.gate.congest()
 			}
 		}
 		if err != nil && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
 			w.err = err
 			break
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			w.err = os.ErrDeadlineExceeded
-			break
-		}
-		_, err = unix.Poll([]unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLOUT}}, int(remaining.Milliseconds())+1)
-		if err != nil && !errors.Is(err, unix.EINTR) {
-			w.err = err
+		if w.err = awaitWritable(w.fd, deadline); w.err != nil {
 			break
 		}
 	}
@@ -179,4 +147,42 @@ func (w *chatOutput) Write(p []byte) (int, error) {
 		}
 	}
 	return total, w.err
+}
+
+func (w *chatOutput) writeGated(p []byte, deadline time.Time) (int, error) {
+	g := w.gate
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.busy || g.draining {
+		if err := g.drainAvailableLocked(); err != nil {
+			w.err = err
+			return 0, nil
+		}
+		g.epoch++
+		g.draining = g.draining || g.inPaste || len(g.pending) > 0
+		if g.draining {
+			g.paste = nil
+		}
+	}
+	if time.Until(deadline) <= 0 {
+		w.err = os.ErrDeadlineExceeded
+		return 0, nil
+	}
+	n, err := w.write(p)
+	if err == nil && n == len(p) {
+		g.outputCongested = false
+	}
+	return n, err
+}
+
+func awaitWritable(fd int, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return os.ErrDeadlineExceeded
+	}
+	_, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}, int(remaining.Milliseconds())+1)
+	if err != nil && !errors.Is(err, unix.EINTR) {
+		return err
+	}
+	return nil
 }

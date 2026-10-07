@@ -67,6 +67,15 @@ func (g *chatInputGate) discarding() bool {
 	return g.draining
 }
 
+func (g *chatInputGate) congest() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.outputCongested = true
+	if !g.busy || g.draining {
+		g.epoch++
+	}
+}
+
 func (g *chatInputGate) outputBlockedLocked() bool {
 	if g.outputCongested {
 		return true
@@ -362,50 +371,7 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		buf := make([]byte, 4096)
-		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			g.mu.Lock()
-			interrupts := g.pendingInterrupts
-			g.pendingInterrupts = 0
-			g.mu.Unlock()
-			for range interrupts {
-				send(chatSignal{sig: os.Interrupt})
-			}
-			n, err := unix.Poll(fds, 50)
-			if errors.Is(err, syscall.EINTR) || n == 0 {
-				continue
-			}
-			if err != nil {
-				send(chatInputFailure{err: err})
-				return
-			}
-			g.mu.Lock()
-			read, ready, err := g.readReadyLocked(buf)
-			batch := chatKeys{}
-			if err == nil && read > 0 {
-				batch = g.decodeLocked(buf[:read])
-			}
-			g.mu.Unlock()
-			if err == nil && !ready || errors.Is(err, syscall.EAGAIN) {
-				continue
-			}
-			if err != nil || read == 0 {
-				if err == nil {
-					err = io.EOF
-				}
-				send(chatInputFailure{err: err})
-				return
-			}
-			if len(batch.events) > 0 {
-				send(batch)
-			}
-		}
+		g.forward(stop, send)
 	}()
 	cleanup := func() error {
 		close(stop)
@@ -413,4 +379,60 @@ func startChatInput(f *os.File, send func(tea.Msg)) (*chatInputGate, func() erro
 		return errors.Join(release(), restore())
 	}
 	return g, cleanup, nil
+}
+
+func (g *chatInputGate) forward(stop <-chan struct{}, send func(tea.Msg)) {
+	buf := make([]byte, 4096)
+	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		for range g.takeInterrupts() {
+			send(chatSignal{sig: os.Interrupt})
+		}
+		n, err := unix.Poll(fds, 50)
+		if errors.Is(err, syscall.EINTR) || n == 0 {
+			continue
+		}
+		if err == nil {
+			err = g.readBatch(buf, send)
+		}
+		if err != nil {
+			send(chatInputFailure{err: err})
+			return
+		}
+	}
+}
+
+func (g *chatInputGate) takeInterrupts() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := g.pendingInterrupts
+	g.pendingInterrupts = 0
+	return n
+}
+
+func (g *chatInputGate) readBatch(buf []byte, send func(tea.Msg)) error {
+	g.mu.Lock()
+	read, ready, err := g.readReadyLocked(buf)
+	batch := chatKeys{}
+	if err == nil && read > 0 {
+		batch = g.decodeLocked(buf[:read])
+	}
+	g.mu.Unlock()
+	switch {
+	case err == nil && !ready || errors.Is(err, syscall.EAGAIN):
+		return nil
+	case err != nil:
+		return err
+	case read == 0:
+		return io.EOF
+	}
+	if len(batch.events) > 0 {
+		send(batch)
+	}
+	return nil
 }
