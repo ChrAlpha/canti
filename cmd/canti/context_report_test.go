@@ -40,7 +40,7 @@ func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 	}
 }
 
-func TestContextTextNamesTheHandoverPathOfEarlierDialogue(t *testing.T) {
+func TestContextTextNamesTheHandoverStepOfEarlierDialogue(t *testing.T) {
 	report := contextReport{RunID: "current", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Session: []harness.ContextSessionSource{
 		{RunID: "r1", SessionSeq: 1, Status: "returned", IncludedGoal: true},
 		{RunID: "r2", SessionSeq: 2, Status: "stopped", HandoverStep: 7},

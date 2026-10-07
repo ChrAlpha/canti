@@ -272,9 +272,10 @@ func corpusRules(t *testing.T) string {
 }
 
 // sessionRules records the first request that a run of a session freezes
-// after nine earlier runs, the fifth stopped, through the CLI: the earlier
-// dialogue the run selects, how it renders, and the sources it records, with
-// run IDs named by their session sequence.
+// after eleven earlier runs through the CLI: the fifth stopped, the tenth
+// returned after a handover, and the eleventh stopped right after its
+// handover. It records the earlier dialogue the run selects, how it renders,
+// and the sources it records, with run IDs named by their session sequence.
 func sessionRules(t *testing.T) string {
 	t.Helper()
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "Earlier answer."}})

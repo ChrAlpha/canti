@@ -58,14 +58,19 @@ func (j *tampered) Latest(ctx context.Context, runID string) (harness.Snapshot, 
 	return tamper(j, "Latest", runID, v, err)
 }
 
+func (j *tampered) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	v, err := j.Store.Recent(ctx, runID, before, limit)
+	return tamper(j, "Recent", runID, v, err)
+}
+
 func (j *tampered) Totals(ctx context.Context, runID string) (harness.Totals, error) {
 	v, err := j.Store.Totals(ctx, runID)
 	return tamper(j, "Totals", runID, v, err)
 }
 
-// sessionAfterAStep returns a fixture whose session run, which follows a
-// stopped earlier run of its session, has observed its first step and waits
-// to prepare its second.
+// sessionAfterAStep returns a fixture whose session run, which follows an
+// earlier run of its session stopped after it froze its first request, has
+// observed its first step and waits to prepare its second.
 func sessionAfterAStep(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t, limits, harness.Budget{}, execReply("true"), returnReply("done"))
@@ -96,9 +101,12 @@ func sessionAfterAStep(t *testing.T) *fixture {
 	}
 	stop(runID)
 	submit(earlierRun, "Report the Go version.")
+	l := f.loop()
+	if s, err := l.Step(ctx, earlierRun); err != nil || s.State.Phase != core.PhaseRequestFrozen {
+		t.Fatalf("earlier run: %+v, %v", s.State, err)
+	}
 	stop(earlierRun)
 	submit(sessionRun, "Count the Go files.")
-	l := f.loop()
 	for range 10 {
 		s, err := l.Step(ctx, sessionRun)
 		if err != nil {
@@ -133,8 +141,10 @@ func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
 		{"SessionRuns", "", errTransient},
 		{"Latest", earlierRun, errTransient},
 		{"Totals", earlierRun, errTransient},
+		{"Recent", earlierRun, errTransient},
+		{"LatestRequest", earlierRun, errTransient},
 	} {
-		t.Run(tc.method+"/"+tc.err.Error(), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s %s/%v", tc.method, tc.run, tc.err), func(t *testing.T) {
 			f := sessionAfterAStep(t)
 			ctx := f.bounded()
 			before := sessionTransitions(t, f)

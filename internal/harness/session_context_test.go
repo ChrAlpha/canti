@@ -355,9 +355,11 @@ func TestSessionContextReturnsAFailedHandoverRead(t *testing.T) {
 }
 
 // TestSessionContextAddsHandoverPathsOnlyWhereTheyFit grows the newest run's
-// answer, or a stopped run's goal, across the edges where each handover path
-// and each unit stop fitting: paths never change which runs and goals are
-// selected, and each is left out only where it would not fit.
+// answer, or a stopped run's goal, through every selection of the earlier
+// dialogue and, within each, past the edge where each handover path stops
+// fitting: paths never change which runs and goals are selected, each is
+// left out only where it would not fit, and a newer run keeps its path over
+// an older one.
 func TestSessionContextAddsHandoverPathsOnlyWhereTheyFit(t *testing.T) {
 	l := &Loop{cfg: LoopConfig{Limits: DefaultPromptLimits()}}
 	paths := map[string]int{"r6": 5, "r5": 4, "r4": 2}
@@ -373,65 +375,71 @@ func TestSessionContextAddsHandoverPathsOnlyWhereTheyFit(t *testing.T) {
 		}
 		return f
 	}
-	sized := func(size func(*sessionFixture), handovers bool) *sessionFixture {
+	sized := func(size func(*sessionFixture), handovers bool) Frame {
 		j := handoverSession()
 		size(j)
 		if !handovers {
 			j.requests, j.recent = nil, nil
 		}
-		return j
+		return selection(j)
+	}
+	dialogue := func(f Frame) string {
+		var out []string
+		for _, s := range f.sessionSources {
+			out = append(out, fmt.Sprintf("%s %v", s.RunID, s.IncludedGoal))
+		}
+		return strings.Join(out, ", ")
 	}
 	pointed := func(f Frame, run string) bool {
-		for _, src := range f.sessionSources {
-			if src.RunID == run {
-				return src.HandoverStep != 0
-			}
-		}
-		return false
+		return slices.ContainsFunc(f.sessionSources, func(s ContextSessionSource) bool { return s.RunID == run && s.HandoverStep != 0 })
 	}
-	dropped := 0
+	dropped, chosen := 0, 0
 	check := func(size func(*sessionFixture)) {
 		t.Helper()
-		f, want := selection(sized(size, true)), selection(sized(size, false)).sessionSources
-		got := slices.Clone(f.sessionSources)
-		if len(got) != len(want) {
-			t.Fatalf("paths changed the selection: %+v, without paths %+v", got, want)
+		f := sized(size, true)
+		if got, want := dialogue(f), dialogue(sized(size, false)); got != want {
+			t.Fatalf("paths changed the selected dialogue from %q to %q", want, got)
 		}
-		for i := range got {
-			step := got[i].HandoverStep
-			got[i].HandoverStep = 0
-			if got[i] != want[i] || step != 0 && step != paths[got[i].RunID] {
-				t.Fatalf("paths changed the selection or point elsewhere: %+v, without paths %+v", f.sessionSources, want)
-			}
-			if step != 0 || paths[got[i].RunID] == 0 {
+		newerKept, newerLost := false, false
+		for i := len(f.sessionSources) - 1; i >= 0; i-- {
+			s := f.sessionSources[i]
+			if paths[s.RunID] == 0 {
 				continue
 			}
+			if s.HandoverStep != 0 && (s.HandoverStep != paths[s.RunID] || newerLost) {
+				t.Fatalf("run %s points to step %d, or after a newer run lost its path: %+v", s.RunID, s.HandoverStep, f.sessionSources)
+			}
+			if s.HandoverStep != 0 {
+				newerKept = true
+				continue
+			}
+			if newerKept {
+				chosen++
+			}
+			newerLost = true
 			dropped++
-			path := handoverPath(got[i].RunID, paths[got[i].RunID])
-			header := strings.Index(f.SessionContext, "Run "+got[i].RunID+" ")
+			path := handoverPath(s.RunID, paths[s.RunID])
+			header := strings.Index(f.SessionContext, "Run "+s.RunID+" ")
 			end := header + strings.Index(f.SessionContext[header:], "\n") + 1
 			g := f
 			g.SessionContext = f.SessionContext[:end] + path + f.SessionContext[end:]
 			if g.ValidateContext(l.cfg.Limits) == nil {
-				t.Fatalf("run %s left out a handover path that fits", got[i].RunID)
+				t.Fatalf("run %s left out a handover path that fits", s.RunID)
 			}
 		}
 	}
-	// edge returns the least n below 1<<16 at which stop holds, which it must
-	// not at 0, or 0 when there is none.
-	edge := func(stop func(n int) bool) int {
-		lo, hi := 0, 1<<16
-		for lo < hi {
+	// first returns the least n in (lo, 1<<16] at which stop holds, given that
+	// it holds from there on.
+	first := func(lo int, stop func(n int) bool) int {
+		hi := 1 << 16
+		for lo++; lo < hi; {
 			if mid := (lo + hi) / 2; stop(mid) {
 				hi = mid
 			} else {
 				lo = mid + 1
 			}
 		}
-		if lo == 0 {
-			t.Fatal("the edge is at 0")
-		}
-		return lo % (1 << 16)
+		return lo
 	}
 	answer := func(n int) func(*sessionFixture) {
 		return func(j *sessionFixture) { j.states["r6"] = returned(strings.Repeat("Ω", n)) }
@@ -440,22 +448,28 @@ func TestSessionContextAddsHandoverPathsOnlyWhereTheyFit(t *testing.T) {
 		return func(j *sessionFixture) { j.runs[1].Goal = strings.Repeat("Ψ", n) }
 	}
 	for _, size := range []func(int) func(*sessionFixture){answer, goal} {
-		edges := []int{edge(func(n int) bool { return len(selection(sized(size(n), false)).sessionSources) < 6 })}
-		for run := range paths {
-			edges = append(edges, edge(func(n int) bool { return !pointed(selection(sized(size(n), true)), run) }))
-		}
-		for _, n := range edges {
-			if n > 0 {
-				check(size(n - 1))
-				check(size(n))
+		selections := 0
+		for start := 0; start < 1<<16; selections++ {
+			selected := dialogue(sized(size(start), false))
+			end := first(start, func(n int) bool { return dialogue(sized(size(n), false)) != selected })
+			check(size(start))
+			for run := range paths {
+				if pointed(sized(size(start), true), run) {
+					if n := first(start, func(n int) bool { return n >= end || !pointed(sized(size(n), true), run) }); n < end {
+						check(size(n - 1))
+						check(size(n))
+					}
+				}
 			}
+			check(size(end - 1))
+			start = end
 		}
-		for n := 0; n < 1<<16; n += 4099 {
-			check(size(n))
+		if selections < 3 {
+			t.Fatalf("the sizes went through %d selections of the earlier dialogue", selections)
 		}
 	}
-	if dropped == 0 {
-		t.Fatal("no edge reached a selection that leaves a handover path out")
+	if dropped == 0 || chosen == 0 {
+		t.Fatalf("%d paths left out, %d of them where a newer run kept its path; want both", dropped, chosen)
 	}
 }
 
