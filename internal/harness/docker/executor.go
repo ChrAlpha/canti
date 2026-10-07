@@ -446,7 +446,8 @@ func (x *Executor) finalize(ctx context.Context, id string, o observation) (harn
 }
 
 // Bind creates the effect's container without starting it, or reports the
-// existing job if it was created for the same execution spec.
+// existing job if it was created for the same execution spec. An effect
+// fenced before it had a container is recorded cancelled without one.
 func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
 	unlock, err := x.lock(ctx, effect.ID)
 	if err != nil {
@@ -461,6 +462,9 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	if err == nil && !done {
 		var found bool
 		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found {
+			if o.latch == latchCancel {
+				return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
+			}
 			if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
 				o, err = x.bound(ctx, effect.ID)
 			}

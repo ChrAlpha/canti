@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,17 @@ type loopFixture struct {
 // observation.
 func newLoop(t *testing.T, f *fake) *loopFixture {
 	t.Helper()
+	lf := saveEffect(t, f)
+	f.set("inspect.out", f.containerOf(lf.effect, "true", "created", 0))
+	f.set("running.json", f.containerOf(lf.effect, "true", "running", 0))
+	f.set("start.sh", `cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
+	lf.step(2, core.PhaseAwaitingObservation)
+	return lf
+}
+
+// saveEffect runs a loop on f until its effect is saved, so it binds next.
+func saveEffect(t *testing.T, f *fake) *loopFixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "canti.db"))
@@ -62,10 +74,6 @@ func newLoop(t *testing.T, f *fake) *loopFixture {
 	}
 	lf := &loopFixture{fake: f, t: t, ctx: ctx, store: store, loop: l}
 	lf.effect = lf.step(3, core.PhaseEffectSaved).State.EffectID
-	f.set("inspect.out", f.containerOf(lf.effect, "true", "created", 0))
-	f.set("running.json", f.containerOf(lf.effect, "true", "running", 0))
-	f.set("start.sh", `cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
-	lf.step(2, core.PhaseAwaitingObservation)
 	return lf
 }
 
@@ -121,5 +129,41 @@ func TestLoopStopLeavesAnUnreadableRecordToResolution(t *testing.T) {
 	lf.wantUnknown("record of effect")
 	if stops := lf.calls("stop"); len(stops) != 0 {
 		t.Fatalf("stops = %q, want a recorded job never stopped", stops)
+	}
+}
+
+func TestLoopObservesAnEffectFencedBeforeItsBind(t *testing.T) {
+	lf := saveEffect(t, newFake(t))
+	if err := os.MkdirAll(lf.x.dir(lf.effect), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setLatch(lf.x.dir(lf.effect), latchCancel); err != nil {
+		t.Fatal(err)
+	}
+	lf.set("inspect.err", "Error response from daemon: No such container: canti-"+lf.effect+"\n")
+	lf.set("inspect.exit", "1")
+	lf.step(3, core.PhaseIdle)
+	ts, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bound core.JobBound
+	var obs *harness.Observation
+	for _, tr := range ts {
+		switch e := tr.Event.(type) {
+		case core.JobBound:
+			bound = e
+		case core.Observed:
+			obs = tr.Facts.Observation
+		}
+	}
+	want := harness.Observation{Execution: core.ExecutionCancelled, Output: harness.ArtifactRef{Path: lf.effect + "/output", Available: true, Detail: "job was cancelled; output is partial"}}
+	if bound.JobID != "fenced:"+lf.effect || obs == nil || !reflect.DeepEqual(*obs, want) {
+		t.Fatalf("bound job %q, observation %+v; want the fenced job observed as %+v", bound.JobID, obs, want)
+	}
+	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
+		if calls := lf.calls(cmd); len(calls) != 0 {
+			t.Fatalf("%s calls = %q, want none for an effect fenced before its bind", cmd, calls)
+		}
 	}
 }

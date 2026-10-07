@@ -664,7 +664,9 @@ state directory, and each target a clean absolute path that overlaps neither
   container still in `created`, finishing the launch even if its context
   ends. Once the latch is set, `Start` only reports the job.
 - **Cancel.** `Cancel` sets a `cancel` latch on an unstarted effect, so that a
-  container bound later reports `cancelled` and never starts. For a running
+  container bound earlier reports `cancelled` and never starts, and a later
+  `Bind` that finds no container records the job `cancelled`, with an empty
+  output and the ID `fenced:<effect ID>`, without creating one. For a running
   job it writes a cancel marker and runs `docker stop` with the stop grace
   (5 s by default), after which Docker kills the container's processes. The
   marker labels the job cancelled even if it exited on its own between

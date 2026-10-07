@@ -143,7 +143,7 @@ func (x *Executor) finish(ctx context.Context, id string, job harness.Job, spec 
 	if err != nil {
 		return harness.Job{}, err
 	}
-	x.release(ctx, job.ID)
+	x.release(ctx, id, job.ID)
 	job.Output = verify(x.artifacts(), job.Output)
 	return job, nil
 }
@@ -181,7 +181,7 @@ func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error
 	if err != nil || !done {
 		return record{}, false, err
 	}
-	x.release(ctx, rec.ID)
+	x.release(ctx, id, rec.ID)
 	rec.Output = verify(x.artifacts(), rec.Output)
 	return rec, true, nil
 }
@@ -189,9 +189,16 @@ func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error
 // release removes a recorded job's container by the ID it was inspected
 // under, never a container that later took its name. A failure leaves it to
 // the next report.
-func (x *Executor) release(ctx context.Context, containerID string) {
-	_, _ = x.docker(ctx, "rm", "-v", containerID)
+func (x *Executor) release(ctx context.Context, id, jobID string) {
+	if jobID != fenced(id) {
+		_, _ = x.docker(ctx, "rm", "-v", jobID)
+	}
 }
+
+// fenced is the ID of the job recorded for an effect that Bind found fenced
+// without a container. It names no container, so the job has no log to
+// capture and no container to release.
+func fenced(id string) string { return "fenced:" + id }
 
 // sweep releases every container of this state whose effect already has a
 // record naming it, so a removal that failed is retried by the next Bind even
@@ -208,7 +215,7 @@ func (x *Executor) sweep(ctx context.Context) {
 			continue
 		}
 		if rec, done, err := x.load(effect); err == nil && done && rec.ID == id {
-			x.release(ctx, id)
+			x.release(ctx, effect, id)
 		}
 	}
 }
@@ -227,9 +234,12 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 	}
 	call, cancel := context.WithTimeout(ctx, x.timeouts.transfer)
 	defer cancel()
-	cmd := x.command(call, "logs", job.ID)
-	cmd.Stdout, cmd.Stderr = t, t
-	logsErr := cmd.Run()
+	var logsErr error
+	if job.ID != fenced(id) {
+		cmd := x.command(call, "logs", job.ID)
+		cmd.Stdout, cmd.Stderr = t, t
+		logsErr = cmd.Run()
+	}
 	if logsErr != nil && call.Err() != nil {
 		logsErr = fmt.Errorf("no response within %v", x.timeouts.transfer)
 	}

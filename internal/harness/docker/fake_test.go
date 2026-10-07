@@ -390,27 +390,44 @@ func TestVanishedStartedJobIsNotReportedMissing(t *testing.T) {
 	}
 }
 
-func TestBindAfterFenceCreatesCancelledJob(t *testing.T) {
+func TestBindAfterFenceRecordsCancelledJobWithoutAContainer(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchCancel)
 	f.missing()
 	if _, found, err := f.x.Inspect(t.Context(), "e"); found || err != nil {
 		t.Fatalf("Inspect(fenced) = %v, %v; want not found", found, err)
 	}
-	f.set("created.json", f.container("created", 0))
-	f.set("create.sh", `cp "$ctl/created.json" "$ctl/inspect.out"; rm -f "$ctl/inspect.err" "$ctl/inspect.exit"`+"\n")
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.Status != harness.JobCancelled || job.ID != "c-e" {
-		t.Fatalf("Bind(fenced) = %+v, %v", job, err)
+	want := harness.Job{ID: "fenced:e", Status: harness.JobCancelled, Output: harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job was cancelled; output is partial"}}
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
+		t.Fatalf("Bind(fenced) = %+v, %v; want %+v", job, err, want)
 	}
-	if creates := f.calls("create"); len(creates) != 1 || !strings.Contains(creates[0], "--name canti-e") {
-		t.Fatalf("creates = %q", creates)
+	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Size() != 0 || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("artifact: %v, %v; want an empty one", fi, err)
 	}
-	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm rm -v c-e" {
-		t.Fatalf("rms = %q, want the fenced container released", rms)
+	for range 2 {
+		if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
+			t.Fatalf("Bind(recorded) = %+v, %v; want %+v", job, err, want)
+		}
+		if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
+			t.Fatalf("Start(recorded) = %+v, %v; want %+v", job, err, want)
+		}
+		if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
+			t.Fatalf("Inspect(recorded) = %+v, %v, %v; want %+v", job, found, err, want)
+		}
+		if err := f.x.Cancel(t.Context(), "e"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	f.missing()
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.Status != harness.JobCancelled || job.ID != "c-e" || len(f.calls("create")) != 1 {
-		t.Fatalf("Bind(released) = %+v, %v, creates %q; want the recorded job", job, err, f.calls("create"))
+	if _, err := f.x.Bind(t.Context(), harness.Effect{ID: "e", Command: "false"}); err == nil {
+		t.Fatal("Bind(changed) succeeded")
+	}
+	if inspects := f.calls("inspect"); len(inspects) != 2 {
+		t.Fatalf("inspects = %q, want only the lookups that found no container", inspects)
+	}
+	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
+		if calls := f.calls(cmd); len(calls) != 0 {
+			t.Fatalf("%s calls = %q, want none for a job that never had a container", cmd, calls)
+		}
 	}
 }
 
