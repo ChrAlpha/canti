@@ -578,6 +578,26 @@ func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
 	}
 }
 
+func TestBindOfARecordedEffectReleasesOtherRecordedJobs(t *testing.T) {
+	f := newFake(t)
+	for id, job := range map[string]string{"a": "c-a", "e": "c-e"} {
+		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: specHash(f.x.runArgs("true"))})
+		if err := publish(f.x.record(id), data, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.set("ps.out", "c-a a\nc-e e\n")
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" {
+		t.Fatalf("Bind() = %+v, %v; want the recorded job", job, err)
+	}
+	if rms := f.calls("rm"); !slices.Contains(rms, "rm rm -v c-a") {
+		t.Fatalf("rms = %q, want the recorded job of another effect released too", rms)
+	}
+}
+
 func TestRebindingRetriesAFailedRelease(t *testing.T) {
 	f := newFake(t)
 	if err := os.MkdirAll(f.x.dir("a"), 0o700); err != nil {

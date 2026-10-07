@@ -202,8 +202,7 @@ func fenced(id string) string { return "fenced:" + id }
 
 // sweep releases every container of this state whose effect already has a
 // record naming it, so a removal that failed is retried by the next Bind of
-// an effect without a record that creates or finds its container, even
-// though the finished effect is never reported again.
+// any effect even though the finished effect is never reported again.
 func (x *Executor) sweep(ctx context.Context) {
 	out, err := x.docker(ctx, "ps", "-a", "--no-trunc", "--filter", "label=canti.state="+x.cfg.State,
 		"--format", `{{.ID}} {{.Label "canti.effect"}}`)

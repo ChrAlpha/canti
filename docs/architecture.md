@@ -735,14 +735,13 @@ state directory, and each target a clean absolute path that overlaps neither
   published as `jobs/<effect ID>/output.json`, and only then
   is the container removed by its ID (`docker rm -v`), together with its
   Docker log; a failed removal is retried by the next report of the effect
-  and by every `Bind` in the state directory that creates or finds the
-  container of an effect without a record, before creating the container
-  or reporting the job. From then on the record is the authority: `Inspect`,
-  `Bind`, and `Start` report the recorded job, `Bind` still rejects a
-  changed spec, `Cancel` does nothing, and a record that does not decode
-  strictly is an error, never a missing job. Every report re-checks the
-  artifact, and a missing or resized file makes it unavailable with a
-  detail.
+  and by every `Bind` in the state directory except one that records or
+  reports a fenced job; `Start` and `Inspect` never retry other effects'
+  removals. From then on the record is the authority: `Inspect`, `Bind`,
+  and `Start` report the recorded job, `Bind` still rejects a changed spec,
+  `Cancel` does nothing, and a record that does not decode strictly is an
+  error, never a missing job. Every report re-checks the artifact, and a
+  missing or resized file makes it unavailable with a detail.
 
 Host disk therefore holds at most `OutputLimit` bytes of artifact per job,
 plus Docker's log and the writable container layer of each job that is still

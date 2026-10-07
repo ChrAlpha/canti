@@ -457,24 +457,26 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 	defer unlock()
 	run := x.runArgs(effect.Command)
 	rec, done, err := x.recorded(ctx, effect.ID)
-	o, spec := observation{}, rec.Spec
+	o, found := observation{}, false
 	if err == nil && !done {
-		var found bool
-		if o, found, err = x.observe(ctx, effect.ID); err == nil {
-			if !found && o.latch == latchCancel {
-				return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
-			}
-			x.sweep(ctx)
-			if !found {
-				if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
-					o, err = x.bound(ctx, effect.ID)
-				}
-			}
+		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found && o.latch == latchCancel {
+			return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
 		}
-		spec = o.c.Config.Labels["canti.spec"]
+	}
+	if rec.ID != fenced(effect.ID) {
+		x.sweep(ctx)
+	}
+	if err == nil && !done && !found {
+		if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
+			o, err = x.bound(ctx, effect.ID)
+		}
 	}
 	if err != nil {
 		return harness.Job{}, err
+	}
+	spec := rec.Spec
+	if !done {
+		spec = o.c.Config.Labels["canti.spec"]
 	}
 	if spec != specHash(run) {
 		return harness.Job{}, fmt.Errorf("docker: effect %s is bound to a different execution spec", effect.ID)
