@@ -13,27 +13,8 @@ import (
 )
 
 func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s spec, url string, once bool) (int, error) {
-	if session == "" || input == "" {
-		return exitUsage, errors.New("-session and -input are required together")
-	}
-	if !sqlite.ValidKey(session) || !sqlite.ValidKey(input) {
-		return exitUsage, errors.New("-session and -input must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
-	}
-	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
-		return exitError, err
-	}
-	fixed := constraints
-	if !explicitConstraints {
-		var err error
-		if fixed, err = inherited(ctx, a, session); err != nil {
-			return exitError, err
-		}
-	}
-	if _, _, err := newRun(goal, fixed, s, time.Now()); err != nil {
-		return exitUsage, err
-	}
-	if a.credErr != nil {
-		return exitError, a.credErr
+	if code, err := a.checkSession(ctx, session, input, goal, constraints, explicitConstraints, s); err != nil {
+		return code, err
 	}
 	m, err := newModel(s.config, url, a.cred)
 	if err != nil {
@@ -101,4 +82,29 @@ func (a *app) submitSession(ctx context.Context, session, input, goal, constrain
 	}
 	done()
 	return a.report(snap, nil, exitActive, s.config)
+}
+
+func (a *app) checkSession(ctx context.Context, session, input, goal, constraints string, explicit bool, s spec) (int, error) {
+	if session == "" || input == "" {
+		return exitUsage, errors.New("-session and -input are required together")
+	}
+	if !sqlite.ValidKey(session) || !sqlite.ValidKey(input) {
+		return exitUsage, errors.New("-session and -input must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
+	}
+	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
+		return exitError, err
+	}
+	if !explicit {
+		var err error
+		if constraints, err = inherited(ctx, a, session); err != nil {
+			return exitError, err
+		}
+	}
+	if _, _, err := newRun(goal, constraints, s, time.Now()); err != nil {
+		return exitUsage, err
+	}
+	if a.credErr != nil {
+		return exitError, a.credErr
+	}
+	return exitOK, nil
 }
