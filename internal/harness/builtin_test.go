@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -161,5 +162,41 @@ func TestRetrievalLostObservationAckKeepsPinnedReference(t *testing.T) {
 	last := string(f.model.sent[len(f.model.sent)-1])
 	if !strings.Contains(last, "original immutable evidence") || strings.Contains(last, replacement) || len(f.exec.calls) != 0 {
 		t.Fatalf("the frozen evidence was not shown, the replacement was, or the executor was called: %v", f.exec.calls)
+	}
+}
+
+func TestAJobBoundByTheExecutorStaysWithIt(t *testing.T) {
+	for _, payload := range []string{`canti:retrieve {}`, `canti:handover {}`} {
+		t.Run(payload, func(t *testing.T) {
+			f := newFixture(t, limits, harness.Budget{}, execReply(payload), returnReply("done"))
+			f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
+			ctx := context.Background()
+			snap := f.steps(f.loop(), 1)
+			for snap.State.Phase != core.PhaseEffectSaved {
+				snap = f.steps(f.loop(), 1)
+			}
+			job, err := f.exec.Bind(ctx, harness.Effect{ID: snap.State.EffectID, Command: payload})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := harness.NewRunner(f.store, f.exec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Commit(ctx, snap, core.JobBound{EffectID: snap.State.EffectID, JobID: job.ID}, harness.Facts{}); err != nil {
+				t.Fatal(err)
+			}
+			wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+			steps, err := f.store.Recent(ctx, runID, 0, 1)
+			if err != nil || len(steps) != 1 {
+				t.Fatalf("steps=%v err=%v", steps, err)
+			}
+			if obs := steps[0].Observation; obs.Retrieval != nil || obs.Preview != "ran: "+payload {
+				t.Fatalf("the bound job was not observed through its executor: %+v", obs)
+			}
+			if calls := f.exec.log(); !slices.Contains(calls, "start") || !slices.Contains(calls, "inspect") {
+				t.Fatalf("executor calls %v", calls)
+			}
+		})
 	}
 }
