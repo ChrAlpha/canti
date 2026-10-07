@@ -575,18 +575,19 @@ completeness, usage, and provenance, and an incomplete response keeps its
 failure text. A run's configuration is stored in its run record; the code
 revision is not. The configuration records the context version of the canti
 that created the run, which names the rules that render its prompts and
-account for their bytes: `TestContextVersionPinsItsRules` records them for
-each version, together with every request of the frozen-request corpus, so
-changing them needs a new version. A run of another context version, or of
-none, is decoded by the fields it stores and stays readable; `resolve` still
-records its unknown results and `stop` closes it, since neither renders a
-request. `resume` refuses it until it halts and then only reports it, either
-way before it builds the model or the executor and without a commit, so no
-canti continues a run under rules it was not created with. Once that run is
-closed, the state directory takes new runs, unless it ended with an outcome
-resolved as unknown, which keeps blocking them. A stored configuration the
-current one cannot decode makes every command refuse the run; use a fresh
-`-state`.
+account for their bytes. `TestContextVersionPinsItsRules` records, once per
+version, what those rules produce: every request and every transition, with
+its facts, of the frozen-request corpus, and every request of a few CLI runs.
+A change that alters any of them needs a new version; a rule that no recorded
+input reaches is not pinned. A run of another context version, or of none, is
+decoded by the fields it stores and stays readable; `resolve` still records
+its unknown results and `stop` closes it, since neither renders a request.
+`resume` refuses it until it halts and then only reports it, either way
+before it builds the model or the executor and without a commit, so no canti
+continues a run under rules it was not created with. Once that run is closed,
+the state directory takes new runs, unless it ended with an outcome resolved
+as unknown, which keeps blocking them. A stored configuration the current one
+cannot decode makes every command refuse the run; use a fresh `-state`.
 
 ## Execution
 
