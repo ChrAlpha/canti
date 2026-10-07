@@ -418,73 +418,119 @@ func (l *Loop) cancel(ctx context.Context, run Run, snap Snapshot) (Snapshot, er
 // not stopping it cancels a job past its timeout and stops a run past its
 // wall time.
 func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
-	s, limit := snap.State, run.Budget.JobTimeout
-	stopping := s.Phase == core.PhaseCancelling
-	timedOut, failures := false, 0
+	w := watcher{Loop: l, run: run, snap: snap, stopping: snap.State.Phase == core.PhaseCancelling}
 	for {
-		job, found, err := l.executor.Inspect(ctx, s.EffectID)
+		job, found, err := l.executor.Inspect(ctx, snap.State.EffectID)
 		if ctx.Err() != nil {
 			return snap, ctx.Err()
 		}
-		why := ""
-		switch {
-		case errors.Is(err, ErrJobLost):
-			why = err.Error()
-		case err != nil:
-			if !stopping {
-				if late := l.late(run); late != "" {
-					return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late + "; " + err.Error()})
-				}
-			}
-			if failures++; failures > l.cfg.InspectRetries {
-				why = fmt.Sprintf("inspect failed %d consecutive times: %v", failures, err)
-			} else {
-				l.note(ctx, slog.LevelWarn, "retrying a failed inspection", snap, "failures", failures, "error", err)
-			}
-		case !found:
-			why = fmt.Sprintf("no job owns effect %s", s.EffectID)
-		case job.ID != s.JobID:
-			why = fmt.Sprintf("effect %s is owned by job %q, not the recorded job %q", s.EffectID, job.ID, s.JobID)
-		case job.Status == JobSucceeded || job.Status == JobFailed:
-			if job.ExitCode != nil {
-				return l.observe(ctx, snap, job, core.ExecutionExited)
-			}
-			why = fmt.Sprintf("job %s %s without an exit code", job.ID, job.Status)
-		case job.Status == JobCancelled:
-			ran := limit > 0 && !job.StartedAt.IsZero() && !job.FinishedAt.IsZero() && job.FinishedAt.Sub(job.StartedAt) >= limit
-			if !stopping && (timedOut || ran) {
-				return l.observe(ctx, snap, job, core.ExecutionTimedOut)
-			}
-			return l.observe(ctx, snap, job, core.ExecutionCancelled)
-		case job.Status == JobFailedToStart:
-			return l.observe(ctx, snap, job, core.ExecutionFailedToStart)
-		case job.Status != JobRunning:
-			why = fmt.Sprintf("job %s reports %s", job.ID, job.Status)
-			if job.Output.Detail != "" {
-				why += ": " + job.Output.Detail
-			}
-		case !stopping:
-			failures = 0
-			if !timedOut && limit > 0 && !job.StartedAt.IsZero() && l.cfg.Now().Sub(job.StartedAt) >= limit {
-				l.note(ctx, slog.LevelInfo, "cancelling a job past its timeout", snap, "job_id", job.ID, "timeout", limit)
-				if err := l.executor.Cancel(ctx, s.EffectID); err != nil {
-					return snap, err
-				}
-				timedOut = true
-			}
-			if late := l.late(run); late != "" {
-				return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late})
-			}
-		default:
-			failures = 0
-		}
-		if why != "" {
-			return l.unknown(ctx, snap, why)
+		if next, done, err := w.inspected(ctx, job, found, err); done {
+			return next, err
 		}
 		if err := sleep(ctx, l.cfg.Poll); err != nil {
 			return snap, err
 		}
 	}
+}
+
+// watcher follows the job of one awaited or cancelling effect across
+// inspections: whether it was cancelled for its timeout and how many
+// inspections failed in a row.
+type watcher struct {
+	*Loop
+	run      Run
+	snap     Snapshot
+	stopping bool
+	timedOut bool
+	failures int
+}
+
+// inspected acts on one inspection of the job and reports whether the
+// watch ends, with the snapshot it committed.
+func (w *watcher) inspected(ctx context.Context, job Job, found bool, err error) (Snapshot, bool, error) {
+	s := w.snap.State
+	why := ""
+	switch {
+	case errors.Is(err, ErrJobLost):
+		why = err.Error()
+	case err != nil:
+		if !w.stopping {
+			if late := w.late(w.run); late != "" {
+				next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late + "; " + err.Error()})
+				return next, true, err
+			}
+		}
+		if w.failures++; w.failures > w.cfg.InspectRetries {
+			why = fmt.Sprintf("inspect failed %d consecutive times: %v", w.failures, err)
+		} else {
+			w.note(ctx, slog.LevelWarn, "retrying a failed inspection", w.snap, "failures", w.failures, "error", err)
+		}
+	case !found:
+		why = fmt.Sprintf("no job owns effect %s", s.EffectID)
+	case job.ID != s.JobID:
+		why = fmt.Sprintf("effect %s is owned by job %q, not the recorded job %q", s.EffectID, job.ID, s.JobID)
+	case job.Status == JobRunning:
+		return w.running(ctx, job)
+	default:
+		return w.finished(ctx, job)
+	}
+	if why != "" {
+		next, err := w.unknown(ctx, w.snap, why)
+		return next, true, err
+	}
+	return w.snap, false, nil
+}
+
+// running enforces the job timeout and the wall time on a running job.
+func (w *watcher) running(ctx context.Context, job Job) (Snapshot, bool, error) {
+	w.failures = 0
+	if w.stopping {
+		return w.snap, false, nil
+	}
+	if limit := w.run.Budget.JobTimeout; !w.timedOut && limit > 0 && !job.StartedAt.IsZero() && w.cfg.Now().Sub(job.StartedAt) >= limit {
+		w.note(ctx, slog.LevelInfo, "cancelling a job past its timeout", w.snap, "job_id", job.ID, "timeout", limit)
+		if err := w.executor.Cancel(ctx, w.snap.State.EffectID); err != nil {
+			return w.snap, true, err
+		}
+		w.timedOut = true
+	}
+	if late := w.late(w.run); late != "" {
+		next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late})
+		return next, true, err
+	}
+	return w.snap, false, nil
+}
+
+// finished observes a job that is no longer running, or records an
+// unknown outcome for a status it cannot interpret.
+func (w *watcher) finished(ctx context.Context, job Job) (Snapshot, bool, error) {
+	var next Snapshot
+	var err error
+	switch job.Status {
+	case JobSucceeded, JobFailed:
+		if job.ExitCode == nil {
+			next, err = w.unknown(ctx, w.snap, fmt.Sprintf("job %s %s without an exit code", job.ID, job.Status))
+			return next, true, err
+		}
+		next, err = w.observe(ctx, w.snap, job, core.ExecutionExited)
+	case JobCancelled:
+		limit := w.run.Budget.JobTimeout
+		ran := limit > 0 && !job.StartedAt.IsZero() && !job.FinishedAt.IsZero() && job.FinishedAt.Sub(job.StartedAt) >= limit
+		execution := core.ExecutionCancelled
+		if !w.stopping && (w.timedOut || ran) {
+			execution = core.ExecutionTimedOut
+		}
+		next, err = w.observe(ctx, w.snap, job, execution)
+	case JobFailedToStart:
+		next, err = w.observe(ctx, w.snap, job, core.ExecutionFailedToStart)
+	default:
+		why := fmt.Sprintf("job %s reports %s", job.ID, job.Status)
+		if job.Output.Detail != "" {
+			why += ": " + job.Output.Detail
+		}
+		next, err = w.unknown(ctx, w.snap, why)
+	}
+	return next, true, err
 }
 
 func (l *Loop) observe(ctx context.Context, snap Snapshot, job Job, execution core.ExecutionState) (Snapshot, error) {
