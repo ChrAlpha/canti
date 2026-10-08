@@ -581,6 +581,9 @@ The loop reserves space before the window reaches its prompt capacity and
 requests a bounded `canti:handover` action, whose payload is that name and
 one space, tab, or line break followed by the handover as plain text, kept
 verbatim; the harness, not the model, names the run and the window it closes.
+The request asks the handover to carry the objective, the restrictions the
+environment has stated and where, the next action, risks, and evidence
+references.
 A proposal fails for empty, invalid UTF-8, or oversized text, when no
 handover was requested, or when the window it opens would leave no work
 capacity; at a requested handover, any other exec is refused unrun and

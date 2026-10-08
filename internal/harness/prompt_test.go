@@ -281,6 +281,9 @@ func TestHandoverRequestAsksForPlainText(t *testing.T) {
 	f.HandoverBytes = 2048
 	p := mustPrompt(t, f, DefaultPromptLimits())
 	tail := p.Blocks[len(p.Blocks)-1]
+	if !strings.Contains(tail, "Include current objective, work location, unfinished obligations, restrictions the environment has stated and where, next action,") {
+		t.Errorf("handover request does not carry stated restrictions: %s", tail)
+	}
 	if !strings.Contains(tail, "payload is canti:handover, one space, and then the handover text of at most 2048 UTF-8 bytes") {
 		t.Fatalf("handover request does not ask for plain text: %s", tail)
 	}

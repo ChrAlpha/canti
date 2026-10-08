@@ -199,13 +199,13 @@ func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
 	// Captured from the provider adapter at 956232c before context diagnostics,
 	// then with the decision purpose system text, the description of the
 	// current window, the purpose record of each step, the plain-text
-	// handover request, and the system text on what binds the agent, which
-	// are the only changes: restoring the earlier texts reproduces the
-	// 956232c bodies.
+	// handover request, the system text on what binds the agent, and the
+	// stated restrictions a handover carries, which are the only changes:
+	// restoring the earlier texts reproduces the 956232c bodies.
 	want := []string{
 		"c49d1929406b578f3cf6803ea27f24c48dd14cd8f223e0614b3ada2e685ed3c7",
-		"af6c5139fc15dfce48c00adf6ea6c12500bcfe059c992088bc4c3f4ce6b70763",
-		"6ba38fbf32ad3f9e5a3b5bb1665614fb5c6f7646a037ba1483da7bbcad70afd9",
+		"14cfc414fd722291325d0a357e571b796919ede201b429cd1b02ff307aef5f8f",
+		"e1f2701172d65062110a754484652a063a2e2458356cfa55f75035bb08ae10eb",
 		"18df8cd021c54f4ea7d338e2f5e0393ef1c08e20f272a213ff6b49fc197f529a",
 	}
 	if len(f.model.prompts) != len(want) {
