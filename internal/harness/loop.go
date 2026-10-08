@@ -105,10 +105,7 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	}
 	if cfg.Reader != nil {
 		r := *cfg.Reader
-		r.Excluded = []string{RetrievePrefix, DiscoveryMarker}
-		for _, b := range HandoverSpace {
-			r.Excluded = append(r.Excluded, handoverName+string(b))
-		}
+		r.Excluded = []string{RetrievePrefix, handoverName, DiscoveryMarker}
 		cfg.Reader = &r
 	}
 	return cfg, nil

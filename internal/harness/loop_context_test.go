@@ -151,6 +151,50 @@ func TestDiscoverySkipsAHandoverAfterAnyWhitespace(t *testing.T) {
 	}
 }
 
+func TestDiscoverySkipsABareHandoverName(t *testing.T) {
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
+		execReply("echo canti:handover"), execReply("canti:handover"), execReply("canti:handover Continue."),
+		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"canti:handover","reason":"find the step"}`),
+		returnReply("done"))
+	f.cfg.WindowSteps = 1
+	artifacts := t.TempDir()
+	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
+	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
+	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
+		t.Fatalf("run=%+v err=%v", s.State, err)
+	}
+	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
+	if err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
+		t.Fatalf("steps=%+v err=%v", steps, err)
+	}
+	var found []string
+	for _, source := range steps[0].Observation.Retrieval.Sources {
+		found = append(found, source.Path)
+	}
+	if !slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000001/") }) ||
+		slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") || strings.Contains(p, "/00000003/") }) {
+		t.Fatalf("discovery found %v; want step 1 and neither handover step", found)
+	}
+}
+
+// finishWithArtifact finishes a started job at its first inspection and
+// writes its output where the archive reads artifacts.
+func finishWithArtifact(x *fakeExec, artifacts string) func(string) (harness.Job, bool, error) {
+	return func(effectID string) (harness.Job, bool, error) {
+		j := x.jobs[effectID]
+		if j == nil {
+			return harness.Job{}, false, nil
+		}
+		if j.Status == harness.JobRunning {
+			x.finish(j, harness.JobSucceeded)
+			if err := os.WriteFile(filepath.Join(artifacts, j.Output.Path), []byte(j.Preview), 0o600); err != nil {
+				return harness.Job{}, false, err
+			}
+		}
+		return j.Job, true, nil
+	}
+}
+
 func discoverPastHandover(t *testing.T, separator string) {
 	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
 		execReply("echo needle"), execReply("canti:handover"+separator+"Find the needle again."),
@@ -159,19 +203,7 @@ func discoverPastHandover(t *testing.T, separator string) {
 	f.cfg.WindowSteps = 1
 	artifacts := t.TempDir()
 	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
-	f.exec.inspect = func(effectID string) (harness.Job, bool, error) {
-		j := f.exec.jobs[effectID]
-		if j == nil {
-			return harness.Job{}, false, nil
-		}
-		if j.Status == harness.JobRunning {
-			f.exec.finish(j, harness.JobSucceeded)
-			if err := os.WriteFile(filepath.Join(artifacts, j.Output.Path), []byte(j.Preview), 0o600); err != nil {
-				return harness.Job{}, false, err
-			}
-		}
-		return j.Job, true, nil
-	}
+	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
 	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
 		t.Fatalf("run=%+v err=%v", s.State, err)
 	}

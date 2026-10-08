@@ -576,8 +576,8 @@ verbatim; the harness, not the model, names the run and the window it closes.
 A proposal fails for empty, invalid UTF-8, or oversized text, when no
 handover was requested, or when the window it opens would leave no work
 capacity; at a requested handover, any other exec is refused unrun and
-counts as a failed proposal, and discovery skips handover steps in any of
-these forms.
+counts as a failed proposal, and discovery skips every step whose command
+begins with that name.
 Optional step and byte thresholds
 can request this sooner; both zero still enables the capacity trigger. A
 valid proposal becomes the next window's handover and lower history bound
