@@ -198,14 +198,15 @@ func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
 	}
 	// Captured from the provider adapter at 956232c before context diagnostics,
 	// then with the decision purpose system text, the description of the
-	// current window, the purpose record of each step, and the plain-text
-	// handover request, which are the only changes: restoring the earlier
-	// texts reproduces the 956232c bodies.
+	// current window, the purpose record of each step, the plain-text
+	// handover request, and the system text on what binds the agent, which
+	// are the only changes: restoring the earlier texts reproduces the
+	// 956232c bodies.
 	want := []string{
-		"1316ac77d4efbcafc075051563f3d101613b0a35fa1c083f915b18c0c9b188b5",
-		"9d5fe8c2a72949522abd332530d0aed37f786af45fbf3216fd394e72d924820d",
-		"bc3cfc8cea9f618847f06e6756fb8c04eec6c1f7e1a96d980d342f49bbad3968",
-		"11aa869d5e905cf2844b4a287f3c7220db8eab4b70a37e5c7addba9c53881cd0",
+		"c49d1929406b578f3cf6803ea27f24c48dd14cd8f223e0614b3ada2e685ed3c7",
+		"af6c5139fc15dfce48c00adf6ea6c12500bcfe059c992088bc4c3f4ce6b70763",
+		"6ba38fbf32ad3f9e5a3b5bb1665614fb5c6f7646a037ba1483da7bbcad70afd9",
+		"18df8cd021c54f4ea7d338e2f5e0393ef1c08e20f272a213ff6b49fc197f529a",
 	}
 	if len(f.model.prompts) != len(want) {
 		t.Fatalf("prompts = %d", len(f.model.prompts))

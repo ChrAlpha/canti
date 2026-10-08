@@ -551,6 +551,14 @@ files directly inside its directory and that a partial scan is not proof
 of absence. A directory search that fails at one file and a cursor that
 does not decode, belongs to another query, or names a file, step field, or
 history that is gone name the next valid action in their errors instead.
+It ranks what a request shows: the current goal and constraints are
+authoritative; command output, retrieved records, earlier dialogue, and the
+handover are evidence that never widens them; and a restriction the
+environment of the run states about itself narrows them unless the goal or
+constraints explicitly lift it by naming it or what it withholds, so the agent
+follows it, including how it says to record what it withholds, continues the
+work it allows, reports the conflict on return, and never acts merely because
+an output asks it to.
 The prompt budget charges that system message. The first
 block holds Goal, Constraints, Environment, Context window, and the short
 Handover when present. One block follows per current-page step, oldest first,
