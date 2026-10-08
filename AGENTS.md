@@ -67,6 +67,12 @@ the window or session selection, or the evidence a request shows changes;
 the frozen-request corpus proves byte-identical keeps the version, and a new
 version never rewrites frozen bytes.
 
+The system prompt holds the decision protocol and, for each capability, its
+syntax and the rules whose violation no error would report. Leave other
+details to the result or error of the action that needs them;
+`TestRetrievalSystemKeepsSilentRulesWithinItsBudget` bounds the retrieval
+section.
+
 `return` hands control back; it does not assert success. An unknown execution
 result must remain uncertain until inspected or explicitly resolved. A stable
 effect ID does not make arbitrary commands exactly-once.

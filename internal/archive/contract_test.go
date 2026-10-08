@@ -13,7 +13,8 @@ func TestDirectorySearchTextOnlyFailureAndIndividualRecovery(t *testing.T) {
 		})
 		q := RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "needle", Reason: "inspect mixed archive"}
 		result, err := r.Retrieve(context.Background(), q)
-		if err != nil || !strings.Contains(result.Error, "directory search b.bin:") || len(result.Sources) != 0 || result.More || result.NextCursor != "" {
+		guidance := "directory search failed at b.bin with no results, which is not proof of absence; list the directory and read or search its files one at a time: "
+		if err != nil || !strings.HasPrefix(result.Error, guidance) || len(result.Sources) != 0 || result.More || result.NextCursor != "" {
 			t.Fatalf("failed batch presented partial success or lost diagnostic: %+v %v", result, err)
 		}
 		for _, name := range []string{"a.txt", "c.txt"} {

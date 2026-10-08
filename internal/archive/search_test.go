@@ -137,6 +137,16 @@ func TestRetrievalDirectorySearchCursorValidation(t *testing.T) {
 	}
 	for _, mutate := range []func(*RetrievalQuery){
 		func(q *RetrievalQuery) { q.Query = "different" },
+		func(q *RetrievalQuery) { q.Cursor = "not base64" },
+	} {
+		stale := q
+		mutate(&stale)
+		if result, err := r.Retrieve(context.Background(), stale); err != nil || !strings.HasSuffix(result.Error, "; start a new search without cursor") {
+			t.Fatalf("an unusable cursor does not say how to restart: %+v %v", result, err)
+		}
+	}
+	for _, mutate := range []func(*RetrievalQuery){
+		func(q *RetrievalQuery) { q.Query = "different" },
 		func(q *RetrievalQuery) { q.Operation = "read" },
 		func(q *RetrievalQuery) { q.Path += "/a" },
 		func(q *RetrievalQuery) { q.Offset = 1 },
@@ -166,7 +176,7 @@ func TestRetrievalDirectorySearchCursorValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := r.Retrieve(context.Background(), q)
-	if err != nil || !strings.Contains(result.Error, "no longer available") {
+	if err != nil || !strings.HasSuffix(result.Error, "no longer available; start a new search without cursor") {
 		t.Fatalf("removed cursor source accepted: %+v %v", result, err)
 	}
 }

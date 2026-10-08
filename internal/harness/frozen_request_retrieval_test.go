@@ -17,7 +17,7 @@ func retrievalScenarios() []frozenScenario {
 	step1 := corpusSteps + "/00000001"
 	// {"binding":"<sha256 of [path,query]>","file":"<meta in base64url>","offset":0}
 	metaCursor := "eyJiaW5kaW5nIjoiMGVlOGI4M2E3YWYzMTgyMDdkODNhNDA0MTI2ZGRkMjNlODM4MDgyY2FkYzk4NmU1YThlOTJjN2I5YTlkMjhiOCIsImZpbGUiOiJiV1YwWVEiLCJvZmZzZXQiOjB9"
-	one, two := `printf 'beta one\n'`, `printf 'beta two\n'`
+	one, two, needle := `printf 'beta one\n'`, `printf 'beta two\n'`, `printf 'the needle is in the shell\n'`
 	// {"binding":"<sha256 of ["discover",path,query,false]>","through":2,"step":1,"field":0,"offset":0}
 	stepCursor := "eyJiaW5kaW5nIjoiZjU1YzNhZjA2ZGRiNTA4Y2EyYmRhM2NmYzI1MThjNDhkMmQ3ZmVlN2JhNjRjNGExN2FjNzZjN2I3YjZkODhmMiIsInRocm91Z2giOjIsInN0ZXAiOjEsImZpZWxkIjowLCJvZmZzZXQiOjB9"
 	earlier, current := "/canti/runs/"+corpusRun, "/canti/runs/"+corpusNextRun
@@ -120,6 +120,34 @@ func retrievalScenarios() []frozenScenario {
 				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then check go.mod for the module name.\n"},
 				"run1-step04-rev1.json": {"This window begins at step 3.", "Source " + step1 + "/purpose:\n",
 					"List the workspace,\nthen check go.mod for the module name.\n"},
+			},
+		},
+		{
+			// The errors that replace the details of the system prompt
+			// reach the next request, and the recovery each names works.
+			name: "retrieval-failure-guidance", limits: stepLimits, outputs: map[string]string{needle: "the needle is in the shell\n"},
+			imports: map[string]string{"mixed/a.txt": "no match here\n", "mixed/b.bin": "needle\x00binary\n", "mixed/c.txt": "the needle is in c\n",
+				"clean/d.txt": "the needle is in d\n"},
+			runs: []frozenRun{{id: corpusRun, goal: "Find every record that mentions the needle.", replies: []string{
+				corpusDecision(core.Exec, needle),
+				corpusRetrieve("search", "/canti/imports/mixed", `,"query":"needle"`, "Find the needle."),
+				corpusRetrieve("list", "/canti/imports/mixed", "", "List the files to search one at a time."),
+				corpusRetrieve("search", "/canti/imports/mixed/c.txt", `,"query":"needle"`, "Search c.txt alone."),
+				corpusRetrieve("search", "/canti/imports/clean", `,"query":"needle","cursor":"`+metaCursor+`"`, "Continue with a cursor of another search."),
+				corpusRetrieve("search", "/canti/imports/clean", `,"query":"needle"`, "Start the search again."),
+				corpusRetrieve("discover", corpusSteps, `,"query":"needle","cursor":"`+stepCursor+`"`, "Continue with a cursor of another discovery."),
+				corpusRetrieve("discover", corpusSteps, `,"query":"needle"`, "Start the discovery again."),
+				corpusDecision(core.Return, "c.txt, d.txt, and step 1 mention the needle."),
+			}, steps: []string{"1 exited 0 output complete", "2 exited 1 retrieval error", "3 exited 0 retrieval 0 sources 3 entries",
+				"4 exited 0 retrieval 1 sources 0 entries", "5 exited 1 retrieval error", "6 exited 0 retrieval 1 sources 0 entries",
+				"7 exited 1 retrieval error", "8 exited 0 retrieval 3 sources 0 entries"}}},
+			marks: map[string][]string{
+				"run1-step03-rev1.json": {`"error":"directory search failed at b.bin with no results, which is not proof of absence; list the directory and read or search its files one at a time: source contains NUL; only UTF-8 text is supported"`},
+				"run1-step05-rev1.json": {"Source /canti/imports/mixed/c.txt:\n"},
+				"run1-step06-rev1.json": {`"error":"invalid directory cursor or changed path/query; start a new search without cursor"`},
+				"run1-step07-rev1.json": {"Source /canti/imports/clean/d.txt:\n"},
+				"run1-step08-rev1.json": {`"error":"invalid discovery cursor or changed path/query/history; start a new discover without cursor"`},
+				"run1-step09-rev1.json": {"Source " + step1 + "/command:\n"},
 			},
 		},
 	}

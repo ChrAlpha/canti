@@ -128,20 +128,21 @@ limits; three gates are partial.
 Live provider evidence is three manual samples with the earlier adapter
 `canti-anthropic/1`; a live evaluation in 50 runs, 44 of them with
 `canti-anthropic/2`, whose decisions passed a proxy that enforces the decision
-schema; and a feedback-round evaluation in nine sessions with
-`canti-anthropic/3-tool` and no proxy. Each used one model through an Anthropic
-Messages-compatible gateway; the last one reported cache reads for most input
-tokens, not checked against its billing. SIGKILL tests do not establish
-durability across power loss or OS crashes. Docker daemon restarts are not
-tested. Of two host reboots met live, a job killed by one was recorded with
-Docker's exit code 255; canti now reports a job killed before its shell records
-an exit status unknown rather than exited, tested with `docker kill`, while a
-signal the job observes, as from a graceful daemon shutdown, is reported as its
-exit status. The container of an unknown job is kept for `docker logs
-canti-<effect ID>` and must be removed by hand. Several hosts are out of scope.
-Cost is not measured. Only retained job output is bounded on disk, per job and
-per run; workspace writes, the journal, and a running job's Docker log and
-container layer are not, and there is no filesystem quota.
+schema; a feedback-round evaluation in nine sessions with
+`canti-anthropic/3-tool` and no proxy; and a comparison of the retrieval system
+prompts of context versions 7 and 8 in twelve runs. Each used one model through
+an Anthropic Messages-compatible gateway; the last two reported cache reads for
+most input tokens, not checked against their billing. SIGKILL tests do not
+establish durability across power loss or OS crashes. Docker daemon restarts
+are not tested. Of two host reboots met live, a job killed by one was recorded
+with Docker's exit code 255; canti now reports a job killed before its shell
+records an exit status unknown rather than exited, tested with `docker kill`,
+while a signal the job observes, as from a graceful daemon shutdown, is
+reported as its exit status. The container of an unknown job is kept for
+`docker logs canti-<effect ID>` and must be removed by hand. Several hosts are
+out of scope. Cost is not measured. Only retained job output is bounded on
+disk, per job and per run; workspace writes, the journal, and a running job's
+Docker log and container layer are not, and there is no filesystem quota.
 
 Distributed scheduling, multi-tenant policy, generic workflow graphs,
 automatic planning, and automatic memory compaction are outside this scope.

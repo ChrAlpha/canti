@@ -221,7 +221,7 @@ func TestSessionContextStoppedStatusFitsWithNewerDialogue(t *testing.T) {
 	regime := func(n int) int {
 		answer := strings.Repeat("N", n)
 		l.journal = &sessionFixture{
-			runs: []Run{{ID: "r3", Goal: "newer", SessionID: "s", SessionSeq: 3}, {ID: "r2", Goal: strings.Repeat("G", 30000), SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
+			runs: []Run{{ID: "r3", Goal: "newer", SessionID: "s", SessionSeq: 3}, {ID: "r2", Goal: strings.Repeat("G", l.cfg.Limits.Goal), SessionID: "s", SessionSeq: 2}, {ID: "r1", Goal: "older", SessionID: "s", SessionSeq: 1}},
 			states: map[string]core.State{
 				"r3": returned(answer),
 				"r2": {Phase: core.PhaseStopped, Reason: core.StopCancelled},

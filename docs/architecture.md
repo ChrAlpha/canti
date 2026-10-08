@@ -544,7 +544,14 @@ overtaken by later steps of that run.
 `Frame.Prompt` renders a system message and user content blocks. The system
 message states the decision protocol of the run's transport: one JSON object
 as the reply text, or exactly one `canti_decision` tool call, set by
-`-decision-format`. The prompt budget charges that system message. The first
+`-decision-format`. With retrieval enabled it also states the retrieval
+action: its syntax, operations, continuation, and rules whose violation no
+error would report, such as that a directory search reads only the regular
+files directly inside its directory and that a partial scan is not proof
+of absence. A directory search that fails at one file and a cursor that
+does not decode, belongs to another query, or names a file, step field, or
+history that is gone name the next valid action in their errors instead.
+The prompt budget charges that system message. The first
 block holds Goal, Constraints, Environment, Context window, and the short
 Handover when present. One block follows per current-page step, oldest first,
 starting with the committed decision's purpose on one line when it has one;

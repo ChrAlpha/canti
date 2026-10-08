@@ -104,7 +104,7 @@ func discoveryStart(q RetrievalQuery, through int) (discoveryCursor, error) {
 		return discoveryCursor{Binding: digest(bound), Through: through, Step: through}, nil
 	}
 	var cursor discoveryCursor
-	invalid := errors.New("invalid discovery cursor or changed path/query/history")
+	invalid := errors.New("invalid discovery cursor or changed path/query/history; start a new discover without cursor")
 	if decodeCursor(q.Cursor, &cursor) != nil || cursor.Binding != digest(bound) ||
 		cursor.Through < 1 || cursor.Through > through || cursor.Step < 1 || cursor.Step > cursor.Through || cursor.Field < 0 || cursor.Field > 2 || cursor.Offset < 0 ||
 		cursor.SkippedCount < 0 || cursor.SkippedCount > 3*(cursor.Through-cursor.Step)+cursor.Field ||
@@ -158,7 +158,7 @@ func (d *discovery) step(ctx context.Context) (bool, error) {
 	d.remaining -= len(meta)
 	d.result.Incomplete = d.result.Incomplete || incomplete
 	if d.cursor.Field >= len(files) {
-		return false, errors.New("discovery cursor field is no longer available")
+		return false, errors.New("discovery cursor field is no longer available; start a new discover without cursor")
 	}
 	source := sourceRange(stepPath+"/"+MetaFile, 0, meta)
 	encoded, _ := json.Marshal(source)

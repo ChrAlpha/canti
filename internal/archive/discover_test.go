@@ -157,6 +157,11 @@ func TestDiscoveryFrozenCursorAndBudgets(t *testing.T) {
 			t.Fatalf("exceeded source or reference bounds: %d %d %+v", bytes, len(refs), result)
 		}
 	}
+	stale := q
+	stale.Query = "changed"
+	if got, err := r.Retrieve(t.Context(), stale); err != nil || !strings.HasSuffix(got.Error, "; start a new discover without cursor") {
+		t.Fatalf("a cursor of another query does not say how to restart: %+v %v", got, err)
+	}
 	for _, mutate := range []func(*RetrievalQuery){
 		func(q *RetrievalQuery) { q.Query = "changed" },
 		func(q *RetrievalQuery) { q.IgnoreCase = true },
@@ -392,6 +397,16 @@ func TestDiscoveryRejectsMalformedCursorAndMissingSteps(t *testing.T) {
 		if err != nil || got.Error == "" || got.More {
 			t.Fatalf("malformed cursor accepted: %s %+v %v", key, got, err)
 		}
+	}
+	gone := make(map[string]any)
+	for k, v := range original {
+		gone[k] = v
+	}
+	gone["step"], gone["field"], gone["offset"] = 1, 2, 0
+	encoded, _ := json.Marshal(gone)
+	q.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+	if got, err := r.Retrieve(t.Context(), q); err != nil || !strings.HasSuffix(got.Error, "discovery cursor field is no longer available; start a new discover without cursor") {
+		t.Fatalf("a cursor past the fields of its step does not say how to restart: %+v %v", got, err)
 	}
 	for label, mutate := range map[string]func(map[string]any){
 		"false_incomplete": func(c map[string]any) {

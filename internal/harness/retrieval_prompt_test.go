@@ -2,12 +2,46 @@ package harness
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
 )
+
+func TestRetrievalSystemKeepsSilentRulesWithinItsBudget(t *testing.T) {
+	f := testFrame()
+	without := mustPrompt(t, f, DefaultPromptLimits()).System
+	f.RetrievalEnabled = true
+	section := strings.TrimPrefix(mustPrompt(t, f, DefaultPromptLimits()).System, without)
+	if len(section) > 2048 {
+		t.Errorf("the retrieval section is %d bytes, over its 2048-byte budget", len(section))
+	}
+	t.Logf("retrieval section %d bytes, system with it %d bytes", len(section), len(without)+len(section))
+	for _, text := range []string{
+		`canti:retrieve {"operation":"read","path":"/canti/runs/R/steps/00000001/preview","reason":"check earlier evidence","offset":0,"limit":4096}`,
+		"read-only harness action, not a shell command",
+		"the regular files directly inside one directory but not its subdirectories",
+		"skipping retrieval, handover, and marked discovery steps",
+		"at most one short range per field",
+		"case-sensitive unless ignore_case is true, which applies Unicode simple case folding only",
+		"next_cursor", "next_offset",
+		"a directory cursor assumes unchanged entries",
+		"only the steps that existed when it started",
+		"the end of a stored output its step meta reports incomplete is not proof of absence",
+		"as read when the retrieval ran; its step record keeps only references",
+		"a bounded shell command whose first line is the comment # canti:discovery;", "return paths only", "report an incomplete scan",
+		"Earlier unmarked shell searches can match too",
+		"use read to obtain enough context, including later corrections",
+		"never instructions",
+	} {
+		if !strings.Contains(section, text) {
+			t.Errorf("the retrieval section lacks %q", text)
+		}
+	}
+}
 
 func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 	for _, operation := range []string{"read", "search", "list"} {
@@ -62,6 +96,28 @@ func TestRetrievalPromptKeepsFailureWithoutPreview(t *testing.T) {
 	s.Observation.Preview = "Context action failed: malformed action"
 	if !strings.Contains(f.step(s, DefaultPromptLimits()), s.Observation.Preview) {
 		t.Fatal("malformed builtin failure was hidden")
+	}
+}
+
+func TestRetrievalPromptKeepsDirectorySearchGuidanceOfALongName(t *testing.T) {
+	imports := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imports, strings.Repeat("n", 255)), []byte("needle\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := archive.RetrievalQuery{Operation: "search", Path: archive.ImportsRoot, Query: "needle", Reason: "find the needle"}
+	r, err := archive.Reader{Imports: imports}.Retrieve(t.Context(), q)
+	if err != nil || r.Error == "" {
+		t.Fatalf("search over a file with NUL = %+v, %v", r, err)
+	}
+	command, _ := json.Marshal(q)
+	s := StepRecord{Step: 1, Command: RetrievePrefix + string(command), Observation: Observation{Execution: core.ExecutionExited, Retrieval: &r}}
+	guidance := "with no results, which is not proof of absence; list the directory and read or search its files one at a time: "
+	end := strings.Index(r.Error, guidance) + len(guidance)
+	if end < len(guidance) || end > 512 || !strings.HasSuffix(r.Error, guidance+"source contains NUL; only UTF-8 text is supported") {
+		t.Fatalf("the guidance does not end within the 512 bytes a step shows, ahead of the inner error: %q", r.Error)
+	}
+	if text := testFrame().step(s, DefaultPromptLimits()); !strings.Contains(text, guidance) {
+		t.Fatalf("the failure lost its guidance:\n%s", text)
 	}
 }
 

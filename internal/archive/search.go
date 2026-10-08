@@ -37,7 +37,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 	if q.Cursor != "" {
 		index = sort.SearchStrings(names, cursor.File)
 		if index == len(names) || names[index] != cursor.File {
-			return errors.New("directory cursor file is no longer available")
+			return errors.New("directory cursor file is no longer available; start a new search without cursor")
 		}
 	}
 	remaining, references := scanBytes, MaxBytes-2
@@ -58,7 +58,7 @@ func (r Reader) searchDirectory(ctx context.Context, dir *os.File, limit int, re
 		var read int
 		limit, references, read, err = r.searchDirectoryFile(ctx, remaining, limit, MaxSources-len(result.Sources), references, &part)
 		if err != nil {
-			return fmt.Errorf("directory search %s: %w", cursor.File, err)
+			return fmt.Errorf("directory search failed at %s with no results, which is not proof of absence; list the directory and read or search its files one at a time: %w", cursor.File, err)
 		}
 		remaining -= read
 		result.Sources = append(result.Sources, part.Sources...)
@@ -140,7 +140,7 @@ func decodeDirectoryCursor(q RetrievalQuery) (directoryCursor, error) {
 	var cursor directoryCursor
 	err := decodeCursor(q.Cursor, &cursor)
 	if errors.Is(err, errCursorEncoding) {
-		return directoryCursor{}, errors.New("invalid directory cursor encoding")
+		return directoryCursor{}, errors.New("invalid directory cursor encoding; start a new search without cursor")
 	}
 	filename, fileErr := base64.RawURLEncoding.DecodeString(cursor.File)
 	cursor.File = string(filename)
@@ -148,7 +148,7 @@ func decodeDirectoryCursor(q RetrievalQuery) (directoryCursor, error) {
 		cursor.Offset < 0 || cursor.File == "" || cursor.File == "." || cursor.File == ".." ||
 		strings.ContainsRune(cursor.File, '/') || len(cursor.File) > 255 ||
 		!utf8.ValidString(cursor.File) || forbiddenRetrievalName(cursor.File) {
-		return directoryCursor{}, errors.New("invalid directory cursor or changed path/query")
+		return directoryCursor{}, errors.New("invalid directory cursor or changed path/query; start a new search without cursor")
 	}
 	return cursor, nil
 }
