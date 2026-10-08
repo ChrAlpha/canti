@@ -69,7 +69,7 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 func contextRules(t *testing.T) string {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "context version %d\nactions %q %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.DefaultPromptLimits())
+	fmt.Fprintf(&b, "context version %d\nactions %q %q, or its name and one of %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.HandoverSpace, harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
@@ -303,7 +303,7 @@ func sessionRules(t *testing.T) string {
 			t.Fatalf("earlier session run %d: %+v", 10+i, r)
 		}
 		decision(1, 10+i, `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"Look around."}`)
-		decision(2, 1+i, `canti:handover {"run_id":"`+f.status().Run.ID+`","first_step":1,"text":"Listed the runs."}`)
+		decision(2, 1+i, harness.HandoverPrefix+"Listed the runs.")
 		if r := f.cli(nil, "resume"); r.code != ending.want {
 			t.Fatalf("earlier session run %d: %+v", 10+i, r)
 		}
@@ -356,9 +356,9 @@ func everyBlock(run harness.Run) harness.Frame {
 		{Step: 4, Command: harness.RetrievePrefix + `{"operation":"read"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Preview: "{}", Retrieval: &read}},
 		{Step: 5, Command: harness.RetrievePrefix + `{"operation":"list"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &list}},
 		{Step: 6, Command: "sleep 1", Resolved: true, Observation: harness.Observation{Execution: core.ExecutionTimedOut, Output: harness.ArtifactRef{Detail: "resolved by operator"}}},
-		{Step: 7, Command: harness.HandoverPrefix + `{}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "Context action failed: x"}},
+		{Step: 7, Command: harness.HandoverPrefix, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "Context action failed: x"}},
 		{Step: 8, Command: harness.RetrievePrefix + `{"operation":"discover"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &discover}},
-		{Step: 9, Command: harness.HandoverPrefix + `{"run_id":"r","first_step":3,"text":"Go on."}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit,
+		{Step: 9, Command: harness.HandoverPrefix + "Go on.", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit,
 			Preview: "Handover recorded; the next request starts a new context window.", Handover: &harness.Handover{RunID: "r", FirstStep: 3, Text: "Go on."}}},
 	}
 	return harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 10, MaxSteps: 0, Attempt: 2, MaxAttempts: 3,

@@ -79,9 +79,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			act("printf 'checkpoint\\n'")
 			observe()
 		}
-		h, _ := json.Marshal(harness.Handover{RunID: run, FirstStep: first,
-			Text: "Continue deployment. Check original release decisions and any amendments before applying settings."})
-		act("canti:handover " + string(h))
+		act(harness.HandoverPrefix + "Continue deployment. Check original release decisions and any amendments before applying settings.")
 		if observe().Handover == nil {
 			t.Fatal("handover was not committed")
 		}

@@ -40,8 +40,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				case step == 23:
 					d = core.Decision{Kind: core.Return, Payload: "done"}
 				case step%4 == 0:
-					h, _ := json.Marshal(harness.Handover{RunID: runID, FirstStep: step - 3, Text: "Verify proof contains once and write result at step 22."})
-					d.Payload = "canti:handover " + string(h)
+					d.Payload = harness.HandoverPrefix + "Verify proof contains once and write result at step 22."
 				}
 				body, _ := json.Marshal(d)
 				f.model.answer(step, 1, reply{text: string(body)})

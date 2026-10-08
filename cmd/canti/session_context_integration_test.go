@@ -39,8 +39,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	}
 	decision(1, 2, core.Decision{Kind: core.Exec, Payload: "printf async > mode.txt"})
 	handover := func(step, first int) {
-		h, _ := json.Marshal(harness.Handover{RunID: runID, FirstStep: first, Text: "Current correction is sync. Verify the workspace and finish the request."})
-		decision(step, 1, core.Decision{Kind: core.Exec, Payload: "canti:handover " + string(h)})
+		decision(step, 1, core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Current correction is sync. Verify the workspace and finish the request."})
 	}
 	handover(2, 1)
 	f.model.answer(3, 1, reply{status: 503, body: "temporary transport failure"})

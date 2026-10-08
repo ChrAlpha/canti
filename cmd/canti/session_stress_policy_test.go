@@ -66,8 +66,7 @@ func sessionStressDecision(_ int, prompt string) (core.Decision, error) {
 	}
 	if strings.Contains(prompt, "## Handover required\n") {
 		state, _ := json.Marshal(s)
-		h, _ := json.Marshal(harness.Handover{RunID: runID, FirstStep: first, Text: "SESSION_STRESS_STATE=" + string(state)})
-		return core.Decision{Kind: core.Exec, Payload: "canti:handover " + string(h)}, nil
+		return core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "SESSION_STRESS_STATE=" + string(state)}, nil
 	}
 	read := func(path string) (core.Decision, error) {
 		q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: path, Reason: "verify original session evidence", Limit: 8192})

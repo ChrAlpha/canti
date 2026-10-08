@@ -570,12 +570,21 @@ backtick runs. An oversized page fails visibly rather than dropping older
 steps.
 
 The loop reserves space before the window reaches its prompt capacity and
-requests a bounded `canti:handover` action. Optional step and byte thresholds
+requests a bounded `canti:handover` action, whose payload is that name and
+one space, tab, or line break followed by the handover as plain text, kept
+verbatim; the harness, not the model, names the run and the window it closes.
+A proposal fails for empty, invalid UTF-8, or oversized text, when no
+handover was requested, or when the window it opens would leave no work
+capacity; at a requested handover, any other exec is refused unrun and
+counts as a failed proposal, and discovery skips handover steps in any of
+these forms.
+Optional step and byte thresholds
 can request this sooner; both zero still enables the capacity trigger. A
 valid proposal becomes the next window's handover and lower history bound
 when the next request is frozen. These window facts are committed with the
 request bytes, so recovery reuses the same boundary and actual handover.
-Invalid proposals keep the current page; repeated failure stops the run.
+Invalid proposals keep the current page, and the retry request says that its
+step is the last chance to hand over; a second failure stops the run.
 Run identity, effect identity, step numbering, and execution recovery do not
 change when a window advances. `return` still ends the run.
 

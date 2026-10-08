@@ -20,9 +20,7 @@ const corpusThirdRun = "run_5d2a8e6f1c9b4a07e3f8b2d6c1a9e4f0"
 // Each checks that it still sits on its threshold.
 func boundaryScenarios() []frozenScenario {
 	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	handover := func(firstStep int, text string) string {
-		return corpusDecision(core.Exec, fmt.Sprintf(`canti:handover {"run_id":"%s","first_step":%d,"text":"%s"}`, corpusRun, firstStep, text))
-	}
+	handover := func(text string) string { return corpusDecision(core.Exec, harness.HandoverPrefix+text) }
 	note := "Build failed to start; check the toolchain next."
 	imported := strings.Repeat("a", 250) + "/" + strings.Repeat("b", 250) + "/" + strings.Repeat("c", 250) + "/" + strings.Repeat("d", 250) + ".md"
 	return slices.Concat(handoverThresholds(), sessionBoundaries(), []frozenScenario{
@@ -33,8 +31,8 @@ func boundaryScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Build the project.", replies: []string{
 				corpusDecision(core.Exec, "make build"),
 				"I will hand over now.",
-				handover(1, " \\n\\t "),
-				handover(1, note+strings.Repeat(" ", 2049-len(note))),
+				handover(" \n\t "),
+				handover(note + strings.Repeat(" ", 2049-len(note))),
 			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
@@ -43,16 +41,16 @@ func boundaryScenarios() []frozenScenario {
 			},
 		},
 		{
-			name: "handover-wrong-run", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
+			// A handover in the earlier JSON form is plain text like any other:
+			// the harness keeps it verbatim and names the run and window itself.
+			name: "handover-json-text", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
 				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusNextRun+`","first_step":1,"text":"Listed go.mod and main.go."}`),
-				handover(1, "Listed go.mod and main.go; report them next."),
+				handover(`{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`),
 				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
 			marks: map[string][]string{
-				"run1-step03-rev1.json": {"Context action failed: harness: handover run_id must be \"" + corpusRun + "\"", "## Handover required\n"},
-				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n"},
+				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", `{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`},
 			},
 		},
 		{
@@ -257,7 +255,7 @@ func handoverThresholds() []frozenScenario {
 		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
 		sc := frozenScenario{
 			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 70824, windowBytes: 8975, outputs: map[string]string{"go test ./...": output},
+			contextBytes: 70890, windowBytes: 8975, outputs: map[string]string{"go test ./...": output},
 			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
 				corpusDecision(core.Exec, "go test ./..."),
 				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":4096`, "Check the first result."),
@@ -270,8 +268,7 @@ func handoverThresholds() []frozenScenario {
 			sc.name, sc.contextBytes, sc.windowBytes = "handover-thresholds-reached", sc.contextBytes-1, sc.windowBytes-1
 			r := &sc.runs[0]
 			text := "The tests ran; every package passed. Next: report it."
-			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec,
-				`canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"`+text+strings.Repeat(" ", 2048-len(text))+`"}`))
+			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec, harness.HandoverPrefix+text+strings.Repeat(" ", 2048-len(text))))
 			r.steps = append(r.steps, "3 exited 0 handover")
 		}
 		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
@@ -307,12 +304,12 @@ func sessionBoundaries() []frozenScenario {
 	}
 	var out []frozenScenario
 	for _, b := range []boundary{
-		{"session-stopped-goal", 73240, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 73239, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 71333, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 71332, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 71117, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 71116, []frozenRun{small, stopped, current}, "none"},
+		{"session-stopped-goal", 73306, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
+		{"session-stopped-status", 73305, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-status-only", 71399, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
+		{"session-navigation-only", 71398, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-navigation", 71183, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
+		{"session-without-dialogue", 71182, []frozenRun{small, stopped, current}, "none"},
 	} {
 		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
 		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,

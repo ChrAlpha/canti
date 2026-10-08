@@ -102,7 +102,7 @@ func frozenScenarios() []frozenScenario {
 			name: "handover", limits: stepLimits, windowSteps: 1, outputs: ls,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
 				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed /workspace: go.mod and main.go. Next: report them."}`),
+				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace: go.mod and main.go. Next: report them."),
 				corpusDecision(core.Return, "The workspace holds go.mod and main.go."),
 			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
 			marks: map[string][]string{
@@ -142,7 +142,7 @@ func frozenScenarios() []frozenScenario {
 		{
 			name: "unlimited-steps", limits: core.Limits{MaxAttempts: 3}, outputs: ls,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Nothing done yet."}`),
+				corpusDecision(core.Exec, harness.HandoverPrefix+"Nothing done yet."),
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Return, "go.mod and main.go."),
 			}, steps: []string{"1 exited 1 action failed", "2 exited 0 output complete"}}},

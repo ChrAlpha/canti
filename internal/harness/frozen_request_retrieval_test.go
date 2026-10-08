@@ -46,17 +46,17 @@ func retrievalScenarios() []frozenScenario {
 			runs: []frozenRun{
 				{id: corpusRun, goal: "List /workspace.", replies: []string{
 					corpusDecision(core.Exec, "ls /workspace"),
-					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed go.mod and main.go."}`),
+					corpusDecision(core.Exec, harness.HandoverPrefix+"Listed go.mod and main.go."),
 					corpusDecision(core.Return, "go.mod and main.go."),
 				}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}},
 				{id: corpusNextRun, goal: "Name the module.", replies: []string{
 					corpusDecision(core.Exec, "cat go.mod"),
 					corpusDecision(core.Exec, "cat go.mod"),
-					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusNextRun+`","first_step":1,"text":"go.mod names module example; report it."}`),
+					corpusDecision(core.Exec, harness.HandoverPrefix+"go.mod names module example; report it."),
 				}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}, stop: core.StopStepsExhausted},
 				{id: corpusThirdRun, goal: "Continue where the session stopped.", replies: []string{
 					corpusRetrieve("read", current+"/steps/00000003/command", "", "Read where the stopped run handed over."),
-					corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusThirdRun+`","first_step":1,"text":"The module is example."}`),
+					corpusDecision(core.Exec, harness.HandoverPrefix+"The module is example."),
 					corpusDecision(core.Return, "The module is example."),
 				}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 handover"}},
 			},
@@ -111,9 +111,9 @@ func retrievalScenarios() []frozenScenario {
 			name: "purpose-across-windows", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Report why the workspace was listed.", replies: []string{
 				corpusPurpose(core.Exec, "List the workspace,\nthen check go.mod for the module name.", "ls /workspace"),
-				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":1,"text":"Listed /workspace. Next: recall why."}`),
+				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace. Next: recall why."),
 				corpusRetrieve("read", step1+"/purpose", "", "Recall why step 1 ran."),
-				corpusDecision(core.Exec, `canti:handover {"run_id":"`+corpusRun+`","first_step":3,"text":"Step 1 listed /workspace to find go.mod."}`),
+				corpusDecision(core.Exec, harness.HandoverPrefix+"Step 1 listed /workspace to find go.mod."),
 				corpusDecision(core.Return, "Step 1 listed /workspace to find go.mod and its module name."),
 			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover", "3 exited 0 retrieval 1 sources 0 entries", "4 exited 0 handover"}}},
 			marks: map[string][]string{

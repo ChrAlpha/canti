@@ -41,7 +41,7 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(encoded)),
 					reply{body: "invalid decision"},
 					execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover with valid input","limit":8}`),
-					execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Original evidence verified; retrieval recovered."}`),
+					execReply(harness.HandoverPrefix+"Original evidence verified; retrieval recovered."),
 					returnReply("Original evidence verified; retrieval recovered."))
 				imported := t.TempDir()
 				if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE"), 0600); err != nil {

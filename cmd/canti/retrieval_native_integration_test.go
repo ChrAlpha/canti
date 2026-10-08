@@ -64,8 +64,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 	}
 	handover := func(first int) {
 		t.Helper()
-		h, _ := json.Marshal(harness.Handover{RunID: run, FirstStep: first, Text: "Continue deployment. Recheck original approvals before applying settings."})
-		act("canti:handover " + string(h))
+		act(harness.HandoverPrefix + "Continue deployment. Recheck original approvals before applying settings.")
 	}
 	act("cat input; rm input")
 	original := observe()

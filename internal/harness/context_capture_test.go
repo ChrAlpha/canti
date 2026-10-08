@@ -115,7 +115,7 @@ func TestContextCaptureRecordsHandoverReasonsAndSkippedChecks(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"),
 				execReply("must be rejected while handover pending"),
-				execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue from original history."}`), returnReply("done"))
+				execReply(harness.HandoverPrefix+"Continue from original history."), returnReply("done"))
 			var reasons []string
 			if mode != "bytes" {
 				f.cfg.WindowSteps = 1
@@ -154,7 +154,7 @@ func TestContextCaptureRecordsCapacityAfterTheSourceIsRemoved(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{},
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"first","limit":8192}`),
 		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"second","limit":8192}`),
-		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Verify original references."}`), returnReply("done"))
+		execReply(harness.HandoverPrefix+"Verify original references."), returnReply("done"))
 	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 96 << 10
@@ -189,7 +189,7 @@ func TestContextCaptureRecordsCapacityAfterTheSourceIsRemoved(t *testing.T) {
 func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply("printf '你好\\n```\\n'"),
 		reply{body: `{"wrong":"protocol"}`},
-		execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue at original evidence."}`), returnReply("done"))
+		execReply(harness.HandoverPrefix+"Continue at original evidence."), returnReply("done"))
 	f.cfg.WindowSteps = 1
 	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
 	m, err := anthropic.New(anthropic.Config{APIKey: "fixture", Model: "fixture-model"})
@@ -198,12 +198,13 @@ func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
 	}
 	// Captured from the provider adapter at 956232c before context diagnostics,
 	// then with the decision purpose system text, the description of the
-	// current window, and the purpose record of each step, which are the only
-	// changes: restoring the earlier texts reproduces the 956232c bodies.
+	// current window, the purpose record of each step, and the plain-text
+	// handover request, which are the only changes: restoring the earlier
+	// texts reproduces the 956232c bodies.
 	want := []string{
 		"1316ac77d4efbcafc075051563f3d101613b0a35fa1c083f915b18c0c9b188b5",
-		"61a0388f3e4656c308033c9720d5f7325a2a4bbea47c32ef2d4778644993e999",
-		"33ed63f7b61d38cbbaf01bc22deea6039acdd00fc578a1837a94ae167e178965",
+		"9d5fe8c2a72949522abd332530d0aed37f786af45fbf3216fd394e72d924820d",
+		"bc3cfc8cea9f618847f06e6756fb8c04eec6c1f7e1a96d980d342f49bbad3968",
 		"11aa869d5e905cf2844b4a287f3c7220db8eab4b70a37e5c7addba9c53881cd0",
 	}
 	if len(f.model.prompts) != len(want) {

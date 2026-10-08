@@ -150,7 +150,11 @@ func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextByte
 	var b strings.Builder
 	capture.Progress = section(&b, "Progress", progress)
 	if f.Window != nil && f.Window.Requested {
-		capture.HandoverRequired = section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover followed by one JSON object with run_id %q, first_step %d, and text of at most %d UTF-8 bytes. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.RunID, f.Window.FirstStep, f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
+		capture.HandoverRequired = section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover, one space, and then the handover text of at most %d UTF-8 bytes, written as plain text. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
+		if f.Window.Failures > 0 {
+			capture.HandoverRequired += len(lastHandover)
+			b.WriteString(lastHandover)
+		}
 	}
 	if r := f.Rejected; r != nil {
 		capture.Repair = section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
@@ -159,6 +163,8 @@ func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextByte
 	}
 	return b.String()
 }
+
+const lastHandover = "The previous step recorded no handover. This step is the last chance to hand over: if it records none either, the run stops.\n"
 
 func section(b *strings.Builder, title, body string) int {
 	before := b.Len()

@@ -88,7 +88,7 @@ func TestContextStepAndTailBounds(t *testing.T) {
 		if i%2 == 0 {
 			f.MaxSteps = 0
 		}
-		f.Window = &Window{FirstStep: math.MaxInt, Requested: true}
+		f.Window = &Window{FirstStep: math.MaxInt, Requested: true, Failures: i / 2 % 2}
 		f.Rejected = &Rejection{Error: pick(), Response: pick()}
 		if actual, bound := len(f.tail(l, f.progress(f.Earlier))), f.tailBytes(l); actual > bound {
 			t.Fatalf("case %d: tail %d exceeds %d", i, actual, bound)
@@ -139,27 +139,32 @@ func TestContextCapacityIncludesNextStepFailureAndRepair(t *testing.T) {
 	}
 }
 
-func TestFailedHandoverReserveCoversDecoderErrors(t *testing.T) {
+func TestFailedHandoverReserveCoversItsFailures(t *testing.T) {
 	l, f := DefaultPromptLimits(), budgetFrame()
 	exit := 1
-	for _, backtick := range []string{"`", `\u0060`} {
-		for n := 0; n <= 2*actionFailureBytes; n++ {
-			payload := `{"` + strings.Repeat(backtick, n) + `":1}`
-			var h Handover
-			err := decodeAction(payload, &h)
-			if err == nil {
-				t.Fatal("handover with an unknown field was accepted")
-			}
-			s := StepRecord{Step: 7, Command: HandoverPrefix + payload, Purpose: strings.Repeat("`", 1<<20), Observation: Observation{Execution: core.ExecutionExited,
-				ExitCode: &exit, Preview: actionFailure + clip(err.Error(), actionFailureBytes)}}
-			if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
-				t.Fatalf("%d %s: failed handover %d exceeds reserve %d at a %d-byte preview", n, backtick, actual, bound, l.Preview)
-			}
+	requested, wide := &Window{FirstStep: 1, Requested: true}, strings.Repeat("`", 2*l.Command)
+	for _, c := range []struct {
+		w    *Window
+		text string
+	}{{requested, " \n\t"}, {requested, "\xff" + wide}, {requested, strings.Repeat("`", f.HandoverBytes+1)}, {&Window{FirstStep: 1}, wide}} {
+		_, err := proposedHandover(f.RunID, c.w, HandoverPrefix+c.text, f.HandoverBytes)
+		if err == nil {
+			t.Fatalf("handover %q in %+v was accepted", c.text, c.w)
 		}
+		s := StepRecord{Step: 7, Command: HandoverPrefix + c.text, Purpose: strings.Repeat("`", 1<<20), Observation: Observation{Execution: core.ExecutionExited,
+			ExitCode: &exit, Preview: actionFailure + clip(err.Error(), actionFailureBytes)}}
+		if actual, bound := len(f.step(s, l)), f.failedHandoverShellBytes(l); actual > bound {
+			t.Fatalf("%v: failed handover %d exceeds reserve %d at a %d-byte preview", err, actual, bound, l.Preview)
+		}
+	}
+	refused := StepRecord{Step: 7, Command: wide, Purpose: strings.Repeat("`", 1<<20), Observation: Observation{Execution: core.ExecutionFailedToStart,
+		Preview: actionFailure + handoverRequired}}
+	if actual, bound := len(f.step(refused, l)), f.failedHandoverShellBytes(l); actual > bound {
+		t.Fatalf("refused work %d exceeds reserve %d", actual, bound)
 	}
 }
 
-func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
+func TestProducibleWindowRendersAFailedHandover(t *testing.T) {
 	for _, total := range []int{128 << 10, 256 << 10} {
 		l, f := DefaultPromptLimits(), budgetFrame()
 		l.Total = total
@@ -189,14 +194,13 @@ func TestProducibleWindowRendersEscapedHandoverFailure(t *testing.T) {
 		f.Steps = append(f.Steps, next)
 		read.Evidence = []string{strings.Repeat("x", archive.MaxBytes)}
 		next.Step++
-		payload := `{"` + strings.Repeat(`\u0060`, 1352) + `":1}`
-		var h Handover
-		decoded := decodeAction(payload, &h)
-		if decoded == nil {
-			t.Fatal("handover with an unknown field was accepted")
+		payload := HandoverPrefix + strings.Repeat("`", f.HandoverBytes+1)
+		_, refused := proposedHandover(f.RunID, &Window{FirstStep: 2, SourceStep: 1, Handover: "x", Requested: true}, payload, f.HandoverBytes)
+		if refused == nil {
+			t.Fatal("an oversized handover was accepted")
 		}
-		next.Command, next.Purpose = HandoverPrefix+payload, strings.Repeat("\xff", 40000)
-		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: actionFailure + clip(decoded.Error(), actionFailureBytes)}
+		next.Command, next.Purpose = payload, strings.Repeat("\xff", 40000)
+		next.Observation = Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: actionFailure + clip(refused.Error(), actionFailureBytes)}
 		f.Steps = append(f.Steps, next)
 		f.Step, f.Attempt = next.Step+1, 2
 		f.Window.Requested, f.Window.Failures = true, 1

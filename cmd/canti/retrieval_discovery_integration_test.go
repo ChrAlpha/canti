@@ -41,7 +41,6 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
-	run := f.status().Run.ID
 	step := 1
 	deadline := time.Now().Add(150 * time.Second)
 	act := func(d core.Decision) {
@@ -161,9 +160,7 @@ done`, sourceRun)
 			}
 		}
 		if page < 2 {
-			h, _ := json.Marshal(harness.Handover{RunID: run, FirstStep: first,
-				Text: "Continue deployment. Recheck original decisions in /canti/runs/" + sourceRun + "/steps before applying wait and retry settings."})
-			act(core.Decision{Kind: core.Exec, Payload: "canti:handover " + string(h)})
+			act(core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Continue deployment. Recheck original decisions in /canti/runs/" + sourceRun + "/steps before applying wait and retry settings."})
 		} else {
 			act(core.Decision{Kind: core.Return, Payload: "scripted evidence check complete"})
 		}

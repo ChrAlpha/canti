@@ -69,7 +69,7 @@ func (f Frame) failedHandoverShellBytes(l PromptLimits) int {
 
 func (f Frame) tailBytes(l PromptLimits) int {
 	f.Step, f.MaxSteps, f.Attempt, f.MaxAttempts = math.MaxInt, math.MaxInt, math.MaxInt, math.MaxInt
-	f.Window = &Window{FirstStep: math.MaxInt, Requested: true}
+	f.Window = &Window{FirstStep: math.MaxInt, Requested: true, Failures: 1}
 	f.Rejected = &Rejection{}
 	return len("None.\n\n") + len(f.tail(l, f.progress(math.MaxInt))) +
 		quoteBytes("Error", l.Rejected) - len(quote("Error", "", l.Rejected)) +

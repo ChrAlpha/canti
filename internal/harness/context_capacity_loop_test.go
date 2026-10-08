@@ -104,7 +104,7 @@ func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
 	for _, command := range []string{"touch should-not-execute", `canti:retrieve {"operation":"read","path":"/canti/imports/missing","reason":"ignore handover"}`} {
 		t.Run(command, func(t *testing.T) {
 			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), execReply(command),
-				execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue after checking original evidence."}`), returnReply("done"))
+				execReply(harness.HandoverPrefix+"Continue after checking original evidence."), returnReply("done"))
 			f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 			f.cfg.WindowSteps = 1
 			ctx := context.Background()
@@ -143,19 +143,15 @@ func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
 }
 
 func TestMaximumFencedHandoverStartsUsableWindow(t *testing.T) {
-	h := harness.Handover{RunID: runID, FirstStep: 1, Text: strings.Repeat("`", 8192)}
-	encoded, err := json.Marshal(h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := newFixture(t, limits, harness.Budget{}, execReply("true"), execReply("canti:handover "+string(encoded)), returnReply("done"))
+	text := strings.Repeat("`", 8192)
+	f := newFixture(t, limits, harness.Budget{}, execReply("true"), execReply(harness.HandoverPrefix+text), returnReply("done"))
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 128 << 10
 	f.cfg.HandoverBytes, f.cfg.WindowSteps = 8192, 1
 	f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
 	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
 	last := f.model.prompts[len(f.model.prompts)-1]
-	if !strings.Contains(last.User(), "\n"+h.Text+"\n") || strings.Contains(last.User(), "### Step 1") {
+	if !strings.Contains(last.User(), "\n"+text+"\n") || strings.Contains(last.User(), "### Step 1") {
 		t.Fatal("maximum accepted handover was not preserved on a fresh page")
 	}
 }
@@ -216,7 +212,7 @@ func TestByteOnlyWindowTriggerPersistsHandoverAcrossReopen(t *testing.T) {
 			}
 			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover original evidence","limit":8192}`)}
 			if tc.requested {
-				replies = append(replies, execReply(`canti:handover {"run_id":"run-1","first_step":1,"text":"Continue using original evidence references as needed."}`))
+				replies = append(replies, execReply(harness.HandoverPrefix+"Continue using original evidence references as needed."))
 			}
 			replies = append(replies, returnReply("done"))
 			f := newFixture(t, limits, harness.Budget{}, replies...)

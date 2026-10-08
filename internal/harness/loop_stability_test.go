@@ -131,7 +131,7 @@ func TestLoopLongStability(t *testing.T) {
 			if step == steps {
 				answer = returnReply("stability complete")
 			} else if req.Window.Requested {
-				answer = execReply(fmt.Sprintf(`canti:handover {"run_id":"%s","first_step":%d,"text":"Continue at step %d; verify original evidence references."}`, runID, req.Window.FirstStep, step))
+				answer = execReply(fmt.Sprintf("%sContinue at step %d; verify original evidence references.", harness.HandoverPrefix, step))
 			} else if step%5 != 0 {
 				source := sourceByStep[step]
 				if source == "" {
