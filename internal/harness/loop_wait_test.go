@@ -120,7 +120,7 @@ func TestLoopPollsWhenAWaitIsNoUse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, execReply("sleep 600"))
 			f.exec.hold = true
-			f.cfg.Poll = 20 * time.Millisecond
+			f.cfg.Poll = 100 * time.Millisecond
 			effect := f.steps(f.loop(), 5).State.EffectID
 			inspections := 0
 			f.exec.tick = func() {
