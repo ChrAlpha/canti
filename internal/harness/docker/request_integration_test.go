@@ -19,8 +19,21 @@ import (
 
 // TestCreatedContainerIsTheOneTheDockerCLICreates compares the container
 // that Bind creates with the one that "docker create" created from the same
-// arguments in earlier revisions.
+// arguments in earlier revisions, also for the platform that
+// DOCKER_DEFAULT_PLATFORM names.
 func TestCreatedContainerIsTheOneTheDockerCLICreates(t *testing.T) {
+	daemon, err := exec.Command("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("default platform", func(t *testing.T) { compareCreated(t) })
+	t.Run("DOCKER_DEFAULT_PLATFORM", func(t *testing.T) {
+		t.Setenv("DOCKER_DEFAULT_PLATFORM", strings.TrimSpace(string(daemon)))
+		compareCreated(t)
+	})
+}
+
+func compareCreated(t *testing.T) {
 	x, err := New(Config{Image: cmp.Or(os.Getenv("CANTI_TEST_IMAGE"), "alpine:3.23"), Workspace: t.TempDir(), State: t.TempDir(),
 		Memory: "256m", CPUs: "0.5", PidsLimit: 64, Mounts: []Mount{{Source: t.TempDir(), Target: "/canti/runs"}}})
 	if err != nil {

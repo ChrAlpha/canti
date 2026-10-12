@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -71,18 +73,23 @@ func (x *Executor) request(effect harness.Effect, spec string) (createRequest, e
 	return r, err
 }
 
-// create creates the container of effect, pulling its image through the
-// docker CLI when the daemon lacks it, as docker create does. A name the
-// daemon reports in use leaves the container that holds it to the caller's
-// lookup: a create sent again after a lost response finds its own.
+// create creates the container of effect for the platform that
+// DOCKER_DEFAULT_PLATFORM names, if any, and pulls its image through the
+// docker CLI when the daemon answers that it is not found, as docker create
+// does. A name the daemon reports in use leaves the container that holds it
+// to the caller's lookup: a create sent again after a lost response finds its
+// own.
 func (x *Executor) create(ctx context.Context, effect harness.Effect, spec string) error {
 	req, err := x.request(effect, spec)
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)
 	}
 	path := "/containers/create?name=canti-" + effect.ID
+	if p := os.Getenv("DOCKER_DEFAULT_PLATFORM"); p != "" {
+		path += "&platform=" + url.QueryEscape(p)
+	}
 	err = x.api(ctx, "create", http.MethodPost, path, req, nil)
-	if status(err) == http.StatusNotFound && strings.Contains(strings.ToLower(err.Error()), "no such image") {
+	if status(err) == http.StatusNotFound {
 		if err = x.pull(ctx); err == nil {
 			err = x.api(ctx, "create", http.MethodPost, path, req, nil)
 		}

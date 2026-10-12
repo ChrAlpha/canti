@@ -47,7 +47,7 @@ type reply struct {
 }
 
 const fakeCLI = `#!/bin/sh
-echo "$*" >> %[1]q/pulls
+echo "$*${DOCKER_DEFAULT_PLATFORM:+ for $DOCKER_DEFAULT_PLATFORM}" >> %[1]q/pulls
 [ -e %[1]q/pull.hang ] && exec sleep 30
 exit "$(cat %[1]q/pull.exit 2>/dev/null || echo 0)"
 `
@@ -126,6 +126,8 @@ func route(r *http.Request) (string, string) {
 	switch {
 	case path == "containers/json":
 		return "ps", "ps all=" + q.Get("all") + " " + q.Get("filters")
+	case path == "containers/create" && q.Has("platform"):
+		return "create", "create " + q.Get("name") + " for " + q.Get("platform")
 	case path == "containers/create":
 		return "create", "create " + q.Get("name")
 	case len(parts) == 2 && r.Method == http.MethodDelete:
@@ -407,10 +409,6 @@ func TestBindPullsAMissingImageOnce(t *testing.T) {
 	if _, err := g.x.Bind(t.Context(), effect); err == nil || !strings.Contains(err.Error(), "docker pull") || len(g.calls("create")) != 1 {
 		t.Fatalf("Bind(pull fails) = %v, creates %q; want the pull's error and no second create", err, g.calls("create"))
 	}
-	g.fail("create", http.StatusNotFound, "page not found")
-	if _, err := g.x.Bind(t.Context(), effect); err == nil || len(g.pulls()) != 1 {
-		t.Fatalf("Bind(create not found otherwise) = %v, pulls %q; want an error without a pull", err, g.pulls())
-	}
 
 	h := newFake(t)
 	h.x.timeouts.transfer = 100 * time.Millisecond
@@ -422,6 +420,31 @@ func TestBindPullsAMissingImageOnce(t *testing.T) {
 	began := time.Now()
 	if _, err := h.x.Bind(t.Context(), effect); err == nil || err.Error() != "docker pull: no response within 100ms" || time.Since(began) > 5*time.Second {
 		t.Fatalf("Bind(pull hung) = %v after %v; want the pull's own deadline", err, time.Since(began))
+	}
+}
+
+// TestBindCreatesForTheDefaultPlatform checks that a create and its pull
+// pick the platform that DOCKER_DEFAULT_PLATFORM names, as docker create
+// does, and that any answer that the image is not found pulls it: a daemon
+// holding only another platform's image reports that it does not match.
+func TestBindCreatesForTheDefaultPlatform(t *testing.T) {
+	t.Setenv("DOCKER_DEFAULT_PLATFORM", "linux/arm64")
+	f := newFake(t)
+	f.missing()
+	created := f.container("created", 0)
+	f.fail("create", http.StatusNotFound, "image with reference alpine:3.23 was found but does not match the specified platform: wanted linux/arm64, actual: linux/amd64")
+	f.hook("create", func(*http.Request) {
+		if len(f.pulls()) > 0 {
+			f.clear("create")
+			f.reply("inspect", created)
+		}
+	})
+	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending {
+		t.Fatalf("Bind(image of another platform) = %+v, %v; want the job created after a pull", job, err)
+	}
+	creates, pulls := f.calls("create"), f.pulls()
+	if want := "create canti-e for linux/arm64"; !slices.Equal(creates, []string{want, want}) || !slices.Equal(pulls, []string{"pull --quiet alpine:3.23 for linux/arm64"}) {
+		t.Fatalf("creates %q, pulls %q; want a pull for linux/arm64 between two creates for it", creates, pulls)
 	}
 }
 
