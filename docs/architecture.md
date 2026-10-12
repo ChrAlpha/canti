@@ -684,11 +684,17 @@ independent of the already-cancelled execution context.
 `docker.Executor` implements the contract through the Docker Engine API,
 over connections that `docker system dial-stdio` opens, so it reaches the
 daemon that the docker CLI would (`DOCKER_HOST`, the current context, TLS,
-ssh), and one CLI process serves many calls instead of one each. The
-container it creates is the one `docker create` created from the same
-arguments in earlier revisions, for the platform `DOCKER_DEFAULT_PLATFORM`
-names, if any, and when the daemon answers that the image is not found it
-pulls it with `docker pull`, which holds the registry credentials. The job of
+ssh), and one CLI process serves many calls instead of one each. Only the
+connection comes from the CLI: requests carry none of the `HttpHeaders` of
+its configuration, the API version is negotiated regardless of
+`DOCKER_API_VERSION`, and a `tcp://` daemon is reached directly, as
+`dial-stdio` reaches it, where the CLI's own requests would go through an
+HTTP proxy. Nor does canti apply `DOCKER_CONTENT_TRUST`; an image pinned by
+digest fixes what jobs run. The container it creates is the one `docker
+create` created from the same arguments in earlier revisions, for the
+platform `DOCKER_DEFAULT_PLATFORM` names, if any, and when the daemon answers
+that the image is not found it pulls it with `docker pull`, which holds the
+registry credentials. The job of
 an effect is the container `canti-<effect ID>`, created by `Bind` with labels
 naming the effect, the executor's state directory, and a SHA-256 hash of the
 execution spec: image, user, network, resource limits, mounts, log options,
