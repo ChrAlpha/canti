@@ -410,6 +410,13 @@ func TestBindPullsAMissingImageOnce(t *testing.T) {
 		t.Fatalf("Bind(pull fails) = %v, creates %q; want the pull's error and no second create", err, g.calls("create"))
 	}
 
+	k := newFake(t)
+	k.missing()
+	k.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
+	if _, err := k.x.Bind(t.Context(), effect); err == nil || err.Error() != "docker create: No such image: alpine:3.23" || len(k.pulls()) != 1 || len(k.calls("create")) != 2 {
+		t.Fatalf("Bind(image still missing after a pull) = %v, pulls %q, creates %q; want the second create's error after one pull", err, k.pulls(), k.calls("create"))
+	}
+
 	h := newFake(t)
 	h.x.timeouts.transfer = 100 * time.Millisecond
 	h.missing()
