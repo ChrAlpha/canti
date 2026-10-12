@@ -110,12 +110,12 @@ func TestLoopWaitsNoLongerThanTheBudgetAllows(t *testing.T) {
 
 func TestLoopPollsWhenAWaitIsNoUse(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		err   error
-		waits int
+		name          string
+		err           error
+		waits, sleeps int
 	}{
-		{"wait fails", errors.New("daemon unavailable"), 5},
-		{"wait returns early", nil, 3},
+		{"wait fails", errors.New("daemon unavailable"), 5, 5},
+		{"wait returns early", nil, 3, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, execReply("sleep 600"))
@@ -133,8 +133,8 @@ func TestLoopPollsWhenAWaitIsNoUse(t *testing.T) {
 			if snap, err := l.Step(f.bounded(), runID); err != nil || snap.State.Phase != core.PhaseIdle {
 				t.Fatalf("Step() = %+v, %v", snap.State, err)
 			}
-			if waits := count(f.exec.log(), "wait"); waits != tc.waits || time.Since(began) < time.Duration(5-tc.waits)*f.cfg.Poll {
-				t.Fatalf("waited %d times in %v over %d inspections, want %d with a poll between the others: %v", waits, time.Since(began), inspections, tc.waits, f.exec.log())
+			if waits := count(f.exec.log(), "wait"); waits != tc.waits || time.Since(began) < time.Duration(tc.sleeps)*f.cfg.Poll {
+				t.Fatalf("waited %d times in %v over %d inspections, want %d and at least %d polls: %v", waits, time.Since(began), inspections, tc.waits, tc.sleeps, f.exec.log())
 			}
 		})
 	}
