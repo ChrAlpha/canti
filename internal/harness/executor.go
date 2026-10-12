@@ -51,6 +51,15 @@ type Executor interface {
 	Cancel(ctx context.Context, effectID string) error
 }
 
+// Waiter is an Executor that can wait for a job to stop running, so that the
+// loop observes its exit at once instead of at its next poll. Wait returns
+// once the job of an effect is not running, ctx is done, or the backend
+// cannot tell; it changes nothing and must not hold up Cancel, and the loop
+// inspects the job after it returns.
+type Waiter interface {
+	Wait(ctx context.Context, effectID string) error
+}
+
 // Effect is the durable intent to perform one external action. A concrete
 // executor must bind the effect ID to the full execution specification it
 // runs under, not only the command text.

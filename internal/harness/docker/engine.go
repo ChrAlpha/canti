@@ -86,7 +86,7 @@ func status(err error) int {
 func (x *Executor) api(ctx context.Context, op, method, path string, body any, handle func(*http.Response) error) error {
 	limit := x.timeouts.call
 	switch op {
-	case "logs":
+	case "logs", "wait":
 		limit = x.timeouts.transfer
 	case "stop":
 		limit += x.cfg.StopGrace

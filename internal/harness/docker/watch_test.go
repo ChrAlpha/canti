@@ -32,6 +32,7 @@ type loopFixture struct {
 	t      *testing.T
 	ctx    context.Context
 	store  *sqlite.Store
+	cfg    harness.LoopConfig
 	loop   *harness.Loop
 	effect string
 }
@@ -65,15 +66,16 @@ func saveEffect(t *testing.T, f *fake) *loopFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := harness.NewLoop(store, f.x, execModel{}, harness.LoopConfig{
+	cfg := harness.LoopConfig{
 		Environment: "fake",
 		History:     t.TempDir(),
 		Poll:        time.Millisecond, InspectRetries: 2,
-	})
+	}
+	l, err := harness.NewLoop(store, f.x, execModel{}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lf := &loopFixture{fake: f, t: t, ctx: ctx, store: store, loop: l}
+	lf := &loopFixture{fake: f, t: t, ctx: ctx, store: store, cfg: cfg, loop: l}
 	lf.effect = lf.step(3, core.PhaseEffectSaved).State.EffectID
 	return lf
 }
@@ -185,5 +187,29 @@ func TestLoopStopIsNotHeldByAHungListing(t *testing.T) {
 	}
 	if e, ok := ts[len(ts)-1].Event.(core.Observed); !ok || e.Execution != core.ExecutionCancelled {
 		t.Fatalf("last transition = %+v, want the cancelled job observed", ts[len(ts)-1])
+	}
+}
+
+func TestLoopObservesTheExitOfAWaitedJobAtOnce(t *testing.T) {
+	lf := newLoop(t, newFake(t))
+	lf.cfg.Poll = time.Hour
+	l, err := harness.NewLoop(lf.store, lf.x, execModel{}, lf.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := lf.containerOf(lf.effect, "true", "exited", 0)
+	lf.hook("wait", func(*http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		lf.reply("inspect", exited)
+		lf.reply("cp", exitArchive(t, "0\n"))
+	})
+	lf.output("done\n")
+	began := time.Now()
+	snap, err := l.Step(lf.ctx, "run-1")
+	if err != nil || snap.State.Phase != core.PhaseIdle || time.Since(began) > 5*time.Second {
+		t.Fatalf("Step() = %+v, %v after %v; want the exit observed at once despite a poll interval of an hour", snap.State, err, time.Since(began))
+	}
+	if waits := lf.calls("wait"); len(waits) != 1 || waits[0] != "wait canti-"+lf.effect+" not-running" {
+		t.Fatalf("waits = %q, want one for the effect's container to stop running", waits)
 	}
 }

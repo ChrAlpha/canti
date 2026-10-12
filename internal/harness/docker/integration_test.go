@@ -495,3 +495,48 @@ echo ok > %s/trust && echo workspace-writable`, archive.ArtifactsRoot, cfg.State
 		}
 	}
 }
+
+func TestWaitReturnsOnceTheJobStops(t *testing.T) {
+	const grace = time.Second
+	cfg, id := setup(t, docker.Config{StopGrace: grace})
+	ctx := testContext(t, time.Minute)
+	x := open(t, cfg)
+	start := func(e harness.Effect) {
+		t.Helper()
+		if _, err := x.Bind(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := x.Start(ctx, e.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quick := harness.Effect{ID: id("quick"), Command: "sleep 0.5; echo done"}
+	start(quick)
+	began := time.Now()
+	if err := x.Wait(ctx, quick.ID); err != nil {
+		t.Fatal(err)
+	}
+	if job := inspect(ctx, t, x, quick.ID); time.Since(began) > 5*time.Second || job.Status != harness.JobSucceeded || job.Preview != "done\n" {
+		t.Fatalf("job after a wait of %v = %+v, want it finished", time.Since(began), job)
+	}
+	long := harness.Effect{ID: id("long"), Command: "sleep 300"}
+	start(long)
+	waited := make(chan error, 1)
+	go func() { waited <- x.Wait(ctx, long.ID) }()
+	time.Sleep(200 * time.Millisecond)
+	began = time.Now()
+	if err := open(t, cfg).Cancel(ctx, long.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil || time.Since(began) > grace+5*time.Second {
+			t.Fatalf("Wait() = %v %v after the cancel", err, time.Since(began))
+		}
+	case <-ctx.Done():
+		t.Fatal("Wait() outlived the cancel")
+	}
+	if job := inspect(ctx, t, x, long.ID); job.Status != harness.JobCancelled {
+		t.Fatalf("cancelled job = %+v", job)
+	}
+}

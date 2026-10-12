@@ -427,10 +427,48 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, err
 		if next, done, err := w.inspected(ctx, job, found, err); done {
 			return next, err
 		}
-		if err := sleep(ctx, l.cfg.Poll); err != nil {
+		if err := w.await(ctx, job, err == nil && found); err != nil {
 			return snap, err
 		}
 	}
+}
+
+// maxWait bounds one wait, so a backend that never answers delays an
+// observation by at most this long.
+const maxWait = 30 * time.Second
+
+// await waits for a running job to stop running, within the job's timeout
+// and the run's wall time, when the executor can wait. After an inspection
+// that failed, a failed wait, or a wait that returned early while the job
+// kept running, it sleeps for the poll interval instead.
+func (w *watcher) await(ctx context.Context, job Job, inspected bool) error {
+	waiter, ok := w.executor.(Waiter)
+	if !ok || !inspected || job.Status != JobRunning || w.early {
+		w.early = false
+		return sleep(ctx, w.cfg.Poll)
+	}
+	limit := maxWait
+	if !w.stopping {
+		if t := w.run.Budget.JobTimeout; t > 0 && !w.timedOut && !job.StartedAt.IsZero() {
+			limit = min(limit, t-w.cfg.Now().Sub(job.StartedAt))
+		}
+		if t := w.run.Budget.WallTime; t > 0 {
+			limit = min(limit, t-w.cfg.Now().Sub(w.run.Created))
+		}
+	}
+	began := time.Now()
+	wctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	err := waiter.Wait(wctx, w.snap.State.EffectID)
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil && wctx.Err() == nil:
+		w.note(ctx, slog.LevelWarn, "waiting for the job failed", w.snap, "error", err)
+		return sleep(ctx, w.cfg.Poll)
+	}
+	w.early = time.Since(began) < w.cfg.Poll
+	return nil
 }
 
 // watcher follows the job of one awaited or cancelling effect across
@@ -442,6 +480,7 @@ type watcher struct {
 	snap     Snapshot
 	stopping bool
 	timedOut bool
+	early    bool
 	failures int
 }
 

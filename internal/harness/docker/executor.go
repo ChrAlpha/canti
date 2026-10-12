@@ -94,8 +94,8 @@ type Executor struct {
 
 // Every daemon call has its own deadline, so a hung daemon cannot hold an
 // effect's lock forever: callTimeout, extended by Config.StopGrace for a
-// stop, or transferTimeout to pull the image and to read a job's whole
-// Docker log.
+// stop, or transferTimeout to pull the image, to read a job's whole Docker
+// log, and to wait for a job to stop.
 const (
 	callTimeout     = 30 * time.Second
 	transferTimeout = 10 * time.Minute
@@ -104,7 +104,10 @@ const (
 // timeouts are the deadlines of daemon calls; tests shorten them.
 type timeouts struct{ call, transfer time.Duration }
 
-var _ harness.Executor = (*Executor)(nil)
+var (
+	_ harness.Executor = (*Executor)(nil)
+	_ harness.Waiter   = (*Executor)(nil)
+)
 
 // New validates cfg, applies its defaults, and creates the state layout. It
 // does not contact the Docker daemon.
@@ -527,6 +530,19 @@ func (x *Executor) Inspect(ctx context.Context, effectID string) (harness.Job, b
 	}
 	job, err := x.finalize(ctx, effectID, o)
 	return job, err == nil, err
+}
+
+// Wait returns once the effect's container is not running, ctx is done, or
+// the daemon cannot tell. It holds no lock and changes nothing, so it never
+// holds up Cancel; the caller inspects the job after it.
+func (x *Executor) Wait(ctx context.Context, effectID string) error {
+	if err := checkID(effectID); err != nil {
+		return err
+	}
+	return x.api(ctx, "wait", http.MethodPost, "/containers/canti-"+effectID+"/wait?condition=not-running", nil, func(r *http.Response) error {
+		_, err := io.Copy(io.Discard, io.LimitReader(r.Body, 4<<10))
+		return err
+	})
 }
 
 // Cancel fences an unstarted effect or stops its running container, waiting

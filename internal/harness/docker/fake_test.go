@@ -106,6 +106,8 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, re.body)
 	case op == "ps":
 		io.WriteString(w, "[]")
+	case op == "wait":
+		io.WriteString(w, `{"StatusCode":0}`)
 	case op == "create":
 		w.WriteHeader(http.StatusCreated)
 		io.WriteString(w, `{"Id":"","Warnings":[]}`)
@@ -143,6 +145,8 @@ func route(r *http.Request) (string, string) {
 		call += " " + q.Get("path")
 	case "logs":
 		call += " stdout=" + q.Get("stdout") + " stderr=" + q.Get("stderr")
+	case "wait":
+		call += " " + q.Get("condition")
 	}
 	return op, call
 }
@@ -1112,5 +1116,67 @@ func TestCancelStopsOnlyARunningJob(t *testing.T) {
 	job, _, err := f.x.Inspect(t.Context(), "e")
 	if err != nil || job.Status != harness.JobCancelled || *job.ExitCode != 143 || job.Output.Complete || job.Preview != "partial\n" {
 		t.Fatalf("Inspect() = %+v, %v", job, err)
+	}
+}
+
+func TestWaitHoldsUpNoCancel(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.reply("inspect", f.container("running", 0))
+	stopped := f.container("exited", 143)
+	f.hook("wait", func(r *http.Request) {
+		f.signal("waiting")
+		select {
+		case <-f.signalled("stopped"):
+		case <-r.Context().Done():
+		}
+	})
+	f.hook("stop", func(*http.Request) {
+		f.reply("inspect", stopped)
+		f.signal("stopped")
+	})
+	waited := make(chan error, 1)
+	go func() { waited <- f.x.Wait(t.Context(), "e") }()
+	<-f.signalled("waiting")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := f.x.Cancel(ctx, "e"); err != nil {
+		t.Fatalf("Cancel() during a wait = %v", err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("Wait() = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait() did not return once the job stopped")
+	}
+	if waits, stops := f.calls("wait"), f.calls("stop"); len(waits) != 1 || waits[0] != "wait canti-e not-running" || len(stops) != 1 {
+		t.Fatalf("waits %q, stops %q", waits, stops)
+	}
+
+	g := newFake(t)
+	g.hang("wait")
+	ctx, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := g.x.Wait(ctx, "e"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait(past the caller's deadline) = %v", err)
+	}
+	g.x.timeouts.transfer = 50 * time.Millisecond
+	if err := g.x.Wait(t.Context(), "e"); err == nil || err.Error() != "docker wait: no response within 50ms" {
+		t.Fatalf("Wait(past its own deadline) = %v", err)
+	}
+	g.hook("wait", nil)
+	g.fail("wait", http.StatusNotFound, "No such container: canti-e")
+	if err := g.x.Wait(t.Context(), "e"); err == nil {
+		t.Fatal("Wait(no container) succeeded")
+	}
+	if err := g.x.Wait(t.Context(), "../e"); err == nil || len(g.calls("wait")) != 3 {
+		t.Fatalf("Wait(invalid ID) = %v, waits %q", err, g.calls("wait"))
+	}
+	for _, op := range []string{"inspect", "create", "start", "stop", "rm", "logs", "cp"} {
+		if calls := g.calls(op); len(calls) != 0 {
+			t.Fatalf("%s calls = %q, want Wait to change nothing", op, calls)
+		}
 	}
 }

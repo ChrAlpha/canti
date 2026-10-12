@@ -281,7 +281,7 @@ the intent is `halt` or a step fails, and at a halt publishes the run's
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
 | `bind`, `start` | Route the effect: when the frozen request of the step requires a handover and the decision is not one, commit `Observed{failed_to_start}` with the refusal as its preview, binding and running nothing; a `canti:retrieve` or `canti:handover` action binds the in-process job `read_<effect ID>` and runs in the harness; otherwise `Runner.Bind`, `Runner.Start`. A bound job's ID decides the route of the later intents |
-| `inspect` | Poll `Inspect` every 500 ms. Commit `Observed` for a finished job; cancel a running job past `Budget.JobTimeout` and observe it as `timed_out`; commit a `timed_out` stop when the wall time runs out while waiting; commit `OutcomeUnknown` for a lost, missing, or foreign job, a result without an exit code, an unexpected status, or a sixth consecutive `Inspect` error |
+| `inspect` | `Inspect` the job; while it runs, wait until it stops when the executor is a `Waiter`, as the Docker executor is, for at most 30 s and never past the job timeout or the wall time, and otherwise poll every 500 ms. Commit `Observed` for a finished job; cancel a running job past `Budget.JobTimeout` and observe it as `timed_out`; commit a `timed_out` stop when the wall time runs out while waiting; commit `OutcomeUnknown` for a lost, missing, or foreign job, a result without an exit code, an unexpected status, or a sixth consecutive `Inspect` error |
 | `cancel` | `Cancel` by effect ID; then watch a recorded job to its result, record a found job with `JobBound`, or observe a positively missing job as `cancelled` |
 
 `Loop.Stop` commits `StopRequested` with the given reason unless the run is
@@ -803,11 +803,12 @@ effect or `Bind` in the state directory retries it; for the last job of a
 run, none may come.
 
 Every daemon call has its own deadline: 30 s, plus the stop grace for a
-stop, and 10 min for the pull of an image the daemon lacks and for reading
-a job's log. A call past only its own deadline fails with an ordinary
-error, never taken for the caller's shutdown, so a hung daemon cannot hold an
-effect's lock forever: the loop retries a hung inspection and then records an
-unknown outcome.
+stop, and 10 min for the pull of an image the daemon lacks, for reading a
+job's log, and for a wait for a job to stop, which holds no lock. A call
+past only its own deadline fails with an ordinary error, never taken for
+the caller's shutdown, so a hung daemon cannot hold an effect's lock
+forever: the loop retries a hung inspection and then records an unknown
+outcome.
 
 The trust boundary is Docker's. A job sees the workspace, mounted read-write
 at `/workspace`, and the artifact root, mounted read-only at
