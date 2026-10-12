@@ -41,7 +41,7 @@ func Proxy(t testing.TB, intercept func(http.ResponseWriter, *http.Request) bool
 		if len(f) != 3 {
 			t.Fatalf("dockertest: docker context inspect = %q", out)
 		}
-		host, tls = f[0], f[1] != "0" || f[2] == "true"
+		host, tls = f[0], tls || f[1] != "0" || f[2] == "true"
 	}
 	network, addr, _ := strings.Cut(host, "://")
 	if network != "unix" && network != "tcp" || tls {
