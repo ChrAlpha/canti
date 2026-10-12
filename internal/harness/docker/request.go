@@ -74,11 +74,11 @@ func (x *Executor) request(effect harness.Effect, spec string) (createRequest, e
 }
 
 // create creates the container of effect for the platform that
-// DOCKER_DEFAULT_PLATFORM names, if any, and pulls its image through the
-// docker CLI when the daemon answers that it is not found, as docker create
-// does. A name the daemon reports in use leaves the container that holds it
-// to the caller's lookup: a create sent again after a lost response finds its
-// own.
+// DOCKER_DEFAULT_PLATFORM names, if any, and when the daemon answers it with
+// not found, pulls the image through the docker CLI and creates once more, as
+// docker create does. A name the daemon reports in use leaves the container
+// that holds it to the caller's lookup: a create sent again after a lost
+// response finds its own.
 func (x *Executor) create(ctx context.Context, effect harness.Effect, spec string) error {
 	req, err := x.request(effect, spec)
 	if err != nil {

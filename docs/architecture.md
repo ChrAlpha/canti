@@ -685,16 +685,19 @@ independent of the already-cancelled execution context.
 over connections that `docker system dial-stdio` opens, so it reaches the
 daemon that the docker CLI would (`DOCKER_HOST`, the current context, TLS,
 ssh), and one CLI process serves many calls instead of one each. Only the
-connection comes from the CLI: requests carry none of the `HttpHeaders` of
-its configuration, the API version is negotiated regardless of
-`DOCKER_API_VERSION`, and a `tcp://` daemon is reached directly, as
-`dial-stdio` reaches it, where the CLI's own requests would go through an
-HTTP proxy. Nor does canti apply `DOCKER_CONTENT_TRUST`; an image pinned by
-digest fixes what jobs run. The container it creates is the one `docker
-create` created from the same arguments in earlier revisions, for the
-platform `DOCKER_DEFAULT_PLATFORM` names, if any, and when the daemon answers
-that the image is not found it pulls it with `docker pull`, which holds the
-registry credentials. The job of
+connection comes from the CLI. The requests are canti's own: they name the
+host `docker`, carry Go's user agent and none of the `HttpHeaders` of the
+CLI's configuration, leave out any path of a `DOCKER_HOST` URL, and speak
+the API version canti negotiates through `/version`, regardless of
+`DOCKER_API_VERSION`. A `tcp://` daemon is reached directly, as `dial-stdio`
+reaches it, where the CLI's own requests would go through an HTTP proxy.
+The container it creates is the one `docker create` created from the same
+arguments in earlier revisions, for the platform `DOCKER_DEFAULT_PLATFORM`
+names, if any, and when the daemon answers a create with not found it pulls
+the image with `docker pull`, which holds the registry credentials, and
+creates once more. Only that pull can check `DOCKER_CONTENT_TRUST`, in CLI
+versions that still do; an image pinned by digest fixes what jobs run.
+The job of
 an effect is the container `canti-<effect ID>`, created by `Bind` with labels
 naming the effect, the executor's state directory, and a SHA-256 hash of the
 execution spec: image, user, network, resource limits, mounts, log options,
