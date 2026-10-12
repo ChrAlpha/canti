@@ -20,8 +20,9 @@ import (
 
 // Proxy returns a directory holding a docker CLI that reaches the daemon of
 // the docker CLI on PATH through a proxy, where intercept answers a request
-// when it reports true. A daemon reached other than over a unix socket or
-// plain tcp cannot be proxied, and the test is skipped.
+// when it reports true. The proxy speaks plain HTTP, so the test is skipped
+// for a daemon reached other than over a unix socket or tcp, and whenever the
+// environment or the current context sets TLS.
 func Proxy(t testing.TB, intercept func(http.ResponseWriter, *http.Request) bool) string {
 	t.Helper()
 	docker, err := exec.LookPath("docker")
@@ -44,8 +45,11 @@ func Proxy(t testing.TB, intercept func(http.ResponseWriter, *http.Request) bool
 		host, tls = f[0], tls || f[1] != "0" || f[2] == "true"
 	}
 	network, addr, _ := strings.Cut(host, "://")
-	if network != "unix" && network != "tcp" || tls {
-		t.Skipf("dockertest: only a daemon on a unix socket or plain tcp can be proxied, not %s with TLS %v", host, tls)
+	switch {
+	case network != "unix" && network != "tcp":
+		t.Skipf("dockertest: only a daemon on a unix socket or tcp can be proxied, not %s", host)
+	case tls:
+		t.Skipf("dockertest: the proxy speaks plain HTTP, and TLS is set for %s", host)
 	}
 	upstream := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
