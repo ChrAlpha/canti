@@ -612,7 +612,7 @@ func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
 		limit            time.Duration
 	}{
 		{"inspect", http.MethodGet, "/containers/canti-e/json", 50 * time.Millisecond},
-		{"create", http.MethodPost, "/containers/create?name=canti-e", 50 * time.Millisecond},
+		{"create", http.MethodPost, "/containers/create?name=canti-e", 150 * time.Millisecond},
 		{"start", http.MethodPost, "/containers/c-e/start", 50 * time.Millisecond},
 		{"stop", http.MethodPost, "/containers/c-e/stop?t=1", 150 * time.Millisecond},
 		{"rm", http.MethodDelete, "/containers/c-e?v=1", 50 * time.Millisecond},

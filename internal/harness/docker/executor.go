@@ -94,8 +94,9 @@ type Executor struct {
 
 // Every daemon call has its own deadline, so a hung daemon cannot hold an
 // effect's lock forever: callTimeout, extended by Config.StopGrace for a
-// stop, or transferTimeout to pull the image, to read a job's whole Docker
-// log, and to wait for a job to stop.
+// stop, or transferTimeout to create a container, which can copy the image,
+// to pull the image, to read a job's whole Docker log, and to wait for a job
+// to stop.
 const (
 	callTimeout     = 30 * time.Second
 	transferTimeout = 10 * time.Minute

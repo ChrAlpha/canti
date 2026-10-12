@@ -803,8 +803,9 @@ effect or `Bind` in the state directory retries it; for the last job of a
 run, none may come.
 
 Every daemon call has its own deadline: 30 s, plus the stop grace for a
-stop, and 10 min for the pull of an image the daemon lacks, for reading a
-job's log, and for a wait for a job to stop, which holds no lock. A call
+stop, and 10 min for a create, which some storage drivers serve by copying
+the image, for the pull of an image the daemon lacks, for reading a job's
+log, and for a wait for a job to stop, which holds no lock. A call
 past only its own deadline fails with an ordinary error, never taken for
 the caller's shutdown, so a hung daemon cannot hold an effect's lock
 forever: the loop retries a hung inspection and then records an unknown
