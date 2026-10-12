@@ -111,12 +111,13 @@ func awaitPTYPhase(t *testing.T, f *fixture, want core.Phase) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		s := f.status()
-		if s.Phase == want {
+		r := f.cli(nil, "status")
+		var s status
+		if r.code == exitOK && strict(r.stdout, &s) == nil && s.Phase == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("run never reached %s: %+v, model requests=%d", want, s, len(f.model.requests()))
+			t.Fatalf("run never reached %s: status = %d\nstdout: %s\nstderr: %s\nmodel requests=%d", want, r.code, r.stdout, r.stderr, len(f.model.requests()))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
