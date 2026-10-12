@@ -31,17 +31,21 @@ func Proxy(t testing.TB, intercept func(http.ResponseWriter, *http.Request) bool
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := os.Getenv("DOCKER_HOST")
+	host, tls := os.Getenv("DOCKER_HOST"), os.Getenv("DOCKER_TLS_VERIFY")+os.Getenv("DOCKER_TLS") != ""
 	if host == "" {
-		out, err := exec.Command(docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
+		out, err := exec.Command(docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}} {{len .TLSMaterial}} {{.Endpoints.docker.SkipTLSVerify}}").Output()
 		if err != nil {
 			t.Fatal(err)
 		}
-		host = strings.TrimSpace(string(out))
+		f := strings.Fields(string(out))
+		if len(f) != 3 {
+			t.Fatalf("dockertest: docker context inspect = %q", out)
+		}
+		host, tls = f[0], f[1] != "0" || f[2] == "true"
 	}
 	network, addr, _ := strings.Cut(host, "://")
-	if network != "unix" && network != "tcp" || os.Getenv("DOCKER_TLS_VERIFY") != "" {
-		t.Skipf("dockertest: only a daemon on a unix socket or plain tcp can be proxied, not %s", host)
+	if network != "unix" && network != "tcp" || tls {
+		t.Skipf("dockertest: only a daemon on a unix socket or plain tcp can be proxied, not %s with TLS %v", host, tls)
 	}
 	upstream := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
