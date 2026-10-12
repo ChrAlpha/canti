@@ -229,7 +229,7 @@ Read [architecture](architecture.md) for interfaces and ownership. Read
 gate. Keep tests beside the package they verify: `core/*_test.go`,
 `internal/harness/*_test.go` (the loop tests use a fake model and executor
 over a real SQLite journal), `internal/harness/sqlite`, `internal/harness/docker`
-(a fake docker CLI for unit tests, the daemon for `integration_test.go`),
+(a fake daemon for unit tests, the daemon for `integration_test.go`),
 `internal/harness/anthropic` (a local HTTP server), and `cmd/canti`, whose
 tests run the test binary as the CLI in subprocesses against a scripted
 Anthropic-format server. The gate tests are `cmd/canti/gate_*_test.go`.

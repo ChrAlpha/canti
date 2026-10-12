@@ -5,12 +5,15 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -229,8 +232,19 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 	t.Run("before:release", func(t *testing.T) {
 		t.Parallel()
 		f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: released + script[1].Payload}, 2: script[2], 3: script[3]})
-		shim := dockerShim(t, "if [ \"$1\" = rm ]; then\n\tkill -KILL \"$PPID\"\n\twhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.05; done\n\texit 1\nfi")
-		cmd, wait := f.start(shim, "run", "-goal", "count", "-image", image)
+		var pid atomic.Int64
+		path := dockerProxy(t, func(_ http.ResponseWriter, r *http.Request) bool {
+			if r.Method != http.MethodDelete {
+				return false
+			}
+			if p := pid.Load(); p > 0 {
+				syscall.Kill(int(p), syscall.SIGKILL)
+			}
+			<-r.Context().Done()
+			return true
+		})
+		cmd, wait := f.start(path, "run", "-goal", "count", "-image", image)
+		pid.Store(int64(cmd.Process.Pid))
 		awaitPhase(t, f, core.PhaseAwaitingObservation)
 		writeFile(t, filepath.Join(f.workspace, "release"))
 		if r := wait(); !killed(cmd) {
@@ -248,7 +262,7 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 			t.Fatalf("containers after the crash = %+v, want the recorded job %s exited", cs, s.JobID)
 		}
 		h := recovered(t, f, pre, slices.Concat(stepKinds, stepKinds, stepKinds[:4]), 1)
-		evidence(t, "crash at commit boundaries", "SIGKILL in docker rm of the recorded step 1 job "+s.JobID, image, f, h)
+		evidence(t, "crash at commit boundaries", "SIGKILL in the removal of the recorded step 1 job "+s.JobID, image, f, h)
 	})
 }
 
@@ -368,7 +382,7 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 		2: {Kind: core.Return, Payload: "done"},
 	})
 	unavailable := filepath.Join(t.TempDir(), "unavailable")
-	path := dockerShim(t, fmt.Sprintf("if [ \"$1 $2\" = 'container inspect' ] && [ -e '%s' ]; then\n\techo 'job status unavailable' >&2\n\texit 1\nfi", unavailable))
+	path := dockerProxy(t, unavailableInspection(unavailable))
 
 	_, wait := f.start(path, "run", "-goal", "wait", "-image", image)
 	awaitPhase(t, f, core.PhaseAwaitingObservation)

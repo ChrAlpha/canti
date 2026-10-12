@@ -1,17 +1,23 @@
 package docker
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/archive"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 func newTestExecutor(t *testing.T, cfg Config) *Executor {
@@ -221,16 +227,7 @@ func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 	}
 }
 
-func pair(args []string, flag, value string) bool {
-	for i := range len(args) - 1 {
-		if args[i] == flag && args[i+1] == value {
-			return true
-		}
-	}
-	return false
-}
-
-func TestCreateArgsIsolateTheJob(t *testing.T) {
+func TestCreateRequestIsolatesTheJob(t *testing.T) {
 	runs, records := t.TempDir(), t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(records, link); err != nil {
@@ -239,64 +236,63 @@ func TestCreateArgsIsolateTheJob(t *testing.T) {
 	x := newTestExecutor(t, Config{User: "1234:5678", Memory: "256m", CPUs: "0.5", PidsLimit: 64,
 		Mounts: []Mount{{Source: runs, Target: "/canti/runs"}, {Source: link, Target: "/canti/run"}}})
 	run := x.runArgs("echo hi")
-	args := x.createArgs("effect_1", run)
-	mounts := []string{"-v", x.cfg.Workspace + ":" + WorkDir, "-v", filepath.Join(x.cfg.State, "artifacts") + ":" + archive.ArtifactsRoot + ":ro",
-		"-v", runs + ":/canti/runs:ro", "-v", records + ":/canti/run:ro", "alpine:3.23"}
-	if i := slices.Index(args, "-v"); i < 0 || !slices.Equal(args[i:i+len(mounts)], mounts) {
-		t.Errorf("create args do not mount %q in order: %q", mounts, args)
+	r, err := x.request(harness.Effect{ID: "effect_1", Command: "echo hi"}, specHash(run))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, p := range [][2]string{
-		{"--name", "canti-effect_1"},
-		{"--label", "canti.effect=effect_1"},
-		{"--label", "canti.state=" + x.cfg.State},
-		{"--label", "canti.spec=" + specHash(run)},
-		{"--label", "canti.exit=" + exitFile},
-		{"-e", "TINI_KILL_PROCESS_GROUP=1"},
-		{"--entrypoint", "/bin/sh"},
-		{"--workdir", WorkDir},
-		{"--user", "1234:5678"},
-		{"--network", "none"},
-		{"--cap-drop", "ALL"},
-		{"--security-opt", "no-new-privileges"},
-		{"--memory", "256m"},
-		{"--cpus", "0.5"},
-		{"--pids-limit", "64"},
-		{"--log-driver", "json-file"},
-		{"--log-opt", "max-size=1p"},
-		{"--log-opt", "mode=blocking"},
-	} {
-		if !pair(args, p[0], p[1]) {
-			t.Errorf("create args lack %s %s: %q", p[0], p[1], args)
-		}
+	env := []string{"TINI_KILL_PROCESS_GROUP=1"}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
+		env = append(env, k+"=", strings.ToLower(k)+"=")
 	}
-	if args[0] != "create" || !slices.Contains(args, "--init") {
-		t.Errorf("create args = %q", args)
+	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": specHash(run), "canti.exit": exitFile}
+	if r.User != "1234:5678" || r.Image != "alpine:3.23" || r.WorkingDir != WorkDir || !r.AttachStdout || !r.AttachStderr ||
+		!slices.Equal(r.Entrypoint, []string{"/bin/sh"}) || !slices.Equal(r.Cmd, []string{"-c", wrapper, "canti", "exec 2>&1\necho hi"}) ||
+		!slices.Equal(r.Env, env) || !maps.Equal(r.Labels, labels) {
+		t.Errorf("create request = %+v", r)
 	}
-	if tail := args[len(args)-5:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", wrapper, "canti", "exec 2>&1\necho hi"}) {
-		t.Errorf("create args end with %q", tail)
+	h := r.HostConfig
+	binds := []string{x.cfg.Workspace + ":" + WorkDir, filepath.Join(x.cfg.State, "artifacts") + ":" + archive.ArtifactsRoot + ":ro",
+		runs + ":/canti/runs:ro", records + ":/canti/run:ro"}
+	if !slices.Equal(h.Binds, binds) || h.NetworkMode != "none" || !slices.Equal(h.CapDrop, []string{"ALL"}) ||
+		!slices.Equal(h.SecurityOpt, []string{"no-new-privileges"}) || !h.Init || h.Memory != 256<<20 || h.NanoCpus != 5e8 ||
+		h.PidsLimit == nil || *h.PidsLimit != 64 || h.LogConfig.Type != "json-file" ||
+		!maps.Equal(h.LogConfig.Config, map[string]string{"max-size": "1p", "mode": "blocking"}) {
+		t.Errorf("host config = %+v", h)
 	}
 	if tail := run[len(run)-3:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", "exec 2>&1\necho hi"}) {
 		t.Errorf("the hashed spec ends with %q, want the shape of earlier revisions", tail)
 	}
-	blanked := map[string]bool{"TINI_KILL_PROCESS_GROUP=1": true}
-	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
-		blanked[k+"="], blanked[strings.ToLower(k)+"="] = true, true
-	}
-	for i, a := range args {
-		switch {
-		case a == "-e" && blanked[args[i+1]]:
-			delete(blanked, args[i+1])
-		case a == "-e", strings.HasPrefix(a, "--env"), a == "--privileged", strings.HasPrefix(a, "--cap-add"), a == "--rm", strings.HasPrefix(a, "--restart"):
-			t.Errorf("create args pass %q: %q", a, args)
+	fields := []string{"AttachStderr", "AttachStdout", "Cmd", "Entrypoint", "Env", "HostConfig", "Image", "Labels", "User", "WorkingDir"}
+	host := []string{"Binds", "CapDrop", "Init", "LogConfig", "NetworkMode", "SecurityOpt"}
+	for cfg, limits := range map[*Config][]string{&x.cfg: {"Memory", "NanoCpus", "PidsLimit"}, &newTestExecutor(t, Config{}).cfg: nil} {
+		r, err := (&Executor{cfg: *cfg}).request(harness.Effect{ID: "e", Command: "true"}, "spec")
+		data, merr := json.Marshal(r)
+		var sent map[string]json.RawMessage
+		var sentHost map[string]json.RawMessage
+		if err == nil {
+			err = errors.Join(merr, json.Unmarshal(data, &sent), json.Unmarshal(sent["HostConfig"], &sentHost))
+		}
+		if err != nil || !slices.Equal(slices.Sorted(maps.Keys(sent)), fields) ||
+			!slices.Equal(slices.Sorted(maps.Keys(sentHost)), slices.Sorted(slices.Values(append(host, limits...)))) {
+			t.Errorf("create request sends %s, %v; want exactly %q and host config %q", data, err, fields, append(host, limits...))
 		}
 	}
-	if len(blanked) != 0 {
-		t.Errorf("create args let the docker CLI inject %v", blanked)
-	}
-	for i, a := range args {
-		if a == "-v" && strings.HasPrefix(args[i+1], x.cfg.State) && !strings.HasSuffix(args[i+1], ":ro") {
-			t.Errorf("state is mounted writable: %q", args[i+1])
+	for _, bad := range []Config{{Memory: "1x"}, {CPUs: "0.0000000001"}} {
+		if _, err := (&Executor{cfg: bad}).request(effect, "spec"); err == nil {
+			t.Errorf("request(%+v) succeeded", bad)
 		}
+	}
+}
+
+func TestSpecHashKeepsTheContainersOfEarlierRevisions(t *testing.T) {
+	x := &Executor{cfg: Config{Image: "alpine:3.23", Workspace: "/ws", State: "/state", User: "1000:1000", Network: "none",
+		Memory: "256m", CPUs: "0.5", PidsLimit: 64, Mounts: []Mount{{Source: "/runs", Target: "/canti/runs"}}}}
+	if got := specHash(x.runArgs("echo hi")); got != "7677d60a4a807af0e8529d20b675eb5c45db01e48db0bc2e06cad7a45d326ec0" {
+		t.Errorf("spec hash = %s; the containers of earlier revisions would no longer bind", got)
+	}
+	x.cfg.Memory, x.cfg.CPUs, x.cfg.PidsLimit, x.cfg.Mounts = "", "", 0, nil
+	if got := specHash(x.runArgs("echo hi")); got != "fa36330dd70ae216bad847ec81d72905b74282ec97fdd1744703de69a2cb7380" {
+		t.Errorf("spec hash without limits = %s; the containers of earlier revisions would no longer bind", got)
 	}
 }
 
@@ -343,9 +339,27 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 	}
 }
 
-func TestCommandsLeaveTheCallersProcessGroup(t *testing.T) {
-	cmd := newTestExecutor(t, Config{}).command(t.Context(), "version")
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		t.Fatal("the docker CLI shares the caller's process group, so a terminal interrupt can abort a launch")
+func TestCLIProcessesLeaveTheCallersProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "docker")
+	if err := os.WriteFile(cli, fmt.Appendf(nil, "#!/bin/sh\nps -o pgid= -p $$ > %q/$1\n", dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := newTestExecutor(t, Config{Docker: cli}).pull(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialStdio(t.Context(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(conn); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	for _, name := range []string{"pull", "system"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if pgid := strings.TrimSpace(string(b)); err != nil || pgid == "" || pgid == strconv.Itoa(syscall.Getpgrp()) {
+			t.Errorf("docker %s ran in process group %q, %v; it shares the caller's, so a terminal interrupt can abort a launch", name, pgid, err)
+		}
 	}
 }

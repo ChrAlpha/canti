@@ -3,11 +3,14 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +85,36 @@ func (t *tap) preview() string {
 
 func omitted(n int64) string {
 	return fmt.Sprintf("\n... %d bytes omitted ...\n", n)
+}
+
+// demux copies the standard output and standard error frames of a job's log
+// stream to w in their order, as docker logs writes them; the daemon reports
+// a failure while streaming in a frame of its own.
+func demux(w io.Writer, r io.Reader) error {
+	var h [8]byte
+	for {
+		if _, err := io.ReadFull(r, h[:]); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		n := int64(binary.BigEndian.Uint32(h[4:]))
+		switch h[0] {
+		case 0, 1, 2:
+			if _, err := io.CopyN(w, r, n); err != nil {
+				if err == io.EOF {
+					err = io.ErrUnexpectedEOF
+				}
+				return err
+			}
+		case 3:
+			msg, _ := io.ReadAll(io.LimitReader(r, n))
+			return errors.New(string(msg))
+		default:
+			return fmt.Errorf("log stream %d is not known", h[0])
+		}
+	}
 }
 
 // describe reports the artifact captured for job, keeping the detail job was
@@ -191,7 +224,7 @@ func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error
 // the next report.
 func (x *Executor) release(ctx context.Context, id, jobID string) {
 	if jobID != fenced(id) {
-		_, _ = x.docker(ctx, "rm", "-v", jobID)
+		_ = x.api(ctx, "rm", http.MethodDelete, "/containers/"+jobID+"?v=1", nil, nil)
 	}
 }
 
@@ -204,18 +237,21 @@ func fenced(id string) string { return "fenced:" + id }
 // record naming it, so a removal that failed is retried by the next Bind even
 // though the finished effect is never reported again.
 func (x *Executor) sweep(ctx context.Context) {
-	out, err := x.docker(ctx, "ps", "-a", "--no-trunc", "--filter", "label=canti.state="+x.cfg.State,
-		"--format", `{{.ID}} {{.Label "canti.effect"}}`)
-	if err != nil {
+	var listed []struct {
+		ID     string
+		Labels map[string]string
+	}
+	filters, _ := json.Marshal(map[string][]string{"label": {"canti.state=" + x.cfg.State}})
+	if x.api(ctx, "ps", http.MethodGet, "/containers/json?all=1&filters="+url.QueryEscape(string(filters)), nil, decode(&listed)) != nil {
 		return
 	}
-	for line := range strings.Lines(string(out)) {
-		id, effect, _ := strings.Cut(strings.TrimSpace(line), " ")
+	for _, c := range listed {
+		effect := c.Labels["canti.effect"]
 		if checkID(effect) != nil {
 			continue
 		}
-		if rec, done, err := x.load(effect); err == nil && done && rec.ID == id {
-			x.release(ctx, effect, id)
+		if rec, done, err := x.load(effect); err == nil && done && rec.ID == c.ID {
+			x.release(ctx, effect, c.ID)
 		}
 	}
 }
@@ -232,16 +268,11 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 	} else {
 		t.w = f
 	}
-	call, cancel := context.WithTimeout(ctx, x.timeouts.transfer)
-	defer cancel()
 	var logsErr error
 	if job.ID != fenced(id) {
-		cmd := x.command(call, "logs", job.ID)
-		cmd.Stdout, cmd.Stderr = t, t
-		logsErr = cmd.Run()
-	}
-	if logsErr != nil && call.Err() != nil {
-		logsErr = fmt.Errorf("no response within %v", x.timeouts.transfer)
+		logsErr = x.api(ctx, "logs", http.MethodGet, "/containers/"+job.ID+"/logs?stdout=1&stderr=1", nil, func(r *http.Response) error {
+			return demux(t, r.Body)
+		})
 	}
 	if f != nil {
 		if err := install(f, path, false, errors.Join(t.werr, logsErr)); logsErr == nil {

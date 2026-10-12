@@ -1,5 +1,5 @@
-// Package docker runs harness effects as Docker containers through the docker
-// CLI.
+// Package docker runs harness effects as Docker containers through the
+// Docker Engine API, over connections that the docker CLI opens.
 //
 // A finished job's container, with its Docker log, is removed once its result
 // is recorded, even when its output could not be captured, so host disk holds
@@ -20,13 +20,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/archive"
@@ -89,18 +89,19 @@ type Mount struct{ Source, Target string }
 type Executor struct {
 	cfg      Config
 	timeouts timeouts
+	engine   *engine
 }
 
-// Every docker CLI call has its own deadline, so a hung daemon cannot hold an
+// Every daemon call has its own deadline, so a hung daemon cannot hold an
 // effect's lock forever: callTimeout, extended by Config.StopGrace for a
-// stop, or transferTimeout for a create, which may pull the image, and to
-// read a job's whole Docker log.
+// stop, or transferTimeout to pull the image and to read a job's whole
+// Docker log.
 const (
 	callTimeout     = 30 * time.Second
 	transferTimeout = 10 * time.Minute
 )
 
-// timeouts are the deadlines of docker CLI calls; tests shorten them.
+// timeouts are the deadlines of daemon calls; tests shorten them.
 type timeouts struct{ call, transfer time.Duration }
 
 var _ harness.Executor = (*Executor)(nil)
@@ -158,7 +159,7 @@ func New(cfg Config) (*Executor, error) {
 		return nil, err
 	}
 	cfg.Workspace, cfg.State, cfg.Mounts = ws, state, mounts
-	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}}, nil
+	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}, engine: cliEngine(cfg.Docker)}, nil
 }
 
 // CheckLayout refuses, as New does, a workspace and a state directory that
@@ -226,15 +227,28 @@ func (x *Executor) runArgs(command string) []string {
 	if c.PidsLimit > 0 {
 		args = append(args, "--pids-limit", strconv.Itoa(c.PidsLimit))
 	}
-	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
+	for _, k := range proxies {
 		args = append(args, "-e", k+"=", "-e", strings.ToLower(k)+"=")
 	}
-	args = append(args, "-v", c.Workspace+":"+WorkDir, "-v", x.artifacts()+":"+archive.ArtifactsRoot+":ro")
-	for _, m := range c.Mounts {
-		args = append(args, "-v", m.Source+":"+m.Target+":ro")
+	for _, b := range x.binds() {
+		args = append(args, "-v", b)
 	}
-	return append(args, c.Image, "-c", "exec 2>&1\n"+command)
+	return append(args, c.Image, "-c", script(command))
 }
+
+// proxies are the variables the docker CLI's configuration could set in a
+// job; every job sets them empty.
+var proxies = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"}
+
+func (x *Executor) binds() []string {
+	b := []string{x.cfg.Workspace + ":" + WorkDir, x.artifacts() + ":" + archive.ArtifactsRoot + ":ro"}
+	for _, m := range x.cfg.Mounts {
+		b = append(b, m.Source+":"+m.Target+":ro")
+	}
+	return b
+}
+
+func script(command string) string { return "exec 2>&1\n" + command }
 
 // wrapper runs the job's script in a child shell exactly as an earlier
 // revision ran it and records the child's exit status in the container's
@@ -259,16 +273,6 @@ func specHash(run []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// createArgs creates the job of run under wrapper. The spec hash covers run
-// alone, so a container of an earlier revision, which ran run directly and
-// has no exitLabel, still binds and is derived from Docker's exit code.
-func (x *Executor) createArgs(id string, run []string) []string {
-	args := []string{"create", "--name", "canti-" + id, "--label", "canti.effect=" + id, "--label", "canti.state=" + x.cfg.State,
-		"--label", "canti.spec=" + specHash(run), "--label", exitLabel + "=" + exitFile, "-e", "TINI_KILL_PROCESS_GROUP=1"}
-	n := len(run) - 1
-	return append(append(args, run[:n]...), wrapper, "canti", run[n])
-}
-
 func (x *Executor) dir(id string) string { return filepath.Join(x.cfg.State, "jobs", id) }
 
 func (x *Executor) artifacts() string { return filepath.Join(x.cfg.State, "artifacts") }
@@ -288,50 +292,7 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 
 var errMissing = errors.New("no such container")
 
-func (x *Executor) command(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, x.cfg.Docker, args...)
-	cmd.WaitDelay = time.Second
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	return cmd
-}
-
-// docker runs one CLI call under its own deadline. Once ctx is done it
-// returns ctx's error; a call past only its own deadline fails with an
-// ordinary error, never mistaken for the caller's shutdown.
-func (x *Executor) docker(ctx context.Context, args ...string) ([]byte, error) {
-	limit := x.timeouts.call
-	switch args[0] {
-	case "create":
-		limit = x.timeouts.transfer
-	case "stop":
-		limit += x.cfg.StopGrace
-	}
-	call, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
-	cmd := x.command(call, args...)
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if args[0] == "cp" {
-		cmd.Stdout = capped{&out}
-	}
-	err := cmd.Run()
-	if err == nil {
-		return out.Bytes(), nil
-	}
-	if cerr := ctx.Err(); cerr != nil {
-		return nil, cerr
-	}
-	if call.Err() != nil {
-		return nil, fmt.Errorf("docker %s: no response within %v", args[0], limit)
-	}
-	stderr := strings.TrimSpace(errOut.String())
-	if s := strings.ToLower(stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
-		err = errMissing
-	}
-	return nil, fmt.Errorf("docker %s: %w: %s", args[0], err, stderr)
-}
-
-// capped bounds the output of docker cp, which a job controls.
+// capped bounds the archive of the exit record, which a job controls.
 type capped struct{ b *bytes.Buffer }
 
 func (c capped) Write(p []byte) (int, error) {
@@ -344,14 +305,18 @@ func (c capped) Write(p []byte) (int, error) {
 // exitStatus reads the exit status that wrapper wrote to file in the
 // container; it is nil when the file holds none.
 func (x *Executor) exitStatus(ctx context.Context, containerID, file string) (*int, error) {
-	out, err := x.docker(ctx, "cp", containerID+":"+file, "-")
+	var out bytes.Buffer
+	err := x.api(ctx, "cp", http.MethodGet, "/containers/"+containerID+"/archive?path="+url.QueryEscape(file), nil, func(r *http.Response) error {
+		_, err := io.Copy(capped{&out}, r.Body)
+		return err
+	})
+	if status(err) == http.StatusNotFound && !errors.Is(err, errMissing) {
+		return nil, nil
+	}
 	if err != nil {
-		if s := strings.ToLower(err.Error()); strings.Contains(s, "could not find the file") || strings.Contains(s, "no such container:path") {
-			return nil, nil
-		}
 		return nil, err
 	}
-	r := tar.NewReader(bytes.NewReader(out))
+	r := tar.NewReader(&out)
 	if h, err := r.Next(); err != nil || h.Typeflag != tar.TypeReg || h.Size > 4 {
 		return nil, nil
 	}
@@ -365,21 +330,34 @@ func (x *Executor) exitStatus(ctx context.Context, containerID, file string) (*i
 }
 
 func (x *Executor) inspect(ctx context.Context, id string) (container, bool, error) {
-	out, err := x.docker(ctx, "container", "inspect", "canti-"+id)
+	var c container
+	err := x.api(ctx, "inspect", http.MethodGet, "/containers/canti-"+id+"/json", nil, decode(&c))
 	if errors.Is(err, errMissing) {
 		return container{}, false, nil
 	}
 	if err != nil {
 		return container{}, false, err
 	}
-	var cs []container
-	if err := json.Unmarshal(out, &cs); err != nil || len(cs) != 1 {
-		return container{}, false, fmt.Errorf("docker: unexpected inspect output for effect %s: %v", id, err)
+	if c.ID == "" {
+		return container{}, false, fmt.Errorf("docker: unexpected inspect output for effect %s", id)
 	}
-	if l := cs[0].Config.Labels; l["canti.effect"] != id || l["canti.state"] != x.cfg.State {
-		return container{}, false, fmt.Errorf("docker: container %s is not owned by effect %s under %s", cs[0].ID, id, x.cfg.State)
+	if l := c.Config.Labels; l["canti.effect"] != id || l["canti.state"] != x.cfg.State {
+		return container{}, false, fmt.Errorf("docker: container %s is not owned by effect %s under %s", c.ID, id, x.cfg.State)
 	}
-	return cs[0], true, nil
+	return c, true, nil
+}
+
+func decode(v any) func(*http.Response) error {
+	return func(r *http.Response) error {
+		d := json.NewDecoder(r.Body)
+		if err := d.Decode(v); err != nil {
+			return err
+		}
+		if _, err := d.Token(); err != io.EOF {
+			return errors.New("trailing data")
+		}
+		return nil
+	}
 }
 
 type observation struct {
@@ -469,7 +447,7 @@ func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job
 		}
 	}
 	if err == nil && !done && !found {
-		if _, err = x.docker(ctx, x.createArgs(effect.ID, run)...); err == nil {
+		if err = x.create(ctx, effect, specHash(run)); err == nil {
 			o, err = x.bound(ctx, effect.ID)
 		}
 	}
@@ -520,7 +498,7 @@ func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, err
 			return harness.Job{}, err
 		}
 		launch := context.WithoutCancel(ctx)
-		_, started := x.docker(launch, "start", o.c.ID)
+		started := x.api(launch, "start", http.MethodPost, "/containers/"+o.c.ID+"/start", nil, nil)
 		o, err = x.bound(launch, effectID)
 		if started != nil && (err != nil || !rejected(o.c)) {
 			return harness.Job{}, started
@@ -578,6 +556,5 @@ func (x *Executor) Cancel(ctx context.Context, effectID string) error {
 		return err
 	}
 	grace := (x.cfg.StopGrace + time.Second - 1) / time.Second
-	_, err = x.docker(ctx, "stop", "-t", strconv.Itoa(int(grace)), c.ID)
-	return err
+	return x.api(ctx, "stop", http.MethodPost, "/containers/"+c.ID+"/stop?t="+strconv.Itoa(int(grace)), nil, nil)
 }

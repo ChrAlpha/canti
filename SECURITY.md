@@ -48,7 +48,7 @@ Known limits:
   of the same user that can modify the state directory; jobs have neither.
   Within that assumption, a container is recognized by its name and labels
   alone, so a principal with daemon access could plant one that canti adopts,
-  and docker CLI output and final job records are read without a size cap.
+  and Docker API responses and final job records are read without a size cap.
 - The workspace is writable by the agent by design, so anything placed in it
   is agent-controlled. Notes in the workspace are never trusted as facts.
 - The state directory is protected only by file permissions. A process of the

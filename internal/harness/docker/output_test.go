@@ -167,3 +167,23 @@ func TestVerifyRechecksArtifact(t *testing.T) {
 		t.Fatalf("verify(missing) = %+v", got)
 	}
 }
+
+func TestDemuxKeepsBothStreamsInOrder(t *testing.T) {
+	var b bytes.Buffer
+	in := frame(1, "out\n") + frame(2, "err\n") + frame(1, strings.Repeat("x", 70000)) + frame(0, "in\n")
+	if err := demux(&b, iotest.OneByteReader(strings.NewReader(in))); err != nil || b.String() != "out\nerr\n"+strings.Repeat("x", 70000)+"in\n" {
+		t.Fatalf("demux() = %.40q, %v", b.String(), err)
+	}
+	for name, tt := range map[string]struct{ in, err string }{
+		"empty":          {"", ""},
+		"cut header":     {frame(1, "ab")[:5], "unexpected EOF"},
+		"cut frame":      {frame(1, "abc")[:10], "unexpected EOF"},
+		"daemon error":   {frame(1, "a") + frame(3, "boom") + frame(1, "b"), "boom"},
+		"unknown stream": {frame(7, "a"), "log stream 7 is not known"},
+	} {
+		err := demux(io.Discard, strings.NewReader(tt.in))
+		if fmt.Sprint(err) != tt.err && (err != nil || tt.err != "") {
+			t.Errorf("demux(%s) = %v, want %q", name, err, tt.err)
+		}
+	}
+}

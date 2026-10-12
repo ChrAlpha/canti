@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,7 +24,7 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 				2: {Kind: core.Return, Payload: "first done"},
 			})
 			unavailable := filepath.Join(t.TempDir(), "unavailable")
-			path := dockerShim(t, fmt.Sprintf("if [ \"$1 $2\" = 'container inspect' ] && [ -e '%s' ]; then\n\techo 'job status unavailable' >&2\n\texit 1\nfi", unavailable))
+			path := dockerProxy(t, unavailableInspection(unavailable))
 
 			_, wait := f.start(path, "run", "-session", "s", "-input", "one", "-goal", "do once", "-image", image)
 			awaitPhase(t, f, core.PhaseAwaitingObservation)

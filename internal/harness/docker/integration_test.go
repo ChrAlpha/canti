@@ -10,17 +10,20 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
+	"github.com/ChrAlpha/canti/internal/harness/docker/dockertest"
 	"github.com/ChrAlpha/canti/internal/harness/executortest"
 )
 
@@ -225,19 +228,11 @@ func TestRejectedStartIsRecordedAndReleased(t *testing.T) {
 
 func TestBindReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
 	cfg, name := setup(t, docker.Config{})
-	real, err := exec.LookPath("docker")
-	if err != nil {
-		t.Fatal(err)
-	}
-	failing := filepath.Join(t.TempDir(), "fail-rm")
-	cfg.Docker = filepath.Join(t.TempDir(), "docker")
-	shim := fmt.Sprintf("#!/bin/sh\n[ \"$1\" = rm ] && [ -e %q ] && exit 1\nexec %q \"$@\"\n", failing, real)
-	if err := os.WriteFile(cfg.Docker, []byte(shim), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(failing, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	var failing atomic.Bool
+	failing.Store(true)
+	cfg.Docker = filepath.Join(dockertest.Proxy(t, func(w http.ResponseWriter, r *http.Request) bool {
+		return r.Method == http.MethodDelete && failing.Load() && dockertest.Reply(w, http.StatusInternalServerError, `{"message":"injected failure"}`)
+	}), "docker")
 	x := open(t, cfg)
 	ctx := testContext(t, time.Minute)
 	first := harness.Effect{ID: name("first"), Command: "echo first"}
@@ -247,14 +242,41 @@ func TestBindReleasesAnEarlierJobWhoseRemovalFailed(t *testing.T) {
 	if got := containers(t, first.ID); len(got) != 1 {
 		t.Fatalf("containers of the first effect = %q, want the one whose removal failed", got)
 	}
-	if err := os.Remove(failing); err != nil {
-		t.Fatal(err)
-	}
+	failing.Store(false)
 	if _, err := x.Bind(ctx, harness.Effect{ID: name("second"), Command: "echo second"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := containers(t, first.ID); len(got) != 0 {
 		t.Fatalf("containers of the first effect = %q after the next bind, want none", got)
+	}
+}
+
+func TestBindPullsAnImageTheDaemonLacks(t *testing.T) {
+	cfg, name := setup(t, docker.Config{})
+	var creates, pulls atomic.Int32
+	cfg.Docker = filepath.Join(dockertest.Proxy(t, func(w http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/containers/create") && creates.Add(1) == 1:
+			return dockertest.Reply(w, http.StatusNotFound, fmt.Sprintf(`{"message":"No such image: %s"}`, cfg.Image))
+		case strings.HasSuffix(r.URL.Path, "/images/create"):
+			pulls.Add(1)
+			return dockertest.Reply(w, http.StatusOK, `{"status":"Status: Image is up to date for `+cfg.Image+`"}`+"\n")
+		}
+		return false
+	}), "docker")
+	ctx := testContext(t, time.Minute)
+	if job := run(ctx, t, open(t, cfg), harness.Effect{ID: name("pulled"), Command: "echo pulled"}); job.Status != harness.JobSucceeded || job.Preview != "pulled\n" {
+		t.Fatalf("job = %+v", job)
+	}
+	if creates.Load() != 2 || pulls.Load() != 1 {
+		t.Fatalf("creates %d, pulls %d; want a pull between two creates", creates.Load(), pulls.Load())
+	}
+	cfg.Docker = filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(cfg.Docker, []byte("#!/bin/sh\nexec docker -H unix:///nonexistent/docker.sock \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := open(t, cfg).Bind(ctx, harness.Effect{ID: name("unreachable"), Command: "true"}); err == nil || !strings.Contains(err.Error(), "/nonexistent/docker.sock") {
+		t.Fatalf("Bind() with the daemon unreachable = %v, want the docker CLI's reason", err)
 	}
 }
 

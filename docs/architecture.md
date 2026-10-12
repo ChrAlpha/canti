@@ -31,7 +31,7 @@ is not.
 | `internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
 | `internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations, their continuations, and the evidence each returns | Offline tests on real directories |
 | `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
-| `internal/harness/docker` | One container per effect through the docker CLI, start latch, output capture | Fake-CLI tests and Docker integration tests |
+| `internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
 | `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
 | `cmd/canti` | CLI: commands, state directory, workspace lock, signals, credential | Subprocess tests; Docker-backed gate tests |
 
@@ -681,7 +681,13 @@ or competing controller would see it. A PID alone is insufficient for
 recovery, and cancellation needs a bounded cleanup and result-recording phase
 independent of the already-cancelled execution context.
 
-`docker.Executor` implements the contract through the docker CLI. The job of
+`docker.Executor` implements the contract through the Docker Engine API,
+over connections that `docker system dial-stdio` opens, so it reaches the
+daemon that the docker CLI would (`DOCKER_HOST`, the current context, TLS,
+ssh), and one CLI process serves many calls instead of one each. The
+container it creates is the one `docker create` created from the same
+arguments in earlier revisions, and when the daemon lacks the image it pulls
+it with `docker pull`, which holds the registry credentials. The job of
 an effect is the container `canti-<effect ID>`, created by `Bind` with labels
 naming the effect, the executor's state directory, and a SHA-256 hash of the
 execution spec: image, user, network, resource limits, mounts, log options,
@@ -701,14 +707,16 @@ state directory, and each target a clean absolute path that overlaps neither
   fsynced, hard-linked into place, which fails if the latch exists, and the
   directory is fsynced. Every operation on an effect holds that directory's
   `flock`, so no caller observes a half-done start.
-- **Start.** `Start` sets the `start` latch and then runs `docker start` on a
-  container still in `created`, finishing the launch even if its context
-  ends. Once the latch is set, `Start` only reports the job.
+- **Start.** `Start` sets the `start` latch and then starts a container
+  still in `created`, finishing the launch even if its context ends. The
+  start is sent once: unlike every other call, it is not sent again when its
+  connection breaks before an answer. Once the latch is set, `Start` only
+  reports the job.
 - **Cancel.** `Cancel` sets a `cancel` latch on an unstarted effect, so that a
   container bound earlier reports `cancelled` and never starts, and a later
   `Bind` that finds no container records the job `cancelled`, with an empty
   output and the ID `fenced:<effect ID>`, without creating one. For a running
-  job it writes a cancel marker and runs `docker stop` with the stop grace
+  job it writes a cancel marker and stops the container with the stop grace
   (5 s by default), after which Docker kills the container's processes. The
   marker labels the job cancelled even if it exited on its own between
   `Cancel`'s inspection and the marker write, or after a `docker stop` cut
@@ -754,19 +762,19 @@ state directory, and each target a clean absolute path that overlaps neither
   step shows it. The wrapper discards its own diagnostics and leaves the job's
   environment unchanged; tini signals the whole process group, which the
   wrapper survives, so a stop signal still reaches the job's processes. The
-  record is read with `docker cp`, at most 64 KiB. A job can forge it, but a
+  record is read as an archive of the container's file, at most 64 KiB. A job can forge it, but a
   forged record that differs from Docker's exit code is not final. Jobs run
   under Docker's json-file log driver with rotation disabled
   (`max-size=1p`) and `mode=blocking`, so no output is dropped. `Bind` and
   `Start` never read the exit record, so a job whose result needs it is
   `unknown` until `Inspect` reads it. On the first report of a finished job
-  whose result is known, the executor copies `docker logs` through a tap
+  whose result is known, the executor copies the job's Docker log through a tap
   that keeps the first `OutputLimit` bytes (8 MiB by default) as
   `artifacts/<effect ID>/output`, counts every byte, and keeps a preview of at
   most `PreviewLimit` bytes (4 KiB by default; the CLI sets it to the
   prompt's preview limit): the head, a `... N bytes omitted ...` marker, and
   the true tail, cut at rune boundaries. A truncated or cancelled job's output is marked incomplete,
-  with details such as `kept N of M bytes`. A failed `docker logs` call or
+  with details such as `kept N of M bytes`. A failed log read or
   artifact write is recorded as an unavailable artifact with the error as
   its detail, because the report of a finished job is final. Only a capture
   cut short by the caller's context, or a final record that cannot be
@@ -777,7 +785,7 @@ state directory, and each target a clean absolute path that overlaps neither
 - **Release.** After the capture, the job's final record — status, exit
   code, times, job ID, spec hash, preview, and artifact reference — is
   published as `jobs/<effect ID>/output.json`, and only then
-  is the container removed by its ID (`docker rm -v`), together with its
+  is the container removed by its ID, with its anonymous volumes and its
   Docker log; a failed removal is retried by the next report of the effect
   and by every `Bind` in the state directory, which sweeps before anything
   else; `Start` and `Inspect` never retry other effects' removals. From then
@@ -794,9 +802,9 @@ container of a finished job whose removal failed, until a later report of the
 effect or `Bind` in the state directory retries it; for the last job of a
 run, none may come.
 
-Every docker CLI call has its own deadline: 30 s, plus the stop grace for
-`docker stop`, and 10 min for a create, which may pull the image, and for
-reading a job's log. A call past only its own deadline fails with an ordinary
+Every daemon call has its own deadline: 30 s, plus the stop grace for a
+stop, and 10 min for the pull of an image the daemon lacks and for reading
+a job's log. A call past only its own deadline fails with an ordinary
 error, never taken for the caller's shutdown, so a hung daemon cannot hold an
 effect's lock forever: the loop retries a hung inspection and then records an
 unknown outcome.
@@ -814,8 +822,8 @@ CLI's configuration would inject are set empty. Jobs run with `--init`, as
 the uid and gid of the canti process, with `--cap-drop ALL`,
 `no-new-privileges`, network `none` unless configured, and optional memory,
 CPU, and process limits (the CLI defaults to 2g of memory and 512 processes).
-The docker CLI runs in its own process group, so a terminal's interrupt
-reaches only canti. The CLI reads the model credential once and removes it
+Each docker CLI process runs in its own process group, so a terminal's
+interrupt reaches only canti. The CLI reads the model credential once and removes it
 from its environment before starting any process; the credential is sent
 only as an HTTP header, and the tests check that it appears in no request
 body, CLI output, or file of the state directory.

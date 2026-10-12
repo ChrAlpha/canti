@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,9 +41,9 @@ type loopFixture struct {
 func newLoop(t *testing.T, f *fake) *loopFixture {
 	t.Helper()
 	lf := saveEffect(t, f)
-	f.set("inspect.out", f.containerOf(lf.effect, "true", "created", 0))
-	f.set("running.json", f.containerOf(lf.effect, "true", "running", 0))
-	f.set("start.sh", `cp "$ctl/running.json" "$ctl/inspect.out"`+"\n")
+	f.reply("inspect", f.containerOf(lf.effect, "true", "created", 0))
+	running := f.containerOf(lf.effect, "true", "running", 0)
+	f.hook("start", func(*http.Request) { f.reply("inspect", running) })
 	lf.step(2, core.PhaseAwaitingObservation)
 	return lf
 }
@@ -108,7 +109,7 @@ func (lf *loopFixture) wantUnknown(failure string) {
 func TestLoopGivesUpOnAHungDaemon(t *testing.T) {
 	lf := newLoop(t, newFake(t))
 	lf.x.timeouts.call = 50 * time.Millisecond
-	lf.set("inspect.sh", "exec sleep 30\n")
+	lf.hang("inspect")
 	before := len(lf.calls("inspect"))
 	lf.step(1, core.PhaseNeedsResolution)
 	lf.wantUnknown("no response within 50ms")
@@ -140,8 +141,7 @@ func TestLoopObservesAnEffectFencedBeforeItsBind(t *testing.T) {
 	if err := setLatch(lf.x.dir(lf.effect), latchCancel); err != nil {
 		t.Fatal(err)
 	}
-	lf.set("inspect.err", "Error response from daemon: No such container: canti-"+lf.effect+"\n")
-	lf.set("inspect.exit", "1")
+	lf.fail("inspect", http.StatusNotFound, "No such container: canti-"+lf.effect)
 	lf.step(3, core.PhaseIdle)
 	ts, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
 	if err != nil {
@@ -161,18 +161,18 @@ func TestLoopObservesAnEffectFencedBeforeItsBind(t *testing.T) {
 	if bound.JobID != "fenced:"+lf.effect || obs == nil || !reflect.DeepEqual(*obs, want) {
 		t.Fatalf("bound job %q, observation %+v; want the fenced job observed as %+v", bound.JobID, obs, want)
 	}
-	for _, cmd := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
-		if calls := lf.calls(cmd); len(calls) != 0 {
-			t.Fatalf("%s calls = %q, want none for an effect fenced before its bind", cmd, calls)
+	for _, op := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
+		if calls := lf.calls(op); len(calls) != 0 {
+			t.Fatalf("%s calls = %q, want none for an effect fenced before its bind", op, calls)
 		}
 	}
 }
 
 func TestLoopStopIsNotHeldByAHungListing(t *testing.T) {
 	lf := newLoop(t, newFake(t))
-	lf.set("ps.sh", "exec sleep 30\n")
-	lf.set("stopped.json", lf.containerOf(lf.effect, "true", "exited", 143))
-	lf.set("stop.sh", `cp "$ctl/stopped.json" "$ctl/inspect.out"`+"\n")
+	lf.hang("ps")
+	stopped := lf.containerOf(lf.effect, "true", "exited", 143)
+	lf.hook("stop", func(*http.Request) { lf.reply("inspect", stopped) })
 	ctx, cancel := context.WithTimeout(lf.ctx, 2*time.Second)
 	defer cancel()
 	snap, err := lf.loop.Stop(ctx, "run-1", core.StopCancelled)

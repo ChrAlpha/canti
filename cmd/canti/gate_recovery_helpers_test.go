@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/docker/dockertest"
 )
 
 // recoveryFixture is a dockerFixture whose test also fails if a container of
@@ -268,23 +270,22 @@ func killed(cmd *exec.Cmd) bool {
 	return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
 }
 
-// dockerShim returns the PATH setting of a docker CLI that runs the shell
-// script with the CLI's arguments before it runs the real one.
-func dockerShim(t *testing.T, script string) []string {
+// dockerProxy returns the PATH setting of a docker CLI that reaches the
+// daemon through a proxy, where intercept answers a request when it reports
+// true.
+func dockerProxy(t *testing.T, intercept func(http.ResponseWriter, *http.Request) bool) []string {
 	t.Helper()
-	bin, err := exec.LookPath("docker")
-	if err == nil {
-		bin, err = filepath.Abs(bin)
+	return []string{"PATH=" + dockertest.Proxy(t, intercept) + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+// unavailableInspection fails every container inspection while the file
+// unavailable exists.
+func unavailableInspection(unavailable string) func(http.ResponseWriter, *http.Request) bool {
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		_, err := os.Stat(unavailable)
+		return err == nil && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/json") && !strings.HasSuffix(r.URL.Path, "/containers/json") &&
+			dockertest.Reply(w, http.StatusInternalServerError, `{"message":"job status unavailable"}`)
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	shim := fmt.Sprintf("#!/bin/sh\n%s\nexec '%s' \"$@\"\n", script, bin)
-	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(shim), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
 // awaitPhase waits until the latest run of f reports phase.
