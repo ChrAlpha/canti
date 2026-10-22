@@ -22,12 +22,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mattn/go-isatty"
-
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/mattn/go-isatty"
 )
 
 const version = "dev"
@@ -61,6 +60,7 @@ Usage:
   canti status [-run ID]                            print the state of a run as JSON
   canti history [-run ID]                           print the transitions of a run as JSON Lines
   canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
+  canti compactions [-run ID] [-id ID]              inspect summary requests, attempts, usage, and adoption
   canti version                                     print the version
 
 Run "canti COMMAND -h" for the flags of a command. run, chat, and resume read the
@@ -77,7 +77,7 @@ type action func(context.Context) (int, error)
 var commands = map[string]func(*flag.FlagSet, *app) action{
 	"run": runCommand, "chat": chatCommand, "resume": resumeCommand, "stop": stopCommand,
 	"resolve": resolveCommand, "status": statusCommand, "history": historyCommand,
-	"context": contextCommand,
+	"context": contextCommand, "compactions": compactionsCommand,
 }
 
 type app struct {
@@ -512,7 +512,7 @@ func (a *app) with(ctx context.Context, model func(config) (harness.Model, error
 	}
 	loop := c
 	if !resume {
-		loop.ContextBytes, loop.HandoverBytes, loop.WindowSteps, loop.WindowBytes = harness.DefaultPromptLimits().Total, 0, 0, 0
+		loop.ContextBytes, loop.SummaryBytes, loop.CompactSteps, loop.CompactBytes = harness.DefaultPromptLimits().Total, 0, 0, 0
 	}
 	var m harness.Model
 	var x *docker.Executor

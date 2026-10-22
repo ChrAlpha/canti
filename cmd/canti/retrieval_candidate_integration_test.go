@@ -32,7 +32,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		}
 	}
 	r := f.cli(nil, "run", "-once", "-goal", "Resume deployment using original release authorization", "-image", image,
-		"-context-bytes", "1048576", "-window-steps", "8", "-max-steps", "30", "-token-budget", "5000", "-wall-time", "4m", "-job-timeout", "10s")
+		"-context-bytes", "1048576", "-compact-steps", "8", "-retain-bytes", "1", "-max-steps", "30", "-token-budget", "500000", "-wall-time", "4m", "-job-timeout", "10s")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
@@ -73,16 +73,13 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		t.Fatal("missing observation")
 		return harness.Observation{}
 	}
-	handover := func(first int) {
+	advanceWindow := func(first int) {
 		t.Helper()
 		for step < first+8 {
 			act("printf 'checkpoint\\n'")
 			observe()
 		}
-		act(harness.HandoverPrefix + "Continue deployment. Check original release decisions and any amendments before applying settings.")
-		if observe().Handover == nil {
-			t.Fatal("handover was not committed")
-		}
+
 	}
 	query := func(q archive.RetrievalQuery) archive.Retrieval {
 		t.Helper()
@@ -104,7 +101,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		paths[name] = "/canti/artifacts/" + o.Output.Path
 	}
 	act("# canti:discovery\nprintf 'Orchid approved wait 999 seconds\\n'")
-	handover(1)
+	advanceWindow(1)
 	calls := 0
 	for window := 0; window < 2; window++ {
 		first := step
@@ -165,7 +162,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		}
 		checkStep := step
 		if window == 0 {
-			handover(first)
+			advanceWindow(first)
 		} else {
 			act("printf 'wait=47 retry=5\\n' > settings")
 		}

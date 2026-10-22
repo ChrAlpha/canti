@@ -14,22 +14,8 @@ func failureScenarios() []frozenScenario {
 	partial := func(detail string) harness.ArtifactRef { return harness.ArtifactRef{Available: true, Detail: detail} }
 	failing, exit, zero := "--- FAIL: TestParse (0.00s)\n    parse_test.go:12: unexpected token \"}\"\nFAIL\n", 2, 0
 	kept := fmt.Sprintf("kept %d of 9000 bytes", len(failing))
-	handover := corpusDecision(core.Exec, harness.HandoverPrefix+"Read go.mod next, then report the module path.")
 	return []frozenScenario{
-		{
-			name: "failed-context-actions", limits: stepLimits, windowSteps: 1,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
-				corpusDecision(core.Exec, `canti:retrieve {"operation":"read","path":"/canti/runs/`+corpusRun+`/goal","reason":"Reread the goal.","bogus":true}`),
-				corpusDecision(core.Exec, harness.HandoverPrefix),
-				handover,
-				corpusDecision(core.Return, "I could not read go.mod yet."),
-			}, steps: []string{"1 exited 1 action failed", "2 exited 1 action failed", "3 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"Preview:\n```\nContext action failed: json: unknown field \"bogus\"\n```\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"Preview:\n```\nContext action failed: harness: handover text must not be empty\n```\n", "## Handover required\n"},
-				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n", "## Current window steps\nNone.\n"},
-			},
-		},
+
 		{
 			name: "action-type-errors", limits: stepLimits,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
@@ -40,34 +26,7 @@ func failureScenarios() []frozenScenario {
 				"run1-step02-rev1.json": {"Context action failed: json: cannot unmarshal number into Go struct field RetrievalQuery.operation of type string"},
 			},
 		},
-		{
-			// A command the requested handover refuses never runs: it is
-			// recorded as failed to start, with no job bound or started.
-			name: "handover-gate", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Exec, "cat go.mod"),
-				handover,
-				corpusDecision(core.Return, "I have not read go.mod yet."),
-			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step03-rev1.json": {"### Step 2\nCommand:\n```\ncat go.mod\n```\nExecution: failed_to_start\n",
-					"Preview:\n```\nContext action failed: handover is required before any more work; use canti:handover\n```\n", "## Handover required\n"},
-				"run1-step04-rev1.json": {"This window begins at step 4.", "## Handover\n"},
-			},
-		},
-		{
-			name: "handover-gate-retrieval", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Reread the listing."),
-				handover,
-				corpusDecision(core.Return, "I have not read go.mod yet."),
-			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step03-rev1.json": {"Execution: failed_to_start\n", "Context action failed: handover is required before any more work; use canti:handover"},
-			},
-		},
+
 		{
 			name: "stopped-session-run", limits: core.Limits{MaxSteps: 1, MaxAttempts: 3}, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
 			runs: []frozenRun{
@@ -78,8 +37,8 @@ func failureScenarios() []frozenScenario {
 				}},
 			},
 			marks: map[string][]string{
-				"run2-step01-rev1.json": {"## Earlier session dialogue\n",
-					"goal, steps, and result): stopped, reason steps_exhausted, recorded steps 1; no assistant return.\nEarlier user goal:\n```\nList /workspace.\n```\n"},
+				"run2-step01-rev1.json": {"## Earlier session history\n",
+					"Recorded run status: stopped, reason steps_exhausted; return does not establish success.\nNo assistant return.\n", "Earlier user goal:\n```\nList /workspace.\n```\n"},
 			},
 		},
 		{

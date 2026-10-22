@@ -36,8 +36,8 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 	sourceRun := f.status().Run.ID
 	f.model = newScriptedModel(t, f.key, nil)
 	goal := "Resume Orchid deployment from run " + sourceRun + "; recover the approved wait and retry budget, accounting for revised decisions."
-	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image, "-window-steps", "9",
-		"-max-steps", "30", "-token-budget", "4000", "-wall-time", "3m", "-job-timeout", "10s", "-output-limit", "2048", "-output-budget", "8192")
+	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image, "-compact-steps", "11", "-retain-bytes", "1",
+		"-max-steps", "31", "-token-budget", "1000000", "-wall-time", "3m", "-job-timeout", "10s", "-output-limit", "2048", "-output-budget", "8192")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
@@ -98,7 +98,7 @@ for file in /canti/runs/%s/steps/*/preview; do
   examined=$((examined+1))
   [ "$examined" -le 128 ] || { printf 'incomplete: file limit\n' >&2; exit 2; }
   first=$(head -n 1 "${file%%/preview}/command") || { printf 'incomplete: command unavailable\n' >&2; exit 2; }
-  case "$first" in 'canti:retrieve '*|'canti:handover '*|'# canti:discovery'*) continue ;; esac
+  case "$first" in 'canti:retrieve '*|'# canti:discovery'*) continue ;; esac
   if grep -F -q 'Orchid' "$file"; then
     found=$((found+1))
     [ "$found" -le 16 ] || { printf 'incomplete: path limit\n' >&2; exit 2; }
@@ -109,6 +109,7 @@ for file in /canti/runs/%s/steps/*/preview; do
   fi
 done`, sourceRun)
 	returnedBytes, shellBytes, searchCalls, readCalls := 0, 0, 0, 0
+	act(core.Decision{Kind: core.Exec, Payload: "printf checkpoint"})
 	for page := 0; page < 3; page++ {
 		first := step
 		act(core.Decision{Kind: core.Exec, Payload: command})
@@ -160,7 +161,7 @@ done`, sourceRun)
 			}
 		}
 		if page < 2 {
-			act(core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Continue deployment. Recheck original decisions in /canti/runs/" + sourceRun + "/steps before applying wait and retry settings."})
+			act(core.Decision{Kind: core.Exec, Payload: "printf checkpoint"})
 		} else {
 			act(core.Decision{Kind: core.Return, Payload: "scripted evidence check complete"})
 		}
@@ -179,8 +180,8 @@ done`, sourceRun)
 		}
 	}
 	s := f.status()
-	if s.Phase != core.PhaseReturned || len(f.model.requests()) != 30 || s.Totals.InputTokens+s.Totals.OutputTokens > 4000 {
+	if s.Phase != core.PhaseReturned || len(f.model.requests()) != 31 || s.Totals.InputTokens+s.Totals.OutputTokens > 1000000 {
 		t.Fatalf("run/call/token bound: %+v, calls=%d", s, len(f.model.requests()))
 	}
-	t.Logf("SCRIPTED_DISCOVERY pages=3 shell_calls=3 search_calls=%d read_calls=%d model_calls=30 shell_bytes=%d native_bytes=%d frozen_request_bytes=%d synthetic_tokens=%d; real CLI/SQLite/Docker, scripted query choice and decisions; no live model task score or provider cost", searchCalls, readCalls, shellBytes, returnedBytes, frozenBytes, s.Totals.InputTokens+s.Totals.OutputTokens)
+	t.Logf("SCRIPTED_DISCOVERY pages=3 shell_calls=3 search_calls=%d read_calls=%d model_calls=31 shell_bytes=%d native_bytes=%d frozen_request_bytes=%d synthetic_tokens=%d; real CLI/SQLite/Docker, scripted query choice and decisions; no live model task score or provider cost", searchCalls, readCalls, shellBytes, returnedBytes, frozenBytes, s.Totals.InputTokens+s.Totals.OutputTokens)
 }

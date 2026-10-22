@@ -75,7 +75,7 @@ func TestLoopLongStability(t *testing.T) {
 	}
 	f := newFixture(t, core.Limits{MaxSteps: maxSteps, MaxAttempts: 5}, harness.Budget{})
 	f.cfg.Reader = &reader
-	f.cfg.WindowSteps = windowSteps
+	f.cfg.CompactSteps = windowSteps
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 128 << 10
 	defer func() { _ = f.store.Close() }()
@@ -91,7 +91,7 @@ func TestLoopLongStability(t *testing.T) {
 	firstSent := map[string][]byte{}
 	sourceByStep := map[int]string{}
 	nextSource := 0
-	var retries, reopens, handovers, maxPrompt, sent int
+	var retries, reopens, compactions, maxPrompt, sent int
 	lateArmed := false
 	type resource struct {
 		heap       uint64
@@ -118,7 +118,7 @@ func TestLoopLongStability(t *testing.T) {
 				t.Fatalf("missing frozen request at step %d: %v", before.State.Step, err)
 			}
 			step := before.State.Step
-			if !lateArmed && steps >= 80 && step >= steps/2 && req.Window.Requested {
+			if !lateArmed && steps >= 80 && step >= steps/2 && req.CheckpointID != "" {
 				for kind := range ackKinds() {
 					if ack.covered[kind] != 1 {
 						t.Fatalf("initial lost acknowledgement missing: %s", kind)
@@ -130,8 +130,6 @@ func TestLoopLongStability(t *testing.T) {
 			answer := execReply(fmt.Sprintf("echo STABILITY_STEP_%05d", step))
 			if step == steps {
 				answer = returnReply("stability complete")
-			} else if req.Window.Requested {
-				answer = execReply(fmt.Sprintf("%sContinue at step %d; verify original evidence references.", harness.HandoverPrefix, step))
 			} else if step%5 != 0 {
 				source := sourceByStep[step]
 				if source == "" {
@@ -234,8 +232,8 @@ func TestLoopLongStability(t *testing.T) {
 	unique := map[string]bool{}
 	sequence := int64(0)
 	windowFirst := 1
-	var pendingHandover *harness.Handover
-	var pendingStep int
+	checkpointID := ""
+	evidenceSteps := map[int][]string{}
 	evidenceCounts := map[string]int{}
 	for {
 		page, err := f.store.Transitions(ctx, runID, sequence, 256)
@@ -264,16 +262,23 @@ func TestLoopLongStability(t *testing.T) {
 					t.Fatal("request missing window or exceeds total byte limit")
 				}
 				w := tr.Facts.Request.Window
-				if tr.To.RequestRev == 1 {
-					if pendingHandover != nil {
-						if w.FirstStep != pendingStep+1 || w.SourceStep != pendingStep || w.Handover != pendingHandover.Text {
-							t.Fatal("accepted handover did not advance to its exact next window")
+				if tr.To.RequestRev == 1 && tr.Facts.Request.CheckpointID != checkpointID {
+					c, err := f.store.PendingCompaction(ctx, runID, tr.Seq-1)
+					if err != nil || !c.Accepted || c.Plan.ID != tr.Facts.Request.CheckpointID || c.Summary != w.Summary || c.Plan.Through != w.Through || w.FirstStep < windowFirst {
+						t.Fatalf("checkpoint adoption: %+v %v", c, err)
+					}
+					checkpointID = c.Plan.ID
+					windowFirst = w.FirstStep
+					compactions++
+					clear(evidenceCounts)
+					for step, evidence := range evidenceSteps {
+						if step < windowFirst {
+							delete(evidenceSteps, step)
+							continue
 						}
-						windowFirst = w.FirstStep
-						pendingHandover = nil
-						clear(evidenceCounts)
-					} else if w.FirstStep != windowFirst {
-						t.Fatal("context window advanced without an accepted handover or moved backward")
+						for _, text := range evidence {
+							evidenceCounts[text]++
+						}
 					}
 				}
 				for evidence, count := range evidenceCounts {
@@ -281,8 +286,8 @@ func TestLoopLongStability(t *testing.T) {
 						t.Fatal("retrieved original evidence missing or duplicated in frozen request")
 					}
 				}
-				if w.FirstStep > 1 && (w.SourceStep != w.FirstStep-1 || w.Handover == "") {
-					t.Fatal("handover provenance is discontinuous")
+				if w.FirstStep > 1 && (w.Through != int64(w.FirstStep) || w.Summary == "") {
+					t.Fatal("compaction provenance is discontinuous")
 				}
 				if w.FirstStep > 1 && strings.Contains(string(tr.Facts.Request.Body), "### Step 1\n") {
 					t.Fatal("old history flowed into a new window")
@@ -303,10 +308,10 @@ func TestLoopLongStability(t *testing.T) {
 				if o := tr.Facts.Observation; o != nil {
 					want.OutputBytes += o.Output.Bytes
 					payload := tr.From.Decision.Payload
-					if strings.HasPrefix(payload, "canti:retrieve ") != (o.Retrieval != nil) || strings.HasPrefix(payload, "canti:handover ") != (o.Handover != nil) {
+					if strings.HasPrefix(payload, "canti:retrieve ") != (o.Retrieval != nil) {
 						t.Fatal("builtin decision and observed result disagree")
 					}
-					if o.Retrieval != nil || o.Handover != nil {
+					if o.Retrieval != nil {
 						if o.Execution != core.ExecutionExited || o.ExitCode == nil || *o.ExitCode != 0 {
 							t.Fatal("builtin observation did not exit successfully")
 						}
@@ -326,19 +331,19 @@ func TestLoopLongStability(t *testing.T) {
 							text := o.Retrieval.Evidence[i]
 							evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
 							evidenceCounts[evidence]++
+							evidenceSteps[tr.From.Step] = append(evidenceSteps[tr.From.Step], evidence)
 							unique[source.Path] = true
 							retrievedBytes += source.Length
 						}
 					}
-					if o.Handover != nil {
-						handovers++
-						pendingHandover = o.Handover
-						pendingStep = tr.From.Step
-					}
+
 				}
 			}
 		}
 	}
+	want.SummaryUsage = harness.Usage{InputTokens: int64(len(f.model.summarySent)) * usage.InputTokens, OutputTokens: int64(len(f.model.summarySent)) * usage.OutputTokens}
+	want.Usage.InputTokens += want.SummaryUsage.InputTokens
+	want.Usage.OutputTokens += want.SummaryUsage.OutputTokens
 	got, err := f.store.Totals(ctx, runID)
 	if err != nil || got != want {
 		t.Fatalf("durable totals %+v, want %+v: %v", got, want, err)
@@ -359,7 +364,7 @@ func TestLoopLongStability(t *testing.T) {
 	}
 	if steps >= 80 {
 		if !lateArmed && (windowSteps == 3 || steps >= 2000) {
-			t.Fatal("late lost acknowledgements were not armed after a handover request")
+			t.Fatal("late lost acknowledgements were not armed after a compaction request")
 		}
 		for kind := range ackKinds() {
 			wantCount := 1
@@ -383,8 +388,8 @@ func TestLoopLongStability(t *testing.T) {
 			}
 		}
 	}
-	if (windowSteps == 3 && steps >= 8 || steps >= 2000) && handovers == 0 || steps >= 11 && retries == 0 || steps >= 17 && repairs == 0 || steps >= 2 && retrievals == 0 || steps >= 13 && reopens == 0 || sent == 0 || requests == 0 {
-		t.Fatalf("missing stability behavior: sends=%d requests=%d retries=%d repairs=%d retrievals=%d handovers=%d reopens=%d", sent, requests, retries, repairs, retrievals, handovers, reopens)
+	if (windowSteps == 3 && steps >= 8 || steps >= 2000) && compactions == 0 || steps >= 11 && retries == 0 || steps >= 17 && repairs == 0 || steps >= 2 && retrievals == 0 || steps >= 13 && reopens == 0 || sent == 0 || requests == 0 {
+		t.Fatalf("missing stability behavior: sends=%d requests=%d retries=%d repairs=%d retrievals=%d compactions=%d reopens=%d", sent, requests, retries, repairs, retrievals, compactions, reopens)
 	}
 	if steps >= 8*len(sources) && len(unique) != len(sources) {
 		t.Fatalf("retrieved %d of %d frozen sources", len(unique), len(sources))
@@ -398,14 +403,14 @@ func TestLoopLongStability(t *testing.T) {
 		Schedule       string         `json:"schedule"`
 		ManifestSHA256 string         `json:"manifest_sha256"`
 		TimeBudgetMS   int64          `json:"time_budget_ms"`
-		WindowSteps    int            `json:"window_steps"`
+		CompactSteps   int            `json:"window_steps"`
 		Steps          int            `json:"steps"`
 		Requests       int            `json:"requests"`
 		Retries        int            `json:"retries"`
 		Retrievals     int            `json:"retrievals"`
 		UniqueFiles    int            `json:"unique_files"`
 		RetrievedBytes int            `json:"retrieved_bytes"`
-		Handovers      int            `json:"handovers"`
+		Compactions    int            `json:"compactions"`
 		Reopens        int            `json:"reopens"`
 		MaxPromptBytes int            `json:"max_prompt_bytes"`
 		ElapsedMS      int64          `json:"elapsed_ms"`
@@ -419,6 +424,6 @@ func TestLoopLongStability(t *testing.T) {
 		Goroutines500  int            `json:"goroutines_step_500"`
 		GoroutinesEnd  int            `json:"goroutines_final"`
 		DurableTotals  harness.Totals `json:"durable_totals"`
-	}{"loop-stability/1", manifestSHA, (15 * time.Minute).Milliseconds(), windowSteps, steps, requests, retries, retrievals, len(unique), retrievedBytes, handovers, reopens, maxPrompt, time.Since(start).Milliseconds(), repairs, ackTypes, ack.covered, resources[50].heap, resources[500].heap, resources[steps].heap, resources[50].goroutines, resources[500].goroutines, resources[steps].goroutines, got})
+	}{"loop-stability/1", manifestSHA, (15 * time.Minute).Milliseconds(), windowSteps, steps, requests, retries, retrievals, len(unique), retrievedBytes, compactions, reopens, maxPrompt, time.Since(start).Milliseconds(), repairs, ackTypes, ack.covered, resources[50].heap, resources[500].heap, resources[steps].heap, resources[50].goroutines, resources[500].goroutines, resources[steps].goroutines, got})
 	t.Logf("CANTI_STABILITY %s", summary)
 }

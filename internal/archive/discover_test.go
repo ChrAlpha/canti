@@ -13,7 +13,7 @@ import (
 
 func discoveryFixture(t *testing.T) Reader {
 	t.Helper()
-	r := Reader{History: t.TempDir(), Artifacts: t.TempDir(), Excluded: []string{"canti:retrieve ", "canti:handover ", "# canti:discovery"}}
+	r := Reader{History: t.TempDir(), Artifacts: t.TempDir(), Excluded: []string{"canti:retrieve ", "example:excluded ", "# canti:discovery"}}
 	if err := os.MkdirAll(filepath.Join(r.History, "run", "steps"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestDiscoveryOriginalSourcesAndEchoExclusion(t *testing.T) {
 	r := discoveryFixture(t)
 	discoveryStep(t, r, 1, "run original job", "needle preview duplicate", "needle original approval", true)
 	discoveryStep(t, r, 2, `canti:retrieve {"query":"needle"}`, "needle retrieval echo", "", false)
-	discoveryStep(t, r, 3, "canti:handover {}", "needle handover echo", "", false)
+	discoveryStep(t, r, 3, "example:excluded {}", "needle excluded echo", "", false)
 	discoveryStep(t, r, 4, "# canti:discovery\nsearch history", "needle shell echo", "needle shell echo", true)
 	result := retrieveOK(t, r, discoveryQuery())
 	texts := discoveryTexts(t, r, result)

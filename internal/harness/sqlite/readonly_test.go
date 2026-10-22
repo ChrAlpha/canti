@@ -34,14 +34,11 @@ func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
 	}
 }
 
-func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
+func TestOpenReadOnlyPreservesCurrentSchemaAndReadonlyFile(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
 	d := newDriver(t, w, createRun(t, w, "run-1", limits))
 	d.freeze()
-	if _, err := w.db.Exec(`DROP TABLE session_runs; PRAGMA user_version = 1`); err != nil {
-		t.Fatal(err)
-	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +60,7 @@ func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA query_only`).Scan(&queryOnly); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || tables != 0 || queryOnly != 1 {
+	if version != schemaVersion || tables != 1 || queryOnly != 1 {
 		t.Fatalf("version = %d, session tables = %d, query_only = %d", version, tables, queryOnly)
 	}
 	got, err := s.Request(context.Background(), "run-1", 1, 1)
@@ -73,12 +70,6 @@ func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
 	page, err := s.ContextRecords(context.Background(), "run-1", 0, 0, 0, 1)
 	if err != nil || page.AsOfSeq != 1 || page.Request.Seq != 1 || len(page.Events) != 0 {
 		t.Fatalf("legacy context = %#v, %v", page, err)
-	}
-	if runs, err := s.SessionRuns(context.Background(), "s", 0, 1); !errors.Is(err, ErrNoSessions) {
-		t.Fatalf("SessionRuns of a journal without sessions = %v, %v", runs, err)
-	}
-	if run, err := s.SessionInput(context.Background(), "s", "i"); !errors.Is(err, ErrNoSessions) {
-		t.Fatalf("SessionInput of a journal without sessions = %v, %v", run, err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -178,7 +169,7 @@ func TestOpenReadOnlyReadsWALWithReadonlyDirectoryAndExistingSidecars(t *testing
 func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
-	if _, err := w.db.Exec(`PRAGMA user_version = 3`); err != nil {
+	if _, err := w.db.Exec(`PRAGMA user_version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := OpenReadOnly(context.Background(), path); !errors.Is(err, ErrIncompatible) {

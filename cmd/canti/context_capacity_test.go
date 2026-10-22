@@ -1,28 +1,29 @@
 package main
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestRunRejectsContextWithoutRoomForMaximumHandover(t *testing.T) {
-	s := parseSpec(t, "-context-bytes", "65536", "-handover-bytes", "8192", "-window-steps", "1")
+func TestRunRejectsContextWithoutRoomForMaximumSummary(t *testing.T) {
+	s := parseSpec(t, "-context-bytes", "65536", "-summary-bytes", "8192", "-compact-steps", "1")
 	if _, _, err := newRun(strings.Repeat("g", 23000), "", s, time.Now()); err == nil {
-		t.Fatal("accepted a run whose next window cannot accommodate a legal handover")
+		t.Fatal("accepted a run whose next window cannot accommodate a legal summary")
 	}
 }
 
 func TestRunRejectsContextWithoutRetrievalReserve(t *testing.T) {
 	s := parseSpec(t, "-context-bytes", "65536")
-	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err == nil || !strings.Contains(err.Error(), "handover reserve") {
-		t.Fatalf("accepted context without room for a full retrieval and handover: %v", err)
+	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err == nil || !strings.Contains(err.Error(), "summary reserve") {
+		t.Fatalf("accepted context without room for a full retrieval and summary: %v", err)
 	}
 }
 
-func TestRunAcceptsDefaultHandoverWithRetrievalReserve(t *testing.T) {
-	s := parseSpec(t, "-context-bytes", "98304")
+func TestRunAcceptsDefaultSummaryWithRetrievalReserve(t *testing.T) {
+	s := parseSpec(t, "-context-bytes", "131072")
 	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +31,11 @@ func TestRunAcceptsDefaultHandoverWithRetrievalReserve(t *testing.T) {
 
 // TestRunNamesTheContextItRequires requires that a run refused for its
 // -context-bytes names the smallest value its goal, constraints, and flags
-// admit, which is admitted, at the default, smallest, and largest handover
+// admit, which is admitted, at the default, smallest, and largest summary
 // allowance, with and without imports.
 func TestRunNamesTheContextItRequires(t *testing.T) {
 	imports := t.TempDir()
-	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192", "-history-imports", imports}} {
+	for _, flags := range [][]string{nil, {"-summary-bytes", "1"}, {"-summary-bytes", "8192", "-history-imports", imports}} {
 		create := func(n int) error {
 			s := parseSpec(t, append([]string{"-context-bytes", strconv.Itoa(n)}, flags...)...)
 			_, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now())
@@ -54,6 +55,19 @@ func TestRunNamesTheContextItRequires(t *testing.T) {
 		err := create(admitted - 1)
 		if want := "at least " + strconv.Itoa(admitted) + " bytes"; err == nil || !strings.HasPrefix(err.Error(), "-context-bytes: ") || !strings.Contains(err.Error(), want) {
 			t.Errorf("%v: -context-bytes %d is refused with %v, which does not name the %d bytes admitted", flags, admitted-1, err, admitted)
+		}
+	}
+}
+
+func TestRunRejectsSerializedAndTokenOverflowBeforeCreatingState(t *testing.T) {
+	for _, args := range [][]string{{"-context-tokens", "16001"}, {"-request-bytes", "100"}, {"-max-tokens", "9223372036854775807"}} {
+		f := newFixture(t, nil)
+		r := f.cli(nil, "run", append([]string{"-goal", "A fixed request with constraints.", "-constraints", "Read only."}, args...)...)
+		if r.code != exitUsage || len(f.model.requests()) != 0 {
+			t.Fatalf("bad admission %v: %+v", args, r)
+		}
+		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
+			t.Fatalf("admission created state %v", err)
 		}
 	}
 }

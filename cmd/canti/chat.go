@@ -20,12 +20,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/mattn/go-isatty"
-
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/mattn/go-isatty"
 )
 
 func chatCommand(fs *flag.FlagSet, a *app) action {
@@ -240,9 +239,6 @@ func inherited(ctx context.Context, a *app, session string) (string, error) {
 	}
 	defer store.Close()
 	prior, err := store.SessionRuns(ctx, session, 0, 1)
-	if errors.Is(err, sqlite.ErrNoSessions) {
-		return "", nil
-	}
 	if err != nil || len(prior) == 0 {
 		return "", err
 	}

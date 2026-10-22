@@ -28,14 +28,35 @@ import (
 // a text block or, for the tool transport, as the canti_decision tool input,
 // or with the body that follows "raw:".
 type corpusModel struct {
-	mu       sync.Mutex
-	tool     bool
-	replies  []string
-	received [][]byte
+	mu             sync.Mutex
+	tool           bool
+	replies        []string
+	received       [][]byte
+	summaries      [][]byte
+	summaryReplies []string
 }
 
 func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
+	var request struct{ System string }
+	_ = json.Unmarshal(body, &request)
+	if strings.HasPrefix(request.System, "You summarize an agent's committed history") {
+		m.mu.Lock()
+		m.summaries = append(m.summaries, body)
+		reply := ""
+		if len(m.summaryReplies) > 0 {
+			reply, m.summaryReplies = m.summaryReplies[0], m.summaryReplies[1:]
+		}
+		m.mu.Unlock()
+		if reply != "" {
+			w.Header().Set("content-type", "application/json")
+			io.WriteString(w, reply)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"stop_reason":"end_turn","model":"claude-opus-5","content":[{"type":"text","text":"Continue the user task, preserve its constraints, and verify original evidence."}],"usage":{"input_tokens":100,"output_tokens":20}}`)
+		return
+	}
 	m.mu.Lock()
 	m.received = append(m.received, body)
 	n := len(m.received)
@@ -180,7 +201,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	model := &corpusModel{tool: sc.tool}
+	model := &corpusModel{tool: sc.tool, summaryReplies: sc.summaryReplies}
 	server := httptest.NewServer(model)
 	t.Cleanup(server.Close)
 	format := ""
@@ -220,7 +241,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		Environment: corpusEnvironment, History: history,
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
 		Reader: reader, DecisionTool: sc.tool,
-		WindowSteps: sc.windowSteps, WindowBytes: sc.windowBytes, HandoverBytes: 2048,
+		CompactSteps: sc.windowSteps, CompactBytes: sc.windowBytes, SummaryBytes: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)

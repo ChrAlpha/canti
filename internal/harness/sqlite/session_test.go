@@ -195,7 +195,7 @@ func TestConcurrentStoresSubmitAndReopen(t *testing.T) {
 	}
 }
 
-func TestSessionMigrationFromV1PreservesLegacyRun(t *testing.T) {
+func TestSessionRefusesOldSchemaWithoutMigration(t *testing.T) {
 	ctx := context.Background()
 	path := tempPath(t)
 	db, err := sql.Open("sqlite", path)
@@ -217,22 +217,13 @@ func TestSessionMigrationFromV1PreservesLegacyRun(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s := open(t, path)
-	if got, err := s.Run(ctx, legacy.ID); err != nil || !sameRun(got, legacy) {
-		t.Fatalf("legacy run after migration = %#v, %v", got, err)
+	if s, err := Open(ctx, path); !errors.Is(err, ErrIncompatible) {
+		if s != nil {
+			s.Close()
+		}
+		t.Fatalf("old schema: %v", err)
 	}
-	stopRun(t, s, legacy)
-	r := sessionRun("run-1", "input-1")
-	if _, err := s.Submit(ctx, r, fresh(t, r.ID, limits)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s = open(t, path)
-	if got, err := s.SessionInput(ctx, r.SessionID, r.InputID); err != nil || got.ID != r.ID {
-		t.Fatalf("migrated input = %#v, %v", got, err)
-	}
+
 }
 
 func TestSessionAssociationFailureRollsBackRun(t *testing.T) {

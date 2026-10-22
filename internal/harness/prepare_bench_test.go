@@ -2,6 +2,8 @@ package harness_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -40,7 +42,7 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 	for step := 1; step <= completed; step++ {
 		w := &harness.Window{FirstStep: 1}
 		if first := completed - window + 1; first > 1 && step >= first {
-			w = &harness.Window{FirstStep: first, SourceStep: first - 1, Handover: "Continue inspecting the workspace."}
+			w = &harness.Window{FirstStep: first, Through: int64(first - 1), Summary: "Continue inspecting the workspace."}
 		}
 		for _, event := range []core.Event{
 			core.RequestFrozen{}, core.AttemptStarted{Step: step, Attempt: 1},
@@ -60,6 +62,19 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 		}
 		snap, err = runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart},
 			harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if completed > window {
+		db, err := sql.Open("sqlite", filepath.Join(dir, "canti.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		head := harness.Checkpoint{ID: "seeded-checkpoint", Owner: "run:" + runID, Through: int64(completed - window + 1), Summary: "Continue inspecting the workspace."}
+		data, _ := json.Marshal(head)
+		_, err = db.Exec("INSERT INTO context_heads(owner,data) VALUES(?,?)", head.Owner, string(data))
+		db.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +111,7 @@ func BenchmarkPrepareRequest(b *testing.B) {
 					b.Fatalf("prepare: %+v, %v", snap.State, err)
 				}
 			}
-			b.ReportMetric(float64(p.records), "records/op")
+			b.ReportMetric(float64(p.sourceRecords), "records/op")
 			b.ReportMetric(float64(len(p.frozen.Body)), "request-B/op")
 		})
 	}
@@ -110,8 +125,8 @@ func TestPrepareReadsOnlyActiveWindow(t *testing.T) {
 			if err != nil || snap.State.Phase != core.PhaseRequestFrozen || p.frozen == nil {
 				t.Fatalf("prepare: %+v, %v", snap.State, err)
 			}
-			if p.records != tc.window || p.pages != (tc.window+historyPage-1)/historyPage {
-				t.Fatalf("read %d records in %d pages for a %d-step window", p.records, p.pages, tc.window)
+			if p.sourceRecords != tc.window || p.sourcePages != max(1, (tc.window+historyPage-1)/historyPage) {
+				t.Fatalf("read %d records in %d pages for a %d-step window", p.sourceRecords, p.sourcePages, tc.window)
 			}
 			body := string(p.frozen.Body)
 			if got := strings.Count(body, "### Step "); got != tc.window {

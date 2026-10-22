@@ -126,3 +126,95 @@ func TestCrashKeepsAcknowledgedCommits(t *testing.T) {
 	}
 	t.Logf("recovered %d transitions after %d acknowledgements", len(stored), acked)
 }
+
+// Each child is killed without closing SQLite after a different maintenance
+// boundary. This verifies WAL recovery, including adoption and RequestFrozen.
+func TestCompactionCrashKeepsEachAcknowledgedBoundary(t *testing.T) {
+	const compactDB = "CANTI_COMPACT_CRASH_DB"
+	const compactStage = "CANTI_COMPACT_CRASH_STAGE"
+	if path := os.Getenv(compactDB); path != "" {
+		stage, _ := strconv.Atoi(os.Getenv(compactStage))
+		s := open(t, path)
+		ctx := context.Background()
+		snap := createRun(t, s, "run", limits)
+		p := compactPlan(t, s, snap)
+		if stage >= 1 {
+			if err := s.StartCompactionAttempt(ctx, p.ID, 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if stage >= 2 {
+			if err := s.SaveCompactionAttempt(ctx, p.ID, harness.CompactAttempt{Number: 1, Done: true, Response: &harness.Response{Body: []byte("summary"), Complete: true, UsageKnown: true, Usage: harness.Usage{InputTokens: 30, OutputTokens: 5}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if stage >= 3 {
+			if err := s.FinishCompaction(ctx, p.ID, "Continue with the original constraints."); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if stage >= 4 {
+			d := newDriver(t, s, snap)
+			d.do(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte("frozen work"), CheckpointID: p.ID, Window: &harness.Window{FirstStep: 1, Through: 1, Summary: "Continue with the original constraints."}}})
+		}
+		syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		select {}
+	}
+	for stage := 0; stage <= 4; stage++ {
+		t.Run(strconv.Itoa(stage), func(t *testing.T) {
+			path := tempPath(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCompactionCrashKeepsEachAcknowledgedBoundary$", "-test.count=1")
+			cmd.Env = append(os.Environ(), compactDB+"="+path, compactStage+"="+strconv.Itoa(stage))
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("child: %v %s", err, out)
+			}
+			status, ok := exit.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("child not killed: %v %s", err, out)
+			}
+			s := open(t, path)
+			c, err := s.PendingCompaction(ctx, "run", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(c.Plan.Request.Body) != "frozen summary request" || len(c.Attempts) != min(stage, 1) {
+				t.Fatalf("lost frozen bytes or attempt: %+v", c)
+			}
+			if stage >= 2 && !c.Attempts[0].Done {
+				t.Fatal("lost saved response")
+			}
+			if (c.Summary != "") != (stage >= 3) {
+				t.Fatal("candidate boundary changed")
+			}
+			head, err := s.ActiveCheckpoint(ctx, "run:run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap := latestOf(t, s, "run")
+			if stage < 4 {
+				if head.ID != "" || snap.Seq != 0 || c.Accepted {
+					t.Fatal("candidate adopted before working request")
+				}
+			} else {
+				if head.ID != c.Plan.ID || snap.Seq != 1 || !c.Accepted {
+					t.Fatal("adoption and frozen request split")
+				}
+			}
+			if stage == 1 {
+				if totalsOf(t, s, "run").ReservedTokens != c.Plan.TokenReserve {
+					t.Fatal("lost unknown usage reservation")
+				}
+			}
+			if stage >= 2 {
+				totals := totalsOf(t, s, "run")
+				if totals.Usage.InputTokens != 30 || totals.ReservedTokens != 0 {
+					t.Fatalf("usage boundary %+v", totals)
+				}
+			}
+		})
+	}
+}

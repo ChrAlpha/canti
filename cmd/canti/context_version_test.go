@@ -69,7 +69,7 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 func contextRules(t *testing.T) string {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "context version %d\nactions %q %q, or its name and one of %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.HandoverSpace, harness.DefaultPromptLimits())
+	fmt.Fprintf(&b, "context version %d\nactions %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
@@ -77,13 +77,13 @@ func contextRules(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Fprintf(&b, "loop defaults: handover %d, total %d\n", fit.Handover, fit.Limit)
+	fmt.Fprintf(&b, "loop defaults: summary %d, total %d\n", fit.Summary, fit.Limit)
 	transports := []anthropic.Config{{DecisionFormat: "text", StructuredOutput: true, Fallbacks: true}, {DecisionFormat: "text"}, {DecisionFormat: "tool", Fallbacks: true}}
 	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
 		for _, c := range transports {
 			f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
 				RunID: run.ID, Window: &harness.Window{FirstStep: 1},
-				DecisionTool: c.DecisionFormat == "tool", RetrievalEnabled: flags[0], ImportsEnabled: flags[1], HandoverBytes: 2048}
+				DecisionTool: c.DecisionFormat == "tool", RetrievalEnabled: flags[0], ImportsEnabled: flags[1], SummaryBytes: 2048}
 			p, err := f.Prompt(harness.DefaultPromptLimits())
 			if err != nil {
 				t.Fatal(err)
@@ -108,10 +108,10 @@ func contextRules(t *testing.T) string {
 	}
 	fmt.Fprintf(&b, "page of every block kind: %s\n", digest(p.System+"\x00"+strings.Join(p.Blocks, "\x00")))
 	imports, previous, mapped := t.TempDir(), "", ""
-	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
+	for _, flags := range [][]string{nil, {"-summary-bytes", "1"}, {"-summary-bytes", "8192"}, {"-history-imports", imports},
 		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
 		{"-image", "\xff" + strings.Repeat("x", 2047)}, {"-image", "debian\xff"},
-		{"-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false", "-decision-format", "tool", "-fallbacks=false", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
+		{"-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false", "-decision-format", "tool", "-fallbacks=false", "-context-bytes", "131072", "-compact-steps", "6", "-compact-bytes", "9000"}} {
 		s := parseSpec(t, flags...)
 		loop := contextConfig(s.config, s.budget)
 		fit, err := harness.ContextFit(loop, run, s.limits)
@@ -131,7 +131,7 @@ func contextRules(t *testing.T) string {
 		}
 		mc := modelConfig(s.config, "", credential{})
 		if m := fmt.Sprintf("model %s, max tokens %d, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
-			mc.Model, mc.MaxTokens, mc.StructuredOutput, mc.DecisionFormat, mc.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
+			mc.Model, mc.MaxTokens, mc.StructuredOutput, mc.DecisionFormat, mc.Fallbacks, loop.Limits, loop.CompactSteps, loop.CompactBytes, loop.Reader.Imports != ""); m != mapped {
 			fmt.Fprintf(&b, "  %s\n", m)
 			mapped = m
 		}
@@ -146,7 +146,7 @@ func contextRules(t *testing.T) string {
 // all differ from their defaults but its decision format, the first frozen
 // by run -once and the next by a resume process that rebuilds the run from
 // its stored config, after the run read an imported file and its window
-// asked for a handover; the repairs of a run of the tool decision format,
+// reached a compaction threshold; the repairs of a run of the tool decision format,
 // which a resume process freezes when text answers it; a run of the text
 // decision format named explicitly, which a resume process returns; and a
 // run whose window outgrows a page of the journal, after 65 reads.
@@ -159,7 +159,7 @@ func storedRules(t *testing.T) string {
 	}
 	f := newFixture(t, map[int]core.Decision{1: read, 2: {Kind: core.Return, Payload: "done"}})
 	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false",
-		"-fallbacks=false", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
+		"-fallbacks=false", "-context-bytes", "131072", "-compact-steps", "1", "-compact-bytes", "9000", "-summary-bytes", "1000",
 		"-history-imports", imports, "-memory", "1g"); r.code != exitActive {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
@@ -271,11 +271,7 @@ func corpusRules(t *testing.T) string {
 	return b.String()
 }
 
-// sessionRules records the first request that a run of a session freezes
-// after eleven earlier runs through the CLI: the fifth stopped, the tenth
-// returned after a handover, and the eleventh stopped right after its
-// handover. It records the earlier dialogue the run selects, how it renders,
-// and the sources it records, with run IDs named by their session sequence.
+// sessionRules pins unified projection across twelve session runs.
 func sessionRules(t *testing.T) string {
 	t.Helper()
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "Earlier answer."}})
@@ -289,23 +285,9 @@ func sessionRules(t *testing.T) string {
 			t.Fatalf("earlier session run %d: %+v", i, r)
 		}
 	}
-	decision := func(step, call int, payload string) {
-		body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: payload})
-		f.model.answer(step, call, reply{text: string(body)})
-	}
-	f.model.answer(3, 1, reply{text: `{"kind":"return","payload":"Handed over, then answered."}`})
-	for i, ending := range []struct {
-		maxSteps string
-		want     int
-	}{{"3", exitOK}, {"2", exitStopped}} {
-		args := []string{"-session", "s", "-input", fmt.Sprintf("in%d", 10+i), "-goal", fmt.Sprintf("Earlier goal %d.", 10+i), "-window-steps", "1", "-max-steps", ending.maxSteps, "-once"}
-		if r := f.cli(nil, "run", args...); r.code != exitActive {
-			t.Fatalf("earlier session run %d: %+v", 10+i, r)
-		}
-		decision(1, 10+i, `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"Look around."}`)
-		decision(2, 1+i, harness.HandoverPrefix+"Listed the runs.")
-		if r := f.cli(nil, "resume"); r.code != ending.want {
-			t.Fatalf("earlier session run %d: %+v", 10+i, r)
+	for i := 10; i <= 11; i++ {
+		if r := f.cli(nil, "run", "-session", "s", "-input", fmt.Sprintf("in%d", i), "-goal", fmt.Sprintf("Earlier goal %d.", i)); r.code != exitOK {
+			t.Fatalf("run %d: %+v", i, r)
 		}
 	}
 	if r := f.cli(nil, "run", "-session", "s", "-input", "in12", "-goal", "Current goal.", "-once"); r.code != exitActive {
@@ -335,13 +317,11 @@ func sessionRules(t *testing.T) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "session run 12 of 12: request %s, navigation %s\n", digest(name(string(req.Body))), name(req.Context.SessionNavigation))
-	for _, src := range req.Context.Session {
-		fmt.Fprintf(&b, "  earlier %s, sequence %d, %s, goal %v, handover step %d\n", name(src.RunID), src.SessionSeq, src.Status, src.IncludedGoal, src.HandoverStep)
-	}
+	fmt.Fprintf(&b, "source coverage %d; retained end %d\n", req.Context.Through, req.Context.SourceEnd)
 	return b.String()
 }
 
-// everyBlock is a page of a requested handover window after a handover,
+// everyBlock is a page with an active summary,
 // with a step of every kind and a rejected response.
 func everyBlock(run harness.Run) harness.Frame {
 	exit, failed := 0, 1
@@ -356,16 +336,15 @@ func everyBlock(run harness.Run) harness.Frame {
 		{Step: 4, Command: harness.RetrievePrefix + `{"operation":"read"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Preview: "{}", Retrieval: &read}},
 		{Step: 5, Command: harness.RetrievePrefix + `{"operation":"list"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &list}},
 		{Step: 6, Command: "sleep 1", Resolved: true, Observation: harness.Observation{Execution: core.ExecutionTimedOut, Output: harness.ArtifactRef{Detail: "resolved by operator"}}},
-		{Step: 7, Command: harness.HandoverPrefix, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "Context action failed: x"}},
+		{Step: 7, Command: "false", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "Context action failed: x"}},
 		{Step: 8, Command: harness.RetrievePrefix + `{"operation":"discover"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &discover}},
-		{Step: 9, Command: harness.HandoverPrefix + "Go on.", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit,
-			Preview: "Handover recorded; the next request starts a new context window.", Handover: &harness.Handover{RunID: "r", FirstStep: 3, Text: "Go on."}}},
+		{Step: 9, Command: "echo next", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Preview: "next"}},
 	}
 	return harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 10, MaxSteps: 0, Attempt: 2, MaxAttempts: 3,
 		Earlier: 2, Steps: steps, RunID: run.ID,
 		Rejected:         &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
-		Window:           &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1},
-		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096,
+		Window:           &harness.Window{FirstStep: 3, Through: 2, Summary: "Continue the tests."},
+		RetrievalEnabled: true, ImportsEnabled: true, SummaryBytes: 4096,
 		SessionContext: "Run run_0 (session sequence 1; source /canti/runs/run_0/goal and result; returned):\n"}
 }
 

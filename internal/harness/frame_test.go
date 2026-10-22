@@ -22,11 +22,11 @@ func TestFrameValidate(t *testing.T) {
 		{name: "valid", edit: func(*Frame) {}},
 		{name: "unlimited steps", edit: func(f *Frame) { f.MaxSteps = 0 }},
 		{name: "unlimited late step", edit: func(f *Frame) {
-			f.Step, f.MaxSteps, f.Earlier, f.Window = math.MaxInt, 0, math.MaxInt-1, &Window{FirstStep: math.MaxInt, SourceStep: math.MaxInt - 1, Handover: "continue"}
+			f.Step, f.MaxSteps, f.Earlier, f.Window = math.MaxInt, 0, math.MaxInt-1, &Window{FirstStep: math.MaxInt, Through: math.MaxInt - 1, Summary: "continue"}
 		}},
 		{name: "negative step limit", edit: func(f *Frame) { f.MaxSteps = -1 }, wantErr: true},
 		{name: "last step and attempt", edit: func(f *Frame) {
-			f.Step, f.Attempt, f.Earlier, f.Window = 10, 3, 9, &Window{FirstStep: 10, SourceStep: 9, Handover: "continue"}
+			f.Step, f.Attempt, f.Earlier, f.Window = 10, 3, 9, &Window{FirstStep: 10, Through: 9, Summary: "continue"}
 		}},
 		{name: "current page", edit: func(f *Frame) { f.Step, f.Earlier, f.Steps = 4, 0, []StepRecord{{Step: 1}, {Step: 2}, {Step: 3}} }},
 		{name: "rejection after an attempt", edit: func(f *Frame) { f.Attempt, f.Rejected = 2, &Rejection{} }},

@@ -11,7 +11,6 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
-	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 var (
@@ -20,11 +19,12 @@ var (
 	stressNavigation = regexp.MustCompile(`Browse older records through /canti/runs/(run_[a-f0-9]+)/session`)
 	stressOrigin     = regexp.MustCompile(`origin=(/canti/runs/run_[a-f0-9]+/steps/00000001/preview)`)
 	stressWindow     = regexp.MustCompile(`This window begins at step (\d+)\.`)
-	stressHandover   = regexp.MustCompile(`(?m)^SESSION_STRESS_STATE=(\{[^\n]+\})$`)
+	stressCheckpoint = regexp.MustCompile(`(?m)^SESSION_STRESS_STATE=(\{[^\n]+\})$`)
 	stressSession    = regexp.MustCompile(`(?m)^\{"session_id":"horizon",[^\n]+\}$`)
 )
 
 type sessionStressState struct {
+	Run      string `json:"run"`
 	Phase    int    `json:"phase"`
 	Previous string `json:"previous"`
 	Origin   string `json:"origin"`
@@ -41,32 +41,16 @@ func sessionStressDecision(_ int, prompt string) (core.Decision, error) {
 		return bad("missing current goal, run, or window")
 	}
 	round, _ := strconv.Atoi(roundMatch[1])
-	first, _ := strconv.Atoi(windowMatch[1])
 	runID := runMatch[1]
-	s := sessionStressState{}
-	if h := stressHandover.FindStringSubmatch(prompt); len(h) > 0 {
-		if err := json.Unmarshal([]byte(h[1]), &s); err != nil {
-			return bad("invalid handover: %v", err)
-		}
-	} else if first != 1 {
-		return bad("new window lost the handover state")
-	} else if round == 1 {
-		s.Origin = "/canti/runs/" + runID + "/steps/00000001/preview"
-	} else {
-		nav := stressNavigation.FindStringSubmatch(prompt)
-		if len(nav) == 0 {
-			return bad("missing previous session navigation")
-		}
-		s.Previous, s.Cursor = nav[1], nav[1]
+	s, err := stressState(prompt, round, runID)
+	if err != nil {
+		return bad("state: %v", err)
 	}
-	for _, block := range strings.Split(prompt, "\n### Step ")[1:] {
+	_, current, _ := strings.Cut(prompt, "## Current window steps\n")
+	for _, block := range strings.Split("\n"+current, "\n### Step ")[1:] {
 		if err := s.observe(round, runID, block); err != nil {
 			return bad("round %d phase %d: %v", round, s.Phase, err)
 		}
-	}
-	if strings.Contains(prompt, "## Handover required\n") {
-		state, _ := json.Marshal(s)
-		return core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "SESSION_STRESS_STATE=" + string(state)}, nil
 	}
 	read := func(path string) (core.Decision, error) {
 		q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: path, Reason: "verify original session evidence", Limit: 8192})
@@ -201,4 +185,68 @@ func (s *sessionStressState) observe(round int, runID, block string) error {
 	}
 	s.Phase++
 	return nil
+}
+
+func stressState(prompt string, round int, runID string) (sessionStressState, error) {
+	s := sessionStressState{}
+	if h := stressCheckpoint.FindStringSubmatch(prompt); len(h) > 0 {
+		if err := json.Unmarshal([]byte(h[1]), &s); err != nil {
+			return s, err
+		}
+	}
+	if s.Run != runID {
+		s = sessionStressState{Run: runID, Previous: s.Run, Cursor: s.Run, Origin: s.Origin}
+	}
+	if round == 1 && s.Origin == "" {
+		s.Origin = "/canti/runs/" + runID + "/steps/00000001/preview"
+	}
+	if round > 1 && s.Previous == "" {
+		return s, fmt.Errorf("previous run missing from checkpoint")
+	}
+	return s, nil
+}
+
+func sessionStressSummary(body []byte) (string, error) {
+	var envelope struct {
+		Messages []struct{ Content []struct{ Text string } }
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", err
+	}
+	var text strings.Builder
+	for _, m := range envelope.Messages {
+		for _, b := range m.Content {
+			text.WriteString(b.Text)
+		}
+	}
+	prompt := text.String()
+	_, current, ok := strings.Cut(prompt, "\nCurrent run: ")
+	if !ok {
+		return "", fmt.Errorf("summary missing current run")
+	}
+	runID, _, _ := strings.Cut(current, "\n")
+	roundMatch := stressRound.FindStringSubmatch(current)
+	if len(roundMatch) == 0 {
+		return "", fmt.Errorf("summary missing current round")
+	}
+	round, _ := strconv.Atoi(roundMatch[1])
+	s, err := stressState(prompt, round, runID)
+	if err != nil {
+		return "", err
+	}
+	sources, _, _ := strings.Cut(prompt, "\nCurrent run:")
+	for _, entry := range strings.Split(sources, "### Session source ")[1:] {
+		header, rest, _ := strings.Cut(entry, "\n")
+		if !strings.Contains(header, "(Run "+runID+";") {
+			continue
+		}
+		_, step, ok := strings.Cut(rest, "### Step ")
+		if ok {
+			if err := s.observe(round, runID, step); err != nil {
+				return "", err
+			}
+		}
+	}
+	data, _ := json.Marshal(s)
+	return "SESSION_STRESS_STATE=" + string(data), nil
 }

@@ -41,7 +41,7 @@ func persistedRuns() (session, plain harness.Run) {
 		Created: time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC),
 		Config: []byte(`{"workspace":"/srv/project","image":"debian:bookworm-slim","network":"none","memory":"2g","cpus":"","pids":512,` +
 			`"output_limit":8388608,"model":"claude-opus-5","max_tokens":16000,"structured":true,"fallbacks":true,` +
-			`"context_bytes":262144,"context_version":1,"handover_bytes":2048}`),
+			`"context_bytes":262144,"context_version":1,"summary_bytes":2048}`),
 	}
 	return session, plain
 }
@@ -64,16 +64,16 @@ func persistedChains() (session, plain []commit) {
 	full := &harness.Request{
 		Body: []byte(`{"model":"claude-opus-5","max_tokens":16000}`), Model: "claude-opus-5",
 		Protocol: "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01", Adapter: "canti-anthropic/2",
-		Window: &harness.Window{FirstStep: 2, Handover: "Rerun the parser tests.", SourceStep: 1, Requested: true, Failures: 1},
+		Window: &harness.Window{FirstStep: 2, Summary: "Rerun the parser tests.", Through: 1},
 		Context: &harness.ContextCapture{
 			Bytes: harness.ContextBytes{Total: 21000, Limit: 262144, System: 4100, Goal: 40, Constraints: 30, Environment: 600,
-				Session: 300, Window: 90, Handover: 120, StepHeader: 25, EmptySteps: 7, Progress: 60, HandoverRequired: 520, Repair: 210,
+				Session: 300, Window: 90, Summary: 120, StepHeader: 25, EmptySteps: 7, Progress: 60, Repair: 210,
 				Steps: []harness.ContextStepBytes{{Step: 7, Bytes: 700}, {Step: 8, Bytes: 14000}}},
 			Session:           []harness.ContextSessionSource{{RunID: "run_prev", SessionSeq: 1, Status: "returned", IncludedGoal: true}},
 			SessionNavigation: "run_prev",
 			Retrievals:        []harness.ContextRetrieval{{Step: 8, Operation: "search", Query: &query, More: true, Incomplete: true, Error: "source changed"}},
 			Sources:           []harness.ContextSource{{Step: 8, Source: source, Available: true, Error: "sha256 mismatch"}},
-			Handover: harness.HandoverCheck{Status: "evaluated", Used: 14700, Capacity: 150000, Growth: 9000,
+			Compaction: harness.CompactionCheck{Status: "evaluated", Used: 14700, Capacity: 150000, Growth: 9000,
 				Steps: 2, WindowSteps: 2, WindowBytes: 65536, Reasons: []string{"window_steps", "capacity"}},
 		},
 	}
@@ -83,7 +83,6 @@ func persistedChains() (session, plain []commit) {
 		Retrieval: &archive.Retrieval{Query: query, Sources: []archive.SourceRange{source}, Entries: []string{"/canti/runs/run_prev/steps/00000001"},
 			NextOffset: 8192, NextCursor: "eyJzdGVwIjoyfQ", More: true, Incomplete: true, SkippedCount: 3,
 			Skipped: []archive.Skip{{Step: 1, Field: "artifact", Reason: "utf8"}}, Error: "directory contains a non-UTF-8 path"},
-		Handover: &harness.Handover{RunID: persistedRun, FirstStep: 7, Text: "Rerun the parser tests."},
 	}
 	session = []commit{
 		{core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{}`), Model: "claude-opus-5",
@@ -116,7 +115,7 @@ func persistedChains() (session, plain []commit) {
 			Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2", Window: &harness.Window{FirstStep: 1},
 			Context: &harness.ContextCapture{Bytes: harness.ContextBytes{Total: 4500, Limit: 262144},
 				Retrievals: []harness.ContextRetrieval{{Step: 1}}, Sources: []harness.ContextSource{{Step: 1}},
-				Handover: harness.HandoverCheck{Status: "request_revision"}}}}},
+				Compaction: harness.CompactionCheck{Status: "request_revision"}}}}},
 		{core.AttemptStarted{Step: 1, Attempt: 1}, harness.Facts{}},
 		{core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`), Complete: true,
 			Model: "claude-opus-5", Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2"}}},

@@ -26,29 +26,34 @@ import (
 // config is the host wiring stored with a run; every later command rebuilds
 // the executor and model from it.
 type config struct {
-	Workspace      string `json:"workspace"`
-	Image          string `json:"image"`
-	Network        string `json:"network"`
-	Memory         string `json:"memory"`
-	CPUs           string `json:"cpus"`
-	Pids           int    `json:"pids"`
-	OutputLimit    int64  `json:"output_limit"`
-	Model          string `json:"model"`
-	MaxTokens      int    `json:"max_tokens"`
-	Structured     bool   `json:"structured"`
-	DecisionFormat string `json:"decision_format,omitempty"`
-	Fallbacks      bool   `json:"fallbacks"`
-	ContextBytes   int    `json:"context_bytes"`
-	ContextVersion int    `json:"context_version"`
-	HistoryImports string `json:"history_imports,omitempty"`
-	WindowSteps    int    `json:"window_steps,omitempty"`
-	WindowBytes    int    `json:"window_bytes,omitempty"`
-	HandoverBytes  int    `json:"handover_bytes,omitempty"`
+	ContextTokens   int    `json:"context_tokens"`
+	RequestBytes    int    `json:"request_bytes"`
+	RetainBytes     int    `json:"retain_bytes"`
+	SummaryTokens   int    `json:"summary_tokens"`
+	SummaryAttempts int    `json:"summary_attempts"`
+	Workspace       string `json:"workspace"`
+	Image           string `json:"image"`
+	Network         string `json:"network"`
+	Memory          string `json:"memory"`
+	CPUs            string `json:"cpus"`
+	Pids            int    `json:"pids"`
+	OutputLimit     int64  `json:"output_limit"`
+	Model           string `json:"model"`
+	MaxTokens       int    `json:"max_tokens"`
+	Structured      bool   `json:"structured"`
+	DecisionFormat  string `json:"decision_format,omitempty"`
+	Fallbacks       bool   `json:"fallbacks"`
+	ContextBytes    int    `json:"context_bytes"`
+	ContextVersion  int    `json:"context_version"`
+	HistoryImports  string `json:"history_imports,omitempty"`
+	CompactSteps    int    `json:"compact_steps,omitempty"`
+	CompactBytes    int    `json:"compact_bytes,omitempty"`
+	SummaryBytes    int    `json:"summary_bytes,omitempty"`
 }
 
 // contextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const contextVersion = 11
+const contextVersion = 12
 
 type spec struct {
 	config config
@@ -70,11 +75,16 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.Structured, "structured", true, "constrain text responses to the decision schema")
 	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
 	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
-	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window and the reserves its next step and handover need")
+	fs.IntVar(&c.ContextTokens, "context-tokens", 200000, "model context allowance in tokens; admission uses a conservative serialized-byte estimate")
+	fs.IntVar(&c.RequestBytes, "request-bytes", 2<<20, "maximum serialized model request bytes")
+	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active summary and reserves for the next complete step")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under "+archive.ImportsRoot)
-	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
-	fs.IntVar(&c.WindowBytes, "window-bytes", 0, "request handover at this many rendered local-history bytes; 0 disables byte trigger")
-	fs.IntVar(&c.HandoverBytes, "handover-bytes", 2048, "maximum handover UTF-8 `bytes` (1..8192)")
+	fs.IntVar(&c.CompactSteps, "compact-steps", 0, "compact after this many retained completed steps; 0 uses capacity only")
+	fs.IntVar(&c.CompactBytes, "compact-bytes", 0, "compact at this many history bytes; 0 uses capacity only")
+	fs.IntVar(&c.SummaryBytes, "summary-bytes", 16384, "maximum continuation summary UTF-8 `bytes` (1..65536)")
+	fs.IntVar(&c.RetainBytes, "retain-bytes", 24<<10, "target UTF-8 `bytes` of recent complete history retained by compaction")
+	fs.IntVar(&c.SummaryTokens, "summary-tokens", 8192, "maximum output `tokens` per summary attempt")
+	fs.IntVar(&c.SummaryAttempts, "summary-attempts", 3, "maximum independent summary `attempts` per source span")
 	fs.IntVar(&l.MaxSteps, "max-steps", 20, "decision `steps` per run; 0 is unlimited")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 30*time.Minute, "run `time` budget; 0 is unlimited")
@@ -86,8 +96,12 @@ func (s *spec) register(fs *flag.FlagSet) {
 func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.config, s.budget
 	switch {
-	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
-		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
+	case c.CompactSteps < 0 || c.CompactBytes < 0 || c.SummaryBytes < 1 || c.SummaryBytes > 65536:
+		return harness.Run{}, core.State{}, errors.New("compaction limits must be nonnegative and summary-bytes must be 1..65536")
+	case c.ContextTokens < 1 || c.RequestBytes < 1:
+		return harness.Run{}, core.State{}, errors.New("context-tokens and request-bytes must be positive")
+	case c.RetainBytes < 0 || c.SummaryTokens < 1 || c.SummaryAttempts < 1:
+		return harness.Run{}, core.State{}, errors.New("invalid compaction budgets")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
@@ -128,6 +142,13 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes: %w", err)
 	}
+	model, err := anthropic.New(modelConfig(c, "https://api.anthropic.com", credential{apiKey: "admission-only"}))
+	if err != nil {
+		return harness.Run{}, core.State{}, err
+	}
+	if err := harness.AdmitInitial(contextConfig(c, b), run, s.limits, model); err != nil {
+		return harness.Run{}, core.State{}, err
+	}
 	run.Config, err = json.Marshal(c)
 	return run, initial, err
 }
@@ -136,8 +157,10 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 // of c with budget b; a loop adds the paths of its state directory.
 func contextConfig(c config, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
+		ContextTokens: c.ContextTokens, OutputTokens: c.MaxTokens, RequestBytes: c.RequestBytes,
 		Environment: environment(c, b), Limits: promptLimits(c),
-		Reader: &archive.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+		RetainBytes: c.RetainBytes, SummaryTokens: c.SummaryTokens, SummaryAttempts: c.SummaryAttempts,
+		Reader: &archive.Reader{Imports: c.HistoryImports}, CompactSteps: c.CompactSteps, CompactBytes: c.CompactBytes, SummaryBytes: c.SummaryBytes,
 		DecisionTool: c.DecisionFormat == "tool",
 	}
 }

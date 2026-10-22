@@ -82,13 +82,21 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | `canti chat [-session ID]` | Talk with the agent: each input becomes the next run of one session |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print the run state as JSON, or its transitions as JSON Lines |
+| `canti context`, `canti compactions` | Inspect frozen business requests or independent summary plans, attempts, usage, and adoption |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Record the job, or the outcome, of an effect whose result is unknown |
 
-A run created by a canti whose context rules differ, as its stored context
-version records, is not resumed: inspect it, then stop it, resolving it first
-if it needs resolution, to start new runs in the same state directory. A run
-that ended with an outcome resolved as unknown keeps blocking new runs there.
+The harness automatically compacts older history into one rolling summary plus
+complete recent steps. A session shares this context across runs and restarts;
+the current goal and effective constraints remain in every working request.
+Summary calls consume tokens and wall time, but no business steps or effects.
+Original records remain available for retrieval. See [compaction](docs/compaction.md)
+for admission, failure recovery, limits, and diagnostics.
+
+This revision uses journal schema 3 and context version 12. Use a fresh state
+directory for earlier development builds; there is no handover migration or
+compatibility reader. An unknown execution result still blocks new runs until
+it is inspected or explicitly resolved.
 
 The first SIGINT or SIGTERM stops the run the same way as `canti stop`. For
 `run` and `resume`, exit status 0 means the agent returned, 3 that the run
@@ -145,7 +153,7 @@ disk, per job and per run; workspace writes, the journal, and a running job's
 Docker log and container layer are not, and there is no filesystem quota.
 
 Distributed scheduling, multi-tenant policy, generic workflow graphs,
-automatic planning, and automatic memory compaction are outside this scope.
+automatic planning, and memory across independent sessions are outside this scope.
 
 ## Contribution shape
 

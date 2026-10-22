@@ -21,7 +21,7 @@ func TestLatestRequestPreservesWindowOnReopen(t *testing.T) {
 	if _, err := s.LatestRequest(ctx, "window"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("empty request: %v", err)
 	}
-	want := harness.Request{Body: []byte("frozen"), Window: &harness.Window{FirstStep: 1, Requested: true}}
+	want := harness.Request{Body: []byte("frozen"), Window: &harness.Window{FirstStep: 1}}
 	d.do(core.RequestFrozen{}, harness.Facts{Request: &want})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)

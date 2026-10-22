@@ -1,0 +1,47 @@
+{
+  "Plan": {
+    "Base": "",
+    "ID": "compact_4477536575323ef4b71ec69fe45b13cd25f27c7547d7e99f859d4b78f3f2ed24",
+    "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
+    "RunSeq": 14,
+    "Owner": "session:session-1",
+    "Parent": "",
+    "After": 0,
+    "Through": 2,
+    "SourceHash": "f928df0b4720d1683f1b16ad8330ece898a0a574db08cc0e6d82111a4775081e",
+    "Request": {
+      "MaxOutputTokens": 8192,
+      "Body": null,
+      "Model": "claude-opus-5",
+      "Protocol": "anthropic-messages/2023-06-01",
+      "Adapter": "canti-anthropic/4-summary"
+    },
+    "MaxAttempts": 3,
+    "MaxSummaryBytes": 550,
+    "ReplacedBytes": 806,
+    "BeforeBytes": 7387,
+    "TokenReserve": 11600
+  },
+  "Attempts": [
+    {
+      "Number": 1,
+      "Done": true,
+      "Response": {
+        "UsageKnown": true,
+        "Body": null,
+        "Complete": true,
+        "Model": "claude-opus-5",
+        "Protocol": "anthropic-messages/2023-06-01",
+        "Adapter": "canti-anthropic/4-summary",
+        "Usage": {
+          "InputTokens": 100,
+          "OutputTokens": 20
+        }
+      },
+      "Failure": "",
+      "UnknownUsage": false
+    }
+  ],
+  "Summary": "Continue the user task, preserve its constraints, and verify original evidence.",
+  "Accepted": true
+}

@@ -71,12 +71,14 @@ func execReply(command string) reply { return decision(core.Exec, command) }
 func returnReply(text string) reply { return decision(core.Return, text) }
 
 type fakeModel struct {
-	mu        sync.Mutex
-	replies   []reply
-	prompts   []harness.Prompt
-	sent      [][]byte
-	freezeErr error
-	empty     bool // Decision extracts nothing
+	summaries   []reply
+	summarySent [][]byte
+	mu          sync.Mutex
+	replies     []reply
+	prompts     []harness.Prompt
+	sent        [][]byte
+	freezeErr   error
+	empty       bool // Decision extracts nothing
 }
 
 func (m *fakeModel) Freeze(p harness.Prompt) (harness.Request, error) {
@@ -88,6 +90,24 @@ func (m *fakeModel) Freeze(p harness.Prompt) (harness.Request, error) {
 
 func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.Response, error) {
 	m.mu.Lock()
+	if req.Adapter == "fake-summary" {
+		m.summarySent = append(m.summarySent, bytes.Clone(req.Body))
+		r := reply{body: "Continue the original goal, preserve constraints, and verify original evidence.", usage: usage}
+		if len(m.summaries) > 0 {
+			r, m.summaries = m.summaries[0], m.summaries[1:]
+		}
+		m.mu.Unlock()
+		if r.hook != nil {
+			r.hook()
+		}
+		if r.block {
+			<-ctx.Done()
+		}
+		if ctx.Err() != nil && !r.late {
+			return harness.Response{}, ctx.Err()
+		}
+		return harness.Response{Body: []byte(r.body), Complete: (r.err == nil) != r.flip, Adapter: "fake-summary", Usage: r.usage, UsageKnown: true}, r.err
+	}
 	m.sent = append(m.sent, bytes.Clone(req.Body))
 	r := reply{err: &harness.StopError{Reason: core.StopUnrecoverable, Err: errors.New("unscripted request")}}
 	if len(m.replies) > 0 {
@@ -285,6 +305,7 @@ func (j hookJournal) Commit(ctx context.Context, t harness.Transition) error {
 type probe struct {
 	*sqlite.Store
 	reads, pages, records, recordBytes int
+	sourcePages, sourceRecords         int
 	frozen                             *harness.Request
 }
 
@@ -317,11 +338,20 @@ func (p *probe) Recent(ctx context.Context, runID string, before int64, limit in
 	p.reads++
 	p.pages++
 	rs, err := p.Store.Recent(ctx, runID, before, limit)
-	for _, r := range rs {
-		p.records++
-		p.recordBytes += len(r.Command) + len(r.Observation.Preview)
-	}
+	p.records += len(rs)
 	return rs, err
+}
+func (p *probe) ContextEntries(ctx context.Context, owner string, after int64, limit, maxBytes int) ([]harness.ContextEntry, bool, error) {
+	p.reads++
+	p.sourcePages++
+	entries, more, err := p.Store.ContextEntries(ctx, owner, after, limit, maxBytes)
+	for _, e := range entries {
+		if e.Step != nil {
+			p.sourceRecords++
+			p.recordBytes += len(e.Step.Command) + len(e.Step.Observation.Preview)
+		}
+	}
+	return entries, more, err
 }
 
 func (p *probe) Commit(_ context.Context, t harness.Transition) error {
@@ -516,4 +546,27 @@ func wantContains(t *testing.T, text string, parts ...string) {
 
 func twoSteps() []reply {
 	return []reply{execReply("ls -la /workspace"), execReply("find . -name '*.go' | wc -l"), returnReply("There are 3 Go files.")}
+}
+
+func (m *fakeModel) FreezeSummary(p harness.Prompt, _ int) (harness.Request, error) {
+	return harness.Request{Body: []byte(p.System + "\n" + p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake-summary"}, nil
+}
+func (m *fakeModel) Summary(r harness.Response) (string, error) {
+	if !r.Complete {
+		return "", errors.New("incomplete summary")
+	}
+	return string(r.Body), nil
+}
+
+func (p *probe) LatestRequest(ctx context.Context, id string) (harness.Request, error) {
+	p.reads++
+	return p.Store.LatestRequest(ctx, id)
+}
+func (p *probe) ActiveCheckpoint(ctx context.Context, owner string) (harness.Checkpoint, error) {
+	p.reads++
+	return p.Store.ActiveCheckpoint(ctx, owner)
+}
+func (p *probe) PendingCompaction(ctx context.Context, id string, seq int64) (harness.Compaction, error) {
+	p.reads++
+	return p.Store.PendingCompaction(ctx, id, seq)
 }

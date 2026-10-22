@@ -24,7 +24,10 @@ type contextCostModel struct {
 	commands []string
 }
 
-func (m *contextCostModel) Complete(_ context.Context, _ harness.Request) (harness.Response, error) {
+func (m *contextCostModel) Complete(_ context.Context, req harness.Request) (harness.Response, error) {
+	if req.Adapter == "canti-anthropic/4-summary" {
+		return harness.Response{Adapter: req.Adapter, Complete: true, UsageKnown: true, Body: []byte(`{"stop_reason":"end_turn","content":[{"type":"text","text":"Continue inspecting original evidence."}]}`)}, nil
+	}
 	if len(m.commands) == 0 {
 		return harness.Response{}, fmt.Errorf("no scripted decision")
 	}
@@ -116,13 +119,14 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 			b.Fatal(err)
 		}
 		if snap.State.Phase == core.PhaseIdle {
+			p.frozen = nil
 			if _, err := prepare.Step(ctx, runID); err != nil {
 				b.Fatal(err)
 			}
 			if p.frozen == nil {
-				b.Fatal("prepare did not freeze a request")
+				continue
 			}
-			if scenario == "near_capacity" && p.frozen.Window.Requested || len(m.commands) == 0 {
+			if scenario == "near_capacity" && (p.frozen.CheckpointID != "") || len(m.commands) == 0 {
 				ready = true
 				break
 			}
@@ -137,8 +141,8 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 	if !ready || snap.State.Phase != core.PhaseIdle || p.frozen == nil {
 		b.Fatal("fixture did not reach prepare boundary")
 	}
-	if scenario == "near_capacity" && !p.frozen.Window.Requested {
-		b.Fatal("fixture did not reach the handover capacity threshold")
+	if scenario == "near_capacity" && !(p.frozen.CheckpointID != "") {
+		b.Fatal("fixture did not reach the compaction capacity threshold")
 	}
 	runner, err := harness.NewRunner(store, x)
 	if err != nil {
@@ -157,7 +161,7 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 		b.Fatal(err)
 	}
 	f.resetRequest(b)
-	b.Logf("scenario=%s step=%d handover_requested=%t body_bytes=%d frozen_facts_bytes=%d body_sha256=%x", scenario, snap.State.Step, f.request.Window.Requested, len(f.request.Body), f.factsBytes, sha256.Sum256(f.request.Body))
+	b.Logf("scenario=%s step=%d checkpoint_adopted=%t body_bytes=%d frozen_facts_bytes=%d body_sha256=%x", scenario, snap.State.Step, (f.request.CheckpointID != ""), len(f.request.Body), f.factsBytes, sha256.Sum256(f.request.Body))
 	return f
 }
 

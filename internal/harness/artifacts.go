@@ -23,5 +23,4 @@ type Observation struct {
 	Preview   string
 	Output    ArtifactRef
 	Retrieval *archive.Retrieval `json:",omitempty"`
-	Handover  *Handover          `json:",omitempty"`
 }

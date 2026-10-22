@@ -88,7 +88,7 @@ func TestContextRequestRejectsInvalidSelectionAndMissingRequest(t *testing.T) {
 	}
 }
 
-func TestContextRequestBeforeFirstFreezeAndLegacyMetadata(t *testing.T) {
+func TestContextRequestBeforeFirstFreezeAndAbsentCapture(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
 	d := newDriver(t, w, createRun(t, w, "run-1", core.Limits{MaxSteps: 1, MaxAttempts: 1}))
@@ -97,12 +97,9 @@ func TestContextRequestBeforeFirstFreezeAndLegacyMetadata(t *testing.T) {
 		t.Fatalf("before first freeze error = %v", err)
 	}
 	d.freeze()
-	if _, err := w.db.Exec(`PRAGMA user_version=1`); err != nil {
-		t.Fatal(err)
-	}
 	s = readOnly(t, path)
 	got, err := s.ContextRequest(context.Background(), "run-1", 0, 0)
 	if err != nil || !reflect.DeepEqual(got, d.commits[0]) || got.Facts.Request.Context != nil {
-		t.Fatalf("legacy request = %#v, %v; want %#v", got, err, d.commits[0])
+		t.Fatalf("request without capture = %#v, %v; want %#v", got, err, d.commits[0])
 	}
 }

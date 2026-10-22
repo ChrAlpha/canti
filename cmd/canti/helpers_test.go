@@ -31,6 +31,7 @@ import (
 // with the decision scripted for the step named in the prompt's progress
 // line, unless answer set a reply for it, and records every request body.
 type scriptedModel struct {
+	summarize func([]byte) (string, error)
 	*httptest.Server
 	key     string
 	script  map[int]core.Decision
@@ -120,6 +121,25 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"unexpected credentials"}}`)
 		return
 	}
+	var request struct{ System string }
+	_ = json.Unmarshal(body, &request)
+	if strings.HasPrefix(request.System, "You summarize an agent's committed history") {
+		text := "Continue the user task, preserve its constraints, and verify original evidence."
+		m.mu.Lock()
+		summarize := m.summarize
+		m.mu.Unlock()
+		if summarize != nil {
+			var err error
+			text, err = summarize(body)
+			if err != nil {
+				w.WriteHeader(400)
+				fmt.Fprint(w, err)
+				return
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"stop_reason": "end_turn", "model": "claude-test", "content": []map[string]string{{"type": "text", "text": text}}, "usage": map[string]int{"input_tokens": 100, "output_tokens": 20}})
+		return
+	}
 	step, prompt, err := promptOf(body)
 	var re reply
 	if err == nil {
@@ -188,7 +208,13 @@ func (m *scriptedModel) holdRequests() <-chan struct{} {
 func (m *scriptedModel) requests() [][]byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([][]byte(nil), m.bodies...)
+	var out [][]byte
+	for _, body := range m.bodies {
+		if !isSummaryRequest(body) {
+			out = append(out, body)
+		}
+	}
+	return out
 }
 
 // prompts returns the user prompt of every request for step, in order.
@@ -359,10 +385,13 @@ type status struct {
 	EffectID   string          `json:"effect_id"`
 	JobID      string          `json:"job_id"`
 	Totals     struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		OutputBytes  int64 `json:"output_bytes"`
-		Steps        int   `json:"steps"`
+		SummaryInputTokens    int64 `json:"summary_input_tokens"`
+		SummaryOutputTokens   int64 `json:"summary_output_tokens"`
+		ReservedUnknownTokens int64 `json:"reserved_unknown_tokens"`
+		InputTokens           int64 `json:"input_tokens"`
+		OutputTokens          int64 `json:"output_tokens"`
+		OutputBytes           int64 `json:"output_bytes"`
+		Steps                 int   `json:"steps"`
 	} `json:"totals"`
 }
 
@@ -456,4 +485,21 @@ func toolReply(decisions ...core.Decision) string {
 	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
 		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
 	return string(data)
+}
+
+func isSummaryRequest(body []byte) bool {
+	var r struct{ System string }
+	_ = json.Unmarshal(body, &r)
+	return strings.HasPrefix(r.System, "You summarize an agent's committed history")
+}
+func (m *scriptedModel) summaryRequests() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out [][]byte
+	for _, body := range m.bodies {
+		if isSummaryRequest(body) {
+			out = append(out, body)
+		}
+	}
+	return out
 }

@@ -133,7 +133,10 @@ func TestFreeze(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(t, "https://unused.test", tc.edit)
 			req := freeze(t, m)
-			want := harness.Request{Body: []byte(tc.body), Model: "claude-opus-5", Protocol: tc.protocol, Adapter: adapter}
+			want := harness.Request{MaxOutputTokens: 16000, Body: []byte(tc.body), Model: "claude-opus-5", Protocol: tc.protocol, Adapter: adapter}
+			if tc.name == "auth token and max tokens" {
+				want.MaxOutputTokens = 512
+			}
 			if !reflect.DeepEqual(req, want) {
 				t.Fatalf("Freeze =\n%s %s %s %s\nwant\n%s %s %s %s", req.Body, req.Model, req.Protocol, req.Adapter, want.Body, want.Model, want.Protocol, want.Adapter)
 			}
@@ -459,7 +462,7 @@ func TestCompleteClassifiesStopReason(t *testing.T) {
 			if stopReason(err) != "" {
 				t.Fatalf("err = %v, want retryable", err)
 			}
-			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7}}
+			want := harness.Response{UsageKnown: true, Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7}}
 			if !reflect.DeepEqual(resp, want) {
 				t.Fatalf("response = %+v\nwant %+v", resp, want)
 			}

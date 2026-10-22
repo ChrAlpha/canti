@@ -17,7 +17,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   decision, the `State` projection, and the pure `Next`/`Intent` transition
   rules. It holds no per-run state between calls and must not acquire model
   I/O, history, storage, clocks, execution, or dependencies outside the
-  standard library. A capability, such as retrieval or handover, adds no
+  standard library. A capability, such as retrieval, adds no
   event kind: the harness parses its exec payload once, keeps its durable
   state as facts of existing events, and gives a change to what it renders a
   new context version.
@@ -45,7 +45,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 
 Retry, termination, and cancellation rules live in `core.State.Next`; change
 them there with a transition-table test. A harness policy, such as a budget,
-the context window, or handover, ends a run only by committing
+the context window, or compaction, ends a run only by committing
 `StopRequested` with its reason and a `Failure` that names the cause. The
 transitions a bounded exploration from `core.NewState` reaches are recorded
 per semantics version in `core/testdata/semantics-v<N>.txt`, so a change to
@@ -53,6 +53,12 @@ any of them fails until `core.SemanticsVersion` is bumped and its
 transitions are recorded with `-record-semantics`; a rule outside the
 explored limits needs its own test. Before changing a harness boundary,
 specify its durable commit point, attached facts, and behavior after restart.
+Independent context compaction is harness maintenance at `IntentPrepareRequest`
+with no outstanding business request revision. Its plan, attempts, and candidate
+are durable records separate from core transitions; adopting the checkpoint and
+freezing the next business request share one transaction. It adds no business
+step, effect, or core event. Cancellation and budget failures still stop through
+`core.State.Next`.
 Model request bytes and provenance must be committed before sending; decisions
 and effects before binding; the bound job before starting; observations
 together with run progress in one `Transition`. Events carry the step,

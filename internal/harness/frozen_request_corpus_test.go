@@ -29,19 +29,20 @@ const (
 )
 
 type frozenScenario struct {
-	name         string
-	tool         bool
-	limits       core.Limits
-	contextBytes int // PromptLimits.Total instead of 256 KiB
-	windowSteps  int
-	windowBytes  int
-	outputs      map[string]string
-	finals       map[string]harness.Job                  // final job of a command instead of success
-	imports      map[string]string                       // files of a read-only imported history archive
-	changes      map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
-	runs         []frozenRun
-	marks        map[string][]string
-	edge         func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
+	summaryReplies []string
+	name           string
+	tool           bool
+	limits         core.Limits
+	contextBytes   int // PromptLimits.Total instead of 256 KiB
+	windowSteps    int
+	windowBytes    int
+	outputs        map[string]string
+	finals         map[string]harness.Job                  // final job of a command instead of success
+	imports        map[string]string                       // files of a read-only imported history archive
+	changes        map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
+	runs           []frozenRun
+	marks          map[string][]string
+	edge           func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
 }
 
 type frozenRun struct {
@@ -98,18 +99,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step07-rev1.json": {"### Step 6\n", "Retrieval: 3 candidate ranges", "Source /canti/artifacts/effect_"},
 			},
 		},
-		{
-			name: "handover", limits: stepLimits, windowSteps: 1, outputs: ls,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace: go.mod and main.go. Next: report them."),
-				corpusDecision(core.Return, "The workspace holds go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"### Step 1\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", "Next: report them.", "## Current window steps\nNone.\n"},
-			},
-		},
+
 		{
 			name: "protocol-repair", limits: stepLimits,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
@@ -135,22 +125,11 @@ func frozenScenarios() []frozenScenario {
 			},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"## Goal\nWhat is in /workspace?\n\n"},
-				"run2-step01-rev1.json": {"## Earlier session dialogue\n", "Earlier user goal:\n```\nWhat is in /workspace?\n```\n",
+				"run2-step01-rev1.json": {"## Earlier session history\n", "Earlier user goal:\n```\nWhat is in /workspace?\n```\n",
 					"Earlier assistant return:\n```\n  go.mod and main.go.\n```\n"},
 			},
 		},
-		{
-			name: "unlimited-steps", limits: core.Limits{MaxAttempts: 3}, outputs: ls,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Nothing done yet."),
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 1 action failed", "2 exited 0 output complete"}}},
-			marks: map[string][]string{
-				"run1-step01-rev1.json": {"Step 1 (unlimited steps), attempt 1 of 3."},
-				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3.", "Context action failed: handover was not requested for this step"},
-			},
-		},
+
 		{
 			name: "tool-transport", tool: true, limits: stepLimits, outputs: ls,
 			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
@@ -165,7 +144,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step02-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n{\"id\":\"msg_03\"", `"input":null`},
 			},
 		},
-	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
+	}, compactScenarios(), edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
 }
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
@@ -210,6 +189,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 				sc.edge(t, requests)
 			}
 			got["journal.txt"] = rig.journal(t, sc.runs)
+			rig.compactionRecords(t, sc.runs, got)
 			sent := rig.model.sent()
 			if len(sent) != len(committed) {
 				t.Fatalf("sent %d requests for %d frozen requests", len(sent), len(committed))
@@ -279,8 +259,7 @@ func stepOutcome(s harness.StepRecord) string {
 		if r.More {
 			out += " more"
 		}
-	case o.Handover != nil:
-		out += " handover"
+
 	case strings.HasPrefix(o.Preview, "Context action failed: "):
 		out += " action failed"
 	case o.Output.Complete:

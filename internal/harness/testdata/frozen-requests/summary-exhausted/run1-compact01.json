@@ -1,0 +1,80 @@
+{
+  "Plan": {
+    "Base": "",
+    "ID": "compact_a50c98d4e122e3b1d05e8ce3d74110ef519fa973381f7c39ae6b4aa4992b1e68",
+    "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
+    "RunSeq": 14,
+    "Owner": "run:run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
+    "Parent": "",
+    "After": 0,
+    "Through": 2,
+    "SourceHash": "1b81e72fa52ee6c7905e57b4205cd7f975460a541d2479e4823be383d9363661",
+    "Request": {
+      "MaxOutputTokens": 8192,
+      "Body": null,
+      "Model": "claude-opus-5",
+      "Protocol": "anthropic-messages/2023-06-01",
+      "Adapter": "canti-anthropic/4-summary"
+    },
+    "MaxAttempts": 3,
+    "MaxSummaryBytes": 488,
+    "ReplacedBytes": 744,
+    "BeforeBytes": 7193,
+    "TokenReserve": 11587
+  },
+  "Attempts": [
+    {
+      "Number": 1,
+      "Done": true,
+      "Response": {
+        "Body": null,
+        "Complete": false,
+        "Model": "claude-opus-5",
+        "Protocol": "anthropic-messages/2023-06-01",
+        "Adapter": "canti-anthropic/4-summary",
+        "Usage": {
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      },
+      "Failure": "anthropic: incomplete response: stop_reason \"max_tokens\"",
+      "UnknownUsage": true
+    },
+    {
+      "Number": 2,
+      "Done": true,
+      "Response": {
+        "Body": null,
+        "Complete": true,
+        "Model": "claude-opus-5",
+        "Protocol": "anthropic-messages/2023-06-01",
+        "Adapter": "canti-anthropic/4-summary",
+        "Usage": {
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      },
+      "Failure": "anthropic: summary contains a non-text block",
+      "UnknownUsage": true
+    },
+    {
+      "Number": 3,
+      "Done": true,
+      "Response": {
+        "Body": null,
+        "Complete": true,
+        "Model": "claude-opus-5",
+        "Protocol": "anthropic-messages/2023-06-01",
+        "Adapter": "canti-anthropic/4-summary",
+        "Usage": {
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      },
+      "Failure": "anthropic: empty summary",
+      "UnknownUsage": true
+    }
+  ],
+  "Summary": "",
+  "Accepted": false
+}

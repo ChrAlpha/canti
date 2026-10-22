@@ -25,7 +25,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.cli(nil, "run", "-once", "-goal", "Continue deployment using the approved wait", "-image", image,
-		"-window-steps", "3", "-max-steps", "12", "-token-budget", "2000", "-wall-time", "3m", "-job-timeout", "10s")
+		"-compact-steps", "3", "-retain-bytes", "1", "-max-steps", "12", "-token-budget", "200000", "-wall-time", "3m", "-job-timeout", "10s")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
@@ -62,10 +62,6 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 		t.Fatal("missing observation")
 		return harness.Observation{}
 	}
-	handover := func(first int) {
-		t.Helper()
-		act(harness.HandoverPrefix + "Continue deployment. Recheck original approvals before applying settings.")
-	}
 	act("cat input; rm input")
 	original := observe()
 	if !original.Output.Complete || strings.Contains(original.Preview, evidence) {
@@ -73,7 +69,6 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 	}
 	act("# canti:discovery\nprintf 'Orchid approved wait is 999 seconds.\\n'")
 	act("printf 'unrelated checkpoint\\n'")
-	handover(1)
 	q, _ := json.Marshal(archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps", Reason: "locate original approval", Query: "Orchid", Limit: 4096})
 	for page := 0; page < 2; page++ {
 		discoveryStep := step
@@ -103,7 +98,6 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 		if page == 0 {
 			act("printf 'verification checkpoint\\n'")
 			act("printf 'next checkpoint\\n'")
-			handover(discoveryStep)
 		} else {
 			act("done")
 		}
@@ -112,8 +106,8 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 			t.Fatal("original artifact evidence missing or retrieval echo included in frozen request")
 		}
 	}
-	if f.status().Phase != core.PhaseReturned || len(f.model.requests()) != 10 {
+	if f.status().Phase != core.PhaseReturned || len(f.model.requests()) != 8 {
 		t.Fatalf("unexpected final phase/calls: %+v, %d", f.status(), len(f.model.requests()))
 	}
-	t.Log("SCRIPTED_NATIVE_DISCOVERY windows=3 model_calls=10 discover_calls=2; same growing run, real CLI/SQLite/Docker and restarts; scripted decisions, no autonomous task score")
+	t.Log("SCRIPTED_NATIVE_DISCOVERY windows=3 model_calls=8 discover_calls=2; same growing run, real CLI/SQLite/Docker and restarts; scripted decisions, no autonomous task score")
 }

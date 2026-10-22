@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,14 +29,15 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 	}
 	started := time.Now()
 	metrics := struct {
-		Runs, Completed, Steps, Windows, Handovers, Requests, Retries, Crashes int
-		Effects, Duplicates, Containers, CandidateBoundaries, NavigationLinks  int
-		BusinessEntries                                                        int
-		Failed                                                                 bool
-		MaxPromptBytes                                                         int
-		DBBytes, RuntimeMS                                                     int64
+		Runs, Completed, Steps, Windows, Compactions, Requests, Retries, Crashes int
+		Effects, Duplicates, Containers, CandidateBoundaries, NavigationLinks    int
+		BusinessEntries                                                          int
+		Failed                                                                   bool
+		MaxPromptBytes                                                           int
+		DBBytes, RuntimeMS                                                       int64
 	}{Runs: runs}
 	f, image := recoveryFixture(t, nil)
+	f.model.summarize = sessionStressSummary
 	f.model.decide = func(step int, prompt string) (core.Decision, error) {
 		d, err := sessionStressDecision(step, prompt)
 		if err != nil {
@@ -80,8 +82,8 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		goal := fmt.Sprintf("SESSION_STRESS_ROUND=%d\nAppend this round's A, B, C once; verify earlier original evidence before continuing.", round)
 		args := []string{"-session", "horizon", "-input", fmt.Sprintf("round-%02d", round), "-goal", goal,
 			"-constraints", "Keep every earlier ledger entry and verify original evidence.", "-image", image,
-			"-context-bytes", "98304", "-window-steps", "4", "-max-steps", "32", "-max-attempts", "3",
-			"-wall-time", "90s", "-job-timeout", "10s", "-token-budget", "10000", "-output-budget", "1048576"}
+			"-summary-bytes", "2048", "-context-bytes", "98304", "-compact-steps", "4", "-retain-bytes", "1", "-max-steps", "32", "-max-attempts", "3",
+			"-wall-time", "90s", "-job-timeout", "10s", "-token-budget", "2000000", "-output-budget", "1048576"}
 		inputs = append(inputs, args)
 		if r := f.cli(nil, "run", append(append([]string{}, args...), "-once")...); r.code != exitActive {
 			t.Fatalf("round %d admission: %+v", round, r)
@@ -105,6 +107,7 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		f.model.mu.Unlock()
 		f.model.answer(6, retryCall, reply{status: 503, body: "bounded session stress transport failure"})
 		beforeCalls := len(f.model.requests())
+		beforeSummaries := len(f.model.summaryRequests())
 		if round == runs-1 {
 			if r := f.cli([]string{"CANTI_TEST_CRASH=after:observed"}, "resume"); r.code != -1 {
 				t.Fatalf("late-run committed observation crash: %+v", r)
@@ -162,7 +165,7 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		metrics.Retries++
 		history := f.history("-run", admitted.Run.ID)
 		windows := map[int]bool{}
-		handovers, frozen := 0, 0
+		compactions, frozen := len(f.model.summaryRequests())-beforeSummaries, 0
 		for _, e := range history {
 			if !strings.HasPrefix(e.State.Decision.Payload, "canti:") {
 				executed = append(executed, e)
@@ -171,9 +174,7 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 				if obs.Execution != core.ExecutionExited || obs.ExitCode == nil || *obs.ExitCode != 0 {
 					t.Fatalf("round %d observation failed: %+v", round, obs)
 				}
-				if obs.Handover != nil {
-					handovers++
-				}
+
 			}
 			if req := e.Facts.Request; req != nil {
 				frozen++
@@ -194,14 +195,9 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 					t.Fatalf("round %d prompt bytes %d vs %+v", round, promptBytes, req.Context.Bytes)
 				}
 				metrics.MaxPromptBytes = max(metrics.MaxPromptBytes, promptBytes)
-				prior := req.Context.Session
-				if len(prior) != min(round-1, 8) {
-					t.Fatalf("round %d prior candidates: %+v", round, prior)
-				}
-				for i, source := range prior {
-					seq := max(1, round-8) + i
-					if source.SessionSeq != int64(seq) || source.RunID != ids[seq-1] || !source.IncludedGoal {
-						t.Fatalf("round %d prior source: %+v", round, source)
+				for _, source := range req.Context.Entries {
+					if source.RunID != admitted.Run.ID && !slices.Contains(ids[:round-1], source.RunID) {
+						t.Fatalf("foreign session source: %+v", source)
 					}
 				}
 				if e.State.Step == 1 && (round == 9 || round == 10) {
@@ -209,12 +205,12 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 				}
 			}
 		}
-		if handovers < 2 || len(windows) != handovers+1 || frozen+1 != len(requests) {
-			t.Fatalf("round %d continuity: windows=%v handovers=%d frozen=%d calls=%d", round, windows, handovers, frozen, len(requests))
+		if compactions < 2 || len(windows) < 3 || frozen+1 != len(requests) {
+			t.Fatalf("round %d continuity: windows=%v compactions=%d frozen=%d calls=%d", round, windows, compactions, frozen, len(requests))
 		}
 		metrics.Steps += final.Totals.Steps
 		metrics.Windows += len(windows)
-		metrics.Handovers += handovers
+		metrics.Compactions += compactions
 		metrics.Containers = len(effectContainers(t, f.state))
 		if metrics.Containers != 0 {
 			t.Fatalf("round %d left %d containers", round, metrics.Containers)
@@ -223,7 +219,7 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		t.Logf("SESSION_ROUND round=%d run=%s steps=%d windows=%d prompt_max=%d elapsed_ms=%d", round, admitted.Run.ID, final.Totals.Steps, len(windows), metrics.MaxPromptBytes, time.Since(started).Milliseconds())
 	}
 	checkReleased(t, f, executed)
-	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.Handovers < runs*2 ||
+	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.Compactions < runs*2 ||
 		runs >= 10 && (metrics.CandidateBoundaries != 2 || metrics.NavigationLinks != 9) {
 		t.Fatalf("incomplete stress coverage: %+v", metrics)
 	}

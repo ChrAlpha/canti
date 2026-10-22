@@ -10,7 +10,7 @@ func BenchmarkPrompt(b *testing.B) {
 	for _, n := range []int{0, 5, 20} {
 		b.Run(fmt.Sprintf("steps=%d", n), func(b *testing.B) {
 			f := testFrame()
-			f.Step, f.MaxSteps, f.HandoverBytes = n+1, 1000, 2048
+			f.Step, f.MaxSteps, f.SummaryBytes = n+1, 1000, 2048
 			f.RetrievalEnabled = true
 			for i := range n {
 				f.Steps = append(f.Steps, exitedStep(i+1, strings.Repeat("go test ./...; ", 180), strings.Repeat("package: ok\n", 400)))

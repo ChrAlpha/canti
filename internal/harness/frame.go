@@ -21,11 +21,10 @@ type Frame struct {
 	DecisionTool                         bool // decisions arrive as canti_decision tool input instead of reply text
 	RetrievalEnabled                     bool
 	ImportsEnabled                       bool
-	HandoverBytes                        int
+	SummaryBytes                         int
 	SessionContext                       string
 	capture                              *ContextCapture
-	sessionSources                       []ContextSessionSource
-	sessionNavigation                    string
+	SessionID                            string
 }
 
 // Rejection is a response of the current step that failed to decode, with

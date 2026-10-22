@@ -10,7 +10,7 @@ import (
 
 func TestContextConfigurationSurvivesResume(t *testing.T) {
 	imported := t.TempDir()
-	s := parseSpec(t, "-history-imports", imported, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
+	s := parseSpec(t, "-history-imports", imported, "-compact-steps", "3", "-compact-bytes", "32768", "-summary-bytes", "1024")
 	s.config.Workspace = t.TempDir()
 	run, _, err := newRun("goal", "constraints", s, time.Now())
 	if err != nil {
@@ -20,13 +20,13 @@ func TestContextConfigurationSurvivesResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ContextVersion != contextVersion || c.HistoryImports != imported || c.WindowSteps != 3 || c.WindowBytes != 32768 || c.HandoverBytes != 1024 {
+	if c.ContextVersion != contextVersion || c.HistoryImports != imported || c.CompactSteps != 3 || c.CompactBytes != 32768 || c.SummaryBytes != 1024 {
 		t.Fatalf("config lost on resume: %#v", c)
 	}
 }
 
 func TestContextConfigurationRejectsInvalidLimits(t *testing.T) {
-	for _, args := range [][]string{{"-window-steps", "-1"}, {"-window-bytes", "-1"}, {"-handover-bytes", "0"}, {"-handover-bytes", "8193"}} {
+	for _, args := range [][]string{{"-compact-steps", "-1"}, {"-compact-bytes", "-1"}, {"-summary-bytes", "0"}, {"-summary-bytes", "65537"}} {
 		if _, _, err := newRun("goal", "", parseSpec(t, args...), time.Now()); err == nil {
 			t.Fatalf("accepted %v", args)
 		}

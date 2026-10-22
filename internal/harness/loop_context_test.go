@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -16,166 +15,6 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
-
-func TestWindowHandoverRecoversAndDoesNotCarryOldEvidence(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"check source"}`),
-		execReply(harness.HandoverPrefix+"Continue at the evidence reference; verify before use."),
-		reply{err: errors.New("transport interrupted")}, returnReply("done"))
-	imported := t.TempDir()
-	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE_SENTINEL"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f.cfg.Reader = &archive.Reader{Imports: imported}
-	f.cfg.WindowSteps = 1
-	ctx := context.Background()
-	for {
-		snap, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snap.State.Intent() == core.IntentHalt {
-			break
-		}
-	}
-	if len(f.model.prompts) != 3 || len(f.model.sent) != 4 {
-		t.Fatalf("prompts=%d sends=%d", len(f.model.prompts), len(f.model.sent))
-	}
-	if !strings.Contains(f.model.prompts[1].User(), "ORIGINAL_EVIDENCE_SENTINEL") {
-		t.Fatal("retrieved evidence did not enter actual request")
-	}
-	last := f.model.prompts[2].User()
-	if strings.Contains(last, "ORIGINAL_EVIDENCE_SENTINEL") || strings.Contains(last, "### Step 1") || strings.Contains(last, "## Notes") {
-		t.Fatalf("old context leaked: %s", last)
-	}
-	if !strings.Contains(last, "Continue at the evidence reference") {
-		t.Fatal("handover missing")
-	}
-	if !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
-		t.Fatal("retry changed frozen window bytes")
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 {
-		t.Fatalf("window: %#v %v", req.Window, err)
-	}
-	if _, err := os.Stat(filepath.Join(f.cfg.History, runID, "steps", "00000002", "preview")); err != nil {
-		t.Fatal("last old-page step not published", err)
-	}
-}
-
-func TestHandoverTakesTheTextAfterItsPrefixVerbatim(t *testing.T) {
-	text := "  Objective: deploy \"gateway\" for <service> {stage 3}.\nNext: run C:\\tools\\check; 继续核对。\n" +
-		"Evidence: /canti/artifacts/effect_" + strings.Repeat("a", 64) + "/output.\n\n"
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("true"), execReply(harness.HandoverPrefix+text), returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	s, err := f.loop().Run(ctx, runID)
-	if err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 || req.Window.Handover != text {
-		t.Fatalf("window=%+v err=%v", req.Window, err)
-	}
-	steps, err := f.store.Recent(ctx, runID, 0, 1)
-	if err != nil || len(steps) != 1 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	if h := steps[0].Observation.Handover; h == nil || *h != (harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
-		t.Fatalf("recorded handover %+v", h)
-	}
-	if !strings.Contains(f.model.prompts[2].User(), text) {
-		t.Fatal("the next window does not quote the handover text")
-	}
-}
-
-func TestHandoverFollowsItsNameAfterAnyWhitespace(t *testing.T) {
-	for _, separator := range []string{"\n", "\t", "\r", " "} {
-		f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-			execReply("true"), execReply("canti:handover"+separator+"Next: verify the build.\n"), returnReply("done"))
-		f.cfg.WindowSteps = 1
-		s, err := f.loop().Run(f.bounded(), runID)
-		if err != nil || s.State.Phase != core.PhaseReturned {
-			t.Fatalf("separator %q: run=%+v err=%v", separator, s.State, err)
-		}
-		req, err := f.store.LatestRequest(f.bounded(), runID)
-		if err != nil || req.Window == nil || req.Window.Handover != "Next: verify the build.\n" {
-			t.Fatalf("separator %q: window=%+v err=%v", separator, req.Window, err)
-		}
-	}
-}
-
-func TestALongerActionNameIsNotAHandover(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("true"), execReply("canti:handovers Next: verify."), execReply("canti:handoverNext: verify."))
-	f.cfg.WindowSteps = 1
-	s, err := f.loop().Run(f.bounded(), runID)
-	if err != nil || s.State.Reason != core.StopUnrecoverable {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 2)
-	if err != nil || len(steps) != 2 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	for _, step := range steps {
-		if o := step.Observation; o.Execution != core.ExecutionFailedToStart || o.Handover != nil {
-			t.Fatalf("step %d observation %+v; want refused work", step.Step, o)
-		}
-	}
-}
-
-func TestUnrequestedHandoverNeverRunsAsACommand(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 3}, harness.Budget{},
-		execReply("canti:handover\ntouch ran; next: report"), execReply("canti:handover"), returnReply("done"))
-	if _, err := f.loop().Run(f.bounded(), runID); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.exec.jobs) != 0 {
-		t.Fatalf("a handover reached the executor: %v", f.exec.calls)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 2)
-	if err != nil || len(steps) != 2 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	for _, s := range steps {
-		if o := s.Observation; o.Handover != nil || !strings.Contains(o.Preview, "handover was not requested for this step") {
-			t.Fatalf("step %d observation %+v", s.Step, o)
-		}
-	}
-}
-
-func TestDiscoverySkipsAHandoverAfterAnyWhitespace(t *testing.T) {
-	for _, separator := range harness.HandoverSpace {
-		t.Run(fmt.Sprintf("%q", separator), func(t *testing.T) { discoverPastHandover(t, string(separator)) })
-	}
-}
-
-func TestDiscoverySkipsABareHandoverName(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("echo canti:handover"), execReply("canti:handover"), execReply("canti:handover Continue."),
-		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"canti:handover","reason":"find the step"}`),
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	artifacts := t.TempDir()
-	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
-	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
-	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
-	if err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	var found []string
-	for _, source := range steps[0].Observation.Retrieval.Sources {
-		found = append(found, source.Path)
-	}
-	if !slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000001/") }) ||
-		slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") || strings.Contains(p, "/00000003/") }) {
-		t.Fatalf("discovery found %v; want step 1 and neither handover step", found)
-	}
-}
 
 // finishWithArtifact finishes a started job at its first inspection and
 // writes its output where the archive reads artifacts.
@@ -192,113 +31,6 @@ func finishWithArtifact(x *fakeExec, artifacts string) func(string) (harness.Job
 			}
 		}
 		return j.Job, true, nil
-	}
-}
-
-func discoverPastHandover(t *testing.T, separator string) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("echo needle"), execReply("canti:handover"+separator+"Find the needle again."),
-		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"needle","reason":"find the step"}`),
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	artifacts := t.TempDir()
-	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
-	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
-	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
-	if err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	var found []string
-	for _, source := range steps[0].Observation.Retrieval.Sources {
-		found = append(found, source.Path)
-	}
-	if len(found) == 0 || slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") }) {
-		t.Fatalf("discovery found %v; want step 1 and not the handover of step 2: %s", found, steps[0].Observation.Preview)
-	}
-}
-
-func TestWindowRefusesRepeatedInvalidHandover(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"),
-		execReply("canti:handover"),
-		execReply(harness.HandoverPrefix+strings.Repeat("界", 683)))
-	f.cfg.WindowSteps = 1
-	s, err := f.loop().Run(context.Background(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.State.Reason != core.StopUnrecoverable {
-		t.Fatalf("state %#v", s.State)
-	}
-	req, err := f.store.LatestRequest(context.Background(), runID)
-	if err != nil || req.Window.FirstStep != 1 {
-		t.Fatalf("discarded old page: %#v %v", req.Window, err)
-	}
-	steps, err := f.store.Recent(context.Background(), runID, 0, 2)
-	if err != nil || len(steps) != 2 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	for i, want := range []string{"handover text must not be empty", "2049 UTF-8 bytes; maximum 2048"} {
-		if o := steps[i].Observation; o.Handover != nil || !strings.Contains(o.Preview, want) {
-			t.Fatalf("step %d observation %+v, want %q", steps[i].Step, o, want)
-		}
-	}
-}
-
-func TestZeroTriggersRequestAndAdvanceHandoverAtCapacity(t *testing.T) {
-	var replies []reply
-	for i := 0; i < 24; i++ {
-		replies = append(replies, execReply("echo CAPACITY_PAGE_MARKER "+strings.Repeat("x", 1800)))
-	}
-	f := newFixture(t, core.Limits{MaxSteps: 30, MaxAttempts: 3}, harness.Budget{}, replies...)
-	f.cfg.Limits = harness.DefaultPromptLimits()
-	f.cfg.Limits.Total = 96 << 10
-	if f.cfg.WindowSteps != 0 || f.cfg.WindowBytes != 0 {
-		t.Fatalf("default triggers = %d steps, %d bytes", f.cfg.WindowSteps, f.cfg.WindowBytes)
-	}
-	ctx := f.bounded()
-	var handoverStep int
-	for i := 0; i < 250; i++ {
-		snap, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snap.State.Phase != core.PhaseRequestFrozen {
-			continue
-		}
-		req, err := f.store.Request(ctx, runID, snap.State.Step, snap.State.RequestRev)
-		if err != nil || req.Window == nil {
-			t.Fatalf("frozen request has no window: %+v %v", req, err)
-		}
-		if req.Window.Requested {
-			handoverStep = snap.State.Step
-			if !strings.Contains(string(req.Body), "Handover required") || !strings.Contains(string(req.Body), "### Step 1") {
-				t.Fatal("capacity trigger dropped current-page history before handover")
-			}
-			break
-		}
-	}
-	if handoverStep < 2 {
-		t.Fatal("automatic capacity trigger did not request a handover")
-	}
-	f.model.mu.Lock()
-	f.model.replies = []reply{
-		execReply(harness.HandoverPrefix + "Continue on the next page; inspect the old record if needed."),
-		returnReply("done"),
-	}
-	f.model.mu.Unlock()
-	snap, err := f.fresh().Run(ctx, runID)
-	if err != nil || snap.State.Phase != core.PhaseReturned {
-		t.Fatalf("run = %+v, %v", snap.State, err)
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != handoverStep+1 || req.Window.SourceStep != handoverStep {
-		t.Fatalf("advanced window = %+v, %v", req.Window, err)
-	}
-	if strings.Contains(string(req.Body), "CAPACITY_PAGE_MARKER") || !strings.Contains(string(req.Body), "Continue on the next page") {
-		t.Fatal("new page inherited old steps or lost handover")
 	}
 }
 
@@ -347,116 +79,6 @@ func TestRetrievalSearchContinuationSurvivesPromptPreviewLimit(t *testing.T) {
 	request := string(f.model.sent[1])
 	if !strings.Contains(request, `"next_offset":8192`) || !strings.Contains(request, `"more":true`) {
 		t.Fatal("search continuation metadata was truncated before reaching the model")
-	}
-}
-
-func TestRevisitingRetrievalAfterHandoverDoesNotExpandItsEvidence(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify original"}`),
-		execReply(harness.HandoverPrefix+"Inspect step 1 access metadata."),
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/runs/run-1/steps/00000001/preview","reason":"inspect prior access"}`),
-		execReply(harness.HandoverPrefix+"Finish."),
-		returnReply("done"))
-	imported := t.TempDir()
-	const original = "UNIQUE_ORIGINAL_EVIDENCE_NOT_METADATA"
-	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(original), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			break
-		}
-	}
-	if len(f.model.sent) != 5 {
-		t.Fatalf("sent %d requests", len(f.model.sent))
-	}
-	if !strings.Contains(string(f.model.sent[1]), original) {
-		t.Fatal("initial retrieval evidence missing")
-	}
-	for _, request := range f.model.sent[2:] {
-		if strings.Contains(string(request), original) {
-			t.Fatal("original evidence recursively reappeared after handover")
-		}
-	}
-	if !strings.Contains(string(f.model.sent[3]), "verify original") || !strings.Contains(string(f.model.sent[3]), "/canti/imports/evidence") {
-		t.Fatal("revisited access did not expose original reason and source")
-	}
-}
-
-func TestHandoverProtocolRepairPreservesFailureCountAndWindow(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("true"),
-		execReply(harness.HandoverPrefix),
-		reply{body: "not a decision", usage: usage},
-		execReply(harness.HandoverPrefix+"Continue from the verified source."),
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			if s.State.Phase != core.PhaseReturned {
-				t.Fatalf("unexpected halt: %+v", s.State)
-			}
-			break
-		}
-	}
-	const last = "This step is the last chance to hand over"
-	if req, err := f.store.Request(ctx, runID, 2, 1); err != nil || strings.Contains(string(req.Body), last) {
-		t.Fatalf("the first handover request says it is the last: %v", err)
-	}
-	for _, revision := range []int{1, 2} {
-		req, err := f.store.Request(ctx, runID, 3, revision)
-		if err != nil || req.Window == nil || req.Window.FirstStep != 1 || req.Window.Failures != 1 || !req.Window.Requested {
-			t.Fatalf("revision %d window=%+v err=%v", revision, req.Window, err)
-		}
-		if !strings.Contains(string(req.Body), last) {
-			t.Fatalf("revision %d of the retry does not say it is the last chance", revision)
-		}
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 4 || req.Window.SourceStep != 3 || req.Window.Failures != 0 {
-		t.Fatalf("new window=%+v err=%v", req.Window, err)
-	}
-}
-
-func TestHandoverPagePreservesRetryAndRepair(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{},
-		execReply("echo first-window-marker"),
-		execReply(harness.HandoverPrefix+"Continue after marker; verify source."),
-		reply{err: errors.New("transport interruption")},
-		reply{body: "invalid decision", usage: usage},
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	s, err := f.fresh().Run(ctx, runID)
-	if err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	if len(f.model.sent) != 5 || !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
-		t.Fatal("transport retry changed frozen request")
-	}
-	for _, revision := range []int{1, 2} {
-		req, err := f.store.Request(ctx, runID, 3, revision)
-		if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 || req.Window.Handover == "" {
-			t.Fatalf("revision %d window=%+v err=%v", revision, req.Window, err)
-		}
-		if strings.Contains(string(req.Body), "first-window-marker") || !strings.Contains(string(req.Body), "Continue after marker") {
-			t.Fatalf("revision %d leaks old page or loses handover", revision)
-		}
-	}
-	if !strings.Contains(string(f.model.sent[4]), "Rejected response") {
-		t.Fatal("protocol repair missing")
 	}
 }
 
@@ -548,8 +170,8 @@ func (j missingLatestWindowRequest) LatestRequest(context.Context, string) (harn
 func TestWindowRecoveryRejectsMissingDurableRequestAfterProgress(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{},
 		execReply("echo old-window-marker"),
-		execReply(harness.HandoverPrefix+"Continue with the next operation."))
-	f.cfg.WindowSteps = 1
+		execReply("echo next operation"))
+	f.cfg.CompactSteps = 1
 	ctx := f.bounded()
 	for {
 		s, err := f.fresh().Step(ctx, runID)
@@ -572,7 +194,7 @@ func TestWindowRecoveryRejectsMissingDurableRequestAfterProgress(t *testing.T) {
 
 func TestWindowProtocolRepairRejectsMissingInitialFrozenRequest(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, reply{body: "invalid decision", usage: usage})
-	f.cfg.WindowSteps = 1
+	f.cfg.CompactSteps = 1
 	ctx := f.bounded()
 	for {
 		s, err := f.fresh().Step(ctx, runID)
@@ -587,5 +209,213 @@ func TestWindowProtocolRepairRejectsMissingInitialFrozenRequest(t *testing.T) {
 	s, err := f.loopOn(missingLatestWindowRequest{f.open()}).Step(ctx, runID)
 	if err != nil || s.State.Phase != core.PhaseStopped || s.State.Reason != core.StopUnrecoverable || len(f.model.prompts) != before {
 		t.Fatalf("protocol repair recreated missing initial request: state=%+v new_prompts=%d err=%v", s.State, len(f.model.prompts)-before, err)
+	}
+}
+
+func TestIndependentCompactionKeepsTailAndDoesNotConsumeWorkSteps(t *testing.T) {
+	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 3}, harness.Budget{}, execReply("echo first "+strings.Repeat("x", 512)), execReply("echo second "+strings.Repeat("y", 512)), execReply("echo third"), returnReply("done"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	if len(f.model.summarySent) != 2 || len(f.model.prompts) != 4 {
+		t.Fatalf("summary calls %d, work calls %d", len(f.model.summarySent), len(f.model.prompts))
+	}
+	first := capturedRequest(t, f, 3, 1)
+	if first.CheckpointID == "" || first.Window.FirstStep != 2 || first.Window.Through != 2 || !strings.Contains(string(first.Body), "### Step 2\n") || strings.Contains(string(first.Body), "### Step 1\n") {
+		t.Fatalf("first checkpoint: %+v", first.Window)
+	}
+	second := capturedRequest(t, f, 4, 1)
+	if second.CheckpointID == first.CheckpointID || second.Window.FirstStep != 3 || second.Window.Through != 3 {
+		t.Fatalf("second checkpoint: %+v", second.Window)
+	}
+	if !strings.Contains(string(f.model.summarySent[1]), "echo second") || strings.Contains(string(f.model.summarySent[1]), "echo third") {
+		t.Fatal("next summary skipped the previously retained step or consumed the protected step")
+	}
+	totals, err := f.store.Totals(f.bounded(), runID)
+	if err != nil || totals.Steps != 3 || totals.SummaryUsage.InputTokens != 2*usage.InputTokens {
+		t.Fatalf("totals: %+v %v", totals, err)
+	}
+	for _, job := range f.exec.jobs {
+		if job.runs != 1 {
+			t.Fatalf("effect repeated: %+v", job)
+		}
+	}
+}
+
+func TestIndependentCompactionRetriesFrozenSummaryAndPreservesWorkIdentity(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("echo one "+strings.Repeat("x", 512)), execReply("echo two "+strings.Repeat("y", 512)), returnReply("done"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	f.model.summaries = []reply{{body: "partial", err: errors.New("transport interrupted"), usage: usage}, {body: "Keep the original goal and constraints; inspect original evidence.", usage: usage}}
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	if len(f.model.summarySent) != 2 || !bytes.Equal(f.model.summarySent[0], f.model.summarySent[1]) {
+		t.Fatal("summary retry changed frozen bytes")
+	}
+	if len(f.exec.jobs) != 2 {
+		t.Fatal("compaction consumed or replayed an effect")
+	}
+}
+
+func TestIndependentCompactionFailureRetainsOriginalContext(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("echo one "+strings.Repeat("x", 512)), execReply("echo two "+strings.Repeat("y", 512)), returnReply("must not be requested"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	f.model.summaries = []reply{{body: ""}, {body: ""}, {body: ""}}
+	wantState(t, f.run(f.fresh()), core.PhaseStopped, core.StopUnrecoverable)
+	head, err := f.store.ActiveCheckpoint(f.bounded(), "run:"+runID)
+	if err != nil || head.ID != "" || len(f.model.prompts) != 2 {
+		t.Fatalf("failed compaction mutated context: %+v %v", head, err)
+	}
+}
+
+func TestIndependentCompactionSavedResponseResumesWithoutResend(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("first "+strings.Repeat("x", 512)), execReply("second "+strings.Repeat("y", 512)), returnReply("done"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	ctx := f.bounded()
+	var snap harness.Snapshot
+	for n := 0; n < 100; n++ {
+		var err error
+		snap, err = f.fresh().Step(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := f.store.PendingCompaction(ctx, runID, snap.Seq)
+		if err == nil && len(c.Attempts) == 1 && c.Attempts[0].Done {
+			break
+		}
+	}
+	if len(f.model.summarySent) != 1 {
+		t.Fatal("did not stop after saved summary response")
+	}
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	if len(f.model.summarySent) != 1 {
+		t.Fatal("saved summary was sent again after restart")
+	}
+}
+
+func TestIndependentCompactionReservesBudgetBeforeSending(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{Tokens: 500}, execReply("first "+strings.Repeat("x", 512)), execReply("second "+strings.Repeat("y", 512)), returnReply("not sent"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	wantState(t, f.run(f.fresh()), core.PhaseStopped, core.StopBudgetExhausted)
+	if len(f.model.summarySent) != 0 || len(f.model.prompts) != 2 {
+		t.Fatal("summary dispatched without budget reservation")
+	}
+	if head, err := f.store.ActiveCheckpoint(f.bounded(), "run:"+runID); err != nil || head.ID != "" {
+		t.Fatal("budget failure adopted context")
+	}
+}
+
+func TestIndependentCompactionCancellationRetainsAttemptAndSource(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("first "+strings.Repeat("x", 512)), execReply("second "+strings.Repeat("y", 512)), returnReply("not sent"))
+	f.cfg.CompactSteps = 2
+	f.cfg.RetainBytes = 1
+	ctx, cancel := context.WithCancel(f.bounded())
+	defer cancel()
+	f.model.summaries = []reply{{body: "late result", late: true, hook: cancel}}
+	snap, err := f.loop().Run(ctx, runID)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel: %+v %v", snap, err)
+	}
+	c, err := f.store.PendingCompaction(f.bounded(), runID, snap.Seq)
+	if err != nil || len(c.Attempts) != 1 || c.Attempts[0].Done {
+		t.Fatalf("late response committed: %+v %v", c, err)
+	}
+	if _, err := f.fresh().Stop(f.bounded(), runID, core.StopCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if head, err := f.store.ActiveCheckpoint(f.bounded(), "run:"+runID); err != nil || head.ID != "" {
+		t.Fatal("cancellation adopted context")
+	}
+	totals, _ := f.store.Totals(f.bounded(), runID)
+	if totals.ReservedTokens != c.Plan.TokenReserve {
+		t.Fatal("cancelled usage assumed zero")
+	}
+}
+
+func TestIndependentCompactionConsumesBacklogInDurablePasses(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, returnReply("unrelated standalone"))
+	f.run(f.loop())
+	ctx := f.bounded()
+	runner, err := harness.NewRunner(f.store, f.exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed committed session facts without preparing historical working requests;
+	// the next run starts with a smaller context allowance than this raw backlog.
+	for i := 1; i <= 40; i++ {
+		id := fmt.Sprintf("prior-%02d", i)
+		state, _ := core.NewState(id, limits)
+		run := harness.Run{ID: id, SessionID: "long", InputID: id, Goal: fmt.Sprintf("Original obligation %d", i), Constraints: "Keep all continuing obligations.", Created: created}
+		if _, err := f.store.Submit(ctx, run, state); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(core.Decision{Kind: core.Return, Payload: strings.Repeat(fmt.Sprintf("Evidence for run %02d. ", i), 400)})
+		snap := harness.Snapshot{State: state}
+		for _, event := range []core.Event{core.RequestFrozen{}, core.AttemptStarted{Step: 1, Attempt: 1}, core.ResponseSaved{Step: 1, Attempt: 1}, core.ResponseLoaded{Step: 1, Attempt: 1, Body: body}} {
+			var facts harness.Facts
+			switch event.(type) {
+			case core.RequestFrozen:
+				facts.Request = &harness.Request{Body: []byte("seed"), Window: &harness.Window{FirstStep: 1}}
+			case core.ResponseSaved:
+				facts.Response = &harness.Response{Body: body, Complete: true}
+			}
+			snap, err = runner.Commit(ctx, snap, event, facts)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	id := "continuation"
+	state, _ := core.NewState(id, limits)
+	run := harness.Run{ID: id, SessionID: "long", InputID: id, Goal: "Continue.", Constraints: "Current correction: read only.", Created: created}
+	if _, err := f.store.Submit(ctx, run, state); err != nil {
+		t.Fatal(err)
+	}
+	f.model.replies = []reply{returnReply("continued")}
+	for n := 0; n < 100; n++ {
+		snap, err := f.fresh().Step(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, err := f.store.ActiveCheckpoint(ctx, "session:long")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.State.RequestRev == 0 && head.ID != "" {
+			t.Fatal("intermediate candidate became active")
+		}
+		if snap.State.Phase == core.PhaseReturned {
+			break
+		}
+		if n == 99 {
+			t.Fatal("backlog did not converge")
+		}
+	}
+	records, err := f.store.Compactions(ctx, id, 0, 100)
+	if err != nil || len(records) < 2 {
+		t.Fatalf("passes %d %v", len(records), err)
+	}
+	after := int64(0)
+	parent := ""
+	for i, record := range records {
+		c := record.Operation
+		if c.Plan.After != after || c.Plan.Parent != parent || c.Plan.Base != "" || c.Accepted != (i == len(records)-1) {
+			t.Fatalf("broken staged lineage: %+v", c.Plan)
+		}
+		after, parent = c.Plan.Through, c.Plan.ID
+	}
+	req, err := f.store.LatestRequest(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"Current correction: read only.", "Continue.", "Evidence for run 40."} {
+		if !strings.Contains(string(req.Body), text) {
+			t.Fatalf("lost %q", text)
+		}
+	}
+	if len(f.exec.jobs) != 0 {
+		t.Fatal("maintenance created effects")
 	}
 }

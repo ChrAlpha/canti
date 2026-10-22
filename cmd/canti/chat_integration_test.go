@@ -90,8 +90,8 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	}
 	c := p[2]
 	first, answer, interrupted := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request")
-	if first < 0 || !(first < answer && answer < interrupted) || strings.Contains(c, "sleep 60") ||
-		!strings.Contains(c, s.Run.ID+"/goal, steps, and result): stopped, reason cancelled, recorded steps 1; no assistant return.") {
+	if first < 0 || !(first < answer && answer < interrupted) || !strings.Contains(c, "Execution: cancelled") ||
+		!strings.Contains(c, "Recorded run status: stopped, reason cancelled; return does not establish success.\nNo assistant return.") {
 		t.Fatalf("the input after an interrupted command lost the dialogue:\n%s", c)
 	}
 	checkReleased(t, f, f.history("-run", s.Run.ID))

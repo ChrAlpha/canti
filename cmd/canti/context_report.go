@@ -146,7 +146,7 @@ func (r contextReport) writeText(w io.Writer) error {
 	t.line("Model %s; protocol %s; adapter %s", q.Model, q.Protocol, q.Adapter)
 	t.line("Frozen request bytes: %d; sha256 %s", q.BodyBytes, q.SHA256)
 	if q.Window != nil {
-		t.line("Window begins at step %d; handover source step %d; requested %t", q.Window.FirstStep, q.Window.SourceStep, q.Window.Requested)
+		t.line("Retained current-run steps begin at %d; summary covers session sources through %d", q.Window.FirstStep, q.Window.Through)
 	}
 	if q.Capture == nil {
 		t.line("Context capture unavailable for this historical request.")
@@ -180,19 +180,13 @@ func (r contextReport) writeText(w io.Writer) error {
 func (t *textLines) capture(c *harness.ContextCapture) {
 	t.line("Rendered prompt bytes: %d / %d", c.Bytes.Total, c.Bytes.Limit)
 	b := c.Bytes
-	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; earlier dialogue %d; handover %d", b.System, b.Goal, b.Constraints, b.Environment, b.Session, b.Handover)
-	if c.Handover.Status == "evaluated" {
-		t.line("Handover check: %s; reasons %v; used %d + growth %d, work capacity %d", c.Handover.Status, c.Handover.Reasons, c.Handover.Used, c.Handover.Growth, c.Handover.Capacity)
+	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; earlier dialogue %d; summary %d", b.System, b.Goal, b.Constraints, b.Environment, b.Session, b.Summary)
+	if c.Compaction.Status == "evaluated" {
+		t.line("Compaction check: %s; reasons %v; used %d + growth %d, work capacity %d", c.Compaction.Status, c.Compaction.Reasons, c.Compaction.Used, c.Compaction.Growth, c.Compaction.Capacity)
 	} else {
-		t.line("Handover check not evaluated: %s", c.Handover.Status)
+		t.line("Compaction check not evaluated: %s", c.Compaction.Status)
 	}
-	for _, s := range c.Session {
-		handover := ""
-		if s.HandoverStep != 0 {
-			handover = fmt.Sprintf(", latest handover step %d", s.HandoverStep)
-		}
-		t.line("Earlier dialogue: run %s sequence %d, %s, goal included %t%s", s.RunID, s.SessionSeq, s.Status, s.IncludedGoal, handover)
-	}
+	t.line("Checkpoint %s; source coverage through %d; retained source end %d", c.CheckpointID, c.Through, c.SourceEnd)
 	for _, retrieval := range c.Retrievals {
 		t.line("Retrieval at step %d: %s; original query in observation; more %t; incomplete %t", retrieval.Step, retrieval.OperationName(), retrieval.More, retrieval.Incomplete)
 		if retrieval.Error != "" {

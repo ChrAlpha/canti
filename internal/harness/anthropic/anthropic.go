@@ -160,7 +160,7 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if err != nil {
 		return harness.Request{}, fmt.Errorf("anthropic: %w", err)
 	}
-	return harness.Request{Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: requestAdapter}, nil
+	return harness.Request{MaxOutputTokens: m.cfg.MaxTokens, Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: requestAdapter}, nil
 }
 
 type message struct {
@@ -187,7 +187,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	}
 	var beta string
 	switch {
-	case req.Adapter != adapter && req.Adapter != toolAdapter:
+	case req.Adapter != adapter && req.Adapter != toolAdapter && req.Adapter != summaryAdapter:
 		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
 		beta = fallbackBeta
@@ -237,8 +237,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if msg.Model != "" {
 		resp.Model = msg.Model
 	}
-	u := msg.Usage
-	resp.Usage = harness.Usage{InputTokens: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, OutputTokens: u.OutputTokens}
+	resp.Usage, resp.UsageKnown = reportedUsage(resp.Body)
 	if req.Adapter == toolAdapter {
 		fields, ok := exactObject(resp.Body)
 		if !ok {

@@ -130,7 +130,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
-		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and handover reserve: it needs a total of at least "},
+		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and summary reserve: it needs a total of at least "},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -442,7 +442,7 @@ func TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion(t *testing.T) {
 func TestRunsOfAnotherContextVersionCloseWhateverTheirContextSettings(t *testing.T) {
 	foreign := func(f *fixture, id string) {
 		setContextVersion(t, f.state, id, "3")
-		setConfig(t, f.state, id, "handover_bytes", "16384")
+		setConfig(t, f.state, id, "summary_bytes", "16384")
 		setConfig(t, f.state, id, "context_bytes", "0")
 	}
 	t.Run("stop", func(t *testing.T) {
@@ -1050,7 +1050,7 @@ func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 			args := append([]string{"-goal", strings.Repeat("g", 32<<10), "-constraints", strings.Repeat("c", 16<<10)}, tc.args...)
 			r := f.cli(noDocker, "run", args...)
 			if !tc.shown {
-				if r.code == exitOK || len(f.model.requests()) != 0 || !strings.Contains(r.stderr, "handover") {
+				if r.code == exitOK || len(f.model.requests()) != 0 || !strings.Contains(r.stderr, "summary reserve") {
 					t.Fatalf("oversized fixed context should fail before calling model: %d, %s", r.code, r.stderr)
 				}
 				return
@@ -1171,8 +1171,8 @@ func parseSpec(t *testing.T, args ...string) spec {
 func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
 	want := spec{
-		config: config{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10, ContextVersion: contextVersion, HandoverBytes: 2048},
+		config: config{ContextTokens: 200000, RequestBytes: 2 << 20, RetainBytes: 24 << 10, SummaryTokens: 8192, SummaryAttempts: 3, Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
+			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10, ContextVersion: contextVersion, SummaryBytes: 16384},
 		budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}
@@ -1189,7 +1189,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-model", "claude-test", "-max-tokens", "900", "-structured=false", "-fallbacks=false",
-		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-summary-bytes", "2048", "-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.config.Workspace = "/work"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)

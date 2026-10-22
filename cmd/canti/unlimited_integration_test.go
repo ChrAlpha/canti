@@ -14,18 +14,17 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
+func TestUnlimitedStepsAcrossCrashCompactionAndRestart(t *testing.T) {
 	for _, tc := range []struct {
 		limit int
 		crash string
 	}{{23, "response_saved"}, {0, "response_saved"}, {0, "attempt_started"}} {
 		t.Run(fmt.Sprintf("max_%d_%s", tc.limit, tc.crash), func(t *testing.T) {
 			f, image := recoveryFixture(t, nil)
-			r := f.cli(nil, "run", "-once", "-goal", "write once and verify after handovers", "-image", image,
-				"-max-steps", strconv.Itoa(tc.limit), "-window-steps", "3", "-wall-time", "3m", "-job-timeout", "10s")
+			r := f.cli(nil, "run", "-once", "-goal", "write once and verify after compactions", "-image", image,
+				"-max-steps", strconv.Itoa(tc.limit), "-compact-steps", "3", "-retain-bytes", "1", "-wall-time", "3m", "-job-timeout", "10s")
 			if r.code != exitActive {
 				t.Fatalf("freeze: %+v", r)
 			}
@@ -39,8 +38,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 					d.Payload = "test \"$(cat proof)\" = once && printf 'verified\\n' >> result"
 				case step == 23:
 					d = core.Decision{Kind: core.Return, Payload: "done"}
-				case step%4 == 0:
-					d.Payload = harness.HandoverPrefix + "Verify proof contains once and write result at step 22."
+
 				}
 				body, _ := json.Marshal(d)
 				f.model.answer(step, 1, reply{text: string(body)})
@@ -69,7 +67,8 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 			if !extends(h, prefix) {
 				t.Fatal("restart changed committed facts")
 			}
-			requests, handovers, startedAttempts := 0, 0, 0
+			requests, startedAttempts := 0, 0
+			checkpoints := map[string]bool{}
 			builtin := map[string]bool{}
 			for _, e := range h {
 				if e.State.Limits.MaxSteps != tc.limit {
@@ -92,7 +91,10 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				}
 				if req := e.Facts.Request; req != nil {
 					requests++
-					wantFirst := 1 + (e.State.Step-1)/4*4
+					wantFirst := max(1, (e.State.Step-2)/2*2+1)
+					if req.CheckpointID != "" {
+						checkpoints[req.CheckpointID] = true
+					}
 					if req.Window == nil || req.Window.FirstStep != wantFirst {
 						t.Fatalf("window at step %d: %+v", e.State.Step, req.Window)
 					}
@@ -101,10 +103,8 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 					}
 				}
 				if o := e.Facts.Observation; o != nil {
-					if o.Handover != nil {
-						handovers++
-					}
-					if o.Handover != nil || o.Retrieval != nil {
+
+					if o.Retrieval != nil {
 						builtin[evEvent[core.Observed](t, e).EffectID] = true
 					}
 				}
@@ -117,8 +117,8 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				t.Fatalf("started attempts = %d, want %d", startedAttempts, wantStarted)
 			}
 			sent := f.model.requests()
-			if requests != 23 || handovers != 5 || len(sent) != 24 || !bytes.Equal(sent[0], prefix[0].Facts.Request.Body) || !bytes.Equal(sent[1], sent[2]) {
-				t.Fatalf("requests=%d handovers=%d sends=%d; expected 23/5/24 and frozen retry bytes", requests, handovers, len(sent))
+			if requests != 23 || len(checkpoints) != 10 || len(sent) != 24 || !bytes.Equal(sent[0], prefix[0].Facts.Request.Body) || !bytes.Equal(sent[1], sent[2]) {
+				t.Fatalf("requests=%d compactions=%d sends=%d; expected 23/10/24 and frozen retry bytes", requests, len(checkpoints), len(sent))
 			}
 			checkFile(t, filepath.Join(f.workspace, "proof"), "once\n")
 			checkFile(t, filepath.Join(f.workspace, "result"), "verified\n")
@@ -139,7 +139,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 			if r := f.cli(nil, "resume"); r.code != exitOK || len(f.model.requests()) != len(sent) {
 				t.Fatalf("terminal resume repeated work: %+v", r)
 			}
-			t.Logf("max_steps=%d steps=23 handovers=5 process_restarts=23 transport_retries=1 docker_jobs=2 result=verified", tc.limit)
+			t.Logf("max_steps=%d steps=23 compactions=10 process_restarts=23 transport_retries=1 docker_jobs=2 result=verified", tc.limit)
 		})
 	}
 }

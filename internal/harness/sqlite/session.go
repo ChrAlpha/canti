@@ -14,10 +14,6 @@ const latestRunsSQL = `SELECT r.id, r.semantics, r.initial, t.kind, t.semantics,
 LEFT JOIN transitions t ON t.run_id = r.id AND t.seq = (SELECT max(seq) FROM transitions WHERE run_id = r.id)
 ORDER BY r.n`
 
-// ErrNoSessions reports a session read of a schema-1 journal opened
-// read-only: the journal predates sessions and has no session table.
-var ErrNoSessions = errors.New("sqlite: the journal predates sessions")
-
 // ValidKey reports whether id can name a session or an input: 1 to 128
 // ASCII letters, digits, underscores, or hyphens.
 func ValidKey(id string) bool {
@@ -121,6 +117,9 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO session_runs (session_id, seq, input_id, run_id) VALUES (?, ?, ?, ?)`, run.SessionID, seq, run.InputID, run.ID); err != nil {
 			return err
 		}
+		if err := appendContextInput(ctx, tx, run); err != nil {
+			return err
+		}
 		result = run
 		result.Created = run.Created.UTC()
 		return nil
@@ -136,9 +135,6 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 	if !ValidKey(sessionID) || !ValidKey(inputID) {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
-	if !s.sessions {
-		return harness.Run{}, ErrNoSessions
-	}
 	return s.run(s.db.QueryRowContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
 }
 
@@ -146,9 +142,6 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
 	if !ValidKey(sessionID) || before < 0 || limit <= 0 {
 		return nil, errors.New("sqlite: invalid session page")
-	}
-	if !s.sessions {
-		return nil, ErrNoSessions
 	}
 	if limit > 32 {
 		limit = 32

@@ -3,18 +3,22 @@ package harness
 import "github.com/ChrAlpha/canti/internal/archive"
 
 type ContextCapture struct {
+	Entries           []ContextEntryRef `json:",omitempty"`
+	CheckpointID      string            `json:",omitempty"`
+	Through           int64
+	SourceEnd         int64
 	Bytes             ContextBytes
 	Session           []ContextSessionSource `json:",omitempty"`
 	SessionNavigation string                 `json:",omitempty"`
 	Retrievals        []ContextRetrieval     `json:",omitempty"`
 	Sources           []ContextSource        `json:",omitempty"`
-	Handover          HandoverCheck
+	Compaction        CompactionCheck
 }
 
 type ContextBytes struct {
 	Total, Limit, System, Goal, Constraints, Environment int
-	Session, Window, Handover, StepHeader, EmptySteps    int
-	Progress, HandoverRequired, Repair                   int
+	Session, Window, Summary, StepHeader, EmptySteps     int
+	Progress, Repair                                     int
 	Steps                                                []ContextStepBytes `json:",omitempty"`
 }
 
@@ -27,7 +31,6 @@ type ContextSessionSource struct {
 	SessionSeq   int64
 	Status       string
 	IncludedGoal bool
-	HandoverStep int `json:",omitempty"`
 }
 
 type ContextRetrieval struct {
@@ -59,9 +62,16 @@ type ContextSource struct {
 	Error     string `json:",omitempty"`
 }
 
-type HandoverCheck struct {
+type CompactionCheck struct {
 	Status                          string
 	Used, Capacity, Growth          int
 	Steps, WindowSteps, WindowBytes int
 	Reasons                         []string `json:",omitempty"`
+}
+
+type ContextEntryRef struct {
+	Index     int64
+	RunID     string
+	SourceSeq int64
+	Kind      string
 }

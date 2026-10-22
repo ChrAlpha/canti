@@ -66,7 +66,7 @@ func TestChatShowsBuiltinSteps(t *testing.T) {
 func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	l := harness.DefaultPromptLimits()
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-context-bytes", "81600")
+	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", l.Goal+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, "chat", "-summary-bytes", "2048", "-context-bytes", "72600")
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") ||
 		!strings.Contains(r.stderr, "canti chat: the input does not fit -context-bytes (harness: ") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
@@ -146,7 +146,7 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	in, w := io.Pipe()
-	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-context-bytes", "71600")
+	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-summary-bytes", "2048", "-context-bytes", "71600")
 	io.WriteString(w, "one\n")
 	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
 	if r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000)); r.code != exitOK {
@@ -307,7 +307,7 @@ func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 	c := p[3]
 	first, answer, interrupted, again := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request"), strings.Index(c, "interrupted again")
 	if !strings.Contains(c, "## Goal\nlast request\n") || first < 0 || !(first < answer && answer < interrupted && interrupted < again) ||
-		strings.Count(c, "stopped, reason cancelled, recorded steps 0; no assistant return.") != 2 {
+		strings.Count(c, "Recorded run status: stopped, reason cancelled;") != 2 {
 		t.Fatalf("the input after interrupts lost the dialogue:\n%s", c)
 	}
 }

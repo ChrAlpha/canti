@@ -1,11 +1,7 @@
 package harness_test
 
 import (
-	"slices"
-	"testing"
-
 	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 // retrievalScenarios page through retrieval results with their cursors and
@@ -40,46 +36,7 @@ func retrievalScenarios() []frozenScenario {
 					`{"session_id":"session-1","sequence":2,"input_id":"input-2","previous_run_id":"` + corpusRun + `"}` + "\n"},
 			},
 		},
-		{
-			name: "session-handover-paths", limits: core.Limits{MaxSteps: 3, MaxAttempts: 3}, windowSteps: 1,
-			outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n", "cat go.mod": "module example\n"},
-			runs: []frozenRun{
-				{id: corpusRun, goal: "List /workspace.", replies: []string{
-					corpusDecision(core.Exec, "ls /workspace"),
-					corpusDecision(core.Exec, harness.HandoverPrefix+"Listed go.mod and main.go."),
-					corpusDecision(core.Return, "go.mod and main.go."),
-				}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}},
-				{id: corpusNextRun, goal: "Name the module.", replies: []string{
-					corpusDecision(core.Exec, "cat go.mod"),
-					corpusDecision(core.Exec, "cat go.mod"),
-					corpusDecision(core.Exec, harness.HandoverPrefix+"go.mod names module example; report it."),
-				}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}, stop: core.StopStepsExhausted},
-				{id: corpusThirdRun, goal: "Continue where the session stopped.", replies: []string{
-					corpusRetrieve("read", current+"/steps/00000003/command", "", "Read where the stopped run handed over."),
-					corpusDecision(core.Exec, harness.HandoverPrefix+"The module is example."),
-					corpusDecision(core.Return, "The module is example."),
-				}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 handover"}},
-			},
-			marks: map[string][]string{
-				"run3-step01-rev1.json": {
-					"; returned):\nLatest handover of this run, agent-written and possibly overtaken by later steps: " + earlier + "/steps/00000002/command\nEarlier user goal:\n",
-					"no assistant return.\nLatest handover of this run, agent-written and possibly overtaken by later steps: " + current + "/steps/00000003/command\nEarlier user goal:\n",
-				},
-				"run3-step02-rev1.json": {"Source " + current + "/steps/00000003/command:\n", "go.mod names module example; report it."},
-			},
-			edge: func(t *testing.T, requests map[string]harness.Request) {
-				if w := requests["run2-step03-rev1.json"].Window; w == nil || w.FirstStep != 1 || !w.Requested {
-					t.Errorf("run 2 handed over in its final step under window %+v; want the first window still requesting", w)
-				}
-				var got []int
-				for _, s := range requests["run3-step01-rev1.json"].Context.Session {
-					got = append(got, s.HandoverStep)
-				}
-				if !slices.Equal(got, []int{2, 3}) {
-					t.Errorf("run 3 points to handover steps %v; want [2 3]", got)
-				}
-			},
-		},
+
 		{
 			name: "discovery-pages", limits: stepLimits, outputs: map[string]string{one: "beta one\n", two: "beta two\n"},
 			runs: []frozenRun{{id: corpusRun, goal: "Find the steps that printed beta.", replies: []string{
@@ -107,21 +64,7 @@ func retrievalScenarios() []frozenScenario {
 				"run1-step04-rev1.json": {`Retrieval continuation: {"next_offset":0,"more":false}`, "Source " + step1 + "/preview:\n"},
 			},
 		},
-		{
-			name: "purpose-across-windows", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Report why the workspace was listed.", replies: []string{
-				corpusPurpose(core.Exec, "List the workspace,\nthen check go.mod for the module name.", "ls /workspace"),
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace. Next: recall why."),
-				corpusRetrieve("read", step1+"/purpose", "", "Recall why step 1 ran."),
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Step 1 listed /workspace to find go.mod."),
-				corpusDecision(core.Return, "Step 1 listed /workspace to find go.mod and its module name."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover", "3 exited 0 retrieval 1 sources 0 entries", "4 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then check go.mod for the module name.\n"},
-				"run1-step04-rev1.json": {"This window begins at step 3.", "Source " + step1 + "/purpose:\n",
-					"List the workspace,\nthen check go.mod for the module name.\n"},
-			},
-		},
+
 		{
 			// The errors that replace the details of the system prompt
 			// reach the next request, and the recovery each names works.

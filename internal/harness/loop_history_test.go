@@ -4,6 +4,7 @@ package harness_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -58,8 +59,8 @@ func fill(head, unit string, size int) string {
 func historyRequest(step int) *harness.Request {
 	w := &harness.Window{FirstStep: (step-1)/seedPageSteps*seedPageSteps + 1}
 	if w.FirstStep > 1 {
-		w.SourceStep = w.FirstStep - 1
-		w.Handover = "Continue the seeded history measurement."
+		w.Through = int64(w.FirstStep - 1)
+		w.Summary = "Continue the seeded history measurement."
 	}
 	return &harness.Request{Window: w, Body: fmt.Appendf(nil, `{"seeded_step":%d}`, step), Model: "seed", Protocol: "seed/v1", Adapter: "seed"}
 }
@@ -90,6 +91,15 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 		switch s.Phase {
 		case core.PhaseIdle:
 			event, facts = core.RequestFrozen{}, harness.Facts{Request: historyRequest(s.Step)}
+			head, err := f.store.ActiveCheckpoint(ctx, "run:"+runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if head.ID != "" {
+				facts.Request.CheckpointID = head.ID
+				facts.Request.Window = &harness.Window{FirstStep: int(head.Through), Through: head.Through, Summary: head.Summary}
+			}
+
 		case core.PhaseRequestFrozen:
 			event = core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}
 		case core.PhaseRequestSent:
@@ -139,6 +149,19 @@ func median[T uint64 | time.Duration](xs []T) T {
 func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySample {
 	t.Helper()
 	ctx := context.Background()
+	// This performance fixture seeds a checkpoint; lifecycle/crash behavior is
+	// covered by the independent compaction integration tests.
+	db, err := sql.Open("sqlite", f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := harness.Checkpoint{ID: fmt.Sprintf("seed-%d", n), Owner: "run:" + runID, Through: int64(n - seedPageSteps + 1), Summary: "Continue the seeded history measurement."}
+	data, _ := json.Marshal(head)
+	_, err = db.Exec("INSERT INTO context_heads(owner,data) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET data=excluded.data", head.Owner, string(data))
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := f.open()
 	p := &probe{Store: store}
 	l, err := harness.NewLoop(p, f.exec, m, f.cfg)
@@ -164,11 +187,11 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 		}
 		if i == 0 {
 			s.cold, s.req = elapsed, *p.frozen
-			s.reads, s.pages, s.records, s.recordBytes = p.reads, p.pages, p.records, p.recordBytes
+			s.reads, s.pages, s.records, s.recordBytes = p.reads, p.sourcePages, p.sourceRecords, p.recordBytes
 			continue
 		}
-		if !reflect.DeepEqual(*p.frozen, s.req) || p.reads != s.reads || p.records != s.records {
-			t.Fatalf("repeated request at %d steps differs: %d bytes, %d reads, %d records", n, len(p.frozen.Body), p.reads, p.records)
+		if !reflect.DeepEqual(*p.frozen, s.req) || p.reads != s.reads || p.sourceRecords != s.records {
+			t.Fatalf("repeated request at %d steps differs: %d bytes, %d reads, %d records", n, len(p.frozen.Body), p.reads, p.sourceRecords)
 		}
 		times = append(times, elapsed)
 		bytes = append(bytes, after.TotalAlloc-before.TotalAlloc)
@@ -235,7 +258,9 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	// Every shown step renders its whole command and preview.
 	fit := seedPageSteps
 	maxRecords, maxPages := fit+historyPage, fit/historyPage+1
-	maxReads := 4 + maxPages
+	// Load/totals, previous request, checkpoint/candidate and archive publication
+	// make nine fixed reads; retained source pages add the only variable part.
+	maxReads := 9 + maxPages
 
 	var samples []historySample
 	for _, n := range historyLadder {

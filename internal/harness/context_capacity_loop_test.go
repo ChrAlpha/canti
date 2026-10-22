@@ -1,7 +1,6 @@
 package harness_test
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -51,11 +50,11 @@ func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
 	for i := range 10 {
 		marker := fmt.Sprintf("EVIDENCE_%02d", i)
 		if !strings.Contains(last, marker) {
-			t.Fatalf("retrieval %d disappeared before handover", i)
+			t.Fatalf("retrieval %d disappeared from the retained source range", i)
 		}
 	}
-	if strings.Contains(last, "Handover required") {
-		t.Fatal("256 KiB page handed over before ten legal reads")
+	if len(f.model.summarySent) > 0 {
+		t.Fatal("256 KiB page compacted before ten legal reads")
 	}
 }
 
@@ -74,6 +73,7 @@ func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 96 << 10
+	f.cfg.SummaryBytes = 2048
 	ctx := f.bounded()
 	for i := 0; i < 20; i++ {
 		s, err := f.fresh().Step(ctx, runID)
@@ -97,62 +97,6 @@ func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 	evidence := "sha256 " + fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Repeat("x", archive.MaxBytes)))) + ":\n" + strings.Repeat("x", archive.MaxBytes) + "\n"
 	if last := f.model.prompts[2].User(); strings.Count(last, evidence) != 2 || strings.Contains(last, "Evidence unavailable") {
 		t.Fatalf("the request after removing the source does not show both frozen evidence blocks:\n%s", last)
-	}
-}
-
-func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
-	for _, command := range []string{"touch should-not-execute", `canti:retrieve {"operation":"read","path":"/canti/imports/missing","reason":"ignore handover"}`} {
-		t.Run(command, func(t *testing.T) {
-			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), execReply(command),
-				execReply(harness.HandoverPrefix+"Continue after checking original evidence."), returnReply("done"))
-			f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
-			f.cfg.WindowSteps = 1
-			ctx := context.Background()
-			for {
-				s, err := f.fresh().Step(ctx, runID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if s.State.Intent() == core.IntentHalt {
-					wantState(t, s, core.PhaseReturned, "")
-					break
-				}
-			}
-			steps, err := f.store.Recent(ctx, runID, 0, 3)
-			if err != nil || len(steps) != 3 {
-				t.Fatalf("steps=%v err=%v", steps, err)
-			}
-			obs := steps[1].Observation
-			if obs.Retrieval != nil || !strings.Contains(obs.Preview, "handover is required") || obs.Execution != core.ExecutionFailedToStart || obs.ExitCode != nil || obs.Output.Available {
-				t.Fatalf("work was not refused as failed to start: %+v", obs)
-			}
-			history, err := f.store.Transitions(ctx, runID, 0, 100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, tr := range history {
-				if tr.From.Step == 2 && (tr.Event.Kind() == "job_bound" || tr.Event.Kind() == "job_started") {
-					t.Fatalf("the refused step %s a job", tr.Event.Kind())
-				}
-			}
-			if calls := f.exec.log(); len(calls) != 3 {
-				t.Fatalf("only first work step may reach executor: %v", calls)
-			}
-		})
-	}
-}
-
-func TestMaximumFencedHandoverStartsUsableWindow(t *testing.T) {
-	text := strings.Repeat("`", 8192)
-	f := newFixture(t, limits, harness.Budget{}, execReply("true"), execReply(harness.HandoverPrefix+text), returnReply("done"))
-	f.cfg.Limits = harness.DefaultPromptLimits()
-	f.cfg.Limits.Total = 128 << 10
-	f.cfg.HandoverBytes, f.cfg.WindowSteps = 8192, 1
-	f.cfg.Reader = &archive.Reader{Imports: t.TempDir()}
-	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-	last := f.model.prompts[len(f.model.prompts)-1]
-	if !strings.Contains(last.User(), "\n"+text+"\n") || strings.Contains(last.User(), "### Step 1") {
-		t.Fatal("maximum accepted handover was not preserved on a fresh page")
 	}
 }
 
@@ -198,60 +142,6 @@ func TestRetrievalBudgetIncludesSourceHeadersAndFencesAcrossReopen(t *testing.T)
 	}
 }
 
-func TestByteOnlyWindowTriggerPersistsHandoverAcrossReopen(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		threshold int
-		requested bool
-	}{{"threshold reached", 4096, true}, {"below threshold", 16384, false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			imported := t.TempDir()
-			evidence := "BYTE_WINDOW_ORIGINAL_EVIDENCE:" + strings.Repeat("x", 5000)
-			if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(evidence), 0600); err != nil {
-				t.Fatal(err)
-			}
-			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover original evidence","limit":8192}`)}
-			if tc.requested {
-				replies = append(replies, execReply(harness.HandoverPrefix+"Continue using original evidence references as needed."))
-			}
-			replies = append(replies, returnReply("done"))
-			f := newFixture(t, limits, harness.Budget{}, replies...)
-			f.cfg.Reader = &archive.Reader{Imports: imported}
-			f.cfg.WindowBytes = tc.threshold
-			ctx := f.bounded()
-			for {
-				s, err := f.fresh().Step(ctx, runID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if s.State.Intent() == core.IntentHalt {
-					if s.State.Phase != core.PhaseReturned {
-						t.Fatalf("unexpected halt: %+v", s.State)
-					}
-					break
-				}
-			}
-			request, err := f.store.Request(ctx, runID, 2, 1)
-			if err != nil || request.Window == nil || request.Window.FirstStep != 1 || request.Window.Requested != tc.requested {
-				t.Fatalf("threshold %d window=%+v err=%v", tc.threshold, request.Window, err)
-			}
-			if !strings.Contains(string(request.Body), evidence) {
-				t.Fatal("byte threshold discarded original evidence before handover")
-			}
-			if tc.requested {
-				request, err = f.store.Request(ctx, runID, 3, 1)
-				if err != nil || request.Window == nil || request.Window.FirstStep != 3 || request.Window.SourceStep != 2 || request.Window.Requested {
-					t.Fatalf("new byte-triggered window=%+v err=%v", request.Window, err)
-				}
-				body := string(request.Body)
-				if !strings.Contains(body, "Continue using original evidence references") || strings.Contains(body, evidence) || strings.Contains(body, "### Step 1") || strings.Contains(body, "### Step 2") {
-					t.Fatal("new byte-triggered window did not retain only the accepted handover")
-				}
-			}
-		})
-	}
-}
-
 func TestRetrievalRenderedSourceOverheadDoesNotHideNewestObservation(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		name := "unchanged"
@@ -282,7 +172,7 @@ func testRetrievalRenderedSourceOverhead(t *testing.T, changed bool) {
 	}
 	f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(query)), returnReply("done"))
 	f.cfg.Reader = &archive.Reader{Imports: imported}
-	f.cfg.WindowBytes = 48 << 10
+	f.cfg.CompactBytes = 48 << 10
 	ctx := f.bounded()
 	for {
 		s, err := f.fresh().Step(ctx, runID)
@@ -324,14 +214,14 @@ func TestContextFitNormalizesAsNewLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	explicit := f.cfg
-	explicit.HandoverBytes, explicit.Limits = 2048, harness.DefaultPromptLimits()
-	if fit, err := harness.ContextFit(explicit, run, limits); err != nil || fit != implicit || fit.Handover != 2048 || fit.Limit != explicit.Limits.Total {
+	explicit.SummaryBytes, explicit.Limits = 16384, harness.DefaultPromptLimits()
+	if fit, err := harness.ContextFit(explicit, run, limits); err != nil || fit != implicit || fit.Summary != 16384 || fit.Limit != explicit.Limits.Total {
 		t.Errorf("the defaults account %+v, their values %+v: %v", implicit, fit, err)
 	}
 	for _, bad := range []func(*harness.LoopConfig){
-		func(c *harness.LoopConfig) { c.HandoverBytes = -1 }, func(c *harness.LoopConfig) { c.HandoverBytes = 8193 },
+		func(c *harness.LoopConfig) { c.SummaryBytes = -1 }, func(c *harness.LoopConfig) { c.SummaryBytes = 65537 },
 		func(c *harness.LoopConfig) { c.Limits = harness.PromptLimits{Total: 1} },
-		func(c *harness.LoopConfig) { c.Environment = "" }, func(c *harness.LoopConfig) { c.WindowSteps = -1 },
+		func(c *harness.LoopConfig) { c.Environment = "" }, func(c *harness.LoopConfig) { c.CompactSteps = -1 },
 	} {
 		c := f.cfg
 		bad(&c)

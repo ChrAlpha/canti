@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -139,10 +139,9 @@ func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
 		{"LatestRequest", sessionRun, errTransient},
 		{"LatestRequest", sessionRun, incompatible},
 		{"SessionRuns", "", errTransient},
-		{"Latest", earlierRun, errTransient},
-		{"Totals", earlierRun, errTransient},
-		{"Recent", earlierRun, errTransient},
-		{"LatestRequest", earlierRun, errTransient},
+		{"ContextEntries", "", errTransient},
+		{"ActiveCheckpoint", "", errTransient},
+		{"Recent", sessionRun, errTransient},
 	} {
 		t.Run(fmt.Sprintf("%s %s/%v", tc.method, tc.run, tc.err), func(t *testing.T) {
 			f := sessionAfterAStep(t)
@@ -165,10 +164,10 @@ func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
 				t.Fatalf("Step() after the failed read = %+v, %v; want a request frozen for step 2", snap.State, err)
 			}
 			req, err := f.store.LatestRequest(ctx, sessionRun)
-			want := []harness.ContextSessionSource{{RunID: earlierRun, SessionSeq: 1, Status: "stopped", IncludedGoal: true}}
-			if err != nil || req.Context == nil || !slices.Equal(req.Context.Session, want) {
-				t.Fatalf("frozen session context = %+v, %v; want %+v", req.Context, err, want)
+			if err != nil || req.Context == nil || !strings.Contains(string(req.Body), "Report the Go version.") || req.Context.SourceEnd != 4 {
+				t.Fatalf("session sources missing: %+v %v", req.Context, err)
 			}
+
 			snap, err = l.Run(ctx, sessionRun)
 			if err != nil || snap.State.Phase != core.PhaseReturned || snap.State.Decision.Payload != "done" {
 				t.Fatalf("Run() = %+v, %v; want the scripted return", snap.State, err)
@@ -196,26 +195,16 @@ func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
 		failure string
 	}{
 		{"window request missing after progress", alter("LatestRequest", sessionRun, func(any) (any, error) { return harness.Request{}, harness.ErrNotFound }),
-			"harness: durable context window request is missing after progress"},
+			"harness: durable context request is missing after progress"},
 		{"window configuration changed", alter("LatestRequest", sessionRun, request(func(r *harness.Request) { r.Window = nil })),
-			"harness: window configuration changed during a run"},
+			"harness: context metadata missing during a run"},
 		{"invalid window", alter("LatestRequest", sessionRun, request(func(r *harness.Request) { r.Window = &harness.Window{FirstStep: 3} })),
-			"harness: invalid context window at step 2"},
+			"harness: invalid compacted context window"},
 		{"no session sequence", alter("Run", sessionRun, func(v any) (any, error) {
 			r := v.(harness.Run)
 			r.SessionSeq = 0
 			return r, nil
 		}), "harness: session sequence is required"},
-		{"candidate limit exceeded", alter("SessionRuns", "", func(v any) (any, error) { return slices.Repeat(v.([]harness.Run), 9), nil }),
-			"harness: session journal exceeded the candidate limit"},
-		{"invalid earlier run", alter("SessionRuns", "", func(v any) (any, error) {
-			runs := v.([]harness.Run)
-			runs[0].SessionSeq = 2
-			return runs, nil
-		}), "harness: invalid earlier session run"},
-		{"earlier run not terminal", alter("Latest", earlierRun, func(any) (any, error) {
-			return harness.Snapshot{State: core.State{RunID: earlierRun, Phase: core.PhaseIdle}}, nil
-		}), `harness: earlier session run "session-earlier" is not terminal`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := sessionAfterAStep(t)
@@ -238,4 +227,14 @@ func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (j *tampered) ContextEntries(ctx context.Context, owner string, after int64, limit, maxBytes int) ([]harness.ContextEntry, bool, error) {
+	v, more, err := j.Store.ContextEntries(ctx, owner, after, limit, maxBytes)
+	v, err = tamper(j, "ContextEntries", "", v, err)
+	return v, more, err
+}
+func (j *tampered) ActiveCheckpoint(ctx context.Context, owner string) (harness.Checkpoint, error) {
+	v, err := j.Store.ActiveCheckpoint(ctx, owner)
+	return tamper(j, "ActiveCheckpoint", "", v, err)
 }

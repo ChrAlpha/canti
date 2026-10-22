@@ -2,7 +2,6 @@ package harness_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -14,45 +13,12 @@ import (
 
 const corpusThirdRun = "run_5d2a8e6f1c9b4a07e3f8b2d6c1a9e4f0"
 
-// boundaryScenarios sit on the thresholds that decide a context: in twins one
-// byte apart, the handover triggers, the earlier session dialogue a run
-// selects, the second failed handover, and evidence that became unavailable.
-// Each checks that it still sits on its threshold.
+// boundaryScenarios exercise provider envelopes, frozen evidence, and field caps.
 func boundaryScenarios() []frozenScenario {
 	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	handover := func(text string) string { return corpusDecision(core.Exec, harness.HandoverPrefix+text) }
-	note := "Build failed to start; check the toolchain next."
 	imported := strings.Repeat("a", 250) + "/" + strings.Repeat("b", 250) + "/" + strings.Repeat("c", 250) + "/" + strings.Repeat("d", 250) + ".md"
-	return slices.Concat(handoverThresholds(), sessionBoundaries(), []frozenScenario{
-		{
-			name: "handover-failed-twice", limits: stepLimits, windowSteps: 1,
-			finals: map[string]harness.Job{"make build": {Status: harness.JobFailedToStart,
-				Output: harness.ArtifactRef{Detail: "job never started:\nexec: \"make\": executable file not found in $PATH"}}},
-			runs: []frozenRun{{id: corpusRun, goal: "Build the project.", replies: []string{
-				corpusDecision(core.Exec, "make build"),
-				"I will hand over now.",
-				handover(" \n\t "),
-				handover(note + strings.Repeat(" ", 2049-len(note))),
-			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
-				"run1-step02-rev2.json": {"## Rejected response\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"Context action failed: harness: handover text must not be empty", "## Handover required\n"},
-			},
-		},
-		{
-			// A handover in the earlier JSON form is plain text like any other:
-			// the harness keeps it verbatim and names the run and window itself.
-			name: "handover-json-text", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				handover(`{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`),
-				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
-			marks: map[string][]string{
-				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", `{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`},
-			},
-		},
+	return slices.Concat([]frozenScenario{
+
 		{
 			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 9},
 			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
@@ -244,95 +210,4 @@ func capped(imported string, width int) string {
 	}
 	fill := width - 2*(5-3) - len(command("````"))
 	return corpusDecision(core.Exec, command("````"+strings.Repeat("r", fill)))
-}
-
-// handoverThresholds are twins whose third request, after a retrieval, has
-// used one byte short of both the capacity of its window and -window-bytes,
-// or both exactly reached.
-func handoverThresholds() []frozenScenario {
-	var out []frozenScenario
-	for _, reached := range []bool{false, true} {
-		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
-		sc := frozenScenario{
-			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 71529, windowBytes: 8975, outputs: map[string]string{"go test ./...": output},
-			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
-				corpusDecision(core.Exec, "go test ./..."),
-				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":4096`, "Check the first result."),
-				corpusDecision(core.Return, "Every package passes."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 retrieval 1 sources 0 entries more"}}},
-		}
-		off := -1
-		if reached {
-			off = 0
-			sc.name, sc.contextBytes, sc.windowBytes = "handover-thresholds-reached", sc.contextBytes-1, sc.windowBytes-1
-			r := &sc.runs[0]
-			text := "The tests ran; every package passed. Next: report it."
-			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec, harness.HandoverPrefix+text+strings.Repeat(" ", 2048-len(text))))
-			r.steps = append(r.steps, "3 exited 0 handover")
-		}
-		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
-			h := requests["run1-step03-rev1.json"].Context.Handover
-			if h.Growth != 0 || h.Used != h.Capacity+off || h.Used != h.WindowBytes+off {
-				t.Errorf("step 3 evaluated %+v; want used %d byte(s) from the capacity and as far from window_bytes", h, off)
-			}
-			if w := requests["run1-step04-rev1.json"].Window; reached && (w == nil || w.FirstStep != 4 || len(w.Handover) != 2048) {
-				t.Errorf("step 4 has window %+v; want one opened by a handover of exactly 2048 bytes", w)
-			}
-		}
-		out = append(out, sc)
-	}
-	return out
-}
-
-// sessionBoundaries are twins one byte apart whose last run selects the
-// earlier session dialogue at a threshold: a stopped run with its goal or
-// only its status, its status or nothing with an older returned run that
-// would fit, and the navigation line or no dialogue at all.
-func sessionBoundaries() []frozenScenario {
-	limits := core.Limits{MaxSteps: 1, MaxAttempts: 3}
-	stopped := frozenRun{id: corpusNextRun, goal: strings.Repeat("Collect every build log under /workspace/logs. ", 40),
-		replies: []string{corpusDecision(core.Exec, "ls /workspace")}, steps: []string{"1 exited 0 output complete"}, stop: core.StopStepsExhausted}
-	small := frozenRun{id: corpusRun, goal: "A.", replies: []string{corpusDecision(core.Return, "B.")}}
-	current := frozenRun{id: corpusThirdRun, goal: "What did the earlier runs find? " + strings.Repeat("List each log they collected with its size. ", 60),
-		replies: []string{corpusDecision(core.Return, "See the session records.")}}
-	type boundary struct {
-		name         string
-		contextBytes int
-		runs         []frozenRun
-		sources      string // the selection the last run records
-	}
-	var out []frozenScenario
-	for _, b := range []boundary{
-		{"session-stopped-goal", 73945, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 73944, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 72038, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 72037, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 71822, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 71821, []frozenRun{small, stopped, current}, "none"},
-	} {
-		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
-		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,
-			outputs: map[string]string{"ls /workspace": "logs\n"},
-			edge: func(t *testing.T, requests map[string]harness.Request) {
-				if got := selection(requests[last].Context); got != b.sources {
-					t.Errorf("the last run selected %q; want %q", got, b.sources)
-				}
-			}})
-	}
-	return out
-}
-
-func selection(c *harness.ContextCapture) string {
-	if c == nil || c.SessionNavigation == "" {
-		return "none"
-	}
-	if len(c.Session) == 0 {
-		return "navigation " + c.SessionNavigation
-	}
-	var out []string
-	for _, s := range c.Session {
-		out = append(out, fmt.Sprintf("%s %s goal %v", s.RunID, s.Status, s.IncludedGoal))
-	}
-	return strings.Join(out, ", ")
 }

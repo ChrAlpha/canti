@@ -6,16 +6,16 @@ anchored = ^($(subst $(space),|,$(strip $(1))))$$
 
 LONG_TESTS = \
 	TestContextCaptureBoundsRejectedRetrievalAcrossReopen \
-	TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart \
+	TestContextDiagnosticAcrossExecutionRetrievalCompactionAndRestart \
 	TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows \
 	TestLoopBoundsRequestsAsHistoryGrows \
 	TestNativeDiscoveryOwnRunAcrossRestartsAndWindows \
 	TestRetrievalDiscoveryAcrossFreshPages \
-	TestSessionDialogueSurvivesHandoverRetryAndRestart \
+	TestSessionDialogueSurvivesCompactionRetryAndRestart \
 	TestSessionGrowthRemainsBoundedAndIsolated \
 	TestSessionMultiRunWindowStress \
 	TestSessionUnknownResolutionPreservesTheRunningEffect \
-	TestUnlimitedStepsAcrossCrashHandoverAndRestart
+	TestUnlimitedStepsAcrossCrashCompactionAndRestart
 
 PTY_TESTS = \
 	TestChatInputContinuesDroppingPageKeyAcrossRunCompletion \

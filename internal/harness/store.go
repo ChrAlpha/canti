@@ -52,6 +52,7 @@ var ErrNotFound = errors.New("harness: record not found")
 // of the oldest record read. Totals are maintained in the same transaction
 // as each commit.
 type Journal interface {
+	CompactionJournal
 	Store
 	Run(ctx context.Context, runID string) (Run, error)
 	Latest(ctx context.Context, runID string) (Snapshot, error)
@@ -103,9 +104,11 @@ type StepRecord struct {
 // every saved or incomplete response, output bytes of every observation, and
 // the number of observed or resolved steps.
 type Totals struct {
-	Usage       Usage
-	OutputBytes int64
-	Steps       int
+	SummaryUsage   Usage
+	ReservedTokens int64
+	Usage          Usage
+	OutputBytes    int64
+	Steps          int
 }
 
 // Snapshot is the committed position of a run: the state and the sequence of

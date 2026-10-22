@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -21,19 +20,25 @@ const historyPage = 64
 // LoopConfig wires a Loop to its environment. Zero values take the defaults
 // noted on each field.
 type LoopConfig struct {
-	Environment    string           // Frame.Environment
-	History        string           // host directory PublishHistory publishes the step records of every run under, which jobs see as archive.RunsRoot
-	Limits         PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
-	Poll           time.Duration    // interval between inspections; 500ms
-	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
-	InspectRetries int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
-	Now            func() time.Time // clock of the wall-time and job budgets; time.Now
-	Logger         *slog.Logger     // discards
-	Reader         *archive.Reader
-	DecisionTool   bool // Frame.DecisionTool
-	WindowSteps    int
-	WindowBytes    int
-	HandoverBytes  int
+	ContextTokens   int // model context allowance; zero leaves token estimation disabled
+	OutputTokens    int // output reserve when a model does not stamp its request
+	RequestBytes    int // maximum serialized request bytes; default 2 MiB
+	RetainBytes     int
+	SummaryTokens   int
+	SummaryAttempts int
+	Environment     string           // Frame.Environment
+	History         string           // host directory PublishHistory publishes the step records of every run under, which jobs see as archive.RunsRoot
+	Limits          PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
+	Poll            time.Duration    // interval between inspections; 500ms
+	Backoff         time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
+	InspectRetries  int              // consecutive Inspect errors tolerated before OutcomeUnknown; 5
+	Now             func() time.Time // clock of the wall-time and job budgets; time.Now
+	Logger          *slog.Logger     // discards
+	Reader          *archive.Reader
+	DecisionTool    bool // Frame.DecisionTool
+	CompactSteps    int
+	CompactBytes    int
+	SummaryBytes    int
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.
@@ -79,20 +84,44 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
 		return cfg, errors.New("harness: loop poll and inspect retries must not be negative")
 	}
-	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
-		return cfg, errors.New("harness: context window limits must not be negative")
+	if cfg.CompactSteps < 0 || cfg.CompactBytes < 0 || cfg.SummaryBytes < 0 {
+		return cfg, errors.New("harness: compaction limits must not be negative")
 	}
-	if cfg.HandoverBytes == 0 {
-		cfg.HandoverBytes = 2048
+	if cfg.SummaryBytes == 0 {
+		cfg.SummaryBytes = 16 << 10
 	}
-	if cfg.HandoverBytes > 8192 {
-		return cfg, errors.New("harness: handover exceeds 8192 bytes")
+	if cfg.SummaryBytes > 64<<10 {
+		return cfg, errors.New("harness: summary exceeds 65536 bytes")
 	}
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
 	if p := cfg.Limits; min(p.Goal, p.Constraints, p.Environment, p.Command, p.Preview, p.Rejected, p.Total, p.Purpose) <= 0 {
 		return cfg, fmt.Errorf("harness: prompt limits %+v must be positive", p)
+	}
+	if cfg.RetainBytes == 0 {
+		cfg.RetainBytes = 24 << 10
+	}
+	if cfg.RetainBytes < 0 {
+		return cfg, errors.New("harness: retained context bytes must be nonnegative")
+	}
+	if cfg.SummaryTokens == 0 {
+		cfg.SummaryTokens = 8192
+	}
+	if cfg.SummaryAttempts == 0 {
+		cfg.SummaryAttempts = 3
+	}
+	if cfg.SummaryTokens < 1 || cfg.SummaryAttempts < 1 {
+		return cfg, errors.New("harness: summary tokens and attempts must be positive")
+	}
+	if cfg.ContextTokens < 0 || cfg.OutputTokens < 0 || cfg.RequestBytes < 0 {
+		return cfg, errors.New("harness: request budgets must be nonnegative")
+	}
+	if cfg.RequestBytes == 0 {
+		cfg.RequestBytes = 2 << 20
+	}
+	if cfg.OutputTokens == 0 {
+		cfg.OutputTokens = 16000
 	}
 	cfg.Poll = cmp.Or(cfg.Poll, 500*time.Millisecond)
 	cfg.Backoff = cmp.Or(cfg.Backoff, time.Second)
@@ -105,7 +134,7 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	}
 	if cfg.Reader != nil {
 		r := *cfg.Reader
-		r.Excluded = []string{RetrievePrefix, handoverName, DiscoveryMarker}
+		r.Excluded = []string{RetrievePrefix, DiscoveryMarker}
 		cfg.Reader = &r
 	}
 	return cfg, nil
@@ -153,12 +182,7 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
 		}
 	}
-	switch r, err := l.route(ctx, snap.State); {
-	case err != nil:
-		return snap, err
-	case r == refused:
-		return l.refuseWork(ctx, snap)
-	case r == inProcess:
+	if effectRoute(snap.State) == inProcess {
 		if next, handled, err := l.builtin(ctx, snap); handled {
 			return next, err
 		}
@@ -269,7 +293,7 @@ func (l *Loop) spent(ctx context.Context, run Run) (core.StopReason, string, err
 	if err != nil {
 		return "", "", err
 	}
-	switch tokens := t.Usage.InputTokens + t.Usage.OutputTokens; {
+	switch tokens := t.Usage.InputTokens + t.Usage.OutputTokens + t.ReservedTokens; {
 	case b.Tokens > 0 && tokens >= b.Tokens:
 		return core.StopBudgetExhausted, fmt.Sprintf("%d tokens reached the %d-token budget", tokens, b.Tokens), nil
 	case b.OutputBytes > 0 && t.OutputBytes >= b.OutputBytes:
@@ -285,32 +309,6 @@ func (l *Loop) late(run Run) string {
 		}
 	}
 	return ""
-}
-
-// windowSteps reads the active page only, bounded by the persisted first step
-// and the snapshot sequence. An older page never re-enters the prompt.
-func (l *Loop) windowSteps(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
-	var steps []StepRecord
-	n := f.Step - f.Window.FirstStep
-	for before := snapshotSeq + 1; len(steps) < n; {
-		limit := min(historyPage, n-len(steps))
-		page, err := l.journal.Recent(ctx, runID, before, limit)
-		if err != nil {
-			return nil, err
-		}
-		for i := len(page) - 1; i >= 0; i-- {
-			record := page[i]
-			if record.Step >= f.Window.FirstStep && record.Step < f.Step {
-				steps = append(steps, record)
-			}
-		}
-		if len(page) < limit || len(page) == 0 || page[0].Step <= f.Window.FirstStep {
-			break
-		}
-		before = page[0].Seq
-	}
-	slices.Reverse(steps)
-	return steps, nil
 }
 
 func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {

@@ -115,7 +115,7 @@ func TestSessionCrashReplayAndFrozenRetry(t *testing.T) {
 func TestSessionGrowthRemainsBoundedAndIsolated(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: strings.Repeat("answer ", 300)}})
 	for i := 0; i < 40; i++ {
-		if r := f.cli(nil, "run", "-session", "growing", "-input", fmt.Sprint(i), "-goal", fmt.Sprintf("question-%02d %s", i, strings.Repeat("x", 1000)), "-context-bytes", "98304"); r.code != exitOK {
+		if r := f.cli(nil, "run", "-session", "growing", "-input", fmt.Sprint(i), "-goal", fmt.Sprintf("question-%02d %s", i, strings.Repeat("x", 1000)), "-summary-bytes", "2048", "-context-bytes", "98304"); r.code != exitOK {
 			t.Fatalf("round %d: %+v", i, r)
 		}
 		s := f.status()
@@ -212,8 +212,8 @@ func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
 
 func TestSessionRetryReportsTheAcceptedInput(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-context-bytes", "80000"}
-	second := []string{"-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "120000"}
+	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-summary-bytes", "2048", "-context-bytes", "71000"}
+	second := []string{"-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "130000"}
 	for _, args := range [][]string{first, second} {
 		if r := f.cli(nil, "run", args...); r.code != exitOK {
 			t.Fatalf("%q: %+v", args[3], r)

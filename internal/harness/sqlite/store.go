@@ -31,7 +31,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
@@ -45,7 +45,10 @@ CREATE TABLE runs (
 	input_tokens INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	output_bytes INTEGER NOT NULL DEFAULT 0,
-	steps INTEGER NOT NULL DEFAULT 0
+	steps INTEGER NOT NULL DEFAULT 0,
+ compact_input INTEGER NOT NULL DEFAULT 0,
+ compact_output INTEGER NOT NULL DEFAULT 0,
+ compact_reserved INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE transitions (
 	run_id TEXT NOT NULL REFERENCES runs (id),
@@ -75,22 +78,13 @@ CREATE TABLE session_runs (
 );
 `
 
-const sessionSchema = `CREATE TABLE session_runs (
-	session_id TEXT NOT NULL,
-	seq INTEGER NOT NULL CHECK (seq > 0),
-	input_id TEXT NOT NULL,
-	run_id TEXT NOT NULL UNIQUE REFERENCES runs (id),
-	PRIMARY KEY (session_id, seq),
-	UNIQUE (session_id, input_id)
-);`
-
 const (
 	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? FROM runs WHERE id = ?`
 	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`
 	runSQL       = `SELECT run FROM runs WHERE id = ?`
 	lastRunSQL   = `SELECT run FROM runs ORDER BY n DESC LIMIT 1`
 	initialSQL   = `SELECT semantics, initial FROM runs WHERE id = ?`
-	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps FROM runs WHERE id = ?`
+	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps, compact_input, compact_output, compact_reserved FROM runs WHERE id = ?`
 	addSQL       = `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
 		output_bytes = output_bytes + ?, steps = steps + ? WHERE id = ?`
 	latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
@@ -118,7 +112,6 @@ type Store struct {
 	db       *sql.DB
 	stmts    map[string]*sql.Stmt
 	readOnly bool
-	sessions bool
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -134,7 +127,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), sessions: true}
+	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
 	err = s.write(ctx, s.migrate)
 	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)
@@ -179,10 +172,7 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 	case version == schemaVersion:
 		return nil
 	case version == 0 && objects == 0:
-		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
-		return err
-	case version == 1:
-		_, err := tx.ExecContext(ctx, sessionSchema+"PRAGMA user_version = 2;")
+		_, err := tx.ExecContext(ctx, schema+compactSchema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
 		return err
 	}
 	return fmt.Errorf("%w: schema version %d with %d objects, want %d", ErrIncompatible, version, objects, schemaVersion)
@@ -250,7 +240,10 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 			return err
 		}
 		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state)
-		return err
+		if err != nil {
+			return err
+		}
+		return appendContextInput(ctx, tx, run)
 	})
 }
 
@@ -322,8 +315,14 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if t.From != last.State {
 		return fmt.Errorf("%w: seq %d of run %q", harness.ErrBrokenChain, t.Seq, r.run)
 	}
+	if err := s.adoptCompaction(ctx, tx, t); err != nil {
+		return err
+	}
 	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
+		return err
+	}
+	if err := s.appendContextTransition(ctx, tx, t); err != nil {
 		return err
 	}
 	d := delta(t)

@@ -114,7 +114,7 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	if err != nil || len(all) != n {
 		t.Fatalf("Recent() = %d records, %v; want %d", len(all), err, n)
 	}
-	for _, tc := range []struct{ total, pages int }{{1 << 20, 2}} {
+	for _, tc := range []struct{ total, pages int }{{1 << 20, 3}} {
 		f.cfg.Limits = harness.DefaultPromptLimits()
 		f.cfg.Limits.Total = tc.total
 		p := &probe{Store: f.store}
@@ -136,8 +136,8 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
 			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
 		}
-		if p.pages != tc.pages || p.records != min(n, tc.pages*historyPage) {
-			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.records, p.pages, tc.pages)
+		if p.sourcePages != tc.pages || p.sourceRecords != min(n, tc.pages*historyPage) {
+			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.sourceRecords, p.sourcePages, tc.pages)
 		}
 	}
 
@@ -158,11 +158,11 @@ type failingRecent struct {
 	reads int
 }
 
-func (j *failingRecent) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+func (j *failingRecent) ContextEntries(ctx context.Context, owner string, after int64, limit, maxBytes int) ([]harness.ContextEntry, bool, error) {
 	if j.reads++; j.reads > 1 {
-		return nil, errRecent
+		return nil, false, errRecent
 	}
-	return j.Store.Recent(ctx, runID, before, limit)
+	return j.Store.ContextEntries(ctx, owner, after, limit, maxBytes)
 }
 
 func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
@@ -368,7 +368,7 @@ func TestLoopStopsWhenRequestCannotBeBuilt(t *testing.T) {
 		failure string
 	}{
 		{"freeze", func(f *fixture) { f.model.freezeErr = errors.New("request too large") }, "request too large"},
-		{"prompt", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Total = 64 }, "fixed context leaves no room for work and handover reserve"},
+		{"prompt", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Total = 64 }, "fixed context leaves no room for work and summary reserve"},
 		{"goal", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Goal = 8 }, "goal exceeds its 8-byte limit"},
 		{"constraints", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Constraints = 8 }, "constraints exceed their 8-byte limit"},
 	}
@@ -491,4 +491,11 @@ func TestLoopToleratesUnreadableNotes(t *testing.T) {
 	if w := h.find("notes unreadable"); len(w) != 0 {
 		t.Fatalf("notes warnings = %v, want none", w)
 	}
+}
+
+func (j *failingRecent) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	if j.reads++; j.reads > 1 {
+		return nil, errRecent
+	}
+	return j.Store.Recent(ctx, runID, before, limit)
 }

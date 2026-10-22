@@ -12,10 +12,9 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
+func TestSessionDialogueSurvivesCompactionRetryAndRestart(t *testing.T) {
 	priorAnswer := "Previous answer chose async.\n" + strings.Repeat("Evidence `🙂` remains quoted.\n", 200)
 	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: priorAnswer}})
 	if r := f.cli(nil, "run", "-session", "s", "-input", "first", "-goal", "Compare async and sync", "-image", image); r.code != exitOK {
@@ -24,8 +23,11 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	priorID := f.status().Run.ID
 	goal := "Correct the earlier answer: use sync. " + strings.Repeat("Keep the current requirement. ", 10)
 	constraints := "Preserve the workspace result. Do not restore async."
+	f.model.summarize = func(body []byte) (string, error) {
+		return "The earlier answer chose async. The current correction is sync. Preserve the workspace and verify original evidence under /canti/runs/" + priorID + ". Executed effects must not be repeated.", nil
+	}
 	start := f.cli(nil, "run", "-once", "-session", "s", "-input", "second", "-goal", goal, "-constraints", constraints,
-		"-image", image, "-context-bytes", "98304", "-window-steps", "1", "-max-steps", "7", "-wall-time", "3m", "-job-timeout", "10s")
+		"-image", image, "-summary-bytes", "2048", "-context-bytes", "98304", "-compact-steps", "2", "-retain-bytes", "1", "-max-steps", "7", "-wall-time", "3m", "-job-timeout", "10s")
 	if start.code != exitActive {
 		t.Fatalf("session start: %+v", start)
 	}
@@ -37,39 +39,25 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 		body, _ := json.Marshal(d)
 		f.model.answer(step, call, reply{text: string(body)})
 	}
-	decision(1, 2, core.Decision{Kind: core.Exec, Payload: "printf async > mode.txt"})
-	handover := func(step, first int) {
-		decision(step, 1, core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Current correction is sync. Verify the workspace and finish the request."})
-	}
-	handover(2, 1)
-	f.model.answer(3, 1, reply{status: 503, body: "temporary transport failure"})
-	decision(3, 2, core.Decision{Kind: core.Exec, Purpose: "Switch the mode from async to sync.", Payload: "test \"$(cat mode.txt)\" = async && printf sync > mode.txt"})
-	handover(4, 3)
-	decision(5, 1, core.Decision{Kind: core.Return, Payload: "Sync correction completed."})
-
+	decision(1, 2, core.Decision{Kind: core.Exec, Payload: "printf async > mode.txt; printf '%s\\n' init >> effects.txt"})
+	f.model.answer(2, 1, reply{status: 503, body: "temporary transport failure"})
+	decision(2, 2, core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"read","path":"/canti/runs/` + runID + `/steps/00000001/preview","reason":"verify committed observation"}`})
+	decision(3, 1, core.Decision{Kind: core.Exec, Purpose: "Switch the mode from async to sync.", Payload: "test \"$(cat mode.txt)\" = async && printf sync > mode.txt && printf '%s\\n' corrected >> effects.txt"})
+	decision(4, 1, core.Decision{Kind: core.Return, Payload: "Sync correction completed."})
 	deadline := time.Now().Add(120 * time.Second)
-	for step := 1; step <= 5; step++ {
-		advanced := false
-		for n := 0; n < 100 && time.Now().Before(deadline); n++ {
-			r := f.cli(nil, "resume", "-once")
-			if r.code != exitActive && r.code != exitOK {
-				t.Fatalf("step %d process %d: %+v", step, n, r)
-			}
-			s := f.status()
-			if s.Step > step || s.Phase == core.PhaseReturned {
-				advanced = true
-				break
-			}
+	for n := 0; f.status().Phase != core.PhaseReturned; n++ {
+		if n >= 100 || time.Now().After(deadline) {
+			t.Fatal("session exceeded transition/time bound")
 		}
-		if !advanced {
-			t.Fatalf("step %d failed to advance before deadline", step)
+		if r := f.cli(nil, "resume", "-once"); r.code != exitActive && r.code != exitOK {
+			t.Fatalf("resume %d: %+v", n, r)
 		}
-	}
-	if s := f.status(); s.Phase != core.PhaseReturned || s.Decision == nil || s.Decision.Payload != "Sync correction completed." {
-		t.Fatalf("business return: %+v", s)
 	}
 	if data, err := os.ReadFile(filepath.Join(f.workspace, "mode.txt")); err != nil || string(data) != "sync" {
-		t.Fatalf("correction effect: %q, %v", data, err)
+		t.Fatalf("correction effect: %q %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.workspace, "effects.txt")); err != nil || string(data) != "init\ncorrected\n" {
+		t.Fatalf("effects replayed: %q %v", data, err)
 	}
 	var retry [][]byte
 	for _, body := range f.model.requests() {
@@ -80,66 +68,65 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 		if !strings.Contains(prompt, strings.TrimSpace(goal)) {
 			continue
 		}
-		var envelope struct {
-			System string `json:"system"`
-		}
+		var envelope struct{ System string }
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			t.Fatal(err)
 		}
-		if len(envelope.System)+len(prompt) > 98304 || !strings.Contains(prompt, constraints) ||
-			!strings.Contains(prompt, priorAnswer) || !strings.Contains(prompt, priorID) {
-			t.Fatalf("step %d lost the corrected goal, constraints, historical pair, or prompt budget (%d bytes)", step, len(envelope.System)+len(prompt))
+		if len(envelope.System)+len(prompt) > 98304 || !strings.Contains(prompt, constraints) || !strings.Contains(prompt, priorID) {
+			t.Fatalf("step %d lost protected input or provenance", step)
 		}
-		if step == 3 {
-			if !strings.Contains(prompt, "This window begins at step 3") || strings.Contains(prompt, "### Step 1\n") {
-				t.Fatalf("fresh window copied earlier steps: %s", prompt)
-			}
+		if step < 3 && !strings.Contains(prompt, priorAnswer) {
+			t.Fatal("earlier raw return disappeared before compact")
+		}
+		if step >= 3 && (!strings.Contains(prompt, "## Session summary") || strings.Contains(prompt, "### Step 1\n")) {
+			t.Fatalf("step %d did not adopt compact", step)
+		}
+		if step == 2 {
 			retry = append(retry, body)
 		}
 	}
 	if len(retry) != 2 || !bytes.Equal(retry[0], retry[1]) {
-		t.Fatalf("step 3 transport retry changed frozen request: %d requests, total calls %d, current goal len %d", len(retry), len(f.model.requests()), len(goal))
+		t.Fatal("transport retry changed frozen request")
 	}
-	meta, err := os.ReadFile(filepath.Join(f.state, "history", runID, "session"))
-	if err != nil || !strings.Contains(string(meta), `"previous_run_id":"`+priorID+`"`) {
-		t.Fatalf("session navigation: %q, %v", meta, err)
+	summaries := f.model.summaryRequests()
+	if len(summaries) < 2 {
+		t.Fatal("expected repeated independent compaction")
 	}
-	var executed []entry
-	for _, e := range f.history("-run", runID) {
-		if !strings.HasPrefix(e.State.Decision.Payload, "canti:handover") {
-			executed = append(executed, e)
-		}
+	// The previous retained retrieval must enter the next summary's source prefix.
+	if !bytes.Contains(summaries[1], []byte("committed observation")) {
+		t.Fatal("previous retained tail was skipped")
 	}
-	checkReleased(t, f, executed)
-
-	steps := "/canti/runs/" + runID + "/steps/"
-	if r := f.cli(nil, "run", "-once", "-session", "s", "-input", "third", "-goal", "Continue the session.", "-image", image, "-wall-time", "3m", "-job-timeout", "10s"); r.code != exitActive {
-		t.Fatalf("third session run: %+v", r)
+	var thirdGoal = "Continue the session."
+	if r := f.cli(nil, "run", "-once", "-session", "s", "-input", "third", "-goal", thirdGoal, "-image", image, "-wall-time", "3m", "-job-timeout", "10s"); r.code != exitActive {
+		t.Fatalf("third: %+v", r)
 	}
-	decision(1, 3, core.Decision{Kind: core.Exec, Payload: "cat " + steps + "00000004/command " + steps + "00000003/purpose"})
-	decision(2, 2, core.Decision{Kind: core.Return, Payload: "Continued from the handover."})
+	decision(1, 3, core.Decision{Kind: core.Exec, Payload: "cat /canti/runs/" + runID + "/steps/00000003/purpose"})
+	decision(2, 3, core.Decision{Kind: core.Return, Payload: "Continued from the session checkpoint and original records."})
 	for n := 0; f.status().Phase != core.PhaseReturned; n++ {
-		if r := f.cli(nil, "resume", "-once"); n == 20 || r.code != exitActive && r.code != exitOK {
-			t.Fatalf("third session run, process %d: %+v", n, r)
+		if n >= 40 {
+			t.Fatal("third run transition bound")
+		}
+		if r := f.cli(nil, "resume", "-once"); r.code != exitActive && r.code != exitOK {
+			t.Fatalf("third: %+v", r)
 		}
 	}
 	var third []string
 	for _, body := range f.model.requests() {
-		if _, prompt, err := promptOf(body); err == nil && strings.Contains(prompt, "Continue the session.") {
+		if _, prompt, err := promptOf(body); err == nil && strings.Contains(prompt, thirdGoal) {
 			third = append(third, prompt)
 		}
 	}
-	path := "Latest handover of this run, agent-written and possibly overtaken by later steps: " + steps + "00000004/command\n"
-	if len(third) != 2 || !strings.Contains(third[0], "; returned):\n"+path) ||
-		!strings.Contains(third[1], "Current correction is sync. Verify the workspace and finish the request.") || !strings.Contains(third[1], "Switch the mode from async to sync.") {
-		t.Fatalf("the third run did not find and read the handover and purpose records from its container: %q", third)
+	if len(third) != 2 || !strings.Contains(third[0], "Sync correction completed.") || !strings.Contains(third[1], "Switch the mode from async to sync.") {
+		t.Fatalf("cross-run tail or archive evidence lost: %q", third)
 	}
-	report := f.cli(nil, "context", "-text", "-step", "1", "-revision", "1")
-	if report.code != exitOK || !strings.Contains(report.stdout, "Earlier dialogue: run "+runID+" sequence 2, returned, goal included true, latest handover step 4\n") {
-		t.Fatalf("the context report of the third run does not name the handover step it points to: %+v", report)
+	var shell []entry
+	for _, e := range append(f.history("-run", runID), f.history("-run", f.status().Run.ID)...) {
+		if !strings.HasPrefix(e.State.Decision.Payload, "canti:retrieve ") {
+			shell = append(shell, e)
+		}
 	}
-	checkReleased(t, f, append(executed, f.history("-run", f.status().Run.ID)...))
-	t.Logf("SCRIPTED_SESSION context_limit=98304 previous_answer_bytes=%d windows=3 step3_transport_attempts=2 continued_from_handover_step=4; real CLI/SQLite/Docker, process-per-transition resume", len(priorAnswer))
+	checkReleased(t, f, shell)
+	t.Logf("SCRIPTED_SESSION summaries=%d business_steps=4 retry_bytes_identical=true; real CLI/SQLite/Docker, process-per-transition resume", len(summaries))
 }
 
 func TestOversizedPreviousAnswerKeepsSessionNavigation(t *testing.T) {
@@ -147,20 +134,19 @@ func TestOversizedPreviousAnswerKeepsSessionNavigation(t *testing.T) {
 	if r := f.cli(nil, "run", "-session", "s", "-input", "first", "-goal", "historical request"); r.code != exitOK {
 		t.Fatalf("prior: %+v", r)
 	}
-	priorID := f.status().Run.ID
 	short, _ := json.Marshal(core.Decision{Kind: core.Return, Payload: "short confirmed answer"})
 	f.model.answer(1, 2, reply{text: string(short)})
-	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "new request", "-context-bytes", "98304"); r.code != exitOK {
+	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "new request", "-summary-bytes", "2048", "-context-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("navigation-only linked run: %+v", r)
 	}
-	if r := f.cli(nil, "run", "-session", "s", "-input", "third", "-goal", "third request", "-context-bytes", "98304"); r.code != exitOK {
+	if r := f.cli(nil, "run", "-session", "s", "-input", "third", "-goal", "third request", "-summary-bytes", "2048", "-context-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("projected linked run: %+v", r)
 	}
-	if r := f.cli(nil, "run", "-goal", "standalone request", "-context-bytes", "98304"); r.code != exitOK {
+	if r := f.cli(nil, "run", "-goal", "standalone request", "-summary-bytes", "2048", "-context-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("standalone: %+v", r)
 	}
 	prompts := f.model.prompts(1)
-	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) || !strings.Contains(prompts[1], priorID+"/session") ||
+	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) ||
 		strings.Contains(prompts[1], "short confirmed answer") || !strings.Contains(prompts[2], "short confirmed answer") ||
 		strings.Contains(prompts[2], strings.Repeat("X", 100)) || strings.Contains(prompts[3], "short confirmed answer") ||
 		strings.Contains(prompts[3], "/session") {

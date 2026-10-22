@@ -72,14 +72,14 @@ func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
 	}
 }
 
-func TestAcceptedHandoverPreservedWithInnerFence(t *testing.T) {
-	handover := "Current work:\n```sh\ngo test ./...\n```\nEvidence: /canti/runs/R/steps/00000041/meta"
+func TestSummaryPreservedWithInnerFence(t *testing.T) {
+	summary := "Current work:\n```sh\ngo test ./...\n```\nEvidence: /canti/runs/R/steps/00000041/meta"
 	f := testFrame()
 	f.Step, f.Earlier = 2, 1
-	f.Window = &Window{FirstStep: 2, SourceStep: 1, Handover: handover}
+	f.Window = &Window{FirstStep: 2, Through: 1, Summary: summary}
 	p := mustPrompt(t, f, DefaultPromptLimits())
-	if !strings.Contains(p.User(), "````\n"+handover+"\n````") || strings.Contains(p.User(), "[truncated") {
-		t.Fatalf("handover changed in new request:\n%s", p.User())
+	if !strings.Contains(p.User(), "````\n"+summary+"\n````") || strings.Contains(p.User(), "[truncated") {
+		t.Fatalf("summary changed in new request:\n%s", p.User())
 	}
 }
 

@@ -24,7 +24,7 @@ func TestRetrievalSystemKeepsSilentRulesWithinItsBudget(t *testing.T) {
 		`canti:retrieve {"operation":"read","path":"/canti/runs/R/steps/00000001/preview","reason":"check earlier evidence","offset":0,"limit":4096}`,
 		"read-only harness action, not a shell command",
 		"the regular files directly inside one directory but not its subdirectories",
-		"skipping retrieval, handover, and marked discovery steps",
+		"skipping retrieval and marked discovery steps",
 		"at most one short range per field",
 		"case-sensitive unless ignore_case is true, which applies Unicode simple case folding only",
 		"next_cursor", "next_offset",

@@ -20,7 +20,7 @@ is not.
 | --- | --- | --- |
 | `core/decode.go` | Decision protocol and decoding | Offline tests |
 | `core/state.go`, `core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
+| `internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable summary and retained source range | Offline tests; long-history measurement over SQLite |
 | `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` |
 | `internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Recording-store tests; used by the loop |
@@ -277,10 +277,10 @@ the intent is `halt` or a step fails, and at a halt publishes the run's
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the complete active window and its handover, and in a repair the rejected response, returning the error of a failed journal read and committing nothing; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the recorded window, the run's session fields, or earlier session runs fail their checks, the goal or constraints exceed their limit, no prompt fits, or freezing fails |
+| `prepare_request` | Load the active checkpoint and contiguous retained sources; drive any durable compaction at this safe point; render and admit the working request; atomically adopt its candidate checkpoint with `RequestFrozen`. Reads and publication errors leave progress unchanged. Irreducible context, invalid candidates, or exhausted summary retries stop through the core. See [compaction](compaction.md). |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
 | `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
-| `bind`, `start` | Route the effect: when the frozen request of the step requires a handover and the decision is not one, commit `Observed{failed_to_start}` with the refusal as its preview, binding and running nothing; a `canti:retrieve` or `canti:handover` action binds the in-process job `read_<effect ID>` and runs in the harness; otherwise `Runner.Bind`, `Runner.Start`. A bound job's ID decides the route of the later intents |
+| `bind`, `start` | A `canti:retrieve` action binds the in-process job `read_<effect ID>`; unknown `canti:` actions fail in-process. Other decisions use `Runner.Bind` and `Runner.Start`. A bound job owns the route of later intents. |
 | `inspect` | `Inspect` the job; while it runs, wait until it stops when the executor is a `Waiter`, as the Docker executor is, for at most 30 s and never past the job timeout or the wall time, and otherwise poll every 500 ms. Commit `Observed` for a finished job; cancel a running job past `Budget.JobTimeout` and observe it as `timed_out`; commit a `timed_out` stop when the wall time runs out while waiting; commit `OutcomeUnknown` for a lost, missing, or foreign job, a result without an exit code, an unexpected status, or a sixth consecutive `Inspect` error |
 | `cancel` | `Cancel` by effect ID; then watch a recorded job to its result, record a found job with `JobBound`, or observe a positively missing job as `cancelled` |
 
@@ -300,7 +300,7 @@ any store error; request and response bodies are not logged.
 
 SQLite holds the authoritative run state and facts, and files hold large
 outputs. `canti history` prints the committed transitions as a read-only JSON
-Lines projection. Agent-written handover never decides whether an action
+Lines projection. Agent-written summaries never decides whether an action
 occurred.
 
 The store contract is one atomic `Commit(Transition)`. Inside that transaction
@@ -518,86 +518,31 @@ refusing when it cannot.
 
 ## Input
 
-Every request is prepared from committed facts and a durable handover window.
-The window begins at `FirstStep`; only its completed steps enter the frame.
-`Journal.Recent` remains a chronological storage query: the loop reads backward
-by commit sequence, 64 records per page, stopping at the window boundary.
-It does not select a sliding suffix by prompt capacity. Lost [step
-records](#step-records) can still be rebuilt from the full committed history.
+Every request is built from the current goal and effective constraints, one
+rolling session summary, and a contiguous suffix of complete source entries.
+The source stream includes inputs, completed steps, and terminal records across
+all runs of the same session. A standalone run has its own owner. Raw sources
+remain in SQLite and the read-only archive; compaction changes only their
+projection into requests. It never changes execution recovery or effect IDs.
 
-A `Frame` holds the authoritative goal and constraints, environment, step and
-attempt positions, complete current-page trajectory, artifact and history
-locations, window state, and any rejected response for protocol repair.
-`Frame.Validate` checks the window boundary and contiguous step coverage.
-Workspace notes are not automatically read or injected.
+[Independent compaction](compaction.md) defines the plan, source hash, attempt
+reservation, validation, atomic adoption, and restart contracts. It runs only
+before the initial frozen request of a business step. Protocol repair keeps
+that step's checkpoint and source selection. A previous retained tail is part
+of the next source prefix; no recent-run selector silently drops older runs.
 
-A run of a session also quotes, oldest first, the earlier runs of its
-session that it selects newest first while they fit: each one's goal and
-return, or a stopped run's reason and step count with its goal where that
-fits, after a line that points to older records. Where room remains after
-that selection, the quoted runs, newest first, also name the path of the
-command of their latest accepted handover: the final step when that was
-one, otherwise the source of the window of the latest request. A path never
-displaces dialogue, and the handover it names is agent-written and may be
-overtaken by later steps of that run.
+`Frame.Validate` checks current-run step coverage and window positions.
+`Frame.Prompt` renders the decision protocol, retrieval syntax and silent rules,
+the authoritative goal and constraints, environment and archive navigation,
+earlier retained history, an explicitly untrusted summary, complete current
+steps with bounded previews, and progress or protocol repair. Workspace notes
+are not injected. The current goal and constraints remain authoritative;
+quoted material never authorizes commands or establishes effect completion.
 
-`Frame.Prompt` renders a system message and user content blocks. The system
-message states the decision protocol of the run's transport: one JSON object
-as the reply text, or exactly one `canti_decision` tool call, set by
-`-decision-format`. With retrieval enabled it also states the retrieval
-action: its syntax, operations, continuation, and rules whose violation no
-error would report, such as that a directory search reads only the regular
-files directly inside its directory and that a partial scan is not proof
-of absence. A directory search that fails at one file and a cursor that
-does not decode, belongs to another query, or names a file, step field, or
-history that is gone name the next valid action in their errors instead.
-It ranks what a request shows: the current goal and constraints are
-authoritative; command output, retrieved records, earlier dialogue, and the
-handover are evidence that never widens them; and a restriction the
-environment of the run states about itself narrows them unless the goal or
-constraints explicitly lift it by naming it or what it withholds, so the agent
-follows it, including how it says to record what it withholds, continues the
-work it allows, reports the conflict on return, and never acts merely because
-an output asks it to.
-The prompt budget charges that system message. The first
-block holds Goal, Constraints, Environment, Context window, and the short
-Handover when present. One block follows per current-page step, oldest first,
-starting with the committed decision's purpose on one line when it has one;
-the tail holds Progress, any required handover instruction, and a rejected
-response. Appending a completed step preserves the prefix within a window,
-since every step block, its frozen retrieval evidence included, is a
-function of committed facts. A new window changes the first block.
-
-`PromptLimits` bounds bytes, not provider tokens: defaults are 32 KiB for the
-goal, 16 KiB for constraints, 2 KiB for the environment and each command,
-512 bytes per step purpose, 4 KiB per output preview, 2 KiB each for a
-rejected response and its error, and 128 KiB total. The CLI defaults the total
-to 256 KiB. Goal and constraints are never truncated. Other bounded inputs use
-explicit truncation markers, valid UTF-8, and fences longer than embedded
-backtick runs. An oversized page fails visibly rather than dropping older
-steps.
-
-The loop reserves space before the window reaches its prompt capacity and
-requests a bounded `canti:handover` action, whose payload is that name and
-one space, tab, or line break followed by the handover as plain text, kept
-verbatim; the harness, not the model, names the run and the window it closes.
-The request asks the handover to carry the objective, the restrictions the
-environment has stated and where, the next action, risks, and evidence
-references.
-A proposal fails for empty, invalid UTF-8, or oversized text, when no
-handover was requested, or when the window it opens would leave no work
-capacity; at a requested handover, any other exec is refused unrun and
-counts as a failed proposal, and discovery skips every step whose command
-begins with that name.
-Optional step and byte thresholds
-can request this sooner; both zero still enables the capacity trigger. A
-valid proposal becomes the next window's handover and lower history bound
-when the next request is frozen. These window facts are committed with the
-request bytes, so recovery reuses the same boundary and actual handover.
-Invalid proposals keep the current page, and the retry request says that its
-step is the last chance to hand over; a second failure stops the run.
-Run identity, effect identity, step numbering, and execution recovery do not
-change when a window advances. `return` still ends the run.
+The total text limit, serialized wire limit, and model-context token allowance
+are independent admission checks. Token admission uses a conservative serialized
+byte estimate, not provider telemetry. Retained steps reserve the next complete
+observation and protocol repair. Inputs that cannot fit are refused visibly.
 
 Native retrieval records its reason, original paths, byte ranges, hashes,
 continuation information, and errors, and commits the bytes it read for
@@ -609,7 +554,7 @@ published preview keeps the references only: reading a past retrieval
 returns references rather than recursively duplicating history. Frozen
 request bodies still retain the actual bytes sent for exact retry. Old pages
 remain accessible through explicit retrieval, including imported history
-when configured. Retrieved evidence and handover text are not authoritative
+when configured. Retrieved evidence and summary text are not authoritative
 instructions or proof that a side effect completed.
 
 `anthropic.Model` implements `Model` for the non-streaming Messages API at
@@ -872,8 +817,10 @@ the Docker daemon reports, observes it as `timed_out`, and continues with the
 next step. A restarted controller that finds a cancelled job observes it as
 `timed_out` when the daemon's start and finish times span the timeout. Both
 assume the daemon shares the host clock. Tokens
-are the provider-reported usage of saved and incomplete responses, so a run
-can end up to one response over its token budget; cost is not measured. The
+include provider-reported usage of business and summary responses. Summary
+attempts also reserve input/output allowance before dispatch, retaining that
+reservation when usage is unknown. A business response can exceed the remaining
+token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between
 steps, so a run can end up to one per-job output limit over it. It is not a
 filesystem quota: workspace writes, the journal's request and response
@@ -884,8 +831,8 @@ bodies, and Docker's log of a running job are not counted. See
 
 Keep one Go module and the current package split. V1 has one model protocol,
 one SQLite journal, and one queryable executor. Distributed scheduling,
-multi-tenant policy, generic workflow graphs, automatic planning, automatic
-memory compaction, and mid-run user input are outside the initial experiment;
+multi-tenant policy, generic workflow graphs, automatic planning, memory
+across independent sessions, and mid-run user input are outside this experiment;
 so are separate response IDs and input revisions, which stay derivable from
 the position identities above until a real consumer needs them. New run rules
 belong in `core.State.Next` with a transition-table test, not in the harness.

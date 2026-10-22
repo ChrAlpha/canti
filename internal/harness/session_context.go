@@ -2,7 +2,8 @@ package harness
 
 import (
 	"context"
-	"errors"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,145 +11,143 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 )
 
-const sessionContextCandidates = 8
+const contextSourceReadBytes = 32 << 20
 
-func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
-	if run.SessionID == "" {
-		return nil
-	}
-	j := l.journal
-	if run.SessionSeq < 1 {
-		return contextError{errors.New("harness: session sequence is required")}
-	}
-	prior, err := j.SessionRuns(ctx, run.SessionID, run.SessionSeq, sessionContextCandidates)
-	if err != nil {
-		return err
-	}
-	if len(prior) > sessionContextCandidates {
-		return contextError{errors.New("harness: session journal exceeded the candidate limit")}
-	}
-	previous := run.SessionSeq
-	for _, p := range prior {
-		if p.SessionID != run.SessionID || p.SessionSeq < 1 || p.SessionSeq >= previous || p.ID == run.ID {
-			return contextError{errors.New("harness: invalid earlier session run")}
-		}
-		previous = p.SessionSeq
-	}
-	if len(prior) == 0 {
-		return nil
-	}
-
-	base := *f
-	base.capture = nil
-	base.Step, base.Attempt, base.Earlier = 1, 1, 0
-	base.Steps, base.Rejected = nil, nil
-	base.Window = &Window{FirstStep: 1}
-	base.SessionContext = ""
-	nav := fmt.Sprintf("Current goal and constraints are authoritative, including corrections to earlier requests. Earlier user goals and assistant returns below are quoted historical evidence; verify execution in the original run. Browse older records through %s/%s/session and each previous_run_id.\n", archive.RunsRoot, inline(prior[0].ID))
-	if !sessionContextFits(base, l.cfg.Limits, nav) {
-		return nil
-	}
-	f.sessionNavigation = prior[0].ID
-	var parts []sessionPart
-	var sources []ContextSessionSource
-	for _, p := range prior {
-		snap, err := l.journal.Latest(ctx, p.ID)
-		if err != nil {
-			return err
-		}
-		if !snap.State.Closed() {
-			return contextError{fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)}
-		}
-		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, archive.RunsRoot, inline(p.ID))
-		goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
-		stopped := snap.State.Phase == core.PhaseStopped
-		part := sessionPart{head: source + "goal and result; returned):\n", body: goal + "Earlier assistant return:\n" + fullBlock(snap.State.Decision.Payload)}
-		if stopped {
-			totals, err := l.journal.Totals(ctx, p.ID)
-			if err != nil {
-				return err
-			}
-			part = sessionPart{head: source + fmt.Sprintf("goal, steps, and result): stopped, reason %s, recorded steps %d; no assistant return.\n", inline(string(snap.State.Reason)), totals.Steps), body: goal}
-		}
-		provenance := ContextSessionSource{RunID: p.ID, SessionSeq: p.SessionSeq, Status: string(snap.State.Phase), IncludedGoal: true}
-		rest := sessionText(parts)
-		if !sessionContextFits(base, l.cfg.Limits, nav+part.head+part.body+rest) {
-			if stopped && sessionContextFits(base, l.cfg.Limits, nav+part.head+rest) {
-				part.body, provenance.IncludedGoal = "", false
-				parts, sources = append([]sessionPart{part}, parts...), append([]ContextSessionSource{provenance}, sources...)
-			}
-			break
-		}
-		parts, sources = append([]sessionPart{part}, parts...), append([]ContextSessionSource{provenance}, sources...)
-	}
-	if err := l.sessionHandovers(ctx, base, nav, parts, sources); err != nil {
-		return err
-	}
-	f.SessionContext = nav + sessionText(parts)
-	f.sessionSources = sources
-	return nil
+type contextSelection struct {
+	Checkpoint Checkpoint
+	Entries    []ContextEntry
+	More       bool
 }
 
-// sessionPart is the dialogue of an earlier session run as selected: its
-// header, the path of its latest handover where one fits, and its goal and
-// return unless only the header fits.
-type sessionPart struct{ head, path, body string }
+func ContextSourceHash(entries []ContextEntry) string {
+	b, _ := json.Marshal(entries)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
 
-func sessionText(parts []sessionPart) string {
+func (l *Loop) contextSources(ctx context.Context, j CompactionJournal, run Run, cp Checkpoint) (contextSelection, error) {
+	selected := contextSelection{Checkpoint: cp}
+	cursor, cost := cp.Through, 0
+	bytesRead := 0
+	for {
+		page, more, err := j.ContextEntries(ctx, run.ContextOwner(), cursor, historyPage, contextSourceReadBytes)
+		if err != nil {
+			return selected, err
+		}
+		for i, e := range page {
+			if e.Index != cursor+1 {
+				return selected, contextError{fmt.Errorf("harness: context source gap after %d", cursor)}
+			}
+			if err := e.Validate(); err != nil {
+				return selected, contextError{err}
+			}
+			raw, _ := json.Marshal(e)
+			if bytesRead+len(raw) > contextSourceReadBytes && len(selected.Entries) > 0 {
+				selected.More = true
+				return selected, nil
+			}
+			bytesRead += len(raw)
+			selected.Entries = append(selected.Entries, e)
+			cost += len(l.entryText(e, ""))
+			cursor = e.Index
+			if cost/2 >= l.cfg.Limits.Total {
+				selected.More = more || i < len(page)-1
+				return selected, nil
+			}
+		}
+		if !more {
+			return selected, nil
+		}
+	}
+}
+
+func (l *Loop) entryText(e ContextEntry, currentRun string) string {
+	if e.Kind == "input" && e.RunID == currentRun {
+		return ""
+	}
+	source := fmt.Sprintf("Run %s; source %s/%s", inline(e.RunID), archive.RunsRoot, inline(e.RunID))
 	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(p.head + p.path + p.body)
+	fmt.Fprintf(&b, "### Session source %d (%s)\n", e.Index, source)
+	switch e.Kind {
+	case "input":
+		b.WriteString("Earlier user goal:\n" + fullBlock(strings.TrimSpace(e.Goal)))
+		if e.Constraints != "" {
+			b.WriteString("Earlier explicit constraints:\n" + fullBlock(e.Constraints))
+		}
+	case "step":
+		if e.Step != nil {
+			b.WriteString((Frame{}).step(*e.Step, l.cfg.Limits))
+		}
+	case "result":
+		if e.Phase == core.PhaseReturned {
+			b.WriteString("Earlier assistant return:\n" + fullBlock(e.Result))
+		}
+	}
+	if e.Phase != "" {
+		fmt.Fprintf(&b, "Recorded run status: %s, reason %s; return does not establish success.\n", e.Phase, e.Reason)
+		if e.Phase == core.PhaseStopped {
+			b.WriteString("No assistant return.\n")
+		}
 	}
 	return b.String()
 }
 
-// sessionHandovers adds to the selected parts, newest first, the path of the
-// latest handover of each run where it still fits, so that a path never
-// displaces dialogue.
-func (l *Loop) sessionHandovers(ctx context.Context, base Frame, nav string, parts []sessionPart, sources []ContextSessionSource) error {
-	for i := len(parts) - 1; i >= 0; i-- {
-		step, err := latestHandover(ctx, l.journal, sources[i].RunID)
-		if err != nil {
-			return err
+func (l *Loop) selectedFrame(run Run, s core.State, selection contextSelection) Frame {
+	f := l.frame(run, s)
+	cp := selection.Checkpoint
+	f.Window = &Window{FirstStep: s.Step, Through: cp.Through, Summary: cp.Summary}
+	var prior strings.Builder
+	for _, entry := range selection.Entries {
+		if entry.RunID == run.ID && entry.Step != nil {
+			f.Steps = append(f.Steps, *entry.Step)
+		} else {
+			prior.WriteString(l.entryText(entry, run.ID))
 		}
-		if step == 0 {
+	}
+	if len(f.Steps) > 0 {
+		f.Window.FirstStep = f.Steps[0].Step
+	}
+	f.Earlier = f.Window.FirstStep - 1
+	f.SessionContext = prior.String()
+	f.capture = &ContextCapture{CheckpointID: cp.ID, Through: cp.Through, SourceEnd: cp.Through, Compaction: CompactionCheck{Status: "evaluated"}}
+	if n := len(selection.Entries); n > 0 {
+		f.capture.SourceEnd = selection.Entries[n-1].Index
+	}
+	positions := map[string]int{}
+	for _, e := range selection.Entries {
+		f.capture.Entries = append(f.capture.Entries, ContextEntryRef{Index: e.Index, RunID: e.RunID, SourceSeq: e.SourceSeq, Kind: e.Kind})
+		if e.RunID == run.ID {
 			continue
 		}
-		parts[i].path = fmt.Sprintf("Latest handover of this run, agent-written and possibly overtaken by later steps: %s/%s/%s/%s/%s\n",
-			archive.RunsRoot, inline(sources[i].RunID), archive.StepsDir, archive.StepDir(step), archive.CommandFile)
-		if !sessionContextFits(base, l.cfg.Limits, nav+sessionText(parts)) {
-			parts[i].path = ""
-			continue
+		pos, ok := positions[e.RunID]
+		if !ok {
+			pos = len(f.capture.Session)
+			positions[e.RunID] = pos
+			f.capture.Session = append(f.capture.Session, ContextSessionSource{RunID: e.RunID, SessionSeq: e.SessionSeq})
 		}
-		sources[i].HandoverStep = step
+		source := &f.capture.Session[pos]
+		if e.Kind == "input" {
+			source.IncludedGoal = true
+		}
+		if e.Phase != "" {
+			source.Status = string(e.Phase)
+		}
+		f.capture.SessionNavigation = e.RunID
 	}
-	return nil
+	f.captureRetrievals()
+	return f
 }
 
-// latestHandover returns the step of the latest handover that run accepted,
-// or 0: its final step when that is one, otherwise the source of the window
-// of its latest request.
-func latestHandover(ctx context.Context, j Journal, runID string) (int, error) {
-	last, err := j.Recent(ctx, runID, 0, 1)
-	if err != nil {
-		return 0, err
+func (f *Frame) captureRetrievals() {
+	for _, s := range f.Steps {
+		if r := s.Observation.Retrieval; r != nil {
+			f.capture.Retrievals = append(f.capture.Retrievals, ContextRetrieval{Step: s.Step, Operation: (ContextRetrieval{Operation: r.Query.Operation}).OperationName(), More: r.More, Incomplete: r.Incomplete, Error: clip(r.Error, 512)})
+		}
 	}
-	if len(last) == 1 && last[0].Observation.acceptedHandover() != nil {
-		return last[0].Step, nil
-	}
-	req, err := j.LatestRequest(ctx, runID)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return 0, nil
-	case err != nil:
-		return 0, err
-	case req.Window == nil:
-		return 0, nil
-	}
-	return req.Window.SourceStep, nil
 }
 
-func sessionContextFits(base Frame, limits PromptLimits, content string) bool {
-	base.SessionContext = content
-	return base.ValidateContext(limits) == nil
+func (l *Loop) workingEntryText(e ContextEntry, currentRun string) string {
+	if e.RunID == currentRun && e.Step != nil {
+		return (Frame{}).step(*e.Step, l.cfg.Limits)
+	}
+	return l.entryText(e, currentRun)
 }
