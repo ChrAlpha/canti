@@ -64,7 +64,7 @@ func TestLoopFreezesTheSystemOfItsDecisionTransport(t *testing.T) {
 			t.Fatalf("tool %v: system =\n%s", tool, p.System)
 		}
 		req, err := f.store.Request(t.Context(), runID, 1, 1)
-		if err != nil || req.Context == nil || req.Context.Bytes.System != len(p.System) || string(req.Body) != p.System+"\n\n"+p.User() {
+		if err != nil || req.Context == nil || req.Context.Bytes.System != len(p.System) || string(req.Body) != string(fakeBody(p)) {
 			t.Fatalf("tool %v: frozen request does not match the rendered system: %v", tool, err)
 		}
 	}

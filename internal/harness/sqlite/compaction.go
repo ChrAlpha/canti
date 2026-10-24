@@ -143,7 +143,11 @@ func (s *Store) PlanCompaction(ctx context.Context, p harness.CompactPlan) error
 		if count != p.Through-p.After {
 			return errors.New("sqlite: compaction coverage is not contiguous")
 		}
-		if err := verifyCompactionSources(ctx, tx, p); err != nil {
+		entries, err := verifyCompactionSources(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+		if err := verifyFrozenPrefix(ctx, tx, p, entries); err != nil {
 			return err
 		}
 		data, err := json.Marshal(harness.Compaction{Plan: p})
@@ -153,6 +157,25 @@ func (s *Store) PlanCompaction(ctx context.Context, p harness.CompactPlan) error
 		_, err = tx.ExecContext(ctx, "INSERT INTO compactions(id,run_id,run_seq,data,parent_id) VALUES(?,?,?,?,?)", p.ID, p.RunID, p.RunSeq, string(data), p.Parent)
 		return err
 	})
+}
+
+func verifyFrozenPrefix(ctx context.Context, tx *sql.Tx, p harness.CompactPlan, entries []harness.ContextEntry) error {
+	if p.Prefix == nil {
+		return nil
+	}
+	facts, err := decodeFacts(tx.QueryRowContext(ctx, latestRequestSQL, p.RunID))
+	if err != nil {
+		return err
+	}
+	r := facts.Request
+	if r == nil || harness.RequestHash(*r) != p.Prefix.RequestHash {
+		return errors.New("sqlite: summary parent differs from its frozen request")
+	}
+	cp := harness.Checkpoint{ID: p.Parent, Through: p.After}
+	if harness.MatchingPrefix(*r, cp, entries) == p.Prefix.Blocks {
+		return nil
+	}
+	return errors.New("sqlite: summary prefix differs from its source boundary")
 }
 
 func (s *Store) StartCompactionAttempt(ctx context.Context, id string, number int) error {

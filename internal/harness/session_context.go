@@ -20,6 +20,9 @@ type contextSelection struct {
 }
 
 func ContextSourceHash(entries []ContextEntry) string {
+	if len(entries) == 0 {
+		entries = nil
+	}
 	b, _ := json.Marshal(entries)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
@@ -95,19 +98,24 @@ func (l *Loop) selectedFrame(run Run, s core.State, selection contextSelection) 
 	f := l.frame(run, s)
 	cp := selection.Checkpoint
 	f.Window = &Window{FirstStep: s.Step, Through: cp.Through, Summary: cp.Summary}
-	var prior strings.Builder
 	for _, entry := range selection.Entries {
+		f.priorHistory = f.priorHistory || entry.RunID != run.ID
+	}
+	for _, entry := range selection.Entries {
+		block := contextBlock{Text: l.entryText(entry, run.ID)}
+		if f.priorHistory && entry.RunID == run.ID && entry.Kind == "input" {
+			block.Text = "\n## Current window steps\n"
+		}
 		if entry.RunID == run.ID && entry.Step != nil {
 			f.Steps = append(f.Steps, *entry.Step)
-		} else {
-			prior.WriteString(l.entryText(entry, run.ID))
+			block.Text, block.Step = f.step(*entry.Step, l.cfg.Limits), entry.Step.Step
 		}
+		f.contextBlocks = append(f.contextBlocks, block)
 	}
 	if len(f.Steps) > 0 {
 		f.Window.FirstStep = f.Steps[0].Step
 	}
 	f.Earlier = f.Window.FirstStep - 1
-	f.SessionContext = prior.String()
 	f.capture = &ContextCapture{CheckpointID: cp.ID, Through: cp.Through, SourceEnd: cp.Through, Compaction: CompactionCheck{Status: "evaluated"}}
 	if n := len(selection.Entries); n > 0 {
 		f.capture.SourceEnd = selection.Entries[n-1].Index
@@ -134,6 +142,9 @@ func (l *Loop) selectedFrame(run Run, s core.State, selection contextSelection) 
 		f.capture.SessionNavigation = e.RunID
 	}
 	f.captureRetrievals()
+	if cut := l.compactionCut(run, selection); cut > 0 {
+		f.capture.Prefix = &ContextPrefix{Through: selection.Entries[cut-1].Index}
+	}
 	return f
 }
 

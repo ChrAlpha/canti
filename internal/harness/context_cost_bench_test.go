@@ -25,8 +25,10 @@ type contextCostModel struct {
 }
 
 func (m *contextCostModel) Complete(_ context.Context, req harness.Request) (harness.Response, error) {
-	if req.Adapter == "canti-anthropic/4-summary" {
-		return harness.Response{Adapter: req.Adapter, Complete: true, UsageKnown: true, Body: []byte(`{"stop_reason":"end_turn","content":[{"type":"text","text":"Continue inspecting original evidence."}]}`)}, nil
+	if req.Adapter == "canti-anthropic/5-summary" {
+		decision, _ := json.Marshal(core.Decision{Kind: core.Return, Payload: "Continue inspecting original evidence."})
+		body, _ := json.Marshal(map[string]any{"stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(decision)}}})
+		return harness.Response{Adapter: req.Adapter, Complete: true, UsageKnown: true, Body: body}, nil
 	}
 	if len(m.commands) == 0 {
 		return harness.Response{}, fmt.Errorf("no scripted decision")

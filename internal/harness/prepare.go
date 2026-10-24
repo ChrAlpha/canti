@@ -71,7 +71,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	need := selection.More || used+l.contextGrowth(f) > l.cfg.Limits.Total
 	requested := l.compactThreshold(selection)
 	if snap.State.RequestRev == 0 && (need || requested) {
-		plan, err := l.planCompaction(run, snap, selection, base, used, need)
+		plan, err := l.planCompaction(ctx, run, snap, selection, base, used, need)
 		if err != nil {
 			return l.contextStop(ctx, snap, err)
 		}
@@ -88,7 +88,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	}
 	if admissionErr := l.admitRequest(req); admissionErr != nil {
 		if snap.State.RequestRev == 0 {
-			plan, err := l.planCompaction(run, snap, selection, base, used, true)
+			plan, err := l.planCompaction(ctx, run, snap, selection, base, used, true)
 			if err == nil && plan != nil {
 				return snap, j.PlanCompaction(ctx, *plan)
 			}
@@ -208,7 +208,7 @@ func (l *Loop) compactBacklog(ctx context.Context, run Run, snap Snapshot, selec
 	for _, e := range selection.Entries {
 		size += len(l.workingEntryText(e, run.ID))
 	}
-	plan, err := l.planCompaction(run, snap, selection, base, size, true)
+	plan, err := l.planCompaction(ctx, run, snap, selection, base, size, true)
 	if err != nil {
 		return l.contextStop(ctx, snap, err)
 	}

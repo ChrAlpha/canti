@@ -29,6 +29,9 @@ type Prompt struct {
 	System string
 	Blocks []string
 	Stable int
+	// CacheThrough is an additional complete-block prefix worth retaining for
+	// the next compaction. Zero uses only the ordinary first/last breakpoints.
+	CacheThrough int
 }
 
 // User returns the user message, the blocks joined.
@@ -38,6 +41,7 @@ func (p Prompt) User() string { return strings.Join(p.Blocks, "") }
 // comes from the run state it is committed with.
 type Request struct {
 	MaxOutputTokens int    `json:",omitempty"`
+	InputTextBytes  int    `json:",omitempty"`
 	CheckpointID    string `json:",omitempty"`
 	Body            []byte
 	Model           string
@@ -63,6 +67,14 @@ type Response struct {
 type Usage struct {
 	InputTokens  int64
 	OutputTokens int64
+	// Cache is nil unless the provider explicitly reported both counters.
+	// InputTokens continues to include cached input for context and run budgets.
+	Cache *CacheUsage `json:",omitempty"`
+}
+
+type CacheUsage struct {
+	ReadTokens  int64
+	WriteTokens int64
 }
 
 // StopError reports a model failure that no retry of the same bytes can fix;

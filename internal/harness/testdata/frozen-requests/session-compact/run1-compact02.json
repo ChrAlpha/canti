@@ -1,26 +1,31 @@
 {
   "Plan": {
-    "Base": "compact_4477536575323ef4b71ec69fe45b13cd25f27c7547d7e99f859d4b78f3f2ed24",
-    "ID": "compact_39d9bef1eec0a400d977011ba79bd0b71b3a59300ba96ac0fea405eacbfb2926",
+    "Base": "compact_815a071a7fe08d2b8c89a568793890d9579313ac7c4544dff5fbc7f8bb850024",
+    "ID": "compact_851e4786c2e328bab363f1f2f815c96672ee793b99a507f12a543f4f96d165d2",
     "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
     "RunSeq": 21,
     "Owner": "session:session-1",
-    "Parent": "compact_4477536575323ef4b71ec69fe45b13cd25f27c7547d7e99f859d4b78f3f2ed24",
+    "Parent": "compact_815a071a7fe08d2b8c89a568793890d9579313ac7c4544dff5fbc7f8bb850024",
     "After": 2,
     "Through": 3,
     "SourceHash": "b10cba8a01a27922fb615991b9f43a4801752e48785f9b0e4547e2cd3091977d",
     "Request": {
       "MaxOutputTokens": 8192,
+      "InputTextBytes": 8674,
       "Body": null,
       "Model": "claude-opus-5",
-      "Protocol": "anthropic-messages/2023-06-01",
-      "Adapter": "canti-anthropic/4-summary"
+      "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+      "Adapter": "canti-anthropic/5-summary"
     },
     "MaxAttempts": 3,
     "MaxSummaryBytes": 732,
     "ReplacedBytes": 988,
-    "BeforeBytes": 7406,
-    "TokenReserve": 11385
+    "BeforeBytes": 7768,
+    "TokenReserve": 17974,
+    "Prefix": {
+      "RequestHash": "f15c8a9e40bab79543dc31ce8f744245f0e595c7c0af2edbf684461216c5ca7a",
+      "Blocks": 2
+    }
   },
   "Attempts": [
     {
@@ -31,11 +36,15 @@
         "Body": null,
         "Complete": true,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 100,
-          "OutputTokens": 20
+          "OutputTokens": 20,
+          "Cache": {
+            "ReadTokens": 0,
+            "WriteTokens": 0
+          }
         }
       },
       "Failure": "",

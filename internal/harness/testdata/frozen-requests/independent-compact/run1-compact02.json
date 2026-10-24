@@ -1,26 +1,31 @@
 {
   "Plan": {
-    "Base": "compact_27b3fdbe7b5cddec3429b928a1b060bc4ac376648a2e62ae15cf31aa2ad6e89d",
-    "ID": "compact_ff2d82ed63999174d4c4fd9713c57a301da33acb857bff682595fada792e259d",
+    "Base": "compact_91e32020f7f7c18815bc07ebfcc37e201448f9d1eabeaa1262e137e001f14298",
+    "ID": "compact_aae94821990d5cbfded38cafa8778c2c59dae746bb528c8f3033a8736a7a7581",
     "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
     "RunSeq": 21,
     "Owner": "run:run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
-    "Parent": "compact_27b3fdbe7b5cddec3429b928a1b060bc4ac376648a2e62ae15cf31aa2ad6e89d",
+    "Parent": "compact_91e32020f7f7c18815bc07ebfcc37e201448f9d1eabeaa1262e137e001f14298",
     "After": 2,
     "Through": 3,
     "SourceHash": "f5fc498157a274c7b5d8ce400945539d128638430367c4524e81dab2610ca3a0",
     "Request": {
       "MaxOutputTokens": 8192,
+      "InputTextBytes": 8550,
       "Body": null,
       "Model": "claude-opus-5",
-      "Protocol": "anthropic-messages/2023-06-01",
-      "Adapter": "canti-anthropic/4-summary"
+      "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+      "Adapter": "canti-anthropic/5-summary"
     },
     "MaxAttempts": 3,
     "MaxSummaryBytes": 732,
     "ReplacedBytes": 988,
-    "BeforeBytes": 7282,
-    "TokenReserve": 11385
+    "BeforeBytes": 7644,
+    "TokenReserve": 17849,
+    "Prefix": {
+      "RequestHash": "e664e1ae261af721ddeb80467800ae18cb70d50cdbd6dbfe37b5ba46d3ba8912",
+      "Blocks": 2
+    }
   },
   "Attempts": [
     {
@@ -31,11 +36,15 @@
         "Body": null,
         "Complete": true,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 100,
-          "OutputTokens": 20
+          "OutputTokens": 20,
+          "Cache": {
+            "ReadTokens": 0,
+            "WriteTokens": 0
+          }
         }
       },
       "Failure": "",

@@ -25,6 +25,13 @@ type Frame struct {
 	SessionContext                       string
 	capture                              *ContextCapture
 	SessionID                            string
+	contextBlocks                        []contextBlock
+	priorHistory                         bool
+}
+
+type contextBlock struct {
+	Text string
+	Step int
 }
 
 // Rejection is a response of the current step that failed to decode, with

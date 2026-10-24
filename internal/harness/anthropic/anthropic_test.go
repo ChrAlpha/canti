@@ -77,6 +77,24 @@ func message(stop, content string) string {
 		`,"stop_reason":` + stop + `,"usage":{"input_tokens":10,"output_tokens":7,"cache_creation_input_tokens":5,"cache_read_input_tokens":3}}`
 }
 
+func TestCompleteKeepsCachedInputUnknownWithoutBothCacheCounters(t *testing.T) {
+	for _, counts := range []string{``, `,"cache_read_input_tokens":0`, `,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`} {
+		t.Run(counts, func(t *testing.T) {
+			body := `{"model":"claude-opus-5","content":` + decision + `,"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":7` + counts + `}}`
+			srv := serve(t, reply(http.StatusOK, body))
+			m := newModel(t, srv.URL, nil)
+			r, err := m.Complete(context.Background(), freeze(t, m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			known := strings.Contains(counts, "cache_creation_input_tokens")
+			if r.UsageKnown != known || (r.Usage.Cache != nil) != known {
+				t.Fatal("missing cache usage became a zero-cost cache read")
+			}
+		})
+	}
+}
+
 func noSecret(t *testing.T, err error, resp harness.Response) {
 	t.Helper()
 	s := string(resp.Body) + resp.Model + resp.Protocol + resp.Adapter
@@ -133,7 +151,7 @@ func TestFreeze(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(t, "https://unused.test", tc.edit)
 			req := freeze(t, m)
-			want := harness.Request{MaxOutputTokens: 16000, Body: []byte(tc.body), Model: "claude-opus-5", Protocol: tc.protocol, Adapter: adapter}
+			want := harness.Request{MaxOutputTokens: 16000, InputTextBytes: len(prompt.System) + len(prompt.User()), Body: []byte(tc.body), Model: "claude-opus-5", Protocol: tc.protocol, Adapter: adapter}
 			if tc.name == "auth token and max tokens" {
 				want.MaxOutputTokens = 512
 			}
@@ -462,7 +480,7 @@ func TestCompleteClassifiesStopReason(t *testing.T) {
 			if stopReason(err) != "" {
 				t.Fatalf("err = %v, want retryable", err)
 			}
-			want := harness.Response{UsageKnown: true, Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7}}
+			want := harness.Response{UsageKnown: true, Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7, Cache: &harness.CacheUsage{ReadTokens: 3, WriteTokens: 5}}}
 			if !reflect.DeepEqual(resp, want) {
 				t.Fatalf("response = %+v\nwant %+v", resp, want)
 			}

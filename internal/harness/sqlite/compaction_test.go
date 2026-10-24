@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -27,6 +28,73 @@ func compactPlan(t *testing.T, s *Store, snap harness.Snapshot) harness.CompactP
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestCompactionValidatesFrozenParentAndPersistsCacheEvidence(t *testing.T) {
+	ctx := context.Background()
+	path := tempPath(t)
+	s := open(t, path)
+	d := newDriver(t, s, createRun(t, s, "run", limits))
+	entries, _, err := s.ContextEntries(ctx, "run:run", 0, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := harness.Request{Body: []byte("committed business prefix"), Context: &harness.ContextCapture{
+		SourceEnd: 1, Entries: []harness.ContextEntryRef{{Index: 1, RunID: "run", Kind: "input", BlockEnd: 1}},
+	}}
+	d.do(core.RequestFrozen{}, harness.Facts{Request: &parent})
+	d.send()
+	body := execBody("inspect")
+	d.save(body, harness.Usage{})
+	d.load(body)
+	d.call(harness.Runner.Bind)
+	d.call(harness.Runner.Start)
+	d.observe(core.ExecutionExited, 0)
+	p := harness.CompactPlan{RunID: "run", RunSeq: d.snap.Seq, Owner: "run:run", Through: 1,
+		SourceHash: harness.ContextSourceHash(entries), Request: harness.Request{Body: []byte("derived summary")},
+		MaxAttempts: 3, MaxSummaryBytes: 100, BeforeBytes: 1000, ReplacedBytes: 1000, TokenReserve: 1000,
+		Prefix: &harness.FrozenPrefix{RequestHash: harness.RequestHash(parent), Blocks: 1}}
+	for _, prefix := range []harness.FrozenPrefix{{RequestHash: strings.Repeat("0", 64), Blocks: 1}, {RequestHash: harness.RequestHash(parent), Blocks: 2}} {
+		invalid := p
+		invalid.Prefix = &prefix
+		invalid, err = harness.NewCompactPlan(invalid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PlanCompaction(ctx, invalid); err == nil {
+			t.Fatal("accepted changed parent or wrong prefix extent")
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE transitions SET facts=json_set(facts,'$.Request.Context.Entries[0].RunID','foreign') WHERE kind='request_frozen'`); err != nil {
+		t.Fatal(err)
+	}
+	p, err = harness.NewCompactPlan(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PlanCompaction(ctx, p); err == nil {
+		t.Fatal("accepted parent provenance belonging to another run")
+	}
+	if _, err := s.db.Exec(`UPDATE transitions SET facts=json_set(facts,'$.Request.Context.Entries[0].RunID','run') WHERE kind='request_frozen'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PlanCompaction(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartCompactionAttempt(ctx, p.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	cache := harness.CacheUsage{ReadTokens: 20, WriteTokens: 2}
+	result := harness.CompactAttempt{Number: 1, Done: true, Response: &harness.Response{Body: []byte("summary"), Complete: true, UsageKnown: true, Usage: harness.Usage{InputTokens: 30, OutputTokens: 5, Cache: &cache}}}
+	if err := s.SaveCompactionAttempt(ctx, p.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s = open(t, path)
+	got, err := s.PendingCompaction(ctx, "run", p.RunSeq)
+	if err != nil || got.Plan.Prefix == nil || *got.Plan.Prefix != *p.Prefix || got.Attempts[0].Response.Usage.Cache == nil || *got.Attempts[0].Response.Usage.Cache != cache {
+		t.Fatalf("lost frozen-prefix or cache evidence: %+v %v", got, err)
+	}
 }
 
 func saveSummary(t *testing.T, s *Store, p harness.CompactPlan) {

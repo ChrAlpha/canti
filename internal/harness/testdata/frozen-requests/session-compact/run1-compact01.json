@@ -1,7 +1,7 @@
 {
   "Plan": {
     "Base": "",
-    "ID": "compact_4477536575323ef4b71ec69fe45b13cd25f27c7547d7e99f859d4b78f3f2ed24",
+    "ID": "compact_815a071a7fe08d2b8c89a568793890d9579313ac7c4544dff5fbc7f8bb850024",
     "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
     "RunSeq": 14,
     "Owner": "session:session-1",
@@ -11,16 +11,21 @@
     "SourceHash": "f928df0b4720d1683f1b16ad8330ece898a0a574db08cc0e6d82111a4775081e",
     "Request": {
       "MaxOutputTokens": 8192,
+      "InputTextBytes": 8492,
       "Body": null,
       "Model": "claude-opus-5",
-      "Protocol": "anthropic-messages/2023-06-01",
-      "Adapter": "canti-anthropic/4-summary"
+      "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+      "Adapter": "canti-anthropic/5-summary"
     },
     "MaxAttempts": 3,
     "MaxSummaryBytes": 550,
     "ReplacedBytes": 806,
-    "BeforeBytes": 7387,
-    "TokenReserve": 11600
+    "BeforeBytes": 7749,
+    "TokenReserve": 17786,
+    "Prefix": {
+      "RequestHash": "d11e43e9c5abfe45613986cf1c84eb394a4a2073708acf4d1593fdf67614fafd",
+      "Blocks": 2
+    }
   },
   "Attempts": [
     {
@@ -31,11 +36,15 @@
         "Body": null,
         "Complete": true,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 100,
-          "OutputTokens": 20
+          "OutputTokens": 20,
+          "Cache": {
+            "ReadTokens": 0,
+            "WriteTokens": 0
+          }
         }
       },
       "Failure": "",

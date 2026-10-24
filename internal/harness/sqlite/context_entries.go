@@ -102,17 +102,17 @@ func (s *Store) ContextEntries(ctx context.Context, owner string, after int64, l
 	return entries, false, rows.Err()
 }
 
-func verifyCompactionSources(ctx context.Context, tx *sql.Tx, p harness.CompactPlan) error {
+func verifyCompactionSources(ctx context.Context, tx *sql.Tx, p harness.CompactPlan) ([]harness.ContextEntry, error) {
 	var size int64
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(sum(octet_length(data)),0) FROM context_entries WHERE owner=? AND n>? AND n<=?", p.Owner, p.After, p.Through).Scan(&size); err != nil {
-		return err
+		return nil, err
 	}
 	if size > 32<<20 {
-		return errors.New("sqlite: compaction sources exceed the read bound")
+		return nil, errors.New("sqlite: compaction sources exceed the read bound")
 	}
 	rows, err := tx.QueryContext(ctx, "SELECT data FROM context_entries WHERE owner=? AND n>? AND n<=? ORDER BY n", p.Owner, p.After, p.Through)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 	var entries []harness.ContextEntry
@@ -120,18 +120,18 @@ func verifyCompactionSources(ctx context.Context, tx *sql.Tx, p harness.CompactP
 		var data string
 		var e harness.ContextEntry
 		if err := rows.Scan(&data); err != nil {
-			return err
+			return nil, err
 		}
 		if err := strict(data, &e); err != nil {
-			return err
+			return nil, err
 		}
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if harness.ContextSourceHash(entries) != p.SourceHash {
-		return errors.New("sqlite: compaction source hash differs from its committed coverage")
+		return nil, errors.New("sqlite: compaction source hash differs from its committed coverage")
 	}
-	return nil
+	return entries, nil
 }

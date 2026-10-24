@@ -19,7 +19,7 @@ another gateway, without a proxy, and the
 [retrieval prompt comparison](#live-comparison-of-the-retrieval-system-prompt-2026-10-08)
 twelve runs of context versions 7 and 8 through a gateway.
 
-## Independent compaction, context version 12
+## Independent compaction, context version 13
 
 The current context contract is [independent compaction](compaction.md), journal
 schema 3. Historical provider measurements later in this document describe the
@@ -36,6 +36,27 @@ directory and retains no handover reader or migration.
 | Usage | Summary attempts reserve tokens before dispatch; lost/missing/invalid usage remains reserved; explicit input/output/cache counts replace the reservation once | Reported usage and conservative estimates; not billing |
 | Cross-run effects and archive | `TestSessionDialogueSurvivesCompactionRetryAndRestart`, the multi-run stress test, and unlimited-step restart test; corrected input and constraints, original-purpose retrieval, repeated compact, and unreplayed effects | Real CLI/SQLite/Docker; scripted local Messages server |
 | Version pin | Frozen corpus includes working requests, summary requests, source hashes, attempt records, and accepted checkpoints | Only scenarios in the corpus pin behavior |
+| Frozen prefix and history order | `TestSummaryPreservesFrozenPrefixAndDecisionProtocol`, `TestCompactionValidatesFrozenParentAndPersistsCacheEvidence`, `TestSessionProjectionOrdersSummaryBeforeRetainedCorrections`; source-aligned prefix extraction, parent validation, both response transports and summary-before-tail ordering | Offline transport and real SQLite; actual cache reuse requires the opt-in live gate |
+
+The bounded provider gate is `TestLiveCompactionPrefix` (`-tags live`,
+`CANTI_LIVE_COMPACTION=1`). It compares a warm frozen-prefix summary with a
+cold nonce control in both text and tool modes, then checks four inherited
+facts in a fresh request. Both cache counters must be reported; the warm
+summary must read more cache than the control and at least 80% of its total
+input. `CANTI_LIVE_COMPACTION_AGED=1` also keeps the latest
+request warm for six minutes before reading the earlier compact boundary.
+There are at most eight calls, or twelve with the aged check, capped at 1,024
+output tokens per call. A skipped gate is not provider acceptance.
+
+`TestLiveCompactionContinuation` (`-tags integration,live` with the same opt-in)
+uses real CLI processes, Docker and the provider for a three-input report task:
+inspect files, implement the report, then change filtering and sort order.
+Every transition resumes in a fresh process. It checks protected input bytes,
+both report versions, the single initialization effect and at least two adopted
+compactions including a frozen-prefix derivation. Each run is bounded by 12
+business steps, 600,000 budget tokens and four minutes. Set
+`CANTI_LIVE_EVIDENCE_DIR` to retain its workspace and journal outside tracked
+source. Provider credentials are consumed from the environment, never recorded.
 
 ## Offline evidence
 
@@ -62,10 +83,10 @@ These tests run in `make check`, and under the race detector in
 | Whole goal and constraints | A goal of 32 KiB and constraints of 16 KiB after trimming, each ending in a one- to four-byte rune, are rendered whole, also beside the environment, notes, and a rejected response at their limits within the 64 KiB total; one byte more fails with the limit named and no prompt (`TestPromptKeepsTheGoalAndConstraintsWhole`). The loop stops such a run as `unrecoverable` with one `stop_requested` transition and no send (`TestLoopStopsWhenRequestCannotBeBuilt`), and `canti run` exits with status 2 before creating the state directory or calling the model, while a run at the limits sends both whole (`TestRunRefusesAGoalOrConstraintsOverTheirLimit`) | Bytes, not tokens |
 | Prompt capacity | No step count caps the steps shown: over 128 steps a loop shows exactly what a prompt of the whole history shows at four totals, and `Recent` pages backward by sequence (`sqlite.TestRecentPagesBackwardBySequence`; see the long-history gate). Through the CLI, a run with a 32 KiB goal, 16 KiB constraints, and six steps each resolved with a 4,000-byte note shows step 1 in the step 7 prompt, built by a later `resume` process, at the default `-context-bytes` of 256 KiB, and refuses the same run at 65,536 before any model call (`TestTheContextBytesOfTheRunBoundEveryPrompt`, `TestUsageAndVersion`) | Bytes, not tokens; the CLI test checks only whether step 1 is shown, or that the run is refused |
 | Stable prompt prefix | Current-run complete steps append stable blocks between checkpoint changes; repair keeps the same checkpoint and source identities | Provider cache reuse is not established |
-| Cache breakpoints | The frozen body holds one user message with a text block per prompt block, in order; the first and the last stable block, and no other, carry an `ephemeral` `cache_control`, also for prompts rendered at steps 1 to 3; none does without a stable block, and one does when a single block is stable (`anthropic.TestFreezeMarksTheFirstAndLastStableBlocks`) | Request bytes only here; the gateway of the 2026-09-24 evaluation ignores `cache_control`, and the one of the 2026-10-03 evaluation reported cache reads for 86–97% of input tokens, which does not show which breakpoint produced them |
+| Cache breakpoints | The frozen body holds one user message with a text block per prompt block, in order; the first and last stable blocks and the prospective compaction boundary carry an `ephemeral` `cache_control`. With no extra boundary the original two-breakpoint contract remains (`anthropic.TestFreezeMarksTheFirstAndLastStableBlocks`, `TestSummaryPreservesFrozenPrefixAndDecisionProtocol`) | Request bytes only here; the gateway of the 2026-09-24 evaluation ignores `cache_control`, and the one of the 2026-10-03 evaluation reported cache reads for 86–97% of input tokens, which does not show which breakpoint produced them |
 | Anthropic adapter | Against a local HTTP server: frozen body sent verbatim with the right headers; status, stop-reason, truncation, size, timeout, redirect, and context handling; decision extraction; a request frozen with fallbacks keeps its beta header when a model configured without them sends it, and one whose protocol is unknown or whose adapter is neither `canti-anthropic/2` nor `canti-anthropic/3-tool`, the earlier `canti-anthropic/1` included, stops as `unrecoverable` without a send (`TestCompleteHonorsFrozenProtocol`) | No live provider; the 2026-09-23 samples used `canti-anthropic/1` |
 | Decision purpose | Strict optional purpose decoding, single-line bounded rendering, step reserve accounting, and original purpose retrieval after compaction (`independent-compact` frozen corpus and session integration) | Advisory text; matching a purpose to its command is not verified |
-| Decision transport prompt | Text and tool business protocols preserve their distinct system prompts and admission; summaries use their own tool-free Messages request (`TestSummaryFreezesWithoutDecisionToolsOrFallbacks`) | Wording and transport, not live compliance |
+| Decision transport prompt | Summary requests retain the frozen business prefix, system, tools, output schema and protocol; a separate maintenance handler accepts only a `return` payload and cannot execute commands (`TestSummaryPreservesFrozenPrefixAndDecisionProtocol`, `TestSummaryAcceptsOnlyReturnPayloadInEitherTransport`, `summary-exec-rejected` and `tool-session-compact` frozen corpus) | Wording and transport, not live compliance |
 | Frozen retrieval evidence | Evidence bytes, source ranges, hashes, and continuations commit with observations; later file mutation or removal does not change retained evidence (`TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen`, frozen corpus) | Compacted evidence remains in original records; summary recall is unmeasured |
 | Retrieval system prompt | Bounded syntax and silent-rule system section; errors supply recovery guidance, discovery excludes retrieval and marked discovery steps; source evidence is untrusted (`TestRetrievalSystemKeepsSilentRulesWithinItsBudget`, retrieval corpus and integration) | Prior live prompt comparisons below do not cover the new compaction mechanism |
 | Docker executor | Against a fake daemon: missing versus lost jobs, no create once the context is done, no restart of an unlatched or failed start, a start never sent twice, a rejected start as `failed_to_start`, launch outliving shutdown, per-call deadlines, the API version the daemon supports, and a loop that gives up on a hung daemon with an unknown outcome; a bind after the fence recording a cancelled job without creating a container; a record published before its container is released, release retries, failed and interrupted captures, and strict records | Fake daemon |

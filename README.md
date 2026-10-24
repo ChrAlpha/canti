@@ -93,7 +93,7 @@ Summary calls consume tokens and wall time, but no business steps or effects.
 Original records remain available for retrieval. See [compaction](docs/compaction.md)
 for admission, failure recovery, limits, and diagnostics.
 
-This revision uses journal schema 3 and context version 12. Use a fresh state
+This revision uses journal schema 3 and context version 13. Use a fresh state
 directory for earlier development builds; there is no handover migration or
 compatibility reader. An unknown execution result still blocks new runs until
 it is inspected or explicitly resolved.

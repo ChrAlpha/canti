@@ -240,6 +240,26 @@ func TestIndependentCompactionKeepsTailAndDoesNotConsumeWorkSteps(t *testing.T) 
 			t.Fatalf("effect repeated: %+v", job)
 		}
 	}
+	records, err := f.store.Compactions(f.bounded(), runID, 0, 10)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("operations: %v", err)
+	}
+	for i, record := range records {
+		parent := capturedRequest(t, f, i+2, 1)
+		plan := record.Operation.Plan
+		if plan.Prefix == nil || plan.Prefix.RequestHash != harness.RequestHash(parent) {
+			t.Fatal("compaction did not derive from its committed request")
+		}
+		var boundary int
+		for _, e := range parent.Context.Entries {
+			if e.Index == plan.Through {
+				boundary = e.BlockEnd
+			}
+		}
+		if boundary != plan.Prefix.Blocks {
+			t.Fatal("prefix includes sources outside the replaced range")
+		}
+	}
 }
 
 func TestIndependentCompactionRetriesFrozenSummaryAndPreservesWorkIdentity(t *testing.T) {

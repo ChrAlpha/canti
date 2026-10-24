@@ -220,12 +220,12 @@ func sessionStressSummary(body []byte) (string, error) {
 		}
 	}
 	prompt := text.String()
-	_, current, ok := strings.Cut(prompt, "\nCurrent run: ")
-	if !ok {
+	runMatch := stressRun.FindStringSubmatch(prompt)
+	if len(runMatch) == 0 {
 		return "", fmt.Errorf("summary missing current run")
 	}
-	runID, _, _ := strings.Cut(current, "\n")
-	roundMatch := stressRound.FindStringSubmatch(current)
+	runID := runMatch[1]
+	roundMatch := stressRound.FindStringSubmatch(prompt)
 	if len(roundMatch) == 0 {
 		return "", fmt.Errorf("summary missing current round")
 	}
@@ -234,17 +234,10 @@ func sessionStressSummary(body []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sources, _, _ := strings.Cut(prompt, "\nCurrent run:")
-	for _, entry := range strings.Split(sources, "### Session source ")[1:] {
-		header, rest, _ := strings.Cut(entry, "\n")
-		if !strings.Contains(header, "(Run "+runID+";") {
-			continue
-		}
-		_, step, ok := strings.Cut(rest, "### Step ")
-		if ok {
-			if err := s.observe(round, runID, step); err != nil {
-				return "", err
-			}
+	_, current, _ := strings.Cut(prompt, "## Current window steps\n")
+	for _, step := range strings.Split("\n"+current, "\n### Step ")[1:] {
+		if err := s.observe(round, runID, step); err != nil {
+			return "", err
 		}
 	}
 	data, _ := json.Marshal(s)

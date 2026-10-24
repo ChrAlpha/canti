@@ -13,6 +13,8 @@ type ContextCapture struct {
 	Retrievals        []ContextRetrieval     `json:",omitempty"`
 	Sources           []ContextSource        `json:",omitempty"`
 	Compaction        CompactionCheck
+	// Prefix records a candidate exact source prefix already marked for caching.
+	Prefix *ContextPrefix `json:",omitempty"`
 }
 
 type ContextBytes struct {
@@ -74,4 +76,12 @@ type ContextEntryRef struct {
 	RunID     string
 	SourceSeq int64
 	Kind      string
+	// BlockEnd is the exclusive content-block boundary representing this source.
+	// A pinned input may share the preceding boundary instead of duplicating it.
+	BlockEnd int `json:",omitempty"`
+}
+
+type ContextPrefix struct {
+	Through int64
+	Blocks  int
 }

@@ -128,8 +128,11 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]
-		if err != nil || !reflect.DeepEqual(got, want) {
+		if err != nil || got.System != want.System || !reflect.DeepEqual(got.Blocks, want.Blocks) || got.Stable != want.Stable {
 			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User())
+		}
+		if got.CacheThrough < 1 || got.CacheThrough >= got.Stable {
+			t.Fatal("full active page lacks an earlier compaction cache boundary")
 		}
 		shown := strings.Count(got.User(), "\n### Step ")
 		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)

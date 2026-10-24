@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/ChrAlpha/canti/core"
 )
 
-func (l *Loop) planCompaction(run Run, snap Snapshot, s contextSelection, base string, before int, required bool) (*CompactPlan, error) {
+func (l *Loop) planCompaction(ctx context.Context, run Run, snap Snapshot, s contextSelection, base string, before int, required bool) (*CompactPlan, error) {
 	model, ok := l.model.(SummaryModel)
 	if !ok {
 		return nil, errors.New("harness: model does not support independent summaries")
@@ -36,46 +35,78 @@ func (l *Loop) planCompaction(run Run, snap Snapshot, s contextSelection, base s
 		}
 		return nil, nil
 	}
-	var history strings.Builder
-	for _, e := range s.Entries[:cut] {
-		history.WriteString(l.entryText(e, ""))
-	}
-	content := "Previous summary:\n" + fullBlock(s.Checkpoint.Summary) + "\nSource entries to replace:\n" + fullBlock(history.String()) +
-		"\nCurrent run: " + run.ID + "\nCurrent request (also kept verbatim):\n" + fullBlock(run.Goal) + "\nEffective explicit constraints:\n" + fullBlock(run.Constraints) +
-		fmt.Sprintf("\nThe summary must be at most %d UTF-8 bytes. Leave out superseded detail; preserve continuing obligations.\n", limit)
-	prompt := Prompt{System: summarySystem, Blocks: []string{content}}
-	// Bound the summary's input independently of the business prompt. Large
-	// backlogs are consumed in consecutive durable passes at the same safe point.
-	if len(content)+len(summarySystem) > l.cfg.Limits.Total {
-		if cut <= 1 {
-			return nil, errors.New("harness: one source unit does not fit the summary input budget")
-		}
-		shorter := s
-		shorter.Entries = s.Entries[:cut/2]
-		shorter.More = true
-		return l.planCompaction(run, snap, shorter, base, before, required)
-	}
-	request, err := model.FreezeSummary(prompt, l.cfg.SummaryTokens)
+	input, prefix, err := l.summaryInput(ctx, run, snap, s, cut, limit)
 	if err != nil {
 		return nil, err
 	}
-	if err := l.admitRequest(request); err != nil {
+	request, err := model.FreezeSummary(input, l.cfg.SummaryTokens)
+	if err != nil {
+		return nil, err
+	}
+	if request.InputTextBytes < 1 {
+		return nil, errors.New("harness: summary model omitted input text accounting")
+	}
+	err = l.admitRequest(request)
+	if err == nil && request.InputTextBytes > l.cfg.Limits.Total {
+		err = errors.New("harness: summary input exceeds the text budget")
+	}
+	if err != nil {
 		if cut <= 1 {
 			return nil, err
 		}
 		shorter := s
 		shorter.Entries = s.Entries[:cut/2]
 		shorter.More = true
-		return l.planCompaction(run, snap, shorter, base, before, required)
+		return l.planCompaction(ctx, run, snap, shorter, base, before, required)
 	}
 	through := s.Checkpoint.Through
 	if cut > 0 {
 		through = s.Entries[cut-1].Index
 	}
 	p, err := NewCompactPlan(CompactPlan{RunID: run.ID, RunSeq: snap.Seq, Owner: run.ContextOwner(), Base: base, Parent: s.Checkpoint.ID,
-		After: s.Checkpoint.Through, Through: through, SourceHash: ContextSourceHash(s.Entries[:cut]), Request: request,
+		After: s.Checkpoint.Through, Through: through, SourceHash: ContextSourceHash(s.Entries[:cut]), Request: request, Prefix: prefix,
 		MaxAttempts: l.cfg.SummaryAttempts, MaxSummaryBytes: limit, BeforeBytes: before, ReplacedBytes: replaced, TokenReserve: RequestInputEstimate(request) + int64(l.outputReserve(request))})
 	return &p, err
+}
+
+func (l *Loop) summaryInput(ctx context.Context, run Run, snap Snapshot, s contextSelection, cut, limit int) (SummaryInput, *FrozenPrefix, error) {
+	selected := s
+	selected.Entries = s.Entries[:cut]
+	input := SummaryInput{Instruction: summaryInstructions + fmt.Sprintf("\nThe summary payload must be at most %d UTF-8 bytes.\n", limit)}
+	previous, err := l.journal.LatestRequest(ctx, run.ID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return input, nil, err
+	}
+	blocks := MatchingPrefix(previous, s.Checkpoint, selected.Entries)
+	if blocks > 0 {
+		input.Parent, input.Blocks = &previous, blocks
+		return input, &FrozenPrefix{RequestHash: RequestHash(previous), Blocks: blocks}, nil
+	}
+	f := l.selectedFrame(run, snap.State, selected)
+	input.Prompt, _ = f.contextPrompt(l.cfg.Limits)
+	input.Blocks = len(input.Prompt.Blocks)
+	return input, nil, nil
+}
+
+// MatchingPrefix requires the exact checkpoint and complete source identities.
+// A new run, a staged summary, or a source absent from the request uses the same
+// canonical renderer instead of claiming a nonexistent warm prefix.
+func MatchingPrefix(r Request, cp Checkpoint, entries []ContextEntry) int {
+	if r.Context == nil || r.CheckpointID != cp.ID || r.Context.CheckpointID != cp.ID || r.Context.Through != cp.Through || len(r.Context.Entries) < len(entries) {
+		return 0
+	}
+	if len(r.Context.Entries) > 0 && r.Context.Entries[0].BlockEnd == 0 {
+		return 0
+	}
+	blocks := 1
+	for i, e := range entries {
+		ref := r.Context.Entries[i]
+		if ref.Index != e.Index || ref.RunID != e.RunID || ref.SourceSeq != e.SourceSeq || ref.Kind != e.Kind || ref.BlockEnd < blocks {
+			return 0
+		}
+		blocks = ref.BlockEnd
+	}
+	return blocks
 }
 
 func (l *Loop) compactionCut(run Run, s contextSelection) int {

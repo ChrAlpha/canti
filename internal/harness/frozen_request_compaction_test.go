@@ -34,13 +34,28 @@ func compactScenarios() []frozenScenario {
 	cross.runs = append([]frozenRun{}, base.runs...)
 	cross.runs = append(cross.runs, frozenRun{id: corpusNextRun, goal: "Continue, but use sync now.", constraints: "Read only; preserve completed effects.", replies: []string{corpusDecision(core.Return, "Earlier results retained.")}})
 	cross.marks = map[string][]string{"run2-step01-rev1.json": {"Continue, but use sync now.", "Read only; preserve completed effects.", "## Session summary", "Earlier assistant return:", "The original purpose was verified."}}
+	cross.edge = func(t *testing.T, requests map[string]harness.Request) {
+		base.edge(t, requests)
+		body := string(requests["run2-step01-rev1.json"].Body)
+		if strings.Index(body, "## Session summary") > strings.Index(body, "Earlier assistant return:") {
+			t.Fatal("retained history precedes its older summary")
+		}
+	}
+	tool := cross
+	tool.name, tool.tool = "tool-session-compact", true
 	failed := base
 	failed.name = "summary-exhausted"
 	failed.edge = nil
 	failed.marks = nil
 	failed.runs = []frozenRun{{id: corpusRun, goal: "Never discard the original context on summary failure.", replies: []string{corpusDecision(core.Exec, command), corpusDecision(core.Exec, command)}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete"}, stop: core.StopUnrecoverable}}
 	failed.summaryReplies = []string{`{"stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}]}`, `{"stop_reason":"end_turn","content":[{"type":"tool_use","name":"exec"}]}`, `{"stop_reason":"end_turn","content":[{"type":"text","text":" "}]}`}
-	return []frozenScenario{base, cross, failed}
+	executable := failed
+	executable.name = "summary-exec-rejected"
+	bad, _ := json.Marshal(core.Decision{Kind: core.Exec, Purpose: "Must never execute.", Payload: "touch unexpected-effect"})
+	text, _ := json.Marshal(string(bad))
+	response := `{"stop_reason":"end_turn","content":[{"type":"text","text":` + string(text) + `}]}`
+	executable.summaryReplies = []string{response, response, response}
+	return []frozenScenario{base, cross, tool, failed, executable}
 }
 
 func (r *corpusRig) compactionRecords(t *testing.T, runs []frozenRun, got map[string][]byte) {

@@ -40,7 +40,7 @@ func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	if c.Goal+c.Constraints+c.Environment+c.Session+c.Window+c.Summary+c.StepHeader != len(p.Blocks[0]) || c.EmptySteps+c.Progress+c.Repair != len(p.Blocks[len(p.Blocks)-1]) {
 		t.Fatalf("head or tail does not match blocks: %+v", c)
 	}
-	if !bytes.Equal(req.Body, []byte(p.System+"\n\n"+p.User())) {
+	if !bytes.Equal(req.Body, fakeBody(p)) {
 		t.Fatal("metadata changed the model's frozen body")
 	}
 }

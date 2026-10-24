@@ -38,9 +38,11 @@ type corpusModel struct {
 
 func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
-	var request struct{ System string }
+	var request struct {
+		Messages []struct{ Content []struct{ Text string } }
+	}
 	_ = json.Unmarshal(body, &request)
-	if strings.HasPrefix(request.System, "You summarize an agent's committed history") {
+	if len(request.Messages) == 2 && len(request.Messages[1].Content) > 0 && strings.HasPrefix(request.Messages[1].Content[0].Text, harness.CompactionPromptPrefix) {
 		m.mu.Lock()
 		m.summaries = append(m.summaries, body)
 		reply := ""
@@ -54,7 +56,15 @@ func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("content-type", "application/json")
-		io.WriteString(w, `{"stop_reason":"end_turn","model":"claude-opus-5","content":[{"type":"text","text":"Continue the user task, preserve its constraints, and verify original evidence."}],"usage":{"input_tokens":100,"output_tokens":20}}`)
+		d := core.Decision{Kind: core.Return, Purpose: "Preserve continuation context.", Payload: "Continue the user task, preserve its constraints, and verify original evidence."}
+		stop := "end_turn"
+		raw, _ := json.Marshal(d)
+		content := []map[string]any{{"type": "text", "text": string(raw)}}
+		if m.tool {
+			stop = "tool_use"
+			content = []map[string]any{{"type": "tool_use", "id": "summary", "name": "canti_decision", "input": d}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"stop_reason": stop, "model": "claude-opus-5", "content": content, "usage": map[string]int{"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
 		return
 	}
 	m.mu.Lock()

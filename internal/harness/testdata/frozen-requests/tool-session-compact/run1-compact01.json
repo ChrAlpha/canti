@@ -1,0 +1,56 @@
+{
+  "Plan": {
+    "Base": "",
+    "ID": "compact_49d6de61444bd5414a61acd08c256679bed636e5ba0cd58f752764731967f4db",
+    "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
+    "RunSeq": 14,
+    "Owner": "session:session-1",
+    "Parent": "",
+    "After": 0,
+    "Through": 2,
+    "SourceHash": "f928df0b4720d1683f1b16ad8330ece898a0a574db08cc0e6d82111a4775081e",
+    "Request": {
+      "MaxOutputTokens": 8192,
+      "InputTextBytes": 8369,
+      "Body": null,
+      "Model": "claude-opus-5",
+      "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+      "Adapter": "canti-anthropic/5-summary-tool"
+    },
+    "MaxAttempts": 3,
+    "MaxSummaryBytes": 550,
+    "ReplacedBytes": 806,
+    "BeforeBytes": 7626,
+    "TokenReserve": 17837,
+    "Prefix": {
+      "RequestHash": "5256ec3363e40605e7cc79b25328dd0aaede3eddd5e0643e9f7279ef8bb9bbde",
+      "Blocks": 2
+    }
+  },
+  "Attempts": [
+    {
+      "Number": 1,
+      "Done": true,
+      "Response": {
+        "UsageKnown": true,
+        "Body": null,
+        "Complete": true,
+        "Model": "claude-opus-5",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary-tool",
+        "Usage": {
+          "InputTokens": 100,
+          "OutputTokens": 20,
+          "Cache": {
+            "ReadTokens": 0,
+            "WriteTokens": 0
+          }
+        }
+      },
+      "Failure": "",
+      "UnknownUsage": false
+    }
+  ],
+  "Summary": "Continue the user task, preserve its constraints, and verify original evidence.",
+  "Accepted": true
+}

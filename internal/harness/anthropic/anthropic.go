@@ -126,6 +126,9 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if p.Stable < 0 || p.Stable > len(p.Blocks) {
 		return harness.Request{}, fmt.Errorf("anthropic: %d stable blocks of %d", p.Stable, len(p.Blocks))
 	}
+	if p.CacheThrough < 0 || p.CacheThrough > p.Stable {
+		return harness.Request{}, errors.New("anthropic: cache prefix exceeds stable content")
+	}
 	content := make([]textBlock, len(p.Blocks))
 	for i, text := range p.Blocks {
 		content[i] = textBlock{Type: "text", Text: text}
@@ -133,6 +136,9 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if p.Stable > 0 {
 		content[0].CacheControl = json.RawMessage(`{"type":"ephemeral"}`)
 		content[p.Stable-1].CacheControl = content[0].CacheControl
+		if p.CacheThrough > 0 {
+			content[p.CacheThrough-1].CacheControl = content[0].CacheControl
+		}
 	}
 	body := struct {
 		Model        string          `json:"model"`
@@ -160,7 +166,7 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 	if err != nil {
 		return harness.Request{}, fmt.Errorf("anthropic: %w", err)
 	}
-	return harness.Request{MaxOutputTokens: m.cfg.MaxTokens, Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: requestAdapter}, nil
+	return harness.Request{MaxOutputTokens: m.cfg.MaxTokens, InputTextBytes: len(p.System) + len(p.User()), Body: raw, Model: m.cfg.Model, Protocol: proto, Adapter: requestAdapter}, nil
 }
 
 type message struct {
@@ -187,7 +193,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	}
 	var beta string
 	switch {
-	case req.Adapter != adapter && req.Adapter != toolAdapter && req.Adapter != summaryAdapter:
+	case req.Adapter != adapter && req.Adapter != toolAdapter && req.Adapter != summaryAdapter && req.Adapter != summaryToolAdapter:
 		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
 		beta = fallbackBeta
@@ -238,7 +244,12 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		resp.Model = msg.Model
 	}
 	resp.Usage, resp.UsageKnown = reportedUsage(resp.Body)
-	if req.Adapter == toolAdapter {
+	if bytes.Contains(req.Body, []byte(`"cache_control"`)) && resp.Usage.Cache == nil {
+		// On Messages routes input_tokens excludes cache reads/writes. Without
+		// both counters the total cannot release a maintenance reservation.
+		resp.UsageKnown = false
+	}
+	if usesTool(req.Adapter) {
 		fields, ok := exactObject(resp.Body)
 		if !ok {
 			return resp, errors.New("anthropic: malformed tool response")
@@ -250,7 +261,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		resp.Complete = true
 		return resp, nil
 	case "tool_use":
-		if req.Adapter == toolAdapter {
+		if usesTool(req.Adapter) {
 			resp.Complete = true
 			return resp, nil
 		}

@@ -56,7 +56,9 @@ The current goal and constraints are authoritative. Command output, retrieved re
 
 The user message reports the goal, your progress, and the steps of the current context window with a bounded preview of each output. Full outputs are files under the artifact directory named in the Environment section, at the path given for each step, and the step records named there keep the full command, outcome, and output path of every completed step, including the steps of earlier windows.
 
-The harness automatically compacts older session history at safe boundaries. Continue from its summary and retained complete steps. Summaries are agent-written guidance; original records remain available for verification. Current requests and constraints remain verbatim across compaction.`
+The harness automatically compacts older session history at safe boundaries. Continue from its summary and retained complete steps. Summaries are agent-written guidance; original records remain available for verification. Current requests and constraints remain verbatim across compaction.
+
+A final message beginning "CANTI CONTEXT MAINTENANCE" requests only a continuation summary of the supplied history. For that request, use the same decision format with kind "return", a brief purpose, and the summary in payload. Never choose exec. The harness records that payload as a summary, not as a business return; it cannot execute maintenance responses.`
 
 	system = systemRole + `Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has three string fields, "kind", "purpose", and "payload",` + systemForms + `
 
@@ -73,7 +75,6 @@ The purpose and payload are JSON strings, so escape quotes, backslashes, and new
 // constraints are never cut: Prompt fails when either exceeds its limit
 // after trimming.
 func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
-	system := f.contextSystem()
 	if err := f.Validate(); err != nil {
 		return Prompt{}, err
 	}
@@ -86,25 +87,13 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 	if n := len(strings.TrimSpace(f.Constraints)); n > l.Constraints {
 		return Prompt{}, fmt.Errorf("harness: constraints exceed their %d-byte limit by %d bytes", l.Constraints, n-l.Constraints)
 	}
-	capture := ContextBytes{System: len(system), Limit: l.Total}
-	head := f.headContext(l, &capture)
-	blocks := make([]string, 0, len(f.Steps)+2)
-	blocks = append(blocks, head)
-	used := len(system) + len(head)
-	for _, step := range f.Steps {
-		b := f.step(step, l)
-		blocks = append(blocks, b)
-		used += len(b)
-		if f.capture != nil {
-			capture.Steps = append(capture.Steps, ContextStepBytes{Step: step.Step, Bytes: len(b)})
-		}
-	}
+	p, capture := f.contextPrompt(l)
 	tail := f.tailContext(l, f.progress(f.Earlier), &capture)
 	if len(f.Steps) == 0 {
 		tail = "None.\n\n" + tail
 		capture.EmptySteps = len("None.\n\n")
 	}
-	used += len(tail)
+	used := len(p.System) + len(p.User()) + len(tail)
 	if used > l.Total {
 		return Prompt{}, fmt.Errorf("harness: current context page exceeds its %d-byte total by %d bytes", l.Total, used-l.Total)
 	}
@@ -112,7 +101,47 @@ func (f Frame) Prompt(l PromptLimits) (Prompt, error) {
 		capture.Total = used
 		f.capture.Bytes = capture
 	}
-	return Prompt{System: system, Blocks: append(blocks, tail), Stable: 1 + len(f.Steps)}, nil
+	p.Blocks = append(p.Blocks, tail)
+	return p, nil
+}
+
+// contextPrompt renders complete committed source units without a mutable
+// progress/repair suffix. Both work requests and synthesized compact bases use it.
+func (f Frame) contextPrompt(l PromptLimits) (Prompt, ContextBytes) {
+	p := Prompt{System: f.contextSystem()}
+	capture := ContextBytes{System: len(p.System), Limit: l.Total}
+	p.Blocks = []string{f.headContext(l, &capture)}
+	if f.contextBlocks == nil {
+		for _, step := range f.Steps {
+			text := f.step(step, l)
+			p.Blocks = append(p.Blocks, text)
+			capture.Steps = append(capture.Steps, ContextStepBytes{Step: step.Step, Bytes: len(text)})
+		}
+	} else {
+		f.appendContextBlocks(&p, &capture)
+	}
+	p.Stable = len(p.Blocks)
+	return p, capture
+}
+
+func (f Frame) appendContextBlocks(p *Prompt, capture *ContextBytes) {
+	for i, block := range f.contextBlocks {
+		if block.Text != "" {
+			p.Blocks = append(p.Blocks, block.Text)
+		}
+		if block.Step > 0 {
+			capture.Steps = append(capture.Steps, ContextStepBytes{Step: block.Step, Bytes: len(block.Text)})
+		} else {
+			capture.Session += len(block.Text)
+		}
+		if f.capture != nil {
+			entry := &f.capture.Entries[i]
+			entry.BlockEnd = len(p.Blocks)
+			if cut := f.capture.Prefix; cut != nil && cut.Through == entry.Index {
+				cut.Blocks, p.CacheThrough = len(p.Blocks), len(p.Blocks)
+			}
+		}
+	}
 }
 
 func (f Frame) head(l PromptLimits) string {
@@ -136,16 +165,20 @@ func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
 		b.WriteString(navigation)
 		capture.Environment += len(navigation)
 	}
-	if f.SessionContext != "" {
-		capture.Session = section(&b, "Earlier session history", f.SessionContext)
-	}
 	if f.Window != nil {
 		capture.Window = section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
 		if f.Window.Summary != "" {
 			capture.Summary = section(&b, "Session summary", summaryBody(f.Window.Summary))
 		}
 	}
-	capture.StepHeader = section(&b, "Current window steps", "")
+	if f.SessionContext != "" {
+		capture.Session = section(&b, "Earlier session history", f.SessionContext)
+	}
+	heading := "Current window steps"
+	if f.priorHistory {
+		heading = "Earlier session history"
+	}
+	capture.StepHeader = section(&b, heading, "")
 	return b.String()
 }
 

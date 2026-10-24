@@ -121,9 +121,9 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"unexpected credentials"}}`)
 		return
 	}
-	var request struct{ System string }
+	var request struct{ Tools json.RawMessage }
 	_ = json.Unmarshal(body, &request)
-	if strings.HasPrefix(request.System, "You summarize an agent's committed history") {
+	if isSummaryRequest(body) {
 		text := "Continue the user task, preserve its constraints, and verify original evidence."
 		m.mu.Lock()
 		summarize := m.summarize
@@ -137,7 +137,15 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"stop_reason": "end_turn", "model": "claude-test", "content": []map[string]string{{"type": "text", "text": text}}, "usage": map[string]int{"input_tokens": 100, "output_tokens": 20}})
+		decision := core.Decision{Kind: core.Return, Purpose: "Preserve continuation context.", Payload: text}
+		stop := "end_turn"
+		raw, _ := json.Marshal(decision)
+		content := []map[string]any{{"type": "text", "text": string(raw)}}
+		if len(request.Tools) > 0 {
+			stop = "tool_use"
+			content = []map[string]any{{"type": "tool_use", "id": "summary", "name": "canti_decision", "input": decision}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"stop_reason": stop, "model": "claude-test", "content": content, "usage": map[string]int{"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
 		return
 	}
 	step, prompt, err := promptOf(body)
@@ -488,9 +496,15 @@ func toolReply(decisions ...core.Decision) string {
 }
 
 func isSummaryRequest(body []byte) bool {
-	var r struct{ System string }
+	var r struct {
+		Messages []struct{ Content []struct{ Text string } }
+	}
 	_ = json.Unmarshal(body, &r)
-	return strings.HasPrefix(r.System, "You summarize an agent's committed history")
+	if len(r.Messages) == 0 {
+		return false
+	}
+	last := r.Messages[len(r.Messages)-1].Content
+	return len(last) > 0 && strings.HasPrefix(last[len(last)-1].Text, harness.CompactionPromptPrefix)
 }
 func (m *scriptedModel) summaryRequests() [][]byte {
 	m.mu.Lock()

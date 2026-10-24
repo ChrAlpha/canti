@@ -1,7 +1,7 @@
 {
   "Plan": {
     "Base": "",
-    "ID": "compact_a50c98d4e122e3b1d05e8ce3d74110ef519fa973381f7c39ae6b4aa4992b1e68",
+    "ID": "compact_066246f1c7014b308c74fa42d14ad5d03e825a5c084dba356c29f4e02e11ee8c",
     "RunID": "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
     "RunSeq": 14,
     "Owner": "run:run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31",
@@ -11,16 +11,21 @@
     "SourceHash": "1b81e72fa52ee6c7905e57b4205cd7f975460a541d2479e4823be383d9363661",
     "Request": {
       "MaxOutputTokens": 8192,
+      "InputTextBytes": 8331,
       "Body": null,
       "Model": "claude-opus-5",
-      "Protocol": "anthropic-messages/2023-06-01",
-      "Adapter": "canti-anthropic/4-summary"
+      "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+      "Adapter": "canti-anthropic/5-summary"
     },
     "MaxAttempts": 3,
     "MaxSummaryBytes": 488,
     "ReplacedBytes": 744,
-    "BeforeBytes": 7193,
-    "TokenReserve": 11587
+    "BeforeBytes": 7555,
+    "TokenReserve": 17623,
+    "Prefix": {
+      "RequestHash": "2b6b3c01b5da90ed908fe58ee10930c0530408cefd67376dadf50bee84db6b85",
+      "Blocks": 2
+    }
   },
   "Attempts": [
     {
@@ -30,8 +35,8 @@
         "Body": null,
         "Complete": false,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 0,
           "OutputTokens": 0
@@ -47,8 +52,8 @@
         "Body": null,
         "Complete": true,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 0,
           "OutputTokens": 0
@@ -64,14 +69,14 @@
         "Body": null,
         "Complete": true,
         "Model": "claude-opus-5",
-        "Protocol": "anthropic-messages/2023-06-01",
-        "Adapter": "canti-anthropic/4-summary",
+        "Protocol": "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01",
+        "Adapter": "canti-anthropic/5-summary",
         "Usage": {
           "InputTokens": 0,
           "OutputTokens": 0
         }
       },
-      "Failure": "anthropic: empty summary",
+      "Failure": "anthropic: summary must return a nonempty continuation payload",
       "UnknownUsage": true
     }
   ],

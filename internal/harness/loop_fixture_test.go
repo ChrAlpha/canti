@@ -85,7 +85,34 @@ func (m *fakeModel) Freeze(p harness.Prompt) (harness.Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prompts = append(m.prompts, p)
-	return harness.Request{Body: []byte(p.System + "\n\n" + p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, m.freezeErr
+	return harness.Request{Body: fakeBody(p), InputTextBytes: len(p.System) + len(p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, m.freezeErr
+}
+
+// Keep the fake transport's block framing in its frozen bytes, too. Recovery
+// tests deliberately discard every in-memory prompt between transitions.
+func fakeBody(p harness.Prompt) []byte {
+	sizes := []int{len(p.System) + 2}
+	for _, block := range p.Blocks {
+		sizes = append(sizes, len(block))
+	}
+	framing, _ := json.Marshal(sizes)
+	return append(append([]byte(p.System+"\n\n"+p.User()), 0), framing...)
+}
+
+func fakePrefix(r harness.Request, blocks int) (string, error) {
+	end := bytes.LastIndexByte(r.Body, 0)
+	var sizes []int
+	if end < 0 || json.Unmarshal(r.Body[end+1:], &sizes) != nil || blocks < 1 || blocks >= len(sizes) {
+		return "", errors.New("invalid frozen fake prefix")
+	}
+	n := 0
+	for _, size := range sizes[:blocks+1] {
+		if size < 0 || size > end-n {
+			return "", errors.New("invalid fake block size")
+		}
+		n += size
+	}
+	return string(r.Body[:n]), nil
 }
 
 func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.Response, error) {
@@ -548,8 +575,17 @@ func twoSteps() []reply {
 	return []reply{execReply("ls -la /workspace"), execReply("find . -name '*.go' | wc -l"), returnReply("There are 3 Go files.")}
 }
 
-func (m *fakeModel) FreezeSummary(p harness.Prompt, _ int) (harness.Request, error) {
-	return harness.Request{Body: []byte(p.System + "\n" + p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake-summary"}, nil
+func (m *fakeModel) FreezeSummary(input harness.SummaryInput, _ int) (harness.Request, error) {
+	p := input.Prompt
+	prefix := p.System + "\n\n" + p.User()
+	if input.Parent != nil {
+		var err error
+		prefix, err = fakePrefix(*input.Parent, input.Blocks)
+		if err != nil {
+			return harness.Request{}, err
+		}
+	}
+	return harness.Request{Body: []byte(prefix + input.Instruction), InputTextBytes: len(prefix) - 2 + len(input.Instruction), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake-summary"}, nil
 }
 func (m *fakeModel) Summary(r harness.Response) (string, error) {
 	if !r.Complete {
