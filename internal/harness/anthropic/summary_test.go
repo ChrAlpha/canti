@@ -107,12 +107,19 @@ func TestSummaryAcceptsOnlyReturnPayloadInEitherTransport(t *testing.T) {
 }
 
 func TestSummaryUsageRequiresExplicitNonnegativeCounts(t *testing.T) {
+	valid := `{"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}`
+	for _, value := range []string{`"input_tokens":10`, `"output_tokens":2`, `"cache_read_input_tokens":5`, `"cache_creation_input_tokens":3`} {
+		body := strings.Replace(valid, value, strings.Split(value, ":")[0]+": null ", 1)
+		if _, ok := reportedUsage([]byte(body)); ok {
+			t.Fatalf("null usage accepted %s", body)
+		}
+	}
 	for _, body := range []string{`{}`, `{"usage":{}}`, `{"usage":{"input_tokens":1}}`, `{"usage":{"input_tokens":1,"output_tokens":-1}}`, `{"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":-2}}`, `{"usage":{"input_tokens":9223372036854775807,"output_tokens":1}}`, `{"usage":{"input_tokens":0,"input_tokens":1,"output_tokens":0}}`} {
 		if _, ok := reportedUsage([]byte(body)); ok {
 			t.Fatalf("invalid usage accepted %s", body)
 		}
 	}
-	u, ok := reportedUsage([]byte(`{"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}`))
+	u, ok := reportedUsage([]byte(valid))
 	if !ok || u.InputTokens != 18 || u.OutputTokens != 2 || u.Cache == nil || u.Cache.ReadTokens != 5 || u.Cache.WriteTokens != 3 {
 		t.Fatalf("usage %+v %t", u, ok)
 	}

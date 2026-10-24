@@ -160,10 +160,11 @@ func reportedUsage(body []byte) (harness.Usage, bool) {
 			}
 			continue
 		}
-		var value int64
-		if json.Unmarshal(raw, &value) != nil || value < 0 {
+		var count *int64
+		if json.Unmarshal(raw, &count) != nil || count == nil || *count < 0 {
 			return harness.Usage{}, false
 		}
+		value := *count
 		if name == "output_tokens" {
 			result.OutputTokens = value
 			continue

@@ -78,17 +78,25 @@ func message(stop, content string) string {
 }
 
 func TestCompleteKeepsCachedInputUnknownWithoutBothCacheCounters(t *testing.T) {
-	for _, counts := range []string{``, `,"cache_read_input_tokens":0`, `,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`} {
-		t.Run(counts, func(t *testing.T) {
-			body := `{"model":"claude-opus-5","content":` + decision + `,"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":7` + counts + `}}`
+	for _, tc := range []struct {
+		counts string
+		known  bool
+	}{
+		{``, false},
+		{`,"cache_read_input_tokens":0`, false},
+		{`,"cache_read_input_tokens":null,"cache_creation_input_tokens":0`, false},
+		{`,"cache_read_input_tokens":0,"cache_creation_input_tokens":null`, false},
+		{`,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, true},
+	} {
+		t.Run(tc.counts, func(t *testing.T) {
+			body := `{"model":"claude-opus-5","content":` + decision + `,"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":7` + tc.counts + `}}`
 			srv := serve(t, reply(http.StatusOK, body))
 			m := newModel(t, srv.URL, nil)
 			r, err := m.Complete(context.Background(), freeze(t, m))
 			if err != nil {
 				t.Fatal(err)
 			}
-			known := strings.Contains(counts, "cache_creation_input_tokens")
-			if r.UsageKnown != known || (r.Usage.Cache != nil) != known {
+			if r.UsageKnown != tc.known || (r.Usage.Cache != nil) != tc.known {
 				t.Fatal("missing cache usage became a zero-cost cache read")
 			}
 		})
