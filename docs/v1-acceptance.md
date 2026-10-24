@@ -58,6 +58,34 @@ business steps, 600,000 budget tokens and four minutes. Set
 `CANTI_LIVE_EVIDENCE_DIR` to retain its workspace and journal outside tracked
 source. Provider credentials are consumed from the environment, never recorded.
 
+### Verification record, 2026-10-24
+
+Code: `114b433e0e4e9defbf39ef95b2fce6f09a7b8b08`, based on independent
+compaction `98786ad7490e86331e59c87392deb55865b23dfe`. The prefix feature is
+`0cee13a`; `114b433` additionally rejects null usage counters. The environment
+was Linux amd64, Go 1.26.10 and Docker 29.9.1-1, with an empty task-owned
+`DOCKER_CONFIG`. No live provider authentication was configured.
+
+| Command | Observed result |
+| --- | --- |
+| `GOFLAGS='-p=1' make check lint` | Passed; both ordinary and `integration,live` vet/lint, zero lint issues |
+| `go test -count=1 -race -p 1 ./...` | Passed; subsequent fixture recovery and null-usage changes were rechecked by the integration and adapter runs below |
+| `GOFLAGS='-p=1 -json' make integration` | Passed: eight test packages, 621 top-level tests and 1,025 subtests; two external retrieval-corpus experiments skipped because their corpus was not supplied |
+| `go test -count=1 -race -tags integration,live ./internal/harness/anthropic` | Passed, including both null cache-counter regressions; opt-in live tests skipped |
+| `go test ./internal/harness -run '^$' -bench '^BenchmarkContextCost$' -benchtime=1x -count=1` | Passed all four fixture scenarios and frozen-body consistency checks; one iteration is not a performance estimate |
+| `make commits BASE=98786ad7490e86331e59c87392deb55865b23dfe` and `git diff --check` | Passed |
+
+The full integration invocation started at `0cee13a`; its adapter package
+also built and passed the final null-counter regressions. The recovery stress
+case completed 80 steps, 84 requests, seven retries, 64 retrievals, 47
+compactions and 22 store reopens, with a maximum prompt of 23,076 bytes.
+Each of eight lost-acknowledgement boundaries was exercised twice.
+
+This is offline model and real SQLite/CLI/Docker evidence. Warm/cold cache
+reads, the aged-cache check, live summary fidelity and the real-provider
+three-input continuation task remain unverified. Neither historical provider
+measurements nor the skipped live tests satisfy those gates.
+
 ## Offline evidence
 
 These tests run in `make check`, and under the race detector in
