@@ -149,9 +149,18 @@ func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	_, wait := f.startWith(in, nil, "chat", "-session", "shared", "-summary-bytes", "2048", "-context-bytes", "71600")
 	io.WriteString(w, "one\n")
 	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
-	if r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000)); r.code != exitOK {
-		t.Fatalf("other process: %+v", r)
-	}
+	// The terminal transition precedes closing the journal and releasing the
+	// workspace lock. Retry only a busy admission, with the same input identity.
+	waitFor(t, func() bool {
+		r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000))
+		if r.code == exitLocked {
+			return false
+		}
+		if r.code != exitOK {
+			t.Fatalf("other process: %+v", r)
+		}
+		return true
+	})
 	go func() { io.WriteString(w, "two\nthree\n"); w.Close() }()
 	r := wait()
 	in.Close()
