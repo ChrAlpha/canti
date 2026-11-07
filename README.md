@@ -90,15 +90,16 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | `canti run -goal TEXT` | Start a run and drive it until it returns or stops |
 | `canti chat [-session ID]` | Talk with the agent: each input becomes the next run of one session |
 | `canti resume` | Continue the latest run, for example after a crash |
-| `canti status`, `canti history` | Print the run state as JSON, or its transitions as JSON Lines |
+| `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
-| `canti resolve -job` or `-execution STATE` | Record the job, or the outcome, of an effect whose result is unknown |
+| `canti resolve -job` or `-execution STATE` | Recover an inspected effect, or record an operator assertion with `-note` and, for exited/timed-out work, `-owner` |
 | `canti host` | Serve the state directory to the commands that drive runs, which start one on demand unless given `-host embedded`, until a signal or `canti host -stop` |
 
-A run created by a canti whose context rules differ, as its stored context
-version records, is not resumed: inspect it, then stop it, resolving it first
-if it needs resolution, to start new runs in the same state directory. A run
-that ended with an outcome resolved as unknown keeps blocking new runs there.
+Only the current schema, semantics, executor record and context versions are
+supported; an unsupported state directory is rejected with a fresh-state remedy.
+Same-version restarts preserve committed facts and exact frozen request bytes.
+An unknown outcome requires explicit inspection or operator resolution and never
+authorizes rerunning the command.
 
 The first SIGINT or SIGTERM stops the run the same way as `canti stop`. For
 `run` and `resume`, exit status 0 means the agent returned, 3 that the run

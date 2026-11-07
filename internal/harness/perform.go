@@ -12,42 +12,35 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 )
 
-// effect carries out the committed effect of snap by its acceptance: the
-// harness performs or cancels a local action itself, and the executor binds,
-// starts, inspects, or cancels an external one. An effect accepted before
-// actions were recorded is only cancelled, in process when it was carried
-// out in process and otherwise through the executor.
+// effect routes exclusively by the committed recovery contract.
 func (l *Loop) effect(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
-	s := snap.State
-	accepted, err := ActionOf(ctx, l.journal, s)
+	a, err := ActionOf(ctx, l.journal, snap.State)
 	if err != nil {
 		return snap, err
 	}
-	intent := s.Intent()
-	switch {
-	case accepted.Provenance == ProvenanceLegacy && intent != core.IntentCancel:
-		return snap, fmt.Errorf("%w: run %s is %s", errLegacyEffect, s.RunID, s.Phase)
-	case accepted.Local() && intent == core.IntentBind:
-		return l.perform(ctx, run, snap, accepted.Action)
-	case accepted.Local() && intent == core.IntentCancel:
+	if a.Local() {
+		if snap.State.Intent() == core.IntentEffect {
+			return l.perform(ctx, run, snap, a.Action)
+		}
 		obs := Observation{Execution: core.ExecutionCancelled, Preview: "Context action cancelled."}
-		return l.runner.Commit(ctx, snap, core.Observed{EffectID: s.EffectID, Execution: core.ExecutionCancelled}, Facts{Observation: &obs})
-	case accepted.Local():
-		return snap, fmt.Errorf("harness: the local action of effect %s is %s", s.EffectID, s.Phase)
+		return l.runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionCancelled}, Facts{Observation: &obs})
 	}
-	switch intent {
-	case core.IntentBind:
-		return l.runner.Bind(ctx, snap)
-	case core.IntentStart:
-		return l.runner.Start(ctx, snap)
-	case core.IntentInspect:
-		return l.watch(ctx, run, snap)
+	effect, err := l.descriptor(run, snap.State, a)
+	if err != nil {
+		return snap, err
 	}
-	next, err := l.cancel(ctx, run, snap)
-	if err != nil && accepted.Provenance == ProvenanceLegacy && ctx.Err() == nil {
-		err = fmt.Errorf("stopping an effect accepted before actions were recorded needs a reachable executor: %w", err)
+	return l.watch(ctx, run, snap, effect)
+}
+
+func (l *Loop) descriptor(run Run, s core.State, a Accepted) (Effect, error) {
+	if a.Execution == nil || a.Execution.ConfigDigest != ConfigDigest(run.Config) {
+		return Effect{}, fmt.Errorf("%w: accepted execution configuration differs", ErrIncompatible)
 	}
-	return next, err
+	e := Effect{ID: s.EffectID, Command: s.Decision.Payload, Spec: a.Execution.Spec}
+	if l.executor.Specification(e.Command) != e.Spec {
+		return Effect{}, fmt.Errorf("%w: executor specification differs from acceptance", ErrIncompatible)
+	}
+	return e, nil
 }
 
 // perform carries out the local action a of snap and commits its outcome,

@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -195,46 +194,6 @@ func TestConcurrentStoresSubmitAndReopen(t *testing.T) {
 	}
 }
 
-func TestSessionMigrationFromV1PreservesLegacyRun(t *testing.T) {
-	ctx := context.Background()
-	path := tempPath(t)
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v1 := strings.Split(schema, "CREATE TABLE session_runs")[0]
-	if _, err := db.ExecContext(ctx, v1+"PRAGMA user_version = 1;"); err != nil {
-		t.Fatal(err)
-	}
-	legacy := testRun("legacy")
-	runData, initialData, err := encodeRun(legacy, fresh(t, legacy.ID, limits))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, insertRunSQL, legacy.ID, core.SemanticsVersion, runData, initialData); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s := open(t, path)
-	if got, err := s.Run(ctx, legacy.ID); err != nil || !sameRun(got, legacy) {
-		t.Fatalf("legacy run after migration = %#v, %v", got, err)
-	}
-	stopRun(t, s, legacy)
-	r := sessionRun("run-1", "input-1")
-	if _, err := s.Submit(ctx, r, fresh(t, r.ID, limits)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s = open(t, path)
-	if got, err := s.SessionInput(ctx, r.SessionID, r.InputID); err != nil || got.ID != r.ID {
-		t.Fatalf("migrated input = %#v, %v", got, err)
-	}
-}
-
 func TestSessionAssociationFailureRollsBackRun(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, tempPath(t))
@@ -297,8 +256,6 @@ func TestSessionAbandonedUnknownEffectBlocksAdmission(t *testing.T) {
 	}
 	d := newDriver(t, s, harness.Snapshot{State: fresh(t, r.ID, limits)})
 	d.decide(execBody("printf ok"), harness.Usage{})
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "lost job"})
 	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionUnknown}, harness.Facts{Observation: observation(core.ExecutionUnknown, 0)})
 	if d.snap.State.Phase != core.PhaseStopped {

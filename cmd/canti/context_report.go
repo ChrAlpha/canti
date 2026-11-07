@@ -9,7 +9,6 @@ import (
 
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
-	"github.com/ChrAlpha/canti/internal/host"
 )
 
 type contextReport struct {
@@ -48,7 +47,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if err := f.check(a.runID); err != nil {
 			return exitUsage, err
 		}
-		store, run, c, err := a.read(ctx)
+		store, run, _, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
@@ -60,7 +59,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
-		report, err := describeContext(page, f.bodies, c.ContextVersion == host.ContextVersion)
+		report, err := describeContext(page, f.bodies)
 		if err != nil {
 			return exitError, err
 		}
@@ -97,7 +96,7 @@ func (a *app) writeRequest(ctx context.Context, store *sqlite.Store, id string, 
 	return exitOK, err
 }
 
-func describeContext(p sqlite.ContextPage, bodies, currentRules bool) (contextReport, error) {
+func describeContext(p sqlite.ContextPage, bodies bool) (contextReport, error) {
 	r := contextReport{RunID: p.Run.ID, SessionID: p.Run.SessionID, SessionSeq: p.Run.SessionSeq, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}, EventBytes: p.EventBytes, EventByteLimit: sqlite.ContextEventPageBytes}
 	var err error
 	if r.Request, err = harness.DescribeContextRequest(p.Request); err != nil {
@@ -120,7 +119,7 @@ func describeContext(p sqlite.ContextPage, bodies, currentRules bool) (contextRe
 		r.Delta = &delta
 	}
 	for _, event := range p.Events {
-		r.Events = append(r.Events, harness.DescribeContextEvent(event, bodies, currentRules))
+		r.Events = append(r.Events, harness.DescribeContextEvent(event, bodies))
 		r.NextAfter = event.Seq
 	}
 	if !r.More {
@@ -150,14 +149,14 @@ func (r contextReport) writeText(w io.Writer) error {
 		t.line("Window begins at step %d; handover source step %d; requested %t", q.Window.FirstStep, q.Window.SourceStep, q.Window.Requested)
 	}
 	if q.Capture == nil {
-		t.line("Context capture unavailable for this historical request.")
+		t.line("Context capture unavailable for this recorded request.")
 	} else {
 		t.capture(q.Capture)
 	}
 	if r.Previous != nil {
 		t.line("Previous: step %d revision %d (seq %d); request bytes delta %+d", r.Previous.Step, r.Previous.Revision, r.Previous.Seq, r.Delta.BodyBytes)
 		if r.Delta.WindowChanged == nil {
-			t.line("Window change unavailable: historical window metadata is missing.")
+			t.line("Window change unavailable: recorded window metadata is missing.")
 		} else {
 			t.line("Window changed: %t", *r.Delta.WindowChanged)
 		}

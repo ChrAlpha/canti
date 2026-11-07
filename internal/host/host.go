@@ -10,7 +10,6 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
@@ -202,27 +201,9 @@ func Find(ctx context.Context, j interface {
 	return run, c, err
 }
 
-// Halted returns the snapshot of run id, of config c of another context
-// version, once it has halted, and otherwise fails naming how to close it:
-// this host renders the context of ContextVersion only.
-func (h *Host) Halted(ctx context.Context, id string, c RunConfig) (harness.Snapshot, error) {
-	snap, err := h.store.Latest(ctx, id)
-	if err == nil {
-		err = snap.Validate()
-	}
-	if err == nil && snap.State.Intent() != core.IntentHalt {
-		err = fmt.Errorf("run %s is %s and %s", id, snap.State.Phase, Unresumable(id, c))
-	}
-	return snap, err
-}
-
-// loop builds the loop of run with model m. A loop that does not resume the
-// run renders no request, so it ignores the context settings that another
-// context version may have stored.
-func (h *Host) loop(run harness.Run, c RunConfig, m harness.Model, resume bool) (*harness.Loop, error) {
-	if !resume {
-		c.ContextBytes, c.HandoverBytes, c.WindowSteps, c.WindowBytes = harness.DefaultPromptLimits().Total, 0, 0, 0
-	}
+// loop reconstructs the exact stored configuration for every operation,
+// including credential-free stopping, resolution and inspection.
+func (h *Host) loop(run harness.Run, c RunConfig, m harness.Model) (*harness.Loop, error) {
 	x, err := NewExecutor(c, h.opts.State)
 	if err != nil {
 		return nil, err

@@ -1,16 +1,13 @@
 package docker
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +19,8 @@ import (
 // record is the final report of a finished job and the hash of the spec it
 // ran under. Once published it is the authority for the effect.
 type record struct {
+	Format int
 	harness.Job
-	Spec string
 }
 
 // tap keeps the first limit bytes of a stream in w, counts every byte, and
@@ -119,19 +116,11 @@ func demux(w io.Writer, r io.Reader) error {
 
 // describe reports the artifact captured for job, keeping the detail job was
 // derived with, such as why it never started.
-func describe(path string, t *tap, logsErr error, job harness.Job) harness.ArtifactRef {
+func describe(path string, t *tap, job harness.Job) harness.ArtifactRef {
 	ref := harness.ArtifactRef{Path: path}
 	var notes []string
 	if job.Output.Detail != "" {
 		notes = append(notes, job.Output.Detail)
-	}
-	switch {
-	case logsErr != nil:
-		ref.Detail = strings.Join(append(notes, "logs unavailable: "+logsErr.Error()), "; ")
-		return ref
-	case t.werr != nil:
-		ref.Detail = strings.Join(append(notes, "artifact write failed: "+t.werr.Error()), "; ")
-		return ref
 	}
 	if t.stored < t.total {
 		notes = append(notes, fmt.Sprintf("kept %d of %d bytes", t.stored, t.total))
@@ -143,122 +132,112 @@ func describe(path string, t *tap, logsErr error, job harness.Job) harness.Artif
 	return ref
 }
 
-func verify(root string, ref harness.ArtifactRef) harness.ArtifactRef {
-	if !ref.Available {
-		return ref
+// finish publishes output and the terminal receipt before releasing physical
+// evidence. Any capture or publication failure leaves the owner recoverable.
+func (x *Executor) finish(ctx context.Context, effect harness.Effect, job harness.Job) (harness.Job, error) {
+	if err := job.Validate(effect); err != nil {
+		return harness.Job{}, err
 	}
-	fi, err := os.Stat(filepath.Join(root, ref.Path))
-	var note string
-	switch {
-	case err != nil:
-		note = "artifact missing: " + err.Error()
-	case fi.Size() != ref.Bytes:
-		note = fmt.Sprintf("artifact has %d bytes, recorded %d", fi.Size(), ref.Bytes)
-	default:
-		return ref
-	}
-	ref.Detail = strings.TrimPrefix(ref.Detail+"; "+note, "; ")
-	ref.Available, ref.Complete = false, false
-	return ref
-}
-
-// finish captures the output of a finished job and records the job, with an
-// unavailable artifact if the capture failed, because the report is final.
-// Only once it is recorded is its container removed. A capture interrupted
-// because ctx is done, or a record that cannot be published, reports an
-// error and leaves the capture to the next report.
-func (x *Executor) finish(ctx context.Context, id string, job harness.Job, spec string) (harness.Job, error) {
-	job, err := x.collect(ctx, id, job)
+	job, err := x.collect(ctx, effect.ID, job)
 	if err == nil {
-		data, _ := json.Marshal(record{job, spec})
-		err = publish(x.record(id), data, false)
+		err = job.Validate(effect)
+	}
+	if err == nil {
+		err = x.receiptWitnesses(effect, job)
+	}
+	if err == nil {
+		data, marshalErr := json.Marshal(record{Format: recordFormat, Job: job})
+		err = marshalErr
+		if err == nil {
+			err = publish(x.record(effect.ID), data, true)
+		}
 	}
 	if err != nil {
 		return harness.Job{}, err
 	}
-	x.release(ctx, id, job.ID)
-	job.Output = verify(x.artifacts(), job.Output)
+	x.release(ctx, job.ID)
 	return job, nil
 }
 
-// load reads the effect's final record, if any. A record that is not exactly
-// a complete record of a finished job is an error, never missing or final.
+// load rejects old, malformed and nonterminal receipts. Known outcomes are
+// immutable; later artifact loss cannot rewrite the retained receipt.
 func (x *Executor) load(id string) (record, bool, error) {
-	data, err := os.ReadFile(x.record(id))
-	if errors.Is(err, fs.ErrNotExist) {
-		return record{}, false, nil
-	}
 	var rec record
-	if err == nil {
-		d := json.NewDecoder(bytes.NewReader(data))
-		d.DisallowUnknownFields()
-		if err = d.Decode(&rec); err == nil {
-			if _, end := d.Token(); end != io.EOF {
-				err = errors.New("trailing data")
-			}
+	found, err := readJSON(x.record(id), &rec)
+	if err == nil && found {
+		if rec.Format != recordFormat || !terminal(rec.Status) {
+			err = errors.New("unsupported or incomplete record; use fresh state")
+		} else {
+			err = rec.Job.Validate(harness.Effect{ID: id, Spec: rec.Spec})
 		}
-	}
-	if err == nil && (rec.ID == "" || rec.Spec == "" || !terminal(rec.Status)) {
-		err = errors.New("incomplete")
 	}
 	if err != nil {
 		return record{}, false, fmt.Errorf("docker: record of effect %s: %w", id, err)
 	}
-	return rec, true, nil
+	return rec, found, nil
 }
 
-// recorded returns the effect's final record, if any, retrying the removal
-// of its container.
-func (x *Executor) recorded(ctx context.Context, id string) (record, bool, error) {
-	rec, done, err := x.load(id)
+// recorded validates the accepted descriptor and both witnesses before even
+// retrying release. A foreign receipt cannot authorize removal of an owner.
+func (x *Executor) recorded(ctx context.Context, effect harness.Effect) (record, bool, error) {
+	rec, done, err := x.load(effect.ID)
 	if err != nil || !done {
+		return rec, done, err
+	}
+	if err := rec.Job.Validate(effect); err != nil {
 		return record{}, false, err
 	}
-	x.release(ctx, id, rec.ID)
-	rec.Output = verify(x.artifacts(), rec.Output)
+	if err := x.receiptWitnesses(effect, rec.Job); err != nil {
+		return record{}, false, err
+	}
+	if err := x.syncWitnesses(effect.ID); err != nil {
+		return record{}, false, err
+	}
+	x.release(ctx, rec.ID)
 	return rec, true, nil
 }
 
-// release removes a recorded job's container by the ID it was inspected
-// under, never a container that later took its name. A failure leaves it to
-// the next report.
-func (x *Executor) release(ctx context.Context, id, jobID string) {
-	if jobID != fenced(id) {
-		_ = x.api(ctx, "rm", http.MethodDelete, "/containers/"+jobID+"?v=1", nil, nil)
+// receiptWitnesses checks not only identity but the durable publication chain
+// needed to establish the retained status. A missing latch or stop intent is
+// corruption, even if the receipt by itself has a valid terminal shape.
+func (x *Executor) receiptWitnesses(effect harness.Effect, job harness.Job) error {
+	witness, err := x.readWitnesses(effect)
+	if err != nil {
+		return err
 	}
+	if job.Fenced != witness.fenced || witness.bound != (job.ID != "") || witness.owner.ID != job.ID {
+		return fmt.Errorf("docker: receipt of effect %s contradicts its binding or cancellation witness", effect.ID)
+	}
+	valid := false
+	switch job.Status {
+	case harness.JobSucceeded, harness.JobFailed, harness.JobFailedToStart:
+		valid = witness.latch == latchStart && !witness.stopping
+	case harness.JobCancelled:
+		if job.StartedAt.IsZero() {
+			valid = witness.latch != latchStart && !witness.stopping
+		} else {
+			valid = witness.latch == latchStart && witness.stopping
+		}
+	}
+	if !valid {
+		return fmt.Errorf("docker: receipt of effect %s contradicts its launch or stop witness", effect.ID)
+	}
+	return nil
 }
 
-// fenced is the ID of the job recorded for an effect that Bind found fenced
-// without a container. It names no container, so the job has no log to
-// capture and no container to release.
-func fenced(id string) string { return "fenced:" + id }
-
-// sweep releases every container of this state whose effect already has a
-// record naming it, so a removal that failed is retried by the next Bind even
-// though the finished effect is never reported again.
-func (x *Executor) sweep(ctx context.Context) {
-	var listed []struct {
-		ID     string
-		Labels map[string]string
-	}
-	filters, _ := json.Marshal(map[string][]string{"label": {"canti.state=" + x.cfg.State}})
-	if x.api(ctx, "ps", http.MethodGet, "/containers/json?all=1&filters="+url.QueryEscape(string(filters)), nil, decode(&listed)) != nil {
-		return
-	}
-	for _, c := range listed {
-		effect := c.Labels["canti.effect"]
-		if checkID(effect) != nil {
-			continue
-		}
-		if rec, done, err := x.load(effect); err == nil && done && rec.ID == c.ID {
-			x.release(ctx, effect, c.ID)
-		}
+// release uses only the immutable physical ID; a later name owner is untouched.
+func (x *Executor) release(ctx context.Context, jobID string) {
+	if jobID != "" {
+		_ = x.api(ctx, "rm", http.MethodDelete, "/containers/"+jobID+"?v=1", nil, nil)
 	}
 }
 
 func (x *Executor) record(id string) string { return filepath.Join(x.dir(id), "output.json") }
 
 func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (harness.Job, error) {
+	if job.ID == "" {
+		return job, nil
+	}
 	rel := id + "/output"
 	path := filepath.Join(x.artifacts(), rel)
 	t := &tap{w: io.Discard, limit: x.cfg.OutputLimit, previewLimit: x.cfg.PreviewLimit}
@@ -269,7 +248,7 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 		t.w = f
 	}
 	var logsErr error
-	if job.ID != fenced(id) {
+	if job.ID != "" {
 		logsErr = x.api(ctx, "logs", http.MethodGet, "/containers/"+job.ID+"/logs?stdout=1&stderr=1", nil, func(r *http.Response) error {
 			return demux(t, r.Body)
 		})
@@ -282,7 +261,10 @@ func (x *Executor) collect(ctx context.Context, id string, job harness.Job) (har
 	if err := ctx.Err(); err != nil {
 		return harness.Job{}, err
 	}
-	job.Output = describe(rel, t, logsErr, job)
+	if err := errors.Join(logsErr, t.werr); err != nil {
+		return harness.Job{}, err
+	}
+	job.Output = describe(rel, t, job)
 	job.Preview = t.preview()
 	return job, nil
 }

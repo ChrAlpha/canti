@@ -75,7 +75,7 @@ func sessionAfterAStep(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t, limits, harness.Budget{}, execReply("true"), returnReply("done"))
 	ctx := f.bounded()
-	r, err := harness.NewRunner(f.store, f.exec)
+	r, err := harness.NewRunner(f.store)
 	if err != nil {
 		t.Fatal(err)
 	}

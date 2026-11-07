@@ -28,6 +28,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := parseSpec(t, tc.args...)
 			s.Config.Workspace = "/work"
+			s.Config.Provider = "http://127.0.0.1:1"
 			if _, _, err := host.NewRun("goal", "", s, time.Time{}); err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("newRun = %v, want %q", err, tc.err)
 			}
@@ -40,6 +41,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 	} {
 		s := parseSpec(t, args...)
 		s.Config.Workspace = "/work"
+		s.Config.Provider = "http://127.0.0.1:1"
 		run, _, err := host.NewRun("goal", "", s, time.Time{})
 		if err != nil {
 			t.Fatalf("host.NewRun(%q) = %v", args, err)

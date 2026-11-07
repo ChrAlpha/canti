@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -32,7 +31,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
@@ -77,26 +76,14 @@ CREATE TABLE session_runs (
 );
 `
 
-// performedIndex serves Recent for performed steps. It is the one schema
-// object that this version adds, without a schema version: a writable open
-// creates it in a journal that lacks it, and an older binary still opens
-// the journal, ignoring the index, until the journal holds a performed row.
-const performedIndex = `CREATE INDEX IF NOT EXISTS transitions_performed ON transitions (run_id, seq) WHERE kind = 'performed';`
-
-const sessionSchema = `CREATE TABLE session_runs (
-	session_id TEXT NOT NULL,
-	seq INTEGER NOT NULL CHECK (seq > 0),
-	input_id TEXT NOT NULL,
-	run_id TEXT NOT NULL UNIQUE REFERENCES runs (id),
-	PRIMARY KEY (session_id, seq),
-	UNIQUE (session_id, input_id)
-);`
+// performedIndex serves bounded reads of local completions.
+const performedIndex = `CREATE INDEX transitions_performed ON transitions (run_id, seq) WHERE kind = 'performed';`
 
 const (
 	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? FROM runs WHERE id = ?`
 	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`
-	runSQL       = `SELECT run FROM runs WHERE id = ?`
-	lastRunSQL   = `SELECT run FROM runs ORDER BY n DESC LIMIT 1`
+	runSQL       = `SELECT semantics, run FROM runs WHERE id = ?`
+	lastRunSQL   = `SELECT semantics, run FROM runs ORDER BY n DESC LIMIT 1`
 	initialSQL   = `SELECT semantics, initial FROM runs WHERE id = ?`
 	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps FROM runs WHERE id = ?`
 	addSQL       = `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
@@ -123,7 +110,7 @@ const (
 	// completionSQL reads one transition by primary key for Completion.
 	completionSQL = `SELECT seq, kind, semantics, from_state, facts FROM transitions WHERE run_id = ? AND seq = ?`
 	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
-	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action')
+	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action'), json_extract(facts, '$.Execution')
 		FROM transitions WHERE run_id = ? AND seq = ?`
 	windowSQL = `SELECT semantics, json_extract(facts, '$.Request.Window') FROM transitions
 		WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
@@ -138,11 +125,9 @@ var queries = []string{
 // Store is a harness.Journal backed by one SQLite database file. It is safe
 // for concurrent use, including by several Stores on the same file.
 type Store struct {
-	db        *sql.DB
-	stmts     map[string]*sql.Stmt
-	readOnly  bool
-	sessions  bool
-	performed atomic.Bool // the journal holds performedIndex
+	db       *sql.DB
+	stmts    map[string]*sql.Stmt
+	readOnly bool
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -158,12 +143,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), sessions: true}
-	s.performed.Store(true)
-	err = s.write(ctx, s.migrate)
+	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
+	err = s.write(ctx, s.initialize)
 	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)
-		err = s.write(ctx, s.migrate)
+		err = s.write(ctx, s.initialize)
 	}
 	for _, query := range queries {
 		if err == nil {
@@ -184,7 +168,7 @@ func busy(err error) bool {
 	return errors.As(err, &e) && e.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
-func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
+func (s *Store) initialize(ctx context.Context, tx *sql.Tx) error {
 	var mode string
 	if err := tx.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
 		return err
@@ -202,16 +186,13 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 	}
 	switch {
 	case version == schemaVersion:
-		_, err := tx.ExecContext(ctx, performedIndex)
-		return err
+		return nil
 	case version == 0 && objects == 0:
 		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
 		return err
-	case version == 1:
-		_, err := tx.ExecContext(ctx, sessionSchema+performedIndex+"PRAGMA user_version = 2;")
-		return err
+
 	}
-	return fmt.Errorf("%w: schema version %d with %d objects, want %d", ErrIncompatible, version, objects, schemaVersion)
+	return fmt.Errorf("%w: schema version %d with %d objects, want %d; use fresh state", ErrIncompatible, version, objects, schemaVersion)
 }
 
 // Close closes the database.
@@ -439,7 +420,11 @@ func (s *Store) checkEffect(ctx context.Context, tx *sql.Tx, t harness.Transitio
 		window, err = s.window(ctx, tx, t.From.RunID, t.From.Step, t.From.RequestRev)
 	}
 	if err == nil {
-		err = harness.CheckEffect(t, accepted, window)
+		var run harness.Run
+		run, err = s.run(s.stmt(ctx, tx, runSQL).QueryRowContext(ctx, t.From.RunID))
+		if err == nil {
+			err = harness.CheckEffect(t, accepted, window, run.Config)
+		}
 		if err != nil {
 			err = fmt.Errorf("%w: %v", harness.ErrFacts, err)
 		}

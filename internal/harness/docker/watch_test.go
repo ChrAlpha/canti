@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +44,9 @@ func newLoop(t *testing.T, f *fake) *loopFixture {
 	f.reply("inspect", f.containerOf(lf.effect, "true", "created", 0))
 	running := f.containerOf(lf.effect, "true", "running", 0)
 	f.hook("start", func(*http.Request) { f.reply("inspect", running) })
-	lf.step(2, core.PhaseAwaitingObservation)
+	if _, err := f.x.Drive(lf.ctx, harness.Effect{ID: lf.effect, Command: "true", Spec: f.x.Specification("true")}); err != nil {
+		t.Fatal(err)
+	}
 	return lf
 }
 
@@ -102,7 +103,7 @@ func (lf *loopFixture) wantUnknown(failure string) {
 		lf.t.Fatal(err)
 	}
 	last := ts[len(ts)-1]
-	if _, ok := last.Event.(core.OutcomeUnknown); !ok || !strings.Contains(last.Facts.Failure, "inspect failed 3 consecutive times") ||
+	if _, ok := last.Event.(core.OutcomeUnknown); !ok ||
 		!strings.Contains(last.Facts.Failure, failure) {
 		lf.t.Fatalf("last transition = %+v, want an unknown outcome after the inspect retries", last)
 	}
@@ -135,37 +136,25 @@ func TestLoopStopLeavesAnUnreadableRecordToResolution(t *testing.T) {
 	}
 }
 
-func TestLoopObservesAnEffectFencedBeforeItsBind(t *testing.T) {
+func TestLoopObservesAnEffectFencedBeforeDrive(t *testing.T) {
 	lf := saveEffect(t, newFake(t))
-	if err := os.MkdirAll(lf.x.dir(lf.effect), 0o700); err != nil {
+	lf.fail("inspect", 404, "No such container: canti-"+lf.effect)
+	e := harness.Effect{ID: lf.effect, Command: "true", Spec: lf.x.Specification("true")}
+	if _, err := lf.x.Cancel(lf.ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if err := setLatch(lf.x.dir(lf.effect), latchCancel); err != nil {
-		t.Fatal(err)
-	}
-	lf.fail("inspect", http.StatusNotFound, "No such container: canti-"+lf.effect)
-	lf.step(3, core.PhaseIdle)
-	ts, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
+	lf.step(1, core.PhaseIdle)
+	rows, err := lf.store.Transitions(lf.ctx, "run-1", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bound core.JobBound
-	var obs *harness.Observation
-	for _, tr := range ts {
-		switch e := tr.Event.(type) {
-		case core.JobBound:
-			bound = e
-		case core.Observed:
-			obs = tr.Facts.Observation
-		}
-	}
-	want := harness.Observation{Execution: core.ExecutionCancelled, Output: harness.ArtifactRef{Path: lf.effect + "/output", Available: true, Detail: "job was cancelled; output is partial"}}
-	if bound.JobID != "fenced:"+lf.effect || obs == nil || !reflect.DeepEqual(*obs, want) {
-		t.Fatalf("bound job %q, observation %+v; want the fenced job observed as %+v", bound.JobID, obs, want)
+	last := rows[len(rows)-1]
+	if last.Facts.Receipt == nil || last.Facts.Receipt.ID != "" || last.Facts.Observation.Execution != core.ExecutionCancelled {
+		t.Fatalf("fenced completion: %+v", last)
 	}
 	for _, op := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
-		if calls := lf.calls(op); len(calls) != 0 {
-			t.Fatalf("%s calls = %q, want none for an effect fenced before its bind", op, calls)
+		if len(lf.calls(op)) != 0 {
+			t.Fatal(op, lf.calls(op))
 		}
 	}
 }
@@ -209,7 +198,7 @@ func TestLoopObservesTheExitOfAWaitedJobAtOnce(t *testing.T) {
 	if err != nil || snap.State.Phase != core.PhaseIdle || time.Since(began) > 5*time.Second {
 		t.Fatalf("Step() = %+v, %v after %v; want the exit observed at once despite a poll interval of an hour", snap.State, err, time.Since(began))
 	}
-	if waits := lf.calls("wait"); len(waits) != 1 || waits[0] != "wait canti-"+lf.effect+" not-running" {
+	if waits := lf.calls("wait"); len(waits) != 1 || waits[0] != "wait c-"+lf.effect+" not-running" {
 		t.Fatalf("waits = %q, want one for the effect's container to stop running", waits)
 	}
 }

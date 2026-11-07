@@ -115,11 +115,11 @@ func failureScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "go test -run TestSlow ./..."),
 				corpusDecision(core.Exec, "go test -run TestFlaky ./..."),
 				corpusDecision(core.Return, "TestParse fails; TestSlow timed out and TestFlaky was cancelled."),
-			}, steps: []string{"1 exited 2 output incomplete", "2 timed_out output incomplete", "3 cancelled output incomplete"}}},
+			}, steps: []string{"1 exited 2 output incomplete", "2 timed_out 143 output incomplete", "3 cancelled 143 output incomplete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"Execution: exited, exit code 2\nOutput: " + fmt.Sprint(len(failing)) + " bytes, incomplete, at /canti/artifacts/effect_", "(" + kept + ")\n"},
-				"run1-step03-rev1.json": {"Execution: timed_out\nOutput: 19 bytes, incomplete, at ", "(job was cancelled; output is partial)\n"},
-				"run1-step04-rev1.json": {"Execution: cancelled\nOutput: 20 bytes, incomplete, at "},
+				"run1-step03-rev1.json": {"Execution: timed_out, exit code 143\nOutput: 19 bytes, incomplete, at ", "(job was cancelled; output is partial)\n"},
+				"run1-step04-rev1.json": {"Execution: cancelled, exit code 143\nOutput: 20 bytes, incomplete, at "},
 			},
 		},
 	}

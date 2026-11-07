@@ -31,7 +31,7 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 		t.Fatal(err)
 	}
 	exec := &fakeExec{}
-	runner, err := harness.NewRunner(s, exec)
+	runner, err := harness.NewRunner(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +54,7 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 				facts.Response = &harness.Response{Body: body, Complete: true}
 			case core.ResponseLoaded:
 				facts.Action = &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}
+				facts.Execution = fixtureExecution("go test ./...")
 			}
 			snap, err = runner.Commit(ctx, snap, event, facts)
 			if err != nil {
@@ -61,13 +62,9 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 			}
 		}
 		effect := snap.State.EffectID
-		for _, event := range []core.Event{core.JobBound{EffectID: effect, JobID: "job-" + effect}, core.JobStarted{EffectID: effect, JobID: "job-" + effect}} {
-			if snap, err = runner.Commit(ctx, snap, event, harness.Facts{}); err != nil {
-				t.Fatal(err)
-			}
-		}
+
 		snap, err = runner.Commit(ctx, snap, core.Observed{EffectID: effect, Execution: core.ExecutionFailedToStart},
-			harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}})
+			harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}, Receipt: &harness.Job{EffectID: effect, Spec: fixtureExecution("go test ./...").Spec, ID: "job-" + effect, Status: harness.JobFailedToStart, Preview: strings.Repeat("output\n", 600)}})
 		if err != nil {
 			t.Fatal(err)
 		}

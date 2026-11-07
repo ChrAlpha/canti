@@ -12,22 +12,18 @@ import (
 // the committed event.
 var ErrFacts = errors.New("harness: facts do not match event")
 
-// Runner interprets core intents against the durable store and the effect
-// executor. Every I/O happens after the phase that authorizes it is committed.
+// Runner derives and commits core transitions with their permitted facts.
+// Physical execution belongs to the executor called by Loop.
 type Runner struct {
-	store    Store
-	executor Executor
+	store Store
 }
 
-// NewRunner wires the durable store and the effect executor.
-func NewRunner(store Store, executor Executor) (Runner, error) {
+// NewRunner wires the durable store.
+func NewRunner(store Store) (Runner, error) {
 	if store == nil {
 		return Runner{}, errors.New("harness: store is required")
 	}
-	if executor == nil {
-		return Runner{}, errors.New("harness: executor is required")
-	}
-	return Runner{store: store, executor: executor}, nil
+	return Runner{store: store}, nil
 }
 
 // Commit derives the next state for event and records it at the next
@@ -74,68 +70,6 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 	return Snapshot{Seq: transition.Seq, State: next}, nil
 }
 
-// Bind hands the committed effect to the executor and commits the job that
-// owns it. A returned job ID becomes JobBound whatever its status snapshot;
-// an executor error or a job without an ID becomes OutcomeUnknown with the
-// failure text. Cancellation observed around the call returns without
-// committing, so a resume finds the job by effect ID.
-func (r Runner) Bind(ctx context.Context, snap Snapshot) (Snapshot, error) {
-	state := snap.State
-	if state.Intent() != core.IntentBind {
-		return snap, fmt.Errorf("harness: phase %q does not bind", state.Phase)
-	}
-	if err := snap.Validate(); err != nil {
-		return snap, err
-	}
-	if err := ctx.Err(); err != nil {
-		return snap, err
-	}
-	job, err := r.executor.Bind(ctx, Effect{ID: state.EffectID, Command: state.Decision.Payload})
-	if err == nil && job.ID == "" {
-		err = fmt.Errorf("executor returned no job ID with status %q", job.Status)
-	}
-	if err != nil {
-		return r.keepUnknown(ctx, snap, err)
-	}
-	return r.Commit(ctx, snap, core.JobBound{EffectID: state.EffectID, JobID: job.ID}, Facts{})
-}
-
-// Start issues the start of the bound job and commits that it was issued. An
-// executor error or a job other than the bound one becomes OutcomeUnknown
-// with the failure text, because the start may or may not have happened.
-// Cancellation observed around the call returns without committing.
-func (r Runner) Start(ctx context.Context, snap Snapshot) (Snapshot, error) {
-	state := snap.State
-	if state.Intent() != core.IntentStart {
-		return snap, fmt.Errorf("harness: phase %q does not start", state.Phase)
-	}
-	if err := snap.Validate(); err != nil {
-		return snap, err
-	}
-	if err := ctx.Err(); err != nil {
-		return snap, err
-	}
-	job, err := r.executor.Start(ctx, state.EffectID)
-	if err == nil && job.ID != state.JobID {
-		err = fmt.Errorf("executor started job %q instead of bound job %q", job.ID, state.JobID)
-	}
-	if err != nil {
-		return r.keepUnknown(ctx, snap, err)
-	}
-	return r.Commit(ctx, snap, core.JobStarted{EffectID: state.EffectID, JobID: state.JobID}, Facts{})
-}
-
-func (r Runner) keepUnknown(ctx context.Context, snap Snapshot, cause error) (Snapshot, error) {
-	if ctx.Err() != nil {
-		return snap, ctx.Err()
-	}
-	next, commitErr := r.Commit(ctx, snap, core.OutcomeUnknown{EffectID: snap.State.EffectID}, Facts{Failure: cause.Error()})
-	if commitErr != nil {
-		return snap, fmt.Errorf("%w; executor: %w", commitErr, cause)
-	}
-	return next, nil
-}
-
 // check reports whether f holds exactly the records event permits, which
 // leads to next.
 func (f Facts) check(event core.Event, next core.State) error {
@@ -158,13 +92,10 @@ func (f Facts) check(event core.Event, next core.State) error {
 		allowed.Response, allowed.Failure = f.Response, f.Failure
 	case core.ResponseLoaded:
 		if next.Phase == core.PhaseEffectSaved {
-			if f.Action == nil {
-				return fmt.Errorf("%w: an accepted exec decision requires its action", ErrFacts)
-			}
-			if err := f.Action.Validate(); err != nil {
+			if _, err := Acceptance(core.SemanticsVersion, f.Action, f.Execution); err != nil {
 				return fmt.Errorf("%w: %v", ErrFacts, err)
 			}
-			allowed.Action = f.Action
+			allowed.Action, allowed.Execution = f.Action, f.Execution
 		}
 	case core.Performed:
 		if f.Outcome == nil {
@@ -178,13 +109,23 @@ func (f Facts) check(event core.Event, next core.State) error {
 		if err := f.checkObservation(e.Execution); err != nil {
 			return err
 		}
-		allowed.Observation = f.Observation
+		allowed.Observation, allowed.Receipt = f.Observation, f.Receipt
 	case core.Resolved:
 		if err := f.checkObservation(e.Execution); err != nil {
 			return err
 		}
-		allowed.Observation = f.Observation
-	case core.OutcomeUnknown, core.StopRequested:
+		if f.Resolution == nil {
+			return fmt.Errorf("%w: resolution provenance is required", ErrFacts)
+		}
+		allowed.Observation, allowed.Receipt, allowed.Resolution = f.Observation, f.Receipt, f.Resolution
+	case core.EffectRecovered:
+		if f.Receipt == nil {
+			return fmt.Errorf("%w: recovery receipt is required", ErrFacts)
+		}
+		allowed.Receipt = f.Receipt
+	case core.OutcomeUnknown:
+		allowed.Failure, allowed.Receipt = f.Failure, f.Receipt
+	case core.StopRequested:
 		allowed.Failure = f.Failure
 	}
 	if f != allowed {

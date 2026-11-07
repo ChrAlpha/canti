@@ -59,8 +59,10 @@ Usage:
   canti resume [-run ID] [flags]                    continue the latest or the named run
   canti stop [-run ID] [-cleanup 30s]               stop a run, cancelling and recording its job;
                                                     an unknown outcome must be resolved first
-  canti resolve [-run ID] (-job | -execution STATE [-exit-code N] [-note TEXT])
+  canti resolve [-run ID] (-job | -execution STATE -note TEXT [-exit-code N] [-owner ID])
+    exited requires -exit-code and -owner; timed_out requires -owner.
                                                     record the outcome of a run's unknown effect
+  canti inspect [-run ID] [-host MODE]
   canti status [-run ID]                            print the state of a run as JSON
   canti history [-run ID]                           print the transitions of a run as JSON Lines
   canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
@@ -83,7 +85,7 @@ type action func(context.Context) (int, error)
 
 var commands = map[string]func(*flag.FlagSet, *app) action{
 	"run": runCommand, "chat": chatCommand, "resume": resumeCommand, "stop": stopCommand,
-	"resolve": resolveCommand, "status": statusCommand, "history": historyCommand,
+	"resolve": resolveCommand, "status": statusCommand, "inspect": inspectCommand, "history": historyCommand,
 	"context": contextCommand, "host": hostCommand,
 }
 
@@ -351,13 +353,13 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 			return exitError, a.credErr
 		}
 		if a.remoteMode() {
-			return a.remoteRun(ctx, true, exitActive, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+			return a.remoteRun(ctx, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
 				return a.remoteResume(ctx, c, r, *url, *once)
 			})
 		}
 		drive, release := a.drive(ctx, *once)
 		defer release()
-		return a.with(ctx, true, exitActive, func(h *host.Host, run harness.Run, c host.RunConfig) (harness.Snapshot, error) {
+		return a.with(ctx, exitActive, func(h *host.Host, run harness.Run, c host.RunConfig) (harness.Snapshot, error) {
 			return drive(h, run.ID, a.binding(c.API, *url))
 		})
 	}
@@ -375,7 +377,7 @@ func stopCommand(fs *flag.FlagSet, a *app) action {
 			return exitUsage, err
 		}
 		if a.remoteMode() {
-			return a.remoteRun(ctx, false, exitActive, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+			return a.remoteRun(ctx, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
 				v, err := c.Stop(ctx, r.RunID, *cleanup)
 				if err != nil {
 					err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\", with a longer -cleanup if the job wrote a large output", r.RunID, err)
@@ -385,7 +387,7 @@ func stopCommand(fs *flag.FlagSet, a *app) action {
 		}
 		ctx, cancel := context.WithTimeout(ctx, *cleanup)
 		defer cancel()
-		return a.with(ctx, false, exitActive, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
+		return a.with(ctx, exitActive, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
 			return stop(ctx, h, run.ID)
 		})
 	}
@@ -395,10 +397,12 @@ var resolvable = []core.ExecutionState{core.ExecutionExited, core.ExecutionFaile
 
 func resolveCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
-	job := fs.Bool("job", false, "record the job the executor finds for the unknown effect")
-	execution := fs.String("execution", "", "record a confirmed outcome `state`: exited, failed_to_start, cancelled, or timed_out")
-	exitCode := fs.Int("exit-code", 0, "exit `code` of an exited effect; required for exited only")
-	note := fs.String("note", "", "operator `text` recorded as the output preview")
+	var flags resolutionFlags
+	fs.BoolVar(&flags.job, "job", false, "record the job the executor finds for the unknown effect")
+	fs.StringVar(&flags.execution, "execution", "", "record a confirmed outcome `state`: exited, failed_to_start, cancelled, or timed_out")
+	fs.IntVar(&flags.exitCode, "exit-code", 0, "exit `code` of an exited effect; required for exited only")
+	fs.StringVar(&flags.note, "note", "", "operator evidence `text`; required for a known resolution")
+	fs.StringVar(&flags.owner, "owner", "", "physical owner `ID`; required for exited or timed_out assertions")
 	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
 		if err := a.checkHostMode(); err != nil {
@@ -406,26 +410,14 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 		}
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-		obs := harness.Observation{Execution: core.ExecutionState(*execution), Preview: *note, Output: harness.ArtifactRef{Detail: "resolved by operator"}}
-		switch {
-		case *job == set["execution"]:
-			return exitUsage, errors.New("give exactly one of -job and -execution")
-		case *job && (set["exit-code"] || set["note"]):
-			return exitUsage, errors.New("-job takes no -exit-code or -note")
-		case !*job && obs.Execution == core.ExecutionUnknown:
-			return exitUsage, errors.New("unknown is not a completed resolution; leave the run in needs_resolution until the outcome is confirmed, then use -job or a known -execution state")
-		case !*job && !slices.Contains(resolvable, obs.Execution):
-			return exitUsage, fmt.Errorf("-execution must be one of %v", resolvable)
-		case !*job && set["exit-code"] != (obs.Execution == core.ExecutionExited):
-			return exitUsage, errors.New("-exit-code is required for exited and allowed for no other state")
-		}
-		if set["exit-code"] {
-			obs.ExitCode = exitCode
+		obs, err := flags.observation(set)
+		if err != nil {
+			return exitUsage, err
 		}
 		if a.remoteMode() {
-			return a.remoteRun(ctx, false, exitOK, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
-				v, err := c.Resolve(ctx, r.RunID, hostrpc.ResolutionOf(*job, obs))
-				if *job && err != nil && strings.Contains(err.Error(), harness.ErrJobUnknown.Error()) {
+			return a.remoteRun(ctx, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+				v, err := c.Resolve(ctx, r.RunID, hostrpc.ResolutionOf(flags.job, obs, flags.owner))
+				if flags.job && err != nil && strings.Contains(err.Error(), harness.ErrJobUnknown.Error()) {
 					err = fmt.Errorf("%w; recording the job cannot resolve effect %s: inspect it, as with \"docker logs canti-%[2]s\", "+
 						"then record its outcome with \"canti resolve -run %s -execution STATE\"", err, v.EffectID, r.RunID)
 				}
@@ -433,10 +425,10 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 				return cmpCode(code, exitOK), rerr
 			})
 		}
-		return a.with(ctx, false, exitOK, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
+		return a.with(ctx, exitOK, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
 			id := run.ID
-			if !*job {
-				return h.Resolve(ctx, id, obs)
+			if !flags.job {
+				return h.Resolve(ctx, id, obs, flags.owner)
 			}
 			snap, err := h.ResolveJob(ctx, id)
 			if errors.Is(err, harness.ErrJobUnknown) {
@@ -446,6 +438,38 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 			return snap, err
 		})
 	}
+}
+
+type resolutionFlags struct {
+	job                    bool
+	execution, note, owner string
+	exitCode               int
+}
+
+func (f resolutionFlags) observation(set map[string]bool) (harness.Observation, error) {
+	obs := harness.Observation{Execution: core.ExecutionState(f.execution), Preview: f.note, Output: harness.ArtifactRef{Detail: "resolved by operator"}}
+	switch {
+	case f.job == set["execution"]:
+		return harness.Observation{}, errors.New("give exactly one of -job and -execution")
+	case f.job && (set["exit-code"] || set["note"] || set["owner"]):
+		return harness.Observation{}, errors.New("-job takes no -exit-code, -note or -owner")
+	case !f.job && obs.Execution == core.ExecutionUnknown:
+		return harness.Observation{}, errors.New("unknown is not a completed resolution; leave the run in needs_resolution until the outcome is confirmed, then use -job or a known -execution state")
+	case !f.job && !slices.Contains(resolvable, obs.Execution):
+		return harness.Observation{}, fmt.Errorf("-execution must be one of %v", resolvable)
+	case !f.job && set["exit-code"] != (obs.Execution == core.ExecutionExited):
+		return harness.Observation{}, errors.New("-exit-code is required for exited and allowed for no other state")
+	}
+	if !f.job && strings.TrimSpace(f.note) == "" {
+		return harness.Observation{}, errors.New("-note is required for an operator resolution")
+	}
+	if !f.job && (obs.Execution == core.ExecutionExited || obs.Execution == core.ExecutionTimedOut) && strings.TrimSpace(f.owner) == "" {
+		return harness.Observation{}, errors.New("-owner is required for exited or timed_out resolution")
+	}
+	if set["exit-code"] {
+		obs.ExitCode = &f.exitCode
+	}
+	return obs, nil
 }
 
 // openHost opens the host of the state directory, holding its lock until it
@@ -471,22 +495,14 @@ func baseURL(api string) string {
 }
 
 // with locks the workspace, finds the selected run, and reports what op
-// does with it. With resume, a run of another context version is only
-// reported once it has halted and refused before that.
-func (a *app) with(ctx context.Context, resume bool, active int, op func(*host.Host, harness.Run, host.RunConfig) (harness.Snapshot, error)) (int, error) {
+// does with it. Unsupported configurations fail before the operation.
+func (a *app) with(ctx context.Context, active int, op func(*host.Host, harness.Run, host.RunConfig) (harness.Snapshot, error)) (int, error) {
 	h, err := a.openHost(ctx, false)
 	if err != nil {
 		return exitError, err
 	}
 	defer h.Close()
 	run, c, err := h.Find(ctx, a.runID)
-	if err == nil && resume && c.ContextVersion != host.ContextVersion {
-		var snap harness.Snapshot
-		if snap, err = h.Halted(ctx, run.ID, c); err == nil {
-			h.Close()
-			return a.report(snap, nil, active, c)
-		}
-	}
 	if err != nil {
 		return exitError, err
 	}

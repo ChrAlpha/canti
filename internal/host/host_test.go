@@ -226,11 +226,10 @@ func TestAKeyIsSentOnlyToTheProviderItIsBoundTo(t *testing.T) {
 		{"host credential of another API", stored, Binding{}, map[Pair]Keys{{APIResponses, "https://stored.test"}: {OpenAIKey: "o"}}, Keys{}, "no credential is given or bound"},
 		{"a named other provider refuses the host credential too", stored, Binding{Provider: "https://other.test"}, map[Pair]Keys{{APIMessages, "https://stored.test"}: own}, Keys{}, "not https://other.test"},
 		{"given keys win", stored, Binding{Fallback: "https://stored.test", Keys: given}, map[Pair]Keys{{APIMessages, "https://stored.test"}: own}, given, ""},
-		{"a run storing no provider", RunConfig{API: APIMessages}, Binding{Fallback: "https://legacy.test", Keys: given}, nil, given, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &Host{opts: Options{Credentials: tc.host}}
-			got, err := h.keysFor("r", tc.c, provider(tc.c, tc.b), tc.b)
+			got, err := h.keysFor("r", tc.c, tc.c.Provider, tc.b)
 			if got != tc.want || (err == nil) != (tc.fails == "") || err != nil && !strings.Contains(err.Error(), tc.fails) {
 				t.Fatalf("keysFor = %v, %v; want %v, %q", got, err, tc.want, tc.fails)
 			}
@@ -239,9 +238,7 @@ func TestAKeyIsSentOnlyToTheProviderItIsBoundTo(t *testing.T) {
 			}
 		})
 	}
-	if p := provider(RunConfig{API: APIMessages}, Binding{}); p != "https://api.anthropic.com" {
-		t.Fatalf("a run storing no provider and a binding naming none resolve to %q", p)
-	}
+
 }
 
 // recording serves the Messages API, answering every request with decision
@@ -453,7 +450,7 @@ func TestResumeOpenFinishesAPendingStopAndLeavesOtherRuns(t *testing.T) {
 		t.Cleanup(func() { h.Shutdown(context.Background()) })
 		return h
 	}
-	for _, version := range []int{ContextVersion, ContextVersion + 1} {
+	for _, version := range []int{ContextVersion} {
 		id := cancelling(t, opts, url, fmt.Sprint("version ", version))
 		setContextVersion(t, opts, id, version)
 		h := restart()
@@ -467,35 +464,17 @@ func TestResumeOpenFinishesAPendingStopAndLeavesOtherRuns(t *testing.T) {
 		h.Shutdown(context.Background())
 	}
 
-	legacy := cancelling(t, opts, url, "legacy")
-	setContextVersion(t, opts, legacy, ActionsContextVersion-1)
 	h := restart()
-	before := kinds(t, h, legacy)
-	if err := h.ResumeOpen(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if after := kinds(t, h, legacy); strings.Join(after, " ") != strings.Join(before, " ") {
-		t.Fatalf("ResumeOpen committed %q to a run of an earlier version", after[len(before):])
-	}
-	if v, err := h.View(context.Background(), legacy); err != nil || v.Drivable || !strings.Contains(v.Why, "stop it with") {
-		t.Fatalf("the pending stop of an earlier version: %+v, %v", v, err)
-	}
-	if snap, err := h.Stop(context.Background(), legacy); err != nil || snap.State.Phase != core.PhaseStopped {
-		t.Fatalf("an explicit stop of it: %+v, %v", snap.State, err)
-	}
-
-	other := submit(t, h, Submission{Binding: binding(url), Goal: "other"}).Run.ID
+	other := submit(t, h, Submission{Binding: binding(url), Goal: "unsupported"}).Run.ID
 	setContextVersion(t, opts, other, ContextVersion-1)
-	if v, err := h.View(context.Background(), other); err != nil || v.Drivable || !strings.Contains(v.Why, "does not resume") {
-		t.Fatalf("a run of another context version: %+v, %v", v, err)
-	}
-	before = kinds(t, h, other)
-	if err := h.ResumeOpen(context.Background()); err != nil {
-		t.Fatal(err)
+	before := kinds(t, h, other)
+	if err := h.ResumeOpen(context.Background()); err == nil {
+		t.Fatal("unsupported run resumed")
 	}
 	if after := kinds(t, h, other); strings.Join(after, " ") != strings.Join(before, " ") {
-		t.Fatalf("ResumeOpen committed %q to a run of another context version", after[len(before):])
+		t.Fatal("unsupported run changed journal")
 	}
+
 }
 
 // TestADriveStartedAfterTheShutdownDoesNothing requires that a drive or a
@@ -534,7 +513,7 @@ func TestWaitSeesACommitThatLandsWhileItRegisters(t *testing.T) {
 	h = testHost(t, Options{Checkpoint: func(p string) {
 		if p == PointWaiting {
 			once.Do(func() {
-				r, _ := harness.NewRunner(h.journal, noExecutor{})
+				r, _ := harness.NewRunner(h.journal)
 				snap, _ := h.store.Latest(context.Background(), id)
 				if _, err := r.Commit(context.Background(), snap, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{}); err != nil {
 					t.Error(err)
@@ -572,7 +551,7 @@ func TestWaitWakesForACommitAfterItsRecheck(t *testing.T) {
 		t.Fatalf("Wait returned %+v before any commit", r)
 	case <-time.After(50 * time.Millisecond):
 	}
-	r, _ := harness.NewRunner(h.journal, noExecutor{})
+	r, _ := harness.NewRunner(h.journal)
 	snap, _ := h.store.Latest(context.Background(), id)
 	if _, err := r.Commit(context.Background(), snap, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{}); err != nil {
 		t.Fatal(err)
@@ -1181,33 +1160,19 @@ func TestAnItemIsTruncatedOnlyForATextItShows(t *testing.T) {
 // before a model is built, a request sent, or anything committed or logged,
 // with a description that shows none of its secret, and that a valid one
 // still drives it.
-func TestADriveOfARunStoringNoProviderChecksTheCallersProvider(t *testing.T) {
-	const marker = "DUMMYMARKER"
+func TestADriveRefusesAStoredRunWithoutProvider(t *testing.T) {
 	url, keys := recording(t, core.Decision{Kind: core.Return, Payload: "done"})
-	var log syncWriter
-	h := testHost(t, Options{Logger: slog.New(slog.NewTextHandler(&log, nil))})
+	h := testHost(t, Options{})
 	id := submit(t, h, Submission{Binding: binding(url)}).Run.ID
 	editConfig(t, h.opts, id, func(c map[string]any) { delete(c, "provider") })
-	if _, c, err := h.Find(context.Background(), id); err != nil || c.Provider != "" {
-		t.Fatalf("the run stores provider %q, %v", c.Provider, err)
+	if _, _, err := h.Find(context.Background(), id); err == nil {
+		t.Fatal("missing stored provider accepted")
 	}
-	k := Keys{AnthropicKey: "sk-test"}
-	for _, b := range []Binding{{Provider: url + "/v?key=" + marker, Keys: k}, {Fallback: url + "/v?key=" + marker, Keys: k},
-		{Provider: "https://u" + marker + ":p@gw.test/v1", Keys: k}, {Fallback: "http://127.0.0.1:9/v#" + marker, Keys: k}, {Fallback: "%zz" + marker, Keys: k}} {
-		_, err := h.Drive(context.Background(), id, b, DriveOptions{})
-		if err == nil || strings.Contains(err.Error(), marker) {
-			t.Fatalf("Drive with %v = %v", b, err)
-		}
+	if _, err := h.Drive(context.Background(), id, binding(url), DriveOptions{}); err == nil {
+		t.Fatal("drive inferred missing provider")
 	}
-	if got := kinds(t, h, id); len(got) != 0 || len(keys()) != 0 || strings.Contains(log.String(), marker) {
-		t.Fatalf("refused drives committed %q, sent %d requests, or logged the marker: %s", got, len(keys()), log.String())
-	}
-	d, err := h.Drive(context.Background(), id, Binding{Fallback: url, Keys: k}, DriveOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned || len(keys()) != 1 {
-		t.Fatalf("a valid drive = %+v, %v after %d requests", snap.State, err, len(keys()))
+	if got := kinds(t, h, id); len(got) != 0 || len(keys()) != 0 {
+		t.Fatalf("unsupported drive changed facts or sent requests: %v", got)
 	}
 }
 
@@ -1255,5 +1220,211 @@ func TestARetryNamesItsRunAfterItsImportsAreGone(t *testing.T) {
 	last, err := h.store.LastRun(context.Background())
 	if err != nil || last.ID != first.Run.ID {
 		t.Fatalf("the latest run is %s, %v; want only the first", last.ID, err)
+	}
+}
+
+// postLatchExecutor models the bounded completion that remains owned by the
+// controller after its caller context ends. It performs no external I/O.
+type postLatchExecutor struct {
+	harness.Executor
+	reached, release chan struct{}
+}
+
+func (x *postLatchExecutor) Specification(command string) string {
+	return harness.ConfigDigest([]byte(command))
+}
+
+func (x *postLatchExecutor) Drive(ctx context.Context, effect harness.Effect) (harness.Job, error) {
+	close(x.reached)
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-x.release:
+		return harness.Job{EffectID: effect.ID, Spec: effect.Spec, ID: "owned", Status: harness.JobRunning, StartedAt: time.Now()}, nil
+	case <-timer.C:
+		return harness.Job{}, errors.New("test post-latch completion was not released")
+	}
+}
+
+func TestStopDeadlineKeepsPostLatchWorkAccountedUntilQuiescent(t *testing.T) {
+	url := answering(t, core.Decision{Kind: core.Exec, Payload: "external work"})
+	h := testHost(t, Options{})
+	ack := submit(t, h, Submission{Binding: binding(url)})
+	run, c, err := h.Find(context.Background(), ack.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := NewModel(c, url, binding(url).Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &postLatchExecutor{reached: make(chan struct{}), release: make(chan struct{})}
+	cfg := ContextConfig(c, run.Budget)
+	cfg.History = HistoryRoot(h.opts.State)
+	cfg.Reader.History, cfg.Reader.Artifacts = cfg.History, filepath.Join(h.opts.State, "artifacts")
+	if err := os.MkdirAll(cfg.History, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loop, err := harness.NewLoop(h.journal, executor, model, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use the same registration and run lifetime as Drive, injecting only the
+	// executor so the post-latch interval has a deterministic release barrier.
+	ctx, cancel := context.WithCancel(h.life)
+	d := &driver{cancel: cancel, done: make(chan struct{})}
+	h.mu.Lock()
+	h.drivers[run.ID] = d
+	h.mu.Unlock()
+	go h.run(ctx, d, loop, run.ID, DriveOptions{})
+	<-executor.reached
+	before := kinds(t, h, run.ID)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stopCancel()
+	began := time.Now()
+	_, err = h.Stop(stopCtx, run.ID)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(began) > time.Second {
+		t.Fatalf("bounded Stop: %v after %v", err, time.Since(began))
+	}
+	if !h.Driving(run.ID) || !h.Busy() {
+		t.Fatal("timed-out Stop forgot its still-active controller")
+	}
+	if err := h.Close(); !errors.Is(err, ErrDriving) {
+		t.Fatalf("Close released active controller: %v", err)
+	}
+	if after := kinds(t, h, run.ID); !slices.Equal(after, before) {
+		t.Fatalf("timed-out Stop committed: %q -> %q", before, after)
+	}
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer shutCancel()
+	if err := h.Shutdown(shutCtx); !errors.Is(err, ErrNotQuiescent) {
+		t.Fatalf("Shutdown released post-latch work: %v", err)
+	}
+	if other, err := Open(context.Background(), h.opts, false); !errors.Is(err, ErrLocked) {
+		if other != nil {
+			other.Close()
+		}
+		t.Fatalf("old work could act after ownership release: %v", err)
+	}
+	close(executor.release)
+	if _, err := (Drive{d}).Result(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("released drive: %v", err)
+	}
+	if err := h.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(context.Background(), h.opts, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if after := kinds(t, reopened, run.ID); !slices.Equal(after, before) {
+		t.Fatalf("canceled controller committed after its latch: %q -> %q", before, after)
+	}
+}
+
+func TestStopAndInspectedResolutionReuseTheAcceptedExecutionConfiguration(t *testing.T) {
+	for _, operation := range []string{"stop", "resolve"} {
+		t.Run(operation, func(t *testing.T) {
+			url := answering(t, core.Decision{Kind: core.Exec, Payload: "echo accepted"})
+			h := testHost(t, Options{})
+			spec := testSpec(h)
+			spec.Config.ContextBytes, spec.Config.WindowSteps, spec.Config.WindowBytes, spec.Config.HandoverBytes = 96<<10, 3, 8192, 1024
+			spec.Config.OutputLimit = 65536
+			ack := submit(t, h, Submission{Spec: spec, Binding: binding(url)})
+			run, c, err := h.Find(context.Background(), ack.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model, err := NewModel(c, url, binding(url).Keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loop, err := h.loop(run, c, model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snap harness.Snapshot
+			for i := 0; i < 3; i++ {
+				snap, err = loop.Step(context.Background(), run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if snap.State.Phase != core.PhaseEffectSaved {
+				t.Fatalf("acceptance: %+v", snap)
+			}
+			accepted, err := h.store.Accepted(context.Background(), run.ID, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			x, err := NewExecutor(c, h.opts.State)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := x.Specification(snap.State.Decision.Payload)
+			if ExecutorConfig(c, h.opts.State).PreviewLimit != harness.DefaultPromptLimits().Preview || accepted.Execution == nil || accepted.Execution.Spec != expected || accepted.Execution.ConfigDigest != harness.ConfigDigest(run.Config) {
+				t.Fatalf("acceptance changed stored executor limits: %+v", accepted)
+			}
+			effect := snap.State.EffectID
+			dir := filepath.Join(h.opts.State, "jobs", effect)
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write := func(name string, value any) {
+				t.Helper()
+				data, err := json.Marshal(value)
+				if err == nil {
+					err = os.WriteFile(filepath.Join(dir, name), data, 0o600)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A retained no-owner cancellation needs only its identity fence. Reading
+			// this receipt requires no backend, and a changed spec must be rejected.
+			write("cancel", struct {
+				Format                          int
+				EffectID, Spec, CommandHash, ID string
+			}{2, effect, expected, harness.ConfigDigest([]byte(snap.State.Decision.Payload)), ""})
+			receipt := harness.Job{EffectID: effect, Spec: expected, Fenced: true, Status: harness.JobCancelled}
+			write("output.json", struct {
+				Format int
+				harness.Job
+			}{2, receipt})
+			if operation == "resolve" {
+				runner, err := harness.NewRunner(h.journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := runner.Commit(context.Background(), snap, core.OutcomeUnknown{EffectID: effect}, harness.Facts{Failure: "inspect retained receipt"}); err != nil {
+					t.Fatal(err)
+				}
+				snap, err = h.ResolveJob(context.Background(), run.ID)
+			} else {
+				snap, err = h.Stop(context.Background(), run.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := h.store.Transitions(context.Background(), run.ID, 0, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := rows[len(rows)-1]
+			if final.Facts.Receipt == nil || *final.Facts.Receipt != receipt || final.Facts.Observation == nil || final.Facts.Observation.Execution != core.ExecutionCancelled {
+				t.Fatalf("stored executor receipt changed: %+v", final)
+			}
+			if operation == "resolve" && (snap.State.Phase != core.PhaseIdle || final.Facts.Resolution == nil || final.Facts.Resolution.Source != harness.ResolutionInspection) {
+				t.Fatalf("inspection settlement: %+v", final)
+			}
+			if operation == "stop" && snap.State.Phase != core.PhaseStopped {
+				t.Fatalf("stop: %+v", snap)
+			}
+			stored, err := h.store.Run(context.Background(), run.ID)
+			if err != nil || string(stored.Config) != string(run.Config) {
+				t.Fatalf("operation changed immutable config: %s, %v", stored.Config, err)
+			}
+		})
 	}
 }

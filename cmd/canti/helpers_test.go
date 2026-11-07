@@ -418,7 +418,6 @@ type status struct {
 	Reason     core.StopReason `json:"reason"`
 	Decision   *core.Decision  `json:"decision"`
 	EffectID   string          `json:"effect_id"`
-	JobID      string          `json:"job_id"`
 	Totals     struct {
 		InputTokens  int64 `json:"input_tokens"`
 		OutputTokens int64 `json:"output_tokens"`

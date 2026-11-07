@@ -16,9 +16,9 @@ type ArtifactRef struct {
 	Detail    string
 }
 
-// Observation is the durable result recorded after an effect is inspected
-// or resolved. Retrieval and Handover are only read: versions before
-// ActionSemantics recorded the outcomes of harness actions as observations.
+// Observation is the durable external result. Retrieval and Handover are
+// transient presentation fields for local outcomes; persisted observations
+// must leave both nil.
 type Observation struct {
 	Execution core.ExecutionState
 	ExitCode  *int

@@ -55,14 +55,11 @@ func (h *Host) Drive(ctx context.Context, id string, b Binding, o DriveOptions) 
 		return Drive{}, err
 	}
 	if c.ContextVersion != ContextVersion {
-		return Drive{}, fmt.Errorf("run %s %s", id, Unresumable(id, c))
+		return Drive{}, fmt.Errorf("run %s %s", id, Unresumable(c))
 	}
-	p := provider(c, b)
+	p := c.Provider
 	if err := CheckProvider(p); err != nil {
-		// A run stored before runs kept their provider takes the caller's,
-		// which no admission checked: check it as admission checks a new
-		// run's, before a model is built, a request sent, or a failure
-		// recorded or logged.
+		// Validate the exact stored endpoint before using a credential.
 		return Drive{}, fmt.Errorf("run %s: %w", id, err)
 	}
 	k, err := h.keysFor(id, c, p, b)
@@ -73,7 +70,7 @@ func (h *Host) Drive(ctx context.Context, id string, b Binding, o DriveOptions) 
 	if err != nil {
 		return Drive{}, err
 	}
-	l, err := h.loop(run, c, m, true)
+	l, err := h.loop(run, c, m)
 	if err != nil {
 		return Drive{}, err
 	}
@@ -120,22 +117,28 @@ func (h *Host) Driving(id string) bool {
 }
 
 // interrupt ends the drive of run id, if any, as a controller shutdown that
-// commits nothing, and waits until it has ended.
-func (h *Host) interrupt(id string) {
+// commits nothing, and waits until it has ended or ctx expires. A timeout
+// leaves the canceled controller accounted to the Host lifetime.
+func (h *Host) interrupt(ctx context.Context, id string) error {
 	h.mu.Lock()
 	d := h.drivers[id]
 	h.mu.Unlock()
 	if d != nil {
 		d.cancel()
-		<-d.done
+		select {
+		case <-d.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 // Stop ends the drive of run id, if any, then records a persistent stop
 // with reason cancelled and carries it out within ctx, which bounds the
 // cleanup: an effect that may exist is cancelled and its true result
-// recorded. It calls no model and needs no credential, so a run of any
-// context version can be stopped. Stop is an operation of the host: it waits
+// recorded. It calls no model and needs no credential. Stop is an operation
+// of the host: it waits
 // for the run's lock only until ctx is done or the host shuts down, and a
 // shutdown ends its cleanup too, leaving the run stopped or cancelling, which
 // a later stop or drive finishes.
@@ -150,12 +153,14 @@ func (h *Host) Stop(ctx context.Context, id string) (harness.Snapshot, error) {
 		return harness.Snapshot{}, err
 	}
 	defer unlock()
-	h.interrupt(id)
+	if err := h.interrupt(ctx, id); err != nil {
+		return harness.Snapshot{}, err
+	}
 	run, c, err := h.Find(ctx, id)
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
-	l, err := h.loop(run, c, NoModel, false)
+	l, err := h.loop(run, c, NoModel)
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
@@ -163,8 +168,10 @@ func (h *Host) Stop(ctx context.Context, id string) (harness.Snapshot, error) {
 }
 
 // Resolve records the confirmed outcome obs of the unknown effect of run id.
-func (h *Host) Resolve(ctx context.Context, id string, obs harness.Observation) (harness.Snapshot, error) {
-	return h.resolve(ctx, id, func(ctx context.Context, l *harness.Loop) (harness.Snapshot, error) { return l.Resolve(ctx, id, obs) })
+func (h *Host) Resolve(ctx context.Context, id string, obs harness.Observation, ownerID string) (harness.Snapshot, error) {
+	return h.resolve(ctx, id, func(ctx context.Context, l *harness.Loop) (harness.Snapshot, error) {
+		return l.Resolve(ctx, id, obs, ownerID)
+	})
 }
 
 // ResolveJob records the job the executor finds for the unknown effect of
@@ -191,7 +198,7 @@ func (h *Host) resolve(ctx context.Context, id string, op func(context.Context, 
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
-	l, err := h.loop(run, c, NoModel, false)
+	l, err := h.loop(run, c, NoModel)
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
@@ -330,7 +337,7 @@ func (h *Host) acquire(ctx context.Context, slot chan struct{}) error {
 // Interrupt ends the drive of run id, if any, as a shutdown of its
 // controller: nothing is committed for it, no job is cancelled, and a later
 // drive resumes the run from the journal.
-func (h *Host) Interrupt(id string) { h.interrupt(id) }
+func (h *Host) Interrupt(id string) { _ = h.interrupt(context.Background(), id) }
 
 // ended is the run and the error of the latest drive that ended.
 type ended struct {

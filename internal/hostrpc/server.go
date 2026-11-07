@@ -300,6 +300,13 @@ func (s *Server) do(ctx context.Context, req Request) Response {
 		if err == nil {
 			resp.Run, err = s.view(ctx, req.RunID)
 		}
+	case OpInspect:
+		var sample host.Inspection
+		sample, err = s.Host.Inspect(ctx, req.RunID)
+		if err == nil {
+			wire := InspectionOf(sample)
+			resp.Inspection = &wire
+		}
 	case OpView:
 		resp.Run, err = s.view(ctx, req.RunID)
 	case OpProgress:
@@ -446,7 +453,7 @@ func (s *Server) resolve(ctx context.Context, req Request) (*Run, error) {
 			return nil, host.SpecError{Err: fmt.Errorf("hostrpc: %q is no execution state of the protocol", r.Execution)}
 		}
 		obs := harness.Observation{Execution: execution, ExitCode: r.ExitCode, Preview: r.Note, Output: harness.ArtifactRef{Detail: "resolved by operator"}}
-		_, err = s.Host.Resolve(ctx, req.RunID, obs)
+		_, err = s.Host.Resolve(ctx, req.RunID, obs, r.OwnerID)
 	}
 	run, viewErr := s.view(ctx, req.RunID)
 	return run, cmpErr(err, viewErr)

@@ -83,14 +83,21 @@ func evEvent[T any](t *testing.T, e entry) T {
 	return v
 }
 
-func evJob(t *testing.T, h []entry) string {
+func evJob(t *testing.T, f *fixture, h []entry) string {
 	t.Helper()
 	for _, e := range h {
-		if e.Kind == "job_bound" {
-			return evEvent[core.JobBound](t, e).JobID
+		if r := e.Facts.Receipt; r != nil && r.ID != "" {
+			return r.ID
 		}
 	}
-	t.Fatalf("no job_bound in %q", kinds(h))
+	// Running work has no journal receipt: locate its durable binding in the
+	// state directory supplied to the test binary's fixture.
+	for _, e := range slices.Backward(h) {
+		if e.State.EffectID != "" {
+			return effectOwner(t, f, e.State.EffectID)
+		}
+	}
+	t.Fatal("no accepted effect")
 	return ""
 }
 
@@ -99,16 +106,11 @@ func evRequestSum(body []byte) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// evAwait polls the history until it holds kind.
-func evAwait(t *testing.T, f *fixture, kind string) []entry {
+// evAwaitRunning waits for an accepted effect whose physical owner is running.
+func evAwaitRunning(t *testing.T, f *fixture) []entry {
 	t.Helper()
-	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if r := f.cli(nil, "history"); r.code == exitOK && strings.Contains(r.stdout, `"kind":"`+kind+`"`) {
-			return f.history()
-		}
-	}
-	t.Fatalf("no %s in the history", kind)
-	return nil
+	awaitRunningEffect(t, f)
+	return f.history()
 }
 
 var evPlatform = sync.OnceValue(func() string {
@@ -124,8 +126,8 @@ func evLog(t *testing.T, image, gate, injected, observed, measured string) {
 }
 
 var (
-	evStep    = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}
-	evStarted = evStep[:6]
+	evStep    = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "observed"}
+	evStarted = evStep[:4]
 	evReturn  = evStep[:4]
 )
 
@@ -155,7 +157,7 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 			}
 			frozen, sent := h[0].Facts.Request, f.model.requests()
 			if frozen == nil || len(sent) != 3 || !bytes.Equal(sent[0], frozen.Body) || !bytes.Equal(sent[1], frozen.Body) ||
-				!bytes.Equal(sent[2], h[9].Facts.Request.Body) {
+				!bytes.Equal(sent[2], h[7].Facts.Request.Body) {
 				t.Fatalf("%d requests do not replay the frozen bytes %+v", len(sent), frozen)
 			}
 			if frozen.Model != "fixture-model" || frozen.Adapter != "canti-anthropic/2" || !strings.HasPrefix(frozen.Protocol, "anthropic-messages/2023-06-01") {
@@ -266,7 +268,7 @@ func TestGateLargeOutput(t *testing.T) {
 		if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) {
 			t.Fatalf("history = %q", kinds(h))
 		}
-		obs := h[6].Facts.Observation
+		obs := h[4].Facts.Observation
 		evCheckFlood(t, f, obs, total, limit)
 		where := path.Join(archive.ArtifactsRoot, obs.Output.Path)
 		sent := f.model.requests()
@@ -278,13 +280,13 @@ func TestGateLargeOutput(t *testing.T) {
 		if err != nil || step != 2 || !strings.Contains(prompt, ref) || !strings.Contains(prompt, "tail-marker") || len(sent[1]) > 64<<10 {
 			t.Errorf("step 2 request of %d bytes lacks %q: %v\n%s", len(sent[1]), ref, err, prompt)
 		}
-		if read := h[13].Facts.Observation; read == nil || read.Preview != fmt.Sprintf("%s %d\n", where, limit) {
+		if read := h[9].Facts.Observation; read == nil || read.Preview != fmt.Sprintf("%s %d\n", where, limit) {
 			t.Fatalf("reading the artifact in the job = %+v", read)
 		}
-		if s := f.status(); s.Totals.OutputBytes != limit+h[13].Facts.Observation.Output.Bytes {
+		if s := f.status(); s.Totals.OutputBytes != limit+h[9].Facts.Observation.Output.Bytes {
 			t.Errorf("status totals = %+v", s.Totals)
 		}
-		rec := checkReleased(t, f, h)[evJob(t, h)]
+		rec := checkReleased(t, f, h)[evJob(t, f, h)]
 		evLog(t, image, "large output", fmt.Sprintf("step 1 writes %d bytes, -output-limit %d", total, limit),
 			fmt.Sprintf("exited 0, %q, artifact %s readable by the step 2 job, container and its log released, returned", obs.Output.Detail, where),
 			fmt.Sprintf("artifact %d bytes, preview %d bytes, step 2 request %d bytes, job %v, run %v",
@@ -302,8 +304,8 @@ func TestGateLargeOutput(t *testing.T) {
 		if !slices.Equal(kinds(h), append(slices.Clone(evStep), "stop_requested")) {
 			t.Fatalf("history = %q", kinds(h))
 		}
-		evCheckFlood(t, f, h[6].Facts.Observation, total, limit)
-		stop := h[7]
+		evCheckFlood(t, f, h[4].Facts.Observation, total, limit)
+		stop := h[5]
 		why := fmt.Sprintf("%d output bytes reached the %d-byte budget", limit, limit)
 		if evEvent[core.StopRequested](t, stop).Reason != core.StopBudgetExhausted || stop.Facts.Failure != why ||
 			stop.From != core.PhaseIdle || stop.To != core.PhaseStopped {
@@ -337,11 +339,11 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 		if !slices.Equal(kinds(h), slices.Concat(evStep, evReturn)) {
 			t.Fatalf("history = %q", kinds(h))
 		}
-		obs := h[6].Facts.Observation
+		obs := h[4].Facts.Observation
 		if obs == nil || obs.Execution != core.ExecutionTimedOut || obs.ExitCode == nil || obs.Output.Complete || !strings.Contains(obs.Output.Detail, "cancelled") {
 			t.Fatalf("observation = %+v", obs)
 		}
-		rec := checkReleased(t, f, h)[evJob(t, h)]
+		rec := checkReleased(t, f, h)[evJob(t, f, h)]
 		ran := rec.FinishedAt.Sub(rec.StartedAt)
 		if ran < timeout || ran > timeout+grace+slack {
 			t.Errorf("job ran %v, want %v to %v", ran, timeout, timeout+grace+slack)
@@ -356,14 +358,14 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 	t.Run("stop_without_controller", func(t *testing.T) {
 		const cleanup = 20 * time.Second
 		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 300"}})
-		if r := f.cli([]string{"CANTI_TEST_CRASH=after:job_started"}, "run", "-goal", "g", "-image", image); r.code != -1 {
+		if r := f.cli([]string{"CANTI_TEST_EXECUTOR_CRASH=running"}, "run", "-goal", "g", "-image", image); r.code != -1 {
 			t.Fatalf("crashing run = %d\nstderr: %s", r.code, r.stderr)
 		}
 		h := f.history()
 		if !slices.Equal(kinds(h), evStarted) {
 			t.Fatalf("history after the crash = %q", kinds(h))
 		}
-		job := evJob(t, h)
+		job := evJob(t, f, h)
 		if ids := evContainers(t, f.state); len(ids) != 1 || !strings.HasPrefix(job, ids[0]) {
 			t.Fatalf("running containers %q, want job %s", ids, job)
 		}
@@ -378,14 +380,14 @@ func TestGateCancellationAndTimeout(t *testing.T) {
 			t.Errorf("stop took %v, beyond its %v cleanup", elapsed, cleanup)
 		}
 		rec := checkReleased(t, f, f.history())[job]
-		evLog(t, image, "cancellation and timeout", "SIGKILL after job_started commit, then stop -cleanup 20s",
+		evLog(t, image, "cancellation and timeout", "SIGKILL after Docker reports the bound owner running, then stop -cleanup 20s",
 			fmt.Sprintf("stop_requested cancelled -> observed %s exit %d -> stopped cancelled, container stopped and released", obs.Execution, *obs.ExitCode),
 			fmt.Sprintf("stop took %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), cleanup, rec.FinishedAt.Sub(rec.StartedAt).Round(time.Millisecond)))
 	})
 	t.Run("signal", func(t *testing.T) {
 		f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 300"}})
 		cmd, wait := f.start(nil, "run", "-goal", "g", "-image", image)
-		job := evJob(t, evAwait(t, f, "job_started"))
+		job := evJob(t, f, evAwaitRunning(t, f))
 		begin := time.Now()
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
 			t.Fatal(err)
@@ -415,8 +417,8 @@ func evCheckCancelled(t *testing.T, f *fixture, reason core.StopReason) *harness
 	if !slices.Equal(kinds(h), append(slices.Clone(evStarted), "stop_requested", "observed")) {
 		t.Fatalf("history = %q", kinds(h))
 	}
-	stop, last := h[6], h[7]
-	if evEvent[core.StopRequested](t, stop).Reason != reason || stop.From != core.PhaseAwaitingObservation || stop.To != core.PhaseCancelling {
+	stop, last := h[4], h[5]
+	if evEvent[core.StopRequested](t, stop).Reason != reason || stop.From != core.PhaseEffectSaved || stop.To != core.PhaseCancelling {
 		t.Errorf("stop = %+v", stop)
 	}
 	obs := last.Facts.Observation
@@ -440,10 +442,10 @@ func TestGateFiniteRuns(t *testing.T) {
 			t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
 		}
 		h := f.history()
-		if !slices.Equal(kinds(h), slices.Concat(evStep, evStep)) || h[13].To != core.PhaseStopped || h[13].State.Reason != core.StopStepsExhausted {
+		if !slices.Equal(kinds(h), slices.Concat(evStep, evStep)) || h[9].To != core.PhaseStopped || h[9].State.Reason != core.StopStepsExhausted {
 			t.Fatalf("history = %q", kinds(h))
 		}
-		for i, want := range map[int]string{6: "one\n", 13: "two\n"} {
+		for i, want := range map[int]string{4: "one\n", 9: "two\n"} {
 			if o := h[i].Facts.Observation; o == nil || o.Execution != core.ExecutionExited || o.Preview != want {
 				t.Errorf("observation %d = %+v", i, o)
 			}
@@ -501,14 +503,14 @@ func TestGateFiniteRuns(t *testing.T) {
 			t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
 		}
 		obs := evCheckCancelled(t, f, core.StopTimedOut)
-		if why := f.history()[6].Facts.Failure; !strings.Contains(why, "wall-time budget") {
+		if why := f.history()[4].Facts.Failure; !strings.Contains(why, "wall-time budget") {
 			t.Errorf("stop failure = %q", why)
 		}
 		if elapsed > wall+grace+slack {
 			t.Errorf("run took %v, want at most %v", elapsed, wall+grace+slack)
 		}
 		h := f.history()
-		rec := checkReleased(t, f, h)[evJob(t, h)]
+		rec := checkReleased(t, f, h)[evJob(t, f, h)]
 		evLog(t, image, "finite runs (wall time)", "-wall-time 5s on sleep 60",
 			fmt.Sprintf("stopped timed_out, job observed %s exit %d, container stopped and released", obs.Execution, *obs.ExitCode),
 			fmt.Sprintf("run %v (bound %v), job ran %v", elapsed.Round(time.Millisecond), wall+grace+slack, rec.FinishedAt.Sub(rec.StartedAt).Round(time.Millisecond)))
@@ -528,7 +530,7 @@ func TestGateFiniteRuns(t *testing.T) {
 			stop.From != core.PhaseEffectSaved || stop.To != core.PhaseCancelling {
 			t.Errorf("stop = %+v", stop)
 		}
-		if o := last.Facts.Observation; o == nil || o.Execution != core.ExecutionCancelled || o.Output.Detail != "no job was bound to the effect" ||
+		if o := last.Facts.Observation; o == nil || o.Execution != core.ExecutionCancelled || o.Output != (harness.ArtifactRef{}) || last.Facts.Receipt == nil || !last.Facts.Receipt.Fenced || last.Facts.Receipt.ID != "" ||
 			last.To != core.PhaseStopped || last.State.Reason != core.StopBudgetExhausted {
 			t.Errorf("result = %+v", last)
 		}

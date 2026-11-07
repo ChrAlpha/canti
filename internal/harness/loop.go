@@ -58,8 +58,8 @@ type Loop struct {
 // NewLoop validates cfg, applies its defaults, and builds a Loop that
 // commits every transition through a Runner on j and x.
 func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
-	if j == nil || m == nil {
-		return nil, errors.New("harness: loop journal and model are required")
+	if j == nil || m == nil || x == nil {
+		return nil, errors.New("harness: loop journal, executor and model are required")
 	}
 	if strings.TrimSpace(cfg.History) == "" {
 		return nil, errPaths
@@ -68,7 +68,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := NewRunner(logged{j, cfg.Logger}, x)
+	r, err := NewRunner(logged{j, cfg.Logger})
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 		return l.send(ctx, run, snap)
 	case core.IntentDecode:
 		return l.decode(ctx, snap)
-	case core.IntentBind, core.IntentStart, core.IntentInspect, core.IntentCancel:
+	case core.IntentEffect, core.IntentCancel:
 		return l.effect(ctx, run, snap)
 	}
 	return snap, nil
@@ -190,46 +190,82 @@ func (l *Loop) Stop(ctx context.Context, runID string, reason core.StopReason) (
 	return l.Run(ctx, runID)
 }
 
-// ErrJobUnknown reports that the job of an unresolved effect inspects to an
-// unknown outcome, which recording the job again would only reach again.
-var ErrJobUnknown = errors.New("harness: the job reports an unknown outcome")
+// ErrJobUnknown reports evidence which cannot authorize recovery.
+var ErrJobUnknown = errors.New("harness: the effect has no known recoverable outcome")
 
-// ResolveJob inspects the effect of a run in needs_resolution and records
-// the job found for it with JobBound, so the run resumes behind the start
-// boundary. It fails when no job is found, and with ErrJobUnknown when the
-// job reports an unknown outcome, which it takes for a stable report, as the
-// docker executor's are, that only Resolve settles; neither commits anything.
+// ResolveJob explicitly inspects unknown work. Active evidence recovers the
+// same accepted effect; terminal evidence settles it with inspection provenance.
 func (l *Loop) ResolveJob(ctx context.Context, runID string) (Snapshot, error) {
 	snap, err := l.unresolved(ctx, runID)
 	if err != nil {
 		return snap, err
 	}
-	job, found, err := l.executor.Inspect(ctx, snap.State.EffectID)
-	switch {
-	case err != nil:
-	case !found:
-		err = fmt.Errorf("harness: no job owns effect %s", snap.State.EffectID)
-	case job.Status == JobUnknown:
-		detail := ""
-		if job.Output.Detail != "" {
-			detail = ": " + job.Output.Detail
-		}
-		err = fmt.Errorf("%w: job %s of effect %s%s", ErrJobUnknown, job.ID, snap.State.EffectID, detail)
-	}
+	job, err := l.inspect(ctx, snap)
 	if err != nil {
 		return snap, err
 	}
-	return l.runner.Commit(ctx, snap, core.JobBound{EffectID: snap.State.EffectID, JobID: job.ID}, Facts{})
+	switch job.Status {
+	case JobPending, JobRunning:
+		return l.runner.Commit(ctx, snap, core.EffectRecovered{EffectID: snap.State.EffectID}, Facts{Receipt: &job})
+	case JobAbsent, JobUnknown:
+		return snap, fmt.Errorf("%w: %s: %s", ErrJobUnknown, job.Status, job.Output.Detail)
+	}
+	run, err := l.journal.Run(ctx, runID)
+	if err != nil {
+		return snap, err
+	}
+	execution := resultExecution(job, run.Budget.JobTimeout, snap.State.Reason != "")
+	obs := observationOf(job, execution)
+	return l.runner.Commit(ctx, snap, core.Resolved{EffectID: snap.State.EffectID, Execution: execution}, Facts{Observation: &obs, Receipt: &job, Resolution: &Resolution{Source: ResolutionInspection, OwnerID: job.ID}})
 }
 
-// Resolve records an explicit outcome for the effect of a run in
-// needs_resolution. Resolving to core.ExecutionUnknown abandons the run.
-func (l *Loop) Resolve(ctx context.Context, runID string, obs Observation) (Snapshot, error) {
+// Resolve records an explicit operator assertion, including physical owner
+// provenance for exited/timed-out work. It performs no backend operation.
+func (l *Loop) Resolve(ctx context.Context, runID string, obs Observation, ownerID string) (Snapshot, error) {
+	if obs.Output != (ArtifactRef{}) && obs.Output != (ArtifactRef{Detail: "resolved by operator"}) {
+		return Snapshot{}, errors.New("harness: operator assertion cannot fabricate retained output")
+	}
+	obs.Output = ArtifactRef{Detail: "resolved by operator"}
+
 	snap, err := l.unresolved(ctx, runID)
 	if err != nil {
 		return snap, err
 	}
-	return l.runner.Commit(ctx, snap, core.Resolved{EffectID: snap.State.EffectID, Execution: obs.Execution}, Facts{Observation: &obs})
+	return l.runner.Commit(ctx, snap, core.Resolved{EffectID: snap.State.EffectID, Execution: obs.Execution}, Facts{Observation: &obs, Resolution: &Resolution{Source: ResolutionOperator, OwnerID: ownerID}})
+}
+
+// Inspect samples the current external effect without committing progress or
+// starting work. Its snapshot and backend receipt are separate observations.
+func (l *Loop) Inspect(ctx context.Context, runID string) (Snapshot, Job, error) {
+	snap, err := l.load(ctx, runID)
+	if err != nil {
+		return snap, Job{}, err
+	}
+	job, err := l.inspect(ctx, snap)
+	return snap, job, err
+}
+
+func (l *Loop) inspect(ctx context.Context, snap Snapshot) (Job, error) {
+	a, err := ActionOf(ctx, l.journal, snap.State)
+	if err != nil {
+		return Job{}, err
+	}
+	if a.Local() {
+		return Job{}, errors.New("harness: the accepted action is local")
+	}
+	run, err := l.journal.Run(ctx, snap.State.RunID)
+	if err != nil {
+		return Job{}, err
+	}
+	e, err := l.descriptor(run, snap.State, a)
+	if err != nil {
+		return Job{}, err
+	}
+	job, err := l.executor.Inspect(ctx, e)
+	if err == nil {
+		err = job.Validate(e)
+	}
+	return job, err
 }
 
 func (l *Loop) load(ctx context.Context, runID string) (Snapshot, error) {
@@ -376,6 +412,13 @@ func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 		}
 		a := NormalizeAction(accepted.Decision.Payload, req.Window != nil && req.Window.Requested, l.cfg.Reader != nil)
 		facts.Action = &a
+		if a.Recovery == RecoveryExternal {
+			run, err := l.journal.Run(ctx, s.RunID)
+			if err != nil {
+				return snap, err
+			}
+			facts.Execution = &ExecutionIdentity{Spec: l.executor.Specification(accepted.Decision.Payload), ConfigDigest: ConfigDigest(run.Config)}
+		}
 	}
 	next, err := l.runner.Commit(ctx, snap, event, facts)
 	if err == nil && next.State.Phase == core.PhaseIdle {
@@ -393,195 +436,200 @@ func (l *Loop) decision(resp Response) []byte {
 	return resp.Body
 }
 
-// cancel fences an effect without a recorded job and records what the
-// lookup finds; a recorded job is cancelled and watched to its result.
-func (l *Loop) cancel(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
-	s := snap.State
-	if err := l.executor.Cancel(ctx, s.EffectID); err != nil {
-		return snap, err
-	}
-	if s.JobID != "" {
-		return l.watch(ctx, run, snap)
-	}
-	job, found, err := l.executor.Inspect(ctx, s.EffectID)
-	switch {
-	case ctx.Err() != nil:
-		return snap, ctx.Err()
-	case errors.Is(err, ErrJobLost):
-		return l.unknown(ctx, snap, err.Error())
-	case err != nil:
-		return snap, err
-	case found:
-		return l.runner.Commit(ctx, snap, core.JobBound{EffectID: s.EffectID, JobID: job.ID}, Facts{})
-	}
-	return l.observe(ctx, snap, Job{Output: ArtifactRef{Detail: "no job was bound to the effect"}}, core.ExecutionCancelled)
-}
-
-// watch polls the recorded job until it reports a result. While the run is
-// not stopping it cancels a job past its timeout and stops a run past its
-// wall time.
-func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
-	w := watcher{Loop: l, run: run, snap: snap, stopping: snap.State.Phase == core.PhaseCancelling}
+// watch returns control to harness policy between bounded executor operations.
+// No transient backend phase is recorded as Run progress.
+func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot, effect Effect) (Snapshot, error) {
+	w := effectWatch{Loop: l, run: run, snap: snap, effect: effect, stopping: snap.State.Phase == core.PhaseCancelling}
 	for {
-		job, found, err := l.executor.Inspect(ctx, snap.State.EffectID)
-		if ctx.Err() != nil {
-			return snap, ctx.Err()
-		}
-		if next, done, err := w.inspected(ctx, job, found, err); done {
+		next, done, err := w.step(ctx)
+		if done {
 			return next, err
 		}
-		if err := w.await(ctx, job, err == nil && found); err != nil {
-			return snap, err
-		}
 	}
 }
 
-// maxWait bounds one wait, so a backend that never answers delays an
-// observation by at most this long.
+type effectWatch struct {
+	*Loop
+	run              Run
+	snap             Snapshot
+	effect           Effect
+	stopping         bool
+	failures         int
+	timeoutRequested bool
+	early            bool
+}
+
+func (w *effectWatch) step(ctx context.Context) (Snapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return w.snap, true, err
+	}
+	if !w.stopping {
+		reason, why, err := w.spent(ctx, w.run)
+		if err != nil {
+			return w.snap, true, err
+		}
+		if reason != "" {
+			next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
+			return next, true, err
+		}
+	}
+	job, expired, err := w.sample(ctx)
+	if ctx.Err() != nil {
+		return w.snap, true, ctx.Err()
+	}
+	if expired {
+		next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: "the wall-time budget ran out while driving the accepted effect"})
+		return next, true, err
+	}
+	if err != nil {
+		return w.failed(ctx, err)
+	}
+	if err := job.Validate(w.effect); err != nil {
+		next, err := w.unknown(ctx, w.snap, err.Error(), nil)
+		return next, true, err
+	}
+	w.failures = 0
+	switch job.Status {
+	case JobAbsent, JobUnknown:
+		next, err := w.unknown(ctx, w.snap, fmt.Sprintf("effect %s reports %s: %s", w.effect.ID, job.Status, job.Output.Detail), &job)
+		return next, true, err
+	case JobPending, JobRunning:
+		return w.pending(ctx, job)
+	default:
+		next, err := w.complete(ctx, w.run, w.snap, job)
+		return next, true, err
+	}
+}
+
+func (w *effectWatch) sample(ctx context.Context) (Job, bool, error) {
+	if w.stopping {
+		job, err := w.executor.Cancel(ctx, w.effect)
+		return job, false, err
+	}
+	call, cancel := ctx, context.CancelFunc(func() {})
+	budgeted := w.run.Budget.WallTime > 0
+	if budgeted {
+		call, cancel = context.WithTimeout(ctx, w.run.Created.Add(w.run.Budget.WallTime).Sub(w.cfg.Now()))
+	}
+	defer cancel()
+	job, err := w.executor.Drive(call, w.effect)
+	return job, budgeted && call.Err() != nil, err
+}
+
+func (w *effectWatch) failed(ctx context.Context, cause error) (Snapshot, bool, error) {
+	if errors.Is(cause, ErrJobLost) {
+		next, err := w.unknown(ctx, w.snap, cause.Error(), nil)
+		return next, true, err
+	}
+	if !w.stopping {
+		if why := w.late(w.run); why != "" {
+			next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: why + "; " + cause.Error()})
+			return next, true, err
+		}
+	}
+	w.failures++
+	if w.failures > w.cfg.InspectRetries {
+		next, err := w.unknown(ctx, w.snap, cause.Error(), nil)
+		return next, true, err
+	}
+	w.note(ctx, slog.LevelWarn, "retrying executor evidence", w.snap, "failures", w.failures, "error", cause)
+	err := w.pause(ctx, Job{})
+	return w.snap, err != nil, err
+}
+
+func (w *effectWatch) pending(ctx context.Context, job Job) (Snapshot, bool, error) {
+	timeout := w.run.Budget.JobTimeout
+	if !w.stopping && !w.timeoutRequested && job.Status == JobRunning && timeout > 0 && !job.StartedAt.IsZero() && w.cfg.Now().Sub(job.StartedAt) >= timeout {
+		var err error
+		job, err = w.executor.Cancel(ctx, w.effect)
+		if err != nil {
+			return w.snap, true, err
+		}
+		if err := job.Validate(w.effect); err != nil {
+			next, err := w.unknown(ctx, w.snap, err.Error(), nil)
+			return next, true, err
+		}
+		w.timeoutRequested = true
+		if job.Status != JobRunning && job.Status != JobPending {
+			next, err := w.complete(ctx, w.run, w.snap, job)
+			return next, true, err
+		}
+	}
+	err := w.await(ctx, job)
+	return w.snap, err != nil, err
+}
+
 const maxWait = 30 * time.Second
 
-// await waits for a running job to stop running, within the job's timeout
-// and the run's wall time, when the executor can wait. After an inspection
-// that failed, a failed wait, or a wait that returned early while the job
-// kept running, it sleeps for the poll interval instead.
-func (w *watcher) await(ctx context.Context, job Job, inspected bool) error {
-	waiter, ok := w.executor.(Waiter)
-	if !ok || !inspected || job.Status != JobRunning || w.early {
-		w.early = false
-		return sleep(ctx, w.cfg.Poll)
+func (w *effectWatch) waitLimit(job Job, limit time.Duration) time.Duration {
+	if w.stopping {
+		return limit
 	}
-	limit := maxWait
-	if !w.stopping {
-		if t := w.run.Budget.JobTimeout; t > 0 && !w.timedOut && !job.StartedAt.IsZero() {
-			limit = min(limit, t-w.cfg.Now().Sub(job.StartedAt))
-		}
-		if t := w.run.Budget.WallTime; t > 0 {
-			limit = min(limit, t-w.cfg.Now().Sub(w.run.Created))
-		}
+	if d := w.run.Budget.WallTime; d > 0 {
+		limit = min(limit, d-w.cfg.Now().Sub(w.run.Created))
+	}
+	if d := w.run.Budget.JobTimeout; d > 0 && !job.Fenced && !job.StartedAt.IsZero() {
+		limit = min(limit, d-w.cfg.Now().Sub(job.StartedAt))
+	}
+	return limit
+}
+
+func (w *effectWatch) pause(ctx context.Context, job Job) error {
+	return sleep(ctx, w.waitLimit(job, w.cfg.Poll))
+}
+
+func (w *effectWatch) await(ctx context.Context, job Job) error {
+	waiter, ok := w.executor.(Waiter)
+	if !ok || job.Status != JobRunning || w.early {
+		w.early = false
+		return w.pause(ctx, job)
 	}
 	began := time.Now()
-	wctx, cancel := context.WithTimeout(ctx, limit)
+	call, cancel := context.WithTimeout(ctx, w.waitLimit(job, maxWait))
 	defer cancel()
-	err := waiter.Wait(wctx, w.snap.State.EffectID)
-	switch {
-	case ctx.Err() != nil:
+	err := waiter.Wait(call, w.effect)
+	if ctx.Err() != nil {
 		return ctx.Err()
-	case err != nil && wctx.Err() == nil:
-		w.note(ctx, slog.LevelWarn, "waiting for the job failed", w.snap, "error", err)
-		return sleep(ctx, w.cfg.Poll)
 	}
+	if err != nil && call.Err() == nil {
+		return w.pause(ctx, job)
+	}
+	// Always sample after a wake-up. Only a still-active next sample sleeps
+	// after an early wake, so a genuine exit is observed without poll latency.
 	w.early = time.Since(began) < w.cfg.Poll
 	return nil
 }
 
-// watcher follows the job of one awaited or cancelling effect across
-// inspections: whether it was cancelled for its timeout and how many
-// inspections failed in a row.
-type watcher struct {
-	*Loop
-	run      Run
-	snap     Snapshot
-	stopping bool
-	timedOut bool
-	early    bool
-	failures int
-}
-
-// inspected acts on one inspection of the job and reports whether the
-// watch ends, with the snapshot it committed.
-func (w *watcher) inspected(ctx context.Context, job Job, found bool, err error) (Snapshot, bool, error) {
-	s := w.snap.State
-	why := ""
-	switch {
-	case errors.Is(err, ErrJobLost):
-		why = err.Error()
-	case err != nil:
-		if !w.stopping {
-			if late := w.late(w.run); late != "" {
-				next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late + "; " + err.Error()})
-				return next, true, err
-			}
-		}
-		if w.failures++; w.failures > w.cfg.InspectRetries {
-			why = fmt.Sprintf("inspect failed %d consecutive times: %v", w.failures, err)
-		} else {
-			w.note(ctx, slog.LevelWarn, "retrying a failed inspection", w.snap, "failures", w.failures, "error", err)
-		}
-	case !found:
-		why = fmt.Sprintf("no job owns effect %s", s.EffectID)
-	case job.ID != s.JobID:
-		why = fmt.Sprintf("effect %s is owned by job %q, not the recorded job %q", s.EffectID, job.ID, s.JobID)
-	case job.Status == JobRunning:
-		return w.running(ctx, job)
-	default:
-		return w.finished(ctx, job)
-	}
-	if why != "" {
-		next, err := w.unknown(ctx, w.snap, why)
-		return next, true, err
-	}
-	return w.snap, false, nil
-}
-
-// running enforces the job timeout and the wall time on a running job.
-func (w *watcher) running(ctx context.Context, job Job) (Snapshot, bool, error) {
-	w.failures = 0
-	if w.stopping {
-		return w.snap, false, nil
-	}
-	if limit := w.run.Budget.JobTimeout; !w.timedOut && limit > 0 && !job.StartedAt.IsZero() && w.cfg.Now().Sub(job.StartedAt) >= limit {
-		w.note(ctx, slog.LevelInfo, "cancelling a job past its timeout", w.snap, "job_id", job.ID, "timeout", limit)
-		if err := w.executor.Cancel(ctx, w.snap.State.EffectID); err != nil {
-			return w.snap, true, err
-		}
-		w.timedOut = true
-	}
-	if late := w.late(w.run); late != "" {
-		next, err := w.runner.Commit(ctx, w.snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: late})
-		return next, true, err
-	}
-	return w.snap, false, nil
-}
-
-// finished observes a job that is no longer running, or records an
-// unknown outcome for a status it cannot interpret.
-func (w *watcher) finished(ctx context.Context, job Job) (Snapshot, bool, error) {
-	var next Snapshot
-	var err error
+func resultExecution(job Job, timeout time.Duration, stopping bool) core.ExecutionState {
 	switch job.Status {
 	case JobSucceeded, JobFailed:
-		if job.ExitCode == nil {
-			next, err = w.unknown(ctx, w.snap, fmt.Sprintf("job %s %s without an exit code", job.ID, job.Status))
-			return next, true, err
-		}
-		next, err = w.observe(ctx, w.snap, job, core.ExecutionExited)
-	case JobCancelled:
-		limit := w.run.Budget.JobTimeout
-		ran := limit > 0 && !job.StartedAt.IsZero() && !job.FinishedAt.IsZero() && job.FinishedAt.Sub(job.StartedAt) >= limit
-		execution := core.ExecutionCancelled
-		if !w.stopping && (w.timedOut || ran) {
-			execution = core.ExecutionTimedOut
-		}
-		next, err = w.observe(ctx, w.snap, job, execution)
+		return core.ExecutionExited
 	case JobFailedToStart:
-		next, err = w.observe(ctx, w.snap, job, core.ExecutionFailedToStart)
-	default:
-		why := fmt.Sprintf("job %s reports %s", job.ID, job.Status)
-		if job.Output.Detail != "" {
-			why += ": " + job.Output.Detail
+		return core.ExecutionFailedToStart
+	case JobCancelled:
+		if !stopping && timeout > 0 && !job.StartedAt.IsZero() && !job.FinishedAt.IsZero() && job.FinishedAt.Sub(job.StartedAt) >= timeout {
+			return core.ExecutionTimedOut
 		}
-		next, err = w.unknown(ctx, w.snap, why)
+		return core.ExecutionCancelled
 	}
-	return next, true, err
+	return core.ExecutionUnknown
 }
 
-func (l *Loop) observe(ctx context.Context, snap Snapshot, job Job, execution core.ExecutionState) (Snapshot, error) {
-	obs := Observation{Execution: execution, ExitCode: job.ExitCode, Preview: job.Preview, Output: job.Output}
-	return l.runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: execution}, Facts{Observation: &obs})
+func observationOf(job Job, execution core.ExecutionState) Observation {
+	return Observation{Execution: execution, ExitCode: job.ExitCode, Preview: job.Preview, Output: job.Output}
 }
 
-func (l *Loop) unknown(ctx context.Context, snap Snapshot, why string) (Snapshot, error) {
-	return l.runner.Commit(ctx, snap, core.OutcomeUnknown{EffectID: snap.State.EffectID}, Facts{Failure: why})
+func (l *Loop) complete(ctx context.Context, run Run, snap Snapshot, job Job) (Snapshot, error) {
+	execution := resultExecution(job, run.Budget.JobTimeout, snap.State.Phase == core.PhaseCancelling)
+	if execution == core.ExecutionUnknown {
+		return l.unknown(ctx, snap, "executor reports unknown after cancellation", &job)
+	}
+	obs := observationOf(job, execution)
+	return l.runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: execution}, Facts{Observation: &obs, Receipt: &job})
+}
+
+func (l *Loop) unknown(ctx context.Context, snap Snapshot, why string, receipt *Job) (Snapshot, error) {
+	return l.runner.Commit(ctx, snap, core.OutcomeUnknown{EffectID: snap.State.EffectID}, Facts{Failure: why, Receipt: receipt})
 }
 
 func (l *Loop) note(ctx context.Context, level slog.Level, msg string, snap Snapshot, attrs ...any) {

@@ -20,17 +20,17 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 		1: {Kind: core.Exec, Payload: "echo x >> count; echo started; sleep 300"},
 		2: {Kind: core.Return, Payload: "done"},
 	})
-	crashRun(t, f, "after:job_started", "run", "-goal", "survive", "-image", image, "-memory", "512m", "-pids", "128")
+	crashRun(t, f, "executor:running", "run", "-goal", "survive", "-image", image, "-memory", "512m", "-pids", "128")
 	pre := f.history()
 	s := pre[len(pre)-1].State
-	if !slices.Equal(kinds(pre), stepKinds[:6]) || s.Phase != core.PhaseAwaitingObservation {
+	if !slices.Equal(kinds(pre), stepKinds[:4]) || s.Phase != core.PhaseEffectSaved {
 		t.Fatalf("history after the crash = %q", kinds(pre))
 	}
 	waitFor(t, func() bool {
 		data, err := os.ReadFile(filepath.Join(f.workspace, "count"))
 		return err == nil && string(data) == "x\n"
 	})
-	if out, err := exec.Command("docker", "kill", s.JobID).CombinedOutput(); err != nil {
+	if out, err := exec.Command("docker", "kill", effectOwner(t, f, s.EffectID)).CombinedOutput(); err != nil {
 		t.Fatalf("docker kill: %v: %s", err, out)
 	}
 	waitFor(t, func() bool {
@@ -51,11 +51,11 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 		h := f.history()
 		last := h[len(h)-1]
 		if !extends(h, before) || len(h) != len(before)+1 || last.Kind != "outcome_unknown" || last.To != core.PhaseNeedsResolution ||
-			last.Facts.Observation != nil || !strings.Contains(last.Facts.Failure, s.JobID) || !strings.Contains(last.Facts.Failure, detail) {
+			last.Facts.Observation != nil || last.Facts.Receipt == nil || last.Facts.Receipt.ID != effectOwner(t, f, s.EffectID) || last.Facts.Receipt.Status != harness.JobUnknown || !strings.Contains(last.Facts.Failure, detail) {
 			t.Fatalf("%s: history = %q, last %+v", what, kinds(h), last)
 		}
-		if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "exited" {
-			t.Errorf("%s: containers = %+v, want the killed job %s kept", what, cs, s.JobID)
+		if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "exited" {
+			t.Errorf("%s: containers = %+v, want the killed job %s kept", what, cs, effectOwner(t, f, s.EffectID))
 		}
 		if recs, n := records(t, f), len(f.model.requests()); len(recs) != 0 || n != 1 {
 			t.Errorf("%s: records %q, %d model requests; want none and one", what, recs, n)
@@ -76,8 +76,8 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 	if now := f.history(); !extends(now, h) || len(now) != len(h) {
 		t.Fatalf("resolve -job of the killed job committed %q", kinds(now[len(h):]))
 	}
-	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "exited" {
-		t.Errorf("containers after resolve -job = %+v, want the killed job %s kept", cs, s.JobID)
+	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "exited" {
+		t.Errorf("containers after resolve -job = %+v, want the killed job %s kept", cs, effectOwner(t, f, s.EffectID))
 	}
 	if r := f.cli(nil, "resolve", "-execution", "cancelled", "-note", "killed outside canti"); r.code != exitOK {
 		t.Fatalf("resolve -execution = %d\nstderr: %s", r.code, r.stderr)
@@ -92,12 +92,12 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 		t.Fatalf("resume after the resolution = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	final := f.history()
-	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:6],
+	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:4],
 		[]string{"outcome_unknown", "resolved"}, stepKinds[:4])) {
 		t.Fatalf("history = %q", kinds(final))
 	}
-	if jobs := boundJobs(t, final); len(jobs) != 1 || jobs[s.EffectID] != s.JobID {
-		t.Errorf("bound jobs = %v, want only %s=%s", jobs, s.EffectID, s.JobID)
+	if jobs := boundJobs(t, final); len(jobs) != 1 || jobs[s.EffectID] != effectOwner(t, f, s.EffectID) {
+		t.Errorf("bound jobs = %v, want only %s=%s", jobs, s.EffectID, effectOwner(t, f, s.EffectID))
 	}
 	if p := f.model.prompts(2); len(p) != 1 || !strings.Contains(p[0], "set by explicit resolution") || !strings.Contains(p[0], "killed outside canti") {
 		t.Errorf("step 2 prompts = %q", p)
@@ -110,5 +110,5 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 	}
 	checkFile(t, filepath.Join(f.workspace, "count"), "x\n")
 	checkReplay(t, s.RunID, final)
-	evidence(t, "unknown outcomes", "after:job_started, then docker kill of job "+s.JobID, image, f, final)
+	evidence(t, "unknown outcomes", "executor:running, then docker kill of job "+effectOwner(t, f, s.EffectID), image, f, final)
 }

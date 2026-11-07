@@ -14,12 +14,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
@@ -233,11 +234,17 @@ func (f *fake) legacy(status string, exit int) string {
 func (f *fake) inspected(id, command, status string, exit int, labels map[string]string) string {
 	var c container
 	c.ID = "c-" + id
-	c.Config.Labels = map[string]string{"canti.effect": id, "canti.state": f.x.cfg.State, "canti.spec": specHash(f.x.runArgs(command))}
+	c.Config.Labels = map[string]string{"canti.effect": id, "canti.state": f.x.cfg.State, "canti.spec": f.x.Specification(command)}
 	maps.Copy(c.Config.Labels, labels)
 	c.State.Status, c.State.ExitCode = status, exit
 	c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
+	if status == "created" {
+		c.State.StartedAt, c.State.FinishedAt = time.Time{}, time.Time{}
+	}
+	if status == "running" {
+		c.State.FinishedAt = time.Time{}
+	}
 	b, err := json.Marshal(c)
 	if err != nil {
 		f.t.Fatal(err)
@@ -289,6 +296,13 @@ func (f *fake) pulls() []string {
 }
 
 func (f *fake) latch(value string) {
+	e := f.effect()
+	if err := os.MkdirAll(f.x.dir(e.ID), 0700); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.x.saveOwnership("binding.json", ownerOf(e, "c-e")); err != nil {
+		f.t.Fatal(err)
+	}
 	if err := os.MkdirAll(f.x.dir("e"), 0o700); err != nil {
 		f.t.Fatal(err)
 	}
@@ -342,871 +356,542 @@ func (f *fake) cancelAt(name string) context.Context {
 	return ctx
 }
 
-var effect = harness.Effect{ID: "e", Command: "true"}
+func (f *fake) effect() harness.Effect {
+	return harness.Effect{ID: "e", Command: "true", Spec: f.x.Specification("true")}
+}
+func (f *fake) ready() {
+	f.reply("inspect", f.container("created", 0))
+	running := f.container("running", 0)
+	f.hook("start", func(*http.Request) { f.reply("inspect", running) })
+}
+func freshExecutor(f *fake) *Executor { x := *f.x; return &x }
 
-func TestInspectReportsMissingOnlyWhenDockerSaysSo(t *testing.T) {
+func TestInspectReportsAbsenceOnlyWhenDockerSaysSo(t *testing.T) {
 	f := newFake(t)
 	f.missing()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || err != nil {
-		t.Fatalf("Inspect(no such container) = %v, %v; want not found", found, err)
+	e := f.effect()
+	j, err := f.x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobAbsent {
+		t.Fatalf("absence: %+v %v", j, err)
 	}
-	for name, fail := range map[string]func(){
-		"not found otherwise": func() { f.fail("inspect", http.StatusNotFound, "page not found") },
-		"daemon error":        func() { f.fail("inspect", http.StatusInternalServerError, "No such container: canti-e") },
-		"daemon down":         func() { f.down("inspect") },
-	} {
-		fail()
-		if _, found, err := f.x.Inspect(t.Context(), "e"); found || err == nil {
-			t.Fatalf("Inspect(%s) = %v, %v; want an error", name, found, err)
+	for _, bad := range []string{"", "{}", "[]", "not json", f.container("created", 0) + "{}", strings.ReplaceAll(f.container("created", 0), `"canti.effect":"e"`, `"canti.effect":"foreign"`)} {
+		f.reply("inspect", bad)
+		if _, err := f.x.Inspect(t.Context(), e); err == nil {
+			t.Fatalf("accepted invalid lookup %q", bad)
 		}
 	}
-	for _, out := range []string{"", "{}", "[]", "not json", f.container("created", 0) + "{}",
-		strings.ReplaceAll(f.container("created", 0), `"canti.effect":"e"`, `"canti.effect":"x"`)} {
-		f.reply("inspect", out)
-		if _, found, err := f.x.Inspect(t.Context(), "e"); found || err == nil {
-			t.Fatalf("Inspect(%s) = %v, %v; want an error", out, found, err)
-		}
+	f.fail("inspect", 500, "No such container: canti-e")
+	if _, err := f.x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("daemon error treated as absence")
+	}
+	if len(f.calls("create"))+len(f.calls("start")) != 0 {
+		t.Fatal("Inspect created or started")
 	}
 }
-
-func TestBindCreatesNothingOnceContextIsDone(t *testing.T) {
+func TestDriveCreatesNothingOnceContextIsDone(t *testing.T) {
 	f := newFake(t)
 	f.missing()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := f.x.Bind(ctx, effect); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Bind(done) = %v", err)
+	if _, err := f.x.Drive(ctx, f.effect()); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
-	if calls := f.calls("inspect"); len(calls) != 0 {
-		t.Fatalf("Bind(done) called docker: %q", calls)
+	if len(f.calls("inspect"))+len(f.calls("create"))+len(f.calls("start")) != 0 {
+		t.Fatal("cancelled call reached backend")
 	}
 }
-
-func TestBindPullsAMissingImageOnce(t *testing.T) {
+func TestDrivePublishesBindingBeforeLaunch(t *testing.T) {
 	f := newFake(t)
 	f.missing()
+	e := f.effect()
 	created := f.container("created", 0)
-	f.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
-	f.hook("create", func(*http.Request) {
-		if len(f.pulls()) > 0 {
-			f.clear("create")
-			f.reply("inspect", created)
-		}
-	})
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending {
-		t.Fatalf("Bind(image missing) = %+v, %v; want the job created after a pull", job, err)
-	}
-	if pulls, creates := f.pulls(), f.calls("create"); !slices.Equal(pulls, []string{"pull --quiet alpine:3.23"}) || len(creates) != 2 {
-		t.Fatalf("pulls %q, creates %q; want one pull between two creates", pulls, creates)
-	}
-
-	g := newFake(t)
-	g.missing()
-	g.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
-	if err := os.WriteFile(filepath.Join(g.ctl, "pull.exit"), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := g.x.Bind(t.Context(), effect); err == nil || !strings.Contains(err.Error(), "docker pull") || len(g.calls("create")) != 1 {
-		t.Fatalf("Bind(pull fails) = %v, creates %q; want the pull's error and no second create", err, g.calls("create"))
-	}
-
-	k := newFake(t)
-	k.missing()
-	k.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
-	if _, err := k.x.Bind(t.Context(), effect); err == nil || err.Error() != "docker create: No such image: alpine:3.23" || len(k.pulls()) != 1 || len(k.calls("create")) != 2 {
-		t.Fatalf("Bind(image still missing after a pull) = %v, pulls %q, creates %q; want the second create's error after one pull", err, k.pulls(), k.calls("create"))
-	}
-
-	h := newFake(t)
-	h.x.timeouts.transfer = 100 * time.Millisecond
-	h.missing()
-	h.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
-	if err := os.WriteFile(filepath.Join(h.ctl, "pull.hang"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	began := time.Now()
-	if _, err := h.x.Bind(t.Context(), effect); err == nil || err.Error() != "docker pull: no response within 100ms" || time.Since(began) > 5*time.Second {
-		t.Fatalf("Bind(pull hung) = %v after %v; want the pull's own deadline", err, time.Since(began))
-	}
-}
-
-// TestBindCreatesForTheDefaultPlatform checks that a create and its pull
-// pick the platform that DOCKER_DEFAULT_PLATFORM names, as docker create
-// does, and that any answer that the image is not found pulls it: a daemon
-// holding only another platform's image reports that it does not match.
-func TestBindCreatesForTheDefaultPlatform(t *testing.T) {
-	t.Setenv("DOCKER_DEFAULT_PLATFORM", "linux/arm64")
-	f := newFake(t)
-	f.missing()
-	created := f.container("created", 0)
-	f.fail("create", http.StatusNotFound, "image with reference alpine:3.23 was found but does not match the specified platform: wanted linux/arm64, actual: linux/amd64")
-	f.hook("create", func(*http.Request) {
-		if len(f.pulls()) > 0 {
-			f.clear("create")
-			f.reply("inspect", created)
-		}
-	})
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending {
-		t.Fatalf("Bind(image of another platform) = %+v, %v; want the job created after a pull", job, err)
-	}
-	creates, pulls := f.calls("create"), f.pulls()
-	if want := "create canti-e for linux/arm64"; !slices.Equal(creates, []string{want, want}) || !slices.Equal(pulls, []string{"pull --quiet alpine:3.23 for linux/arm64"}) {
-		t.Fatalf("creates %q, pulls %q; want a pull for linux/arm64 between two creates for it", creates, pulls)
-	}
-}
-
-func TestBindAdoptsOnlyItsOwnContainerOfALostCreateResponse(t *testing.T) {
-	conflict := `Conflict. The container name "/canti-e" is already in use by container "c-e".`
-	f := newFake(t)
-	created := f.container("created", 0)
-	for name, held := range map[string]string{
-		"another state": strings.ReplaceAll(created, f.x.cfg.State, "/other"),
-		"another spec":  f.containerOf("e", "false", "created", 0),
-		"own":           created,
-	} {
-		f.missing()
-		f.hook("create", func(*http.Request) { f.reply("inspect", held) })
-		f.fail("create", http.StatusConflict, conflict)
-		job, err := f.x.Bind(t.Context(), effect)
-		if own := name == "own"; own != (err == nil) || own && (job.ID != "c-e" || job.Status != harness.JobPending) {
-			t.Fatalf("Bind(name held by %s) = %+v, %v", name, job, err)
-		}
-	}
-	if creates := f.calls("create"); len(creates) != 3 {
-		t.Fatalf("creates = %q, want one for each Bind", creates)
-	}
-}
-
-func TestStartNeverRestartsAnUnlatchedContainer(t *testing.T) {
-	f := newFake(t)
-	for _, status := range []string{"exited", "running"} {
-		f.reply("inspect", f.container(status, 0))
-		if _, err := f.x.Start(t.Context(), "e"); err == nil {
-			t.Fatalf("Start(%s without latch) succeeded", status)
-		}
-	}
-	if latch, err := readLatch(f.x.dir("e")); latch != "" || err != nil || len(f.calls("start")) != 0 {
-		t.Fatalf("latch %q, %v, starts %q", latch, err, f.calls("start"))
-	}
-}
-
-func TestFailedStartIsNeverReissued(t *testing.T) {
-	for name, fail := range map[string]func(*fake){
-		"rejected":    func(f *fake) { f.fail("start", http.StatusInternalServerError, "boom") },
-		"answer lost": func(f *fake) { f.down("start") },
-		"no answer":   func(f *fake) { f.x.timeouts.call = 50 * time.Millisecond; f.hang("start") },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFake(t)
-			f.reply("inspect", f.container("created", 0))
-			fail(f)
-			if _, err := f.x.Start(t.Context(), "e"); err == nil {
-				t.Fatal("Start() succeeded")
-			}
-			f.x.timeouts.call = callTimeout
-			for range 2 {
-				if job, err := f.x.Start(t.Context(), "e"); err != nil || job.Status != harness.JobUnknown {
-					t.Fatalf("Start() again = %+v, %v; want unknown", job, err)
-				}
-			}
-			if err := f.x.Cancel(t.Context(), "e"); err != nil {
-				t.Fatal(err)
-			}
-			if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobUnknown {
-				t.Fatalf("Inspect() = %+v, %v; want unknown", job, err)
-			}
-			if starts, stops := f.calls("start"), f.calls("stop"); len(starts) != 1 || len(stops) != 0 {
-				t.Fatalf("starts %q, stops %q", starts, stops)
-			}
-		})
-	}
-}
-
-// rejecting makes the fake daemon reject a start as it does for an unknown
-// user, calling before first.
-func (f *fake) rejecting(before func()) {
-	f.reply("inspect", f.container("created", 0))
-	var c container
-	if err := json.Unmarshal([]byte(f.container("created", 128)), &c); err != nil {
-		f.t.Fatal(err)
-	}
-	c.State.Error, c.State.StartedAt, c.State.FinishedAt = "unable to find user nosuchuser", time.Time{}, time.Time{}
-	rejected, _ := json.Marshal(c)
-	f.hook("start", func(*http.Request) {
-		if before != nil {
-			before()
-		}
-		f.reply("inspect", string(rejected))
-	})
-	f.fail("start", http.StatusInternalServerError, "unable to find user nosuchuser")
-}
-
-func TestRejectedStartFailsToStart(t *testing.T) {
-	f := newFake(t)
-	f.rejecting(nil)
-	want, err := f.x.Start(t.Context(), "e")
-	out := harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job never started: unable to find user nosuchuser"}
-	if err != nil || want.ID != "c-e" || want.Status != harness.JobFailedToStart || want.ExitCode != nil || !want.StartedAt.IsZero() || want.Output != out {
-		t.Fatalf("Start(rejected) = %+v, %v; want the job failed to start with output %+v", want, err, out)
-	}
-	if _, err := os.Stat(f.x.record("e")); err != nil {
-		t.Fatalf("the failed start was not recorded: %v", err)
-	}
-	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm c-e v=1" {
-		t.Fatalf("rms = %q, want the created container released", rms)
-	}
-	f.missing()
-	if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
-		t.Fatalf("Start() again = %+v, %v; want %+v", job, err, want)
-	}
-	if err := f.x.Cancel(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
-		t.Fatalf("Inspect() = %+v, %v, %v; want %+v", job, found, err, want)
-	}
-	if starts, stops := f.calls("start"), f.calls("stop"); len(starts) != 1 || len(stops) != 0 {
-		t.Fatalf("starts %q, stops %q", starts, stops)
-	}
-}
-
-func TestRejectedStartKeepsItsReason(t *testing.T) {
-	f := newFake(t)
-	f.rejecting(nil)
-	f.fail("logs", http.StatusInternalServerError, "boom")
-	job, err := f.x.Start(t.Context(), "e")
-	if want := "job never started: unable to find user nosuchuser; logs unavailable: docker logs: boom"; err != nil || job.Status != harness.JobFailedToStart || job.Output.Detail != want {
-		t.Fatalf("Start(rejected, capture fails) = %+v, %v; want detail %q", job, err, want)
-	}
-	w := newFake(t)
-	w.rejecting(nil)
-	if err := os.WriteFile(filepath.Join(w.x.artifacts(), "e"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	job, err = w.x.Start(t.Context(), "e")
-	if err != nil || !strings.HasPrefix(job.Output.Detail, "job never started: unable to find user nosuchuser; artifact write failed: ") {
-		t.Fatalf("Start(rejected, artifact unwritable) = %+v, %v; want the reason kept", job, err)
-	}
-	g := newFake(t)
-	g.rejecting(nil)
-	if _, err := g.x.Start(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(g.x.artifacts(), "e", "output")); err != nil {
-		t.Fatal(err)
-	}
-	job, _, err = g.x.Inspect(t.Context(), "e")
-	if err != nil || !strings.HasPrefix(job.Output.Detail, "job never started: unable to find user nosuchuser; artifact missing: ") {
-		t.Fatalf("Inspect(artifact removed) = %+v, %v; want the reason kept", job, err)
-	}
-}
-
-func TestRejectedStartDuringShutdownIsRecordedLater(t *testing.T) {
-	f := newFake(t)
-	f.rejecting(func() { f.signal("began"); time.Sleep(300 * time.Millisecond) })
-	if _, err := f.x.Start(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Start(rejected during shutdown) = %v, want cancellation", err)
-	}
-	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-		t.Fatalf("a report after shutdown was recorded: %v, rms %q", err, f.calls("rm"))
-	}
-	job, err := f.x.Start(t.Context(), "e")
-	if err != nil || job.Status != harness.JobFailedToStart || len(f.calls("start")) != 1 || len(f.calls("rm")) != 1 {
-		t.Fatalf("Start() again = %+v, %v, starts %q; want the failed start recorded and released", job, err, f.calls("start"))
-	}
-}
-
-func TestLaunchOutlivesShutdown(t *testing.T) {
-	f := newFake(t)
-	f.reply("inspect", f.container("created", 0))
 	running := f.container("running", 0)
+	f.hook("create", func(*http.Request) { f.reply("inspect", created) })
 	f.hook("start", func(*http.Request) {
-		f.signal("began")
-		time.Sleep(300 * time.Millisecond)
+		saved, found, err := f.x.ownership(e, "binding.json")
+		if err != nil || !found || saved.ID != "c-e" {
+			t.Errorf("binding at launch: %+v %v %v", saved, found, err)
+		}
 		f.reply("inspect", running)
 	})
-	if job, err := f.x.Start(f.cancelAt("began"), "e"); err != nil || job.Status != harness.JobRunning {
-		t.Fatalf("Start() interrupted after the latch = %+v, %v; want running", job, err)
+	j, err := f.x.Drive(t.Context(), e)
+	if err != nil || j.Status != harness.JobRunning {
+		t.Fatalf("Drive: %+v %v", j, err)
 	}
-	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobRunning {
-		t.Fatalf("Inspect() = %+v, %v; want running", job, err)
-	}
-}
-
-func TestHungCallsFailAtTheirOwnDeadlines(t *testing.T) {
-	f := newFake(t)
-	f.x.timeouts = timeouts{call: 50 * time.Millisecond, transfer: 150 * time.Millisecond}
-	f.x.cfg.StopGrace = 100 * time.Millisecond
-	for _, tt := range []struct {
-		op, method, path string
-		limit            time.Duration
-	}{
-		{"inspect", http.MethodGet, "/containers/canti-e/json", 50 * time.Millisecond},
-		{"create", http.MethodPost, "/containers/create?name=canti-e", 150 * time.Millisecond},
-		{"start", http.MethodPost, "/containers/c-e/start", 50 * time.Millisecond},
-		{"stop", http.MethodPost, "/containers/c-e/stop?t=1", 150 * time.Millisecond},
-		{"rm", http.MethodDelete, "/containers/c-e?v=1", 50 * time.Millisecond},
-		{"ps", http.MethodGet, "/containers/json?all=1", 50 * time.Millisecond},
-		{"cp", http.MethodGet, "/containers/c-e/archive?path=%2Ftmp%2F.canti-exit", 50 * time.Millisecond},
-		{"logs", http.MethodGet, "/containers/c-e/logs?stdout=1&stderr=1", 150 * time.Millisecond},
-	} {
-		f.hang(tt.op)
-		began := time.Now()
-		err := f.x.api(t.Context(), tt.op, tt.method, tt.path, nil, nil)
-		took := time.Since(began)
-		if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
-			err.Error() != fmt.Sprintf("docker %s: no response within %v", tt.op, tt.limit) || took < tt.limit || took > tt.limit+5*time.Second {
-			t.Fatalf("docker %s (hung) = %v after %v; want an ordinary error at %v", tt.op, err, took, tt.limit)
-		}
-		if calls := f.calls(tt.op); len(calls) != 1 {
-			t.Fatalf("%s calls = %q, want one", tt.op, calls)
-		}
-	}
-	f.x.timeouts.call = time.Minute
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	if err := f.x.api(ctx, "ps", http.MethodGet, "/containers/json?all=1", nil, nil); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("docker ps (hung, caller's deadline first) = %v, want the caller's error", err)
-	}
-	f.latch(latchStart)
-	f.hook("inspect", nil)
-	f.hook("cp", nil)
-	f.hook("rm", nil)
-	f.exited(0)
-	job, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || job.Status != harness.JobSucceeded || job.Output.Available || job.Output.Detail != "logs unavailable: docker logs: no response within 150ms" {
-		t.Fatalf("Inspect(capture hung) = %+v, %v; want the job recorded without output", job, err)
+	if len(f.calls("create")) != 1 || len(f.calls("start")) != 1 {
+		t.Fatal(f.log)
 	}
 }
-
-func TestVanishedStartedJobIsNotReportedMissing(t *testing.T) {
-	f := newFake(t)
-	f.latch(latchStart)
-	f.missing()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || !errors.Is(err, harness.ErrJobLost) {
-		t.Fatalf("Inspect() = %v, %v; want ErrJobLost", found, err)
-	}
-	if _, err := f.x.Bind(t.Context(), effect); !errors.Is(err, harness.ErrJobLost) || len(f.calls("create")) != 0 {
-		t.Fatalf("Bind() = %v, creates %q; want ErrJobLost and no replacement", err, f.calls("create"))
-	}
-	if _, err := f.x.Start(t.Context(), "e"); !errors.Is(err, harness.ErrJobLost) || len(f.calls("start")) != 0 {
-		t.Fatalf("Start() = %v, starts %q; want ErrJobLost", err, f.calls("start"))
-	}
-	if err := f.x.Cancel(t.Context(), "e"); err != nil {
-		t.Fatalf("Cancel() = %v", err)
-	}
-}
-
-func TestBindAfterFenceRecordsCancelledJobWithoutAContainer(t *testing.T) {
-	f := newFake(t)
-	f.latch(latchCancel)
-	f.missing()
-	if _, found, err := f.x.Inspect(t.Context(), "e"); found || err != nil {
-		t.Fatalf("Inspect(fenced) = %v, %v; want not found", found, err)
-	}
-	want := harness.Job{ID: "fenced:e", Status: harness.JobCancelled, Output: harness.ArtifactRef{Path: "e/output", Available: true, Detail: "job was cancelled; output is partial"}}
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
-		t.Fatalf("Bind(fenced) = %+v, %v; want %+v", job, err, want)
-	}
-	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Size() != 0 || fi.Mode().Perm() != 0o644 {
-		t.Fatalf("artifact: %v, %v; want an empty one", fi, err)
-	}
-	for range 2 {
-		if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
-			t.Fatalf("Bind(recorded) = %+v, %v; want %+v", job, err, want)
-		}
-		if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
-			t.Fatalf("Start(recorded) = %+v, %v; want %+v", job, err, want)
-		}
-		if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
-			t.Fatalf("Inspect(recorded) = %+v, %v, %v; want %+v", job, found, err, want)
-		}
-		if err := f.x.Cancel(t.Context(), "e"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := f.x.Bind(t.Context(), harness.Effect{ID: "e", Command: "false"}); err == nil {
-		t.Fatal("Bind(changed) succeeded")
-	}
-	if inspects, ps := f.calls("inspect"), f.calls("ps"); len(inspects) != 2 || len(ps) != 4 {
-		t.Fatalf("inspects %q, ps %q; want only the lookups that found no container and each Bind's sweep", inspects, ps)
-	}
-	for _, op := range []string{"create", "start", "stop", "logs", "cp", "rm"} {
-		if calls := f.calls(op); len(calls) != 0 {
-			t.Fatalf("%s calls = %q, want none for a job that never had a container", op, calls)
-		}
-	}
-}
-
-func TestBindAfterFenceKeepsTheJobBoundBeforeIt(t *testing.T) {
-	f := newFake(t)
-	f.missing()
-	created := f.container("created", 0)
-	f.hook("create", func(*http.Request) { f.reply("inspect", created) })
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending {
-		t.Fatalf("Bind() = %+v, %v; want the created job pending", job, err)
-	}
-	if err := f.x.Cancel(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	want, err := f.x.Bind(t.Context(), effect)
-	if err != nil || want.ID != "c-e" || want.Status != harness.JobCancelled {
-		t.Fatalf("Bind() after the fence = %+v, %v; want the job bound before it, cancelled", want, err)
-	}
-	if _, err := os.Stat(f.x.record("e")); err != nil {
-		t.Fatalf("the cancelled job was not recorded: %v", err)
-	}
-	f.missing()
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
-		t.Fatalf("Bind() after the container was removed = %+v, %v; want %+v", job, err, want)
-	}
-	if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
-		t.Fatalf("Inspect() = %+v, %v, %v; want %+v", job, found, err, want)
-	}
-	if creates, rms := f.calls("create"), f.calls("rm"); len(creates) != 1 || creates[0] != "create canti-e" || len(rms) != 3 || rms[0] != "rm c-e v=1" {
-		t.Fatalf("creates %q, rms %q; want one container, recorded and released", creates, rms)
-	}
-}
-
-func same(a, b harness.Job) bool {
-	x, errx := json.Marshal(a)
-	y, erry := json.Marshal(b)
-	return errx == nil && erry == nil && string(x) == string(y)
-}
-
-func TestFinishedJobIsRecordedThenReleased(t *testing.T) {
-	f := newFake(t)
-	f.latch(latchStart)
-	f.exited(3)
-	f.output("hello\n")
-	f.hook("rm", func(*http.Request) {
-		if fi, err := os.Stat(f.x.record("e")); err != nil || fi.Size() == 0 {
-			f.signal("early")
-		}
-	})
-	stale := filepath.Join(f.x.artifacts(), "e", ".tmp-crashed")
-	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(stale, []byte("partial"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	want, found, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || !found || want.ID != "c-e" || want.Status != harness.JobFailed || want.ExitCode == nil || *want.ExitCode != 3 ||
-		want.Preview != "hello\n" || !want.Output.Complete || want.StartedAt.IsZero() || !want.FinishedAt.After(want.StartedAt) {
-		t.Fatalf("Inspect() = %+v, %v, %v", want, found, err)
-	}
-	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm c-e v=1" {
-		t.Fatalf("rms = %q, want the finished container released", rms)
-	}
-	if logs := f.calls("logs"); len(logs) != 1 || logs[0] != "logs c-e stdout=1 stderr=1" {
-		t.Fatalf("logs = %q, want both streams of the finished container", logs)
-	}
-	if f.happened("early") {
-		t.Fatal("the container was removed before its record was durable")
-	}
-	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("stale capture file survived: %v", err)
-	}
-	if fi, err := os.Stat(filepath.Join(f.x.artifacts(), "e", "output")); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Fatalf("artifact mode: %v, %v", fi, err)
-	}
-	foreign := strings.ReplaceAll(strings.ReplaceAll(f.container("created", 0), `"c-e"`, `"c-other"`), f.x.cfg.State, "/other")
-	for name, gone := range map[string]func(){
-		"removed": f.missing,
-		"renamed": func() { f.reply("inspect", foreign) },
-	} {
-		gone()
-		if job, found, err := f.x.Inspect(t.Context(), "e"); err != nil || !found || !same(job, want) {
-			t.Fatalf("%s: Inspect() = %+v, %v, %v; want %+v", name, job, found, err, want)
-		}
-		if job, err := f.x.Bind(t.Context(), effect); err != nil || !same(job, want) {
-			t.Fatalf("%s: Bind() = %+v, %v; want %+v", name, job, err, want)
-		}
-		if _, err := f.x.Bind(t.Context(), harness.Effect{ID: "e", Command: "false"}); err == nil {
-			t.Fatalf("%s: Bind(changed) succeeded", name)
-		}
-		if job, err := f.x.Start(t.Context(), "e"); err != nil || !same(job, want) {
-			t.Fatalf("%s: Start() = %+v, %v; want %+v", name, job, err, want)
-		}
-		if err := f.x.Cancel(t.Context(), "e"); err != nil {
-			t.Fatalf("%s: Cancel() = %v", name, err)
-		}
-	}
-	for _, op := range []string{"create", "start", "stop"} {
-		if calls := f.calls(op); len(calls) != 0 {
-			t.Fatalf("%s calls = %q", op, calls)
-		}
-	}
-	if logs := f.calls("logs"); len(logs) != 1 {
-		t.Fatalf("logs = %q, want one capture", logs)
-	}
-}
-
-func TestFailedReleaseIsRetriedByTheNextReport(t *testing.T) {
-	f := newFake(t)
-	f.latch(latchStart)
-	f.exited(0)
-	f.output("hello\n")
-	f.fail("rm", http.StatusInternalServerError, "boom")
-	want, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || want.Status != harness.JobSucceeded || want.Preview != "hello\n" {
-		t.Fatalf("Inspect(rm fails) = %+v, %v", want, err)
-	}
-	for i := range 2 {
-		if i == 1 {
-			f.clear("rm")
-		}
-		if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || !same(job, want) {
-			t.Fatalf("Inspect() again = %+v, %v; want %+v", job, err, want)
-		}
-	}
-	if rms, logs := f.calls("rm"), f.calls("logs"); len(rms) != 3 || rms[2] != "rm c-e v=1" || len(logs) != 1 {
-		t.Fatalf("rms %q, logs %q; want the removal retried on every report and one capture", rms, logs)
-	}
-}
-
-func TestBindReleasesRecordedJobsOfOtherEffects(t *testing.T) {
-	f := newFake(t)
-	for id, job := range map[string]string{"old": "c-old", "moved": "c-moved"} {
-		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: "spec"})
-		if err := publish(f.x.record(id), data, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f.reply("ps", listing("c-old", "old", "c-live", "live", "c-other", "moved"))
-	f.missing()
-	created := f.container("created", 0)
-	f.hook("create", func(*http.Request) { f.reply("inspect", created) })
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" || job.Status != harness.JobPending || len(f.calls("create")) != 1 {
-		t.Fatalf("Bind() = %+v, %v, creates %q; want the created job pending", job, err, f.calls("create"))
-	}
-	if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm c-old v=1" {
-		t.Fatalf("rms = %q, want only the recorded job of another effect released", rms)
-	}
-	filters, _ := json.Marshal(map[string][]string{"label": {"canti.state=" + f.x.cfg.State}})
-	if ps := f.calls("ps"); len(ps) != 1 || ps[0] != "ps all=1 "+string(filters) {
-		t.Fatalf("ps calls = %q, want one listing of every container of this state, running or not", ps)
-	}
-	if _, err := f.x.Bind(t.Context(), effect); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.x.Start(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	f.exited(0)
-	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded {
-		t.Fatalf("Inspect() = %+v, %v; want the job recorded", job, err)
-	}
-	if ps, rms := f.calls("ps"), f.calls("rm"); len(ps) != 2 || !slices.Equal(rms, []string{"rm c-old v=1", "rm c-old v=1", "rm c-e v=1"}) {
-		t.Fatalf("ps %q, rms %q; want each Bind, and neither Start nor Inspect, to sweep", ps, rms)
-	}
-}
-
-func TestBindOfARecordedEffectReleasesOtherRecordedJobs(t *testing.T) {
-	f := newFake(t)
-	for id, job := range map[string]string{"a": "c-a", "e": "c-e"} {
-		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: specHash(f.x.runArgs("true"))})
-		if err := publish(f.x.record(id), data, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f.reply("ps", listing("c-a", "a", "c-e", "e"))
-	if job, err := f.x.Bind(t.Context(), effect); err != nil || job.ID != "c-e" {
-		t.Fatalf("Bind() = %+v, %v; want the recorded job", job, err)
-	}
-	if rms := f.calls("rm"); !slices.Contains(rms, "rm c-a v=1") {
-		t.Fatalf("rms = %q, want the recorded job of another effect released too", rms)
-	}
-}
-
-func TestBindReleasesOtherJobsBeforeItsOwnHungRelease(t *testing.T) {
-	f := newFake(t)
-	for id, job := range map[string]string{"a": "c-a", "e": "c-e"} {
-		if err := os.MkdirAll(f.x.dir(id), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(record{Job: harness.Job{ID: job, Status: harness.JobSucceeded}, Spec: specHash(f.x.runArgs("true"))})
-		if err := publish(f.x.record(id), data, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f.reply("ps", listing("c-a", "a", "c-e", "e"))
-	f.hook("rm", func(r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/c-e") {
-			f.wait(r)
-		}
-	})
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
-	defer cancel()
-	if job, err := f.x.Bind(ctx, effect); err != nil || job.ID != "c-e" {
-		t.Fatalf("Bind() = %+v, %v; want the recorded job", job, err)
-	}
-	if rms := f.calls("rm"); !slices.Contains(rms, "rm c-a v=1") {
-		t.Fatalf("rms = %q, want the recorded job of another effect released before the effect's own hung removal", rms)
-	}
-}
-
-func TestRebindingRetriesAFailedRelease(t *testing.T) {
-	f := newFake(t)
-	if err := os.MkdirAll(f.x.dir("a"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	data, _ := json.Marshal(record{Job: harness.Job{ID: "c-a", Status: harness.JobSucceeded}, Spec: "spec"})
-	if err := publish(f.x.record("a"), data, false); err != nil {
-		t.Fatal(err)
-	}
-	f.reply("ps", listing("c-a", "a"))
-	f.fail("rm", http.StatusInternalServerError, "boom")
-	f.missing()
-	created := f.container("created", 0)
-	f.hook("create", func(*http.Request) { f.reply("inspect", created) })
-	if _, err := f.x.Bind(t.Context(), effect); err != nil {
-		t.Fatal(err)
-	}
-	f.clear("rm")
-	failed := len(f.calls("rm"))
-	if _, err := f.x.Bind(t.Context(), effect); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.x.Start(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	f.exited(0)
-	if _, _, err := f.x.Inspect(t.Context(), "e"); err != nil {
-		t.Fatal(err)
-	}
-	if rms := f.calls("rm")[failed:]; !slices.Contains(rms, "rm c-a v=1") {
-		t.Fatalf("rms after the daemon recovered = %q, want the recorded job of another effect released", rms)
-	}
-}
-
-func TestFailedCaptureIsRecordedAndReleased(t *testing.T) {
-	for _, tt := range []struct {
-		name, detail string
-		fail         func(*fake)
-	}{
-		{"logs unavailable", "logs unavailable: docker logs: boom", func(f *fake) {
-			f.fail("logs", http.StatusInternalServerError, "boom")
-		}},
-		{"daemon down", "logs unavailable: docker logs: ", func(f *fake) { f.down("logs") }},
-		{"log cut short", "logs unavailable: docker logs: unexpected EOF", func(f *fake) {
-			f.reply("logs", frame(1, "hello\n")[:12])
-		}},
-		{"log stream failed", "logs unavailable: docker logs: daemon failed", func(f *fake) {
-			f.reply("logs", frame(1, "hello\n")+frame(3, "daemon failed"))
-		}},
-		{"artifact unwritable", "artifact write failed: ", func(f *fake) {
-			f.output("hello\n")
-			if err := os.WriteFile(filepath.Join(f.x.artifacts(), "e"), nil, 0o644); err != nil {
-				f.t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
+func TestDriveAdoptsOnlyMatchingOwnerAfterLostCreateAnswer(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprint(foreign), func(t *testing.T) {
 			f := newFake(t)
-			f.latch(latchStart)
-			f.exited(0)
-			tt.fail(f)
-			want, found, err := f.x.Inspect(t.Context(), "e")
-			if err != nil || !found || want.Status != harness.JobSucceeded || want.Output.Path != "e/output" ||
-				want.Output.Available || want.Output.Complete || !strings.HasPrefix(want.Output.Detail, tt.detail) {
-				t.Fatalf("Inspect(capture fails) = %+v, %v, %v", want, found, err)
+			f.missing()
+			created := f.container("created", 0)
+			if foreign {
+				created = f.containerOf("e", "false", "created", 0)
 			}
-			data, err := os.ReadFile(f.x.record("e"))
-			var rec record
-			if err == nil {
-				err = json.Unmarshal(data, &rec)
-			}
-			if err != nil || !same(rec.Job, want) || rec.Spec != specHash(f.x.runArgs("true")) {
-				t.Fatalf("record = %+v, %v; want %+v", rec, err, want)
-			}
-			if rms := f.calls("rm"); len(rms) != 1 || rms[0] != "rm c-e v=1" {
-				t.Fatalf("rms = %q, want the container and its log released", rms)
-			}
-			captures := len(f.calls("logs"))
-			f.output("late\n")
-			if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || !same(job, want) {
-				t.Fatalf("Inspect() again = %+v, %v; want the recorded job", job, err)
-			}
-			if logs := f.calls("logs"); len(logs) != captures {
-				t.Fatalf("logs = %q, want the final report never captured again", logs)
+			f.down("create")
+			f.hook("create", func(*http.Request) { f.reply("inspect", created) })
+			f.hook("start", func(*http.Request) { f.reply("inspect", f.container("running", 0)) })
+			j, err := f.x.Drive(t.Context(), f.effect())
+			if foreign {
+				if err == nil || len(f.calls("start")) != 0 {
+					t.Fatalf("foreign owner: %+v %v", j, err)
+				}
+			} else if err != nil || j.Status != harness.JobRunning || len(f.calls("start")) != 1 {
+				t.Fatalf("lost create: %+v %v", j, err)
 			}
 		})
 	}
 }
-
-func TestInterruptedCaptureIsNotRecorded(t *testing.T) {
+func TestRecordedPendingOwnerIsNeverReplaced(t *testing.T) {
 	f := newFake(t)
-	f.latch(latchStart)
-	f.exited(0)
-	f.hook("logs", func(r *http.Request) { f.signal("began"); f.wait(r) })
-	if _, _, err := f.x.Inspect(f.cancelAt("began"), "e"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Inspect(shutdown during capture) = %v, want cancellation", err)
-	}
-	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-		t.Fatalf("an interrupted capture was recorded: %v, rms %q", err, f.calls("rm"))
-	}
-	f.hook("logs", nil)
-	f.output("hello\n")
-	job, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || job.Preview != "hello\n" || !job.Output.Complete || len(f.calls("logs")) != 2 || len(f.calls("rm")) != 1 {
-		t.Fatalf("Inspect() = %+v, %v, logs %q; want the next report to capture again", job, err, f.calls("logs"))
-	}
-}
-
-func TestUnpublishedRecordIsNotFinal(t *testing.T) {
-	f := newFake(t)
-	f.latch(latchStart)
-	f.exited(0)
-	f.output("hello\n")
-	f.hook("logs", func(*http.Request) {
-		if err := os.MkdirAll(filepath.Join(f.x.record("e"), "blocked"), 0o755); err != nil {
-			f.t.Error(err)
-		}
-	})
-	if job, _, err := f.x.Inspect(t.Context(), "e"); err == nil || len(f.calls("rm")) != 0 {
-		t.Fatalf("Inspect(record unpublishable) = %+v, %v, rms %q; want an error and the container kept", job, err, f.calls("rm"))
-	}
-	if err := os.RemoveAll(f.x.record("e")); err != nil {
+	e := f.effect()
+	if err := os.MkdirAll(f.x.dir(e.ID), 0700); err != nil {
 		t.Fatal(err)
 	}
-	f.hook("logs", nil)
-	if job, _, err := f.x.Inspect(t.Context(), "e"); err != nil || job.Status != harness.JobSucceeded || !job.Output.Complete || len(f.calls("rm")) != 1 {
-		t.Fatalf("Inspect() = %+v, %v; want the job recorded and released", job, err)
+	if err := f.x.saveOwnership("binding.json", ownerOf(e, "original")); err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range []bool{true, false} {
+		if missing {
+			f.missing()
+		} else {
+			f.reply("inspect", f.container("created", 0))
+		}
+		for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){freshExecutor(f).Drive, freshExecutor(f).Inspect, freshExecutor(f).Cancel} {
+			if _, err := op(t.Context(), e); !errors.Is(err, harness.ErrJobLost) {
+				t.Fatalf("lost pending owner: %v", err)
+			}
+		}
+	}
+	if len(f.calls("create"))+len(f.calls("start"))+len(f.calls("stop")) != 0 {
+		t.Fatal("replaced or stopped unowned container")
 	}
 }
 
-func TestMalformedRecordIsAnError(t *testing.T) {
-	valid := `{"ID":"c-e","Status":"succeeded","Spec":"SPEC"}`
-	for name, data := range map[string]string{
-		"valid":         valid,
-		"old format":    `{"preview":"hello\n","output":{"Path":"e/output","Bytes":6,"Complete":true,"Available":true}}`,
-		"unknown field": `{"ID":"c-e","Status":"succeeded","Spec":"SPEC","Retry":true}`,
-		"no ID":         `{"Status":"succeeded","Spec":"SPEC"}`,
-		"no status":     `{"ID":"c-e","Spec":"SPEC"}`,
-		"no spec":       `{"ID":"c-e","Status":"succeeded"}`,
-		"not final":     `{"ID":"c-e","Status":"running","Spec":"SPEC"}`,
-		"trailing data": valid + ` {}`,
-		"truncated":     valid[:20],
-	} {
-		t.Run(name, func(t *testing.T) {
+type bindingCancellation struct {
+	context.Context
+	cancel context.CancelFunc
+	path   string
+}
+
+func (c bindingCancellation) Err() error {
+	if _, err := os.Stat(c.path); err == nil {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+func TestDriveRechecksDeadlineAfterBindingBeforeLatch(t *testing.T) {
+	f := newFake(t)
+	f.ready()
+	e := f.effect()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	bound := bindingCancellation{Context: ctx, cancel: cancel, path: filepath.Join(f.x.dir(e.ID), "binding.json")}
+	if _, err := freshExecutor(f).Drive(bound, e); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expired binding authorization: %v", err)
+	}
+	if _, found, err := f.x.ownership(e, "binding.json"); err != nil || !found {
+		t.Fatalf("binding not durable: %v", err)
+	}
+	if latch, err := readLatch(f.x.dir(e.ID)); err != nil || latch != "" || len(f.calls("start")) != 0 {
+		t.Fatalf("latch %q %v, starts %v", latch, err, f.calls("start"))
+	}
+}
+
+func TestUncertainLaunchIsNeverIssuedAgain(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		t.Run(fmt.Sprint(lost), func(t *testing.T) {
+			f := newFake(t)
+			f.reply("inspect", f.container("created", 0))
+			if lost {
+				f.down("start")
+			} else {
+				f.fail("start", 500, "boom")
+			}
+			e := f.effect()
+			for range 3 {
+				j, err := freshExecutor(f).Drive(t.Context(), e)
+				if err != nil || j.Status != harness.JobUnknown {
+					t.Fatalf("uncertain launch: %+v %v", j, err)
+				}
+			}
+			if len(f.calls("start")) != 1 {
+				t.Fatal(f.calls("start"))
+			}
+		})
+	}
+}
+func TestUnlatchedLiveOwnerStaysUnknown(t *testing.T) {
+	for _, state := range []string{"running", "exited"} {
+		t.Run(state, func(t *testing.T) {
+			f := newFake(t)
+			f.reply("inspect", f.container(state, 0))
+			j, err := f.x.Drive(t.Context(), f.effect())
+			if err != nil || j.Status != harness.JobUnknown || len(f.calls("start")) != 0 {
+				t.Fatalf("unlatched owner: %+v %v", j, err)
+			}
+		})
+	}
+}
+func TestCancellationBeforeBindingFencesLateDriveWithoutAnOwner(t *testing.T) {
+	f := newFake(t)
+	f.missing()
+	e := f.effect()
+	want, err := f.x.Cancel(t.Context(), e)
+	if err != nil || want.Status != harness.JobCancelled || want.ID != "" || !want.Fenced {
+		t.Fatalf("fence: %+v %v", want, err)
+	}
+	for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){freshExecutor(f).Drive, freshExecutor(f).Inspect, freshExecutor(f).Cancel} {
+		j, err := op(t.Context(), e)
+		if err != nil || !same(j, want) {
+			t.Fatalf("fenced replay: %+v %v", j, err)
+		}
+	}
+	if len(f.calls("create"))+len(f.calls("start"))+len(f.calls("stop")) != 0 {
+		t.Fatal("late Drive reached execution")
+	}
+}
+func TestCancellationFenceDoesNotTurnAmbiguousLookupIntoKnownAbsence(t *testing.T) {
+	f := newFake(t)
+	f.down("inspect")
+	e := f.effect()
+	if _, err := f.x.Cancel(t.Context(), e); err == nil {
+		t.Fatal("ambiguous lookup became cancelled")
+	}
+	if _, found, err := f.x.ownership(e, "cancel"); err != nil || !found {
+		t.Fatalf("fence not retained: %v", err)
+	}
+	if _, err := os.Stat(f.x.record(e.ID)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("false terminal receipt: %v", err)
+	}
+	f.ready()
+	j, err := freshExecutor(f).Drive(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || len(f.calls("start")) != 0 {
+		t.Fatalf("late fenced owner: %+v %v", j, err)
+	}
+}
+func TestWrongSpecificationCannotDriveInspectOrCancel(t *testing.T) {
+	f := newFake(t)
+	f.ready()
+	e := f.effect()
+	e.Spec = strings.Repeat("0", 64)
+	for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){f.x.Drive, f.x.Inspect, f.x.Cancel} {
+		if _, err := op(t.Context(), e); err == nil {
+			t.Fatal("wrong spec accepted")
+		}
+	}
+	if len(f.log) != 0 {
+		t.Fatalf("wrong spec reached backend: %v", f.log)
+	}
+}
+func TestFinishedReceiptSurvivesReleaseAndLaterCancel(t *testing.T) {
+	for _, code := range []int{0, 3} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			f := newFake(t)
 			f.latch(latchStart)
-			f.reply("inspect", f.container("running", 0))
-			f.reply("ps", listing("c-e", "e"))
-			data = strings.ReplaceAll(data, "SPEC", specHash(f.x.runArgs("true")))
-			if err := os.WriteFile(f.x.record("e"), []byte(data), 0o600); err != nil {
+			f.exited(code)
+			f.output("hello\n")
+			e := f.effect()
+			want, err := f.x.Inspect(t.Context(), e)
+			if err != nil {
 				t.Fatal(err)
 			}
-			_, found, inspectErr := f.x.Inspect(t.Context(), "e")
-			_, bindErr := f.x.Bind(t.Context(), effect)
-			_, startErr := f.x.Start(t.Context(), "e")
-			cancelErr := f.x.Cancel(t.Context(), "e")
-			if name == "valid" {
-				if !found || errors.Join(inspectErr, bindErr, startErr, cancelErr) != nil {
-					t.Fatalf("valid record: found %v, errors %v", found, errors.Join(inspectErr, bindErr, startErr, cancelErr))
+			f.missing()
+			for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){freshExecutor(f).Cancel, freshExecutor(f).Drive, freshExecutor(f).Inspect} {
+				j, err := op(t.Context(), e)
+				if err != nil || !same(j, want) {
+					t.Fatalf("retained result changed: %+v %v, want %+v", j, err, want)
 				}
-				return
 			}
-			if found || inspectErr == nil || bindErr == nil || startErr == nil || cancelErr != nil {
-				t.Fatalf("found %v, errors %v, %v, %v, %v; want every report to fail and nothing to stop", found, inspectErr, bindErr, startErr, cancelErr)
+			if len(f.calls("start"))+len(f.calls("stop")) != 0 {
+				t.Fatal("terminal replay reached execution")
 			}
-			f.x.sweep(t.Context())
-			for _, op := range []string{"rm", "logs", "stop", "start", "create"} {
-				if calls := f.calls(op); len(calls) != 0 {
-					t.Fatalf("%s calls = %q", op, calls)
+		})
+	}
+}
+func TestFirstCancelPreservesAnAlreadyExitedResult(t *testing.T) {
+	for _, code := range []int{0, 3} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			f := newFake(t)
+			f.latch(latchStart)
+			f.exited(code)
+			e := f.effect()
+			j, err := f.x.Cancel(t.Context(), e)
+			if err != nil || j.ExitCode == nil || *j.ExitCode != code || j.Status == harness.JobCancelled || !j.Fenced {
+				t.Fatalf("natural exit: %+v %v", j, err)
+			}
+			if len(f.calls("stop")) != 0 {
+				t.Fatal("stopped exited owner")
+			}
+		})
+	}
+}
+func TestFailedCaptureRetainsOwnerUntilPublicationCanRetry(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.exited(0)
+	f.fail("logs", 500, "capture failed")
+	e := f.effect()
+	if _, err := f.x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("capture failure became terminal")
+	}
+	if len(f.calls("rm")) != 0 {
+		t.Fatal("released uncaptured owner")
+	}
+	if _, err := os.Stat(f.x.record(e.ID)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("published failed capture")
+	}
+	f.output("recovered")
+	j, err := freshExecutor(f).Inspect(t.Context(), e)
+	if err != nil || j.Preview != "recovered" || len(f.calls("rm")) != 1 {
+		t.Fatalf("capture retry: %+v %v", j, err)
+	}
+}
+func TestMalformedBindingAndTerminalRecordsFailClosed(t *testing.T) {
+	for _, name := range []string{"binding.json", "cancel", "output.json"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t)
+			f.ready()
+			e := f.effect()
+			if err := os.MkdirAll(f.x.dir(e.ID), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.x.dir(e.ID), name), []byte(`{"Format":1}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){f.x.Drive, f.x.Inspect, f.x.Cancel} {
+				if _, err := op(t.Context(), e); err == nil {
+					t.Fatalf("accepted malformed %s", name)
 				}
+			}
+			if len(f.calls("create"))+len(f.calls("start"))+len(f.calls("stop")) != 0 {
+				t.Fatal("corrupt evidence reached execution")
 			}
 		})
 	}
 }
 
-func TestCancelStopsOnlyARunningJob(t *testing.T) {
+func same(a, b harness.Job) bool { return reflect.DeepEqual(a, b) }
+
+func TestRetainedReceiptRejectsMissingLaunchWitness(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
-	f.reply("inspect", f.container("running", 0))
-	stopped := f.container("exited", 143)
-	f.hook("stop", func(*http.Request) { f.reply("inspect", stopped) })
-	f.output("partial\n")
-	for range 2 {
-		if err := f.x.Cancel(t.Context(), "e"); err != nil {
-			t.Fatal(err)
-		}
+	f.exited(0)
+	e := f.effect()
+	if _, err := f.x.Inspect(t.Context(), e); err != nil {
+		t.Fatal(err)
 	}
-	if stops := f.calls("stop"); len(stops) != 1 || stops[0] != "stop c-e 5" {
-		t.Fatalf("stops = %q", stops)
+	before := len(f.calls("rm"))
+	if err := os.Remove(filepath.Join(f.x.dir(e.ID), "latch")); err != nil {
+		t.Fatal(err)
 	}
-	job, _, err := f.x.Inspect(t.Context(), "e")
-	if err != nil || job.Status != harness.JobCancelled || *job.ExitCode != 143 || job.Output.Complete || job.Preview != "partial\n" {
-		t.Fatalf("Inspect() = %+v, %v", job, err)
+	if _, err := freshExecutor(f).Inspect(t.Context(), e); err == nil {
+		t.Fatal("known result accepted without launch witness")
+	}
+	if len(f.calls("rm")) != before {
+		t.Fatal("invalid receipt authorized release")
+	}
+}
+func TestRetainedReceiptStaysImmutableAfterArtifactLoss(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.exited(0)
+	f.output("retained")
+	e := f.effect()
+	want, err := f.x.Inspect(t.Context(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.x.cfg.State, "artifacts", want.Output.Path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	f.missing()
+	j, err := freshExecutor(f).Inspect(t.Context(), e)
+	if err != nil || !same(j, want) {
+		t.Fatalf("receipt changed after artifact deletion: %+v %v", j, err)
+	}
+	read, err := (archive.Reader{Artifacts: filepath.Join(f.x.cfg.State, "artifacts")}).Retrieve(t.Context(), archive.RetrievalQuery{Operation: "read", Path: "/canti/artifacts/" + want.Output.Path, Reason: "verify retained bytes"})
+	if err != nil || read.Error == "" {
+		t.Fatalf("missing artifact retrieval: %+v %v", read, err)
 	}
 }
 
-func TestWaitHoldsUpNoCancel(t *testing.T) {
+func TestBindingPublicationFailureCannotConsumeLaunchLatch(t *testing.T) {
+	f := newFake(t)
+	f.missing()
+	e := f.effect()
+	created := f.container("created", 0)
+	blocker := filepath.Join(f.x.dir(e.ID), "binding.json")
+	f.hook("create", func(*http.Request) {
+		if err := os.MkdirAll(blocker, 0700); err != nil {
+			t.Error(err)
+		}
+		f.reply("inspect", created)
+	})
+	if _, err := f.x.Drive(t.Context(), e); err == nil {
+		t.Fatal("unpublished binding launched")
+	}
+	if latch, err := readLatch(f.x.dir(e.ID)); err != nil || latch != "" || len(f.calls("start")) != 0 {
+		t.Fatalf("unpublished launch: %q %v %v", latch, err, f.calls("start"))
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	f.hook("start", func(*http.Request) { f.reply("inspect", f.container("running", 0)) })
+	j, err := freshExecutor(f).Drive(t.Context(), e)
+	if err != nil || j.ID != "c-e" || len(f.calls("create")) != 1 || len(f.calls("start")) != 1 {
+		t.Fatalf("publication recovery: %+v %v", j, err)
+	}
+}
+
+func TestRetainedStartedCancellationRequiresItsStopWitness(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
 	f.reply("inspect", f.container("running", 0))
-	stopped := f.container("exited", 143)
-	f.hook("wait", func(r *http.Request) {
-		f.signal("waiting")
-		select {
-		case <-f.signalled("stopped"):
-		case <-r.Context().Done():
+	e := f.effect()
+	f.hook("stop", func(*http.Request) { f.reply("inspect", f.container("exited", 143)) })
+	if j, err := f.x.Cancel(t.Context(), e); err != nil || j.Status != harness.JobCancelled {
+		t.Fatalf("cancel: %+v %v", j, err)
+	}
+	before := len(f.calls("rm"))
+	if err := os.Remove(filepath.Join(f.x.dir(e.ID), "stop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshExecutor(f).Inspect(t.Context(), e); err == nil {
+		t.Fatal("accepted started cancellation without stop witness")
+	}
+	if len(f.calls("rm")) != before {
+		t.Fatal("invalid cancellation authorized release")
+	}
+}
+
+func TestEffectLockWaitHasAnIndependentBound(t *testing.T) {
+	f := newFake(t)
+	f.x.timeouts.call = 30 * time.Millisecond
+	unlock, err := f.x.lock(t.Context(), "e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	began := time.Now()
+	_, err = f.x.Inspect(t.Context(), f.effect())
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(began) > time.Second {
+		t.Fatalf("lock wait: %v after %v", err, time.Since(began))
+	}
+	if len(f.log) != 0 {
+		t.Fatal("blocked operation reached backend")
+	}
+}
+
+func TestTerminalPublicationFailureRetainsTheOwnerForRetry(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.exited(0)
+	f.output("retained output")
+	e := f.effect()
+	blocker := f.x.record(e.ID)
+	f.hook("logs", func(*http.Request) {
+		if err := os.Mkdir(blocker, 0700); err != nil {
+			t.Error(err)
 		}
 	})
-	f.hook("stop", func(*http.Request) {
-		f.reply("inspect", stopped)
-		f.signal("stopped")
-	})
-	waited := make(chan error, 1)
-	go func() { waited <- f.x.Wait(t.Context(), "e") }()
-	<-f.signalled("waiting")
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	if _, err := f.x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("failed publication became a terminal receipt")
+	}
+	if len(f.calls("rm")) != 0 {
+		t.Fatal("owner released before terminal publication")
+	}
+	f.hook("logs", nil)
+	f.output("retained output")
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	j, err := freshExecutor(f).Inspect(t.Context(), e)
+	if err != nil || j.ID != "c-e" || j.Status != harness.JobSucceeded || j.Preview != "retained output" || len(f.calls("rm")) != 1 {
+		t.Fatalf("publication retry: %+v %v", j, err)
+	}
+}
+
+func TestDriveOwnsBoundedLaunchAfterCallerCancellation(t *testing.T) {
+	f := newFake(t)
+	f.ready()
+	f.x.timeouts.call = 200 * time.Millisecond
+	e := f.effect()
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if err := f.x.Cancel(ctx, "e"); err != nil {
-		t.Fatalf("Cancel() during a wait = %v", err)
+	started, release := make(chan struct{}), make(chan struct{})
+	f.hook("start", func(r *http.Request) {
+		close(started)
+		cancel()
+		select {
+		case <-release:
+		case <-f.stop:
+			return
+		}
+		if r.Context().Err() != nil {
+			t.Error("post-latch launch inherited caller cancellation")
+		}
+		f.reply("inspect", f.container("running", 0))
+	})
+	type result struct {
+		job harness.Job
+		err error
+	}
+	done := make(chan result, 1)
+	go func() { j, err := f.x.Drive(ctx, e); done <- result{j, err} }()
+	<-started
+	if latch, err := readLatch(f.x.dir(e.ID)); err != nil || latch != latchStart {
+		t.Fatalf("start lacked latch: %q %v", latch, err)
 	}
 	select {
-	case err := <-waited:
-		if err != nil {
-			t.Fatalf("Wait() = %v", err)
+	case r := <-done:
+		t.Fatalf("Drive detached its launch: %+v", r)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case r := <-done:
+		if r.err != nil || r.job.Status != harness.JobRunning || !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("bounded completion: %+v %v", r, ctx.Err())
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Wait() did not return once the job stopped")
+	case <-time.After(time.Second):
+		t.Fatal("launch did not finish within its own bounds")
 	}
-	if waits, stops := f.calls("wait"), f.calls("stop"); len(waits) != 1 || waits[0] != "wait canti-e not-running" || len(stops) != 1 {
-		t.Fatalf("waits %q, stops %q", waits, stops)
+	if _, err := freshExecutor(f).Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
 	}
+	if len(f.calls("start")) != 1 {
+		t.Fatal("launch was repeated")
+	}
+}
 
-	g := newFake(t)
-	g.hang("wait")
-	ctx, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancel()
-	if err := g.x.Wait(ctx, "e"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Wait(past the caller's deadline) = %v", err)
+func TestAmbientPlatformCannotChangeAcceptedExecution(t *testing.T) {
+	f := newFake(t)
+	f.missing()
+	e := f.effect()
+	t.Setenv("DOCKER_DEFAULT_PLATFORM", "invalid/ambient-platform")
+	if got := f.x.Specification(e.Command); got != e.Spec {
+		t.Fatal("ambient platform changed pure specification")
 	}
-	g.x.timeouts.transfer = 50 * time.Millisecond
-	if err := g.x.Wait(t.Context(), "e"); err == nil || err.Error() != "docker wait: no response within 50ms" {
-		t.Fatalf("Wait(past its own deadline) = %v", err)
-	}
-	g.hook("wait", nil)
-	g.fail("wait", http.StatusNotFound, "No such container: canti-e")
-	if err := g.x.Wait(t.Context(), "e"); err == nil {
-		t.Fatal("Wait(no container) succeeded")
-	}
-	if err := g.x.Wait(t.Context(), "../e"); err == nil || len(g.calls("wait")) != 3 {
-		t.Fatalf("Wait(invalid ID) = %v, waits %q", err, g.calls("wait"))
-	}
-	for _, op := range []string{"inspect", "create", "start", "stop", "rm", "logs", "cp"} {
-		if calls := g.calls(op); len(calls) != 0 {
-			t.Fatalf("%s calls = %q, want Wait to change nothing", op, calls)
+	f.fail("create", http.StatusNotFound, "No such image: alpine:3.23")
+	created := f.container("created", 0)
+	f.hook("create", func(*http.Request) {
+		if len(f.pulls()) > 0 {
+			f.clear("create")
+			f.reply("inspect", created)
 		}
+	})
+	f.hook("start", func(*http.Request) { f.reply("inspect", f.container("running", 0)) })
+	j, err := f.x.Drive(t.Context(), e)
+	if err != nil || j.Status != harness.JobRunning {
+		t.Fatalf("ambient-independent Drive: %+v %v", j, err)
+	}
+	creates, pulls := f.calls("create"), f.pulls()
+	if len(creates) != 2 || creates[0] != "create canti-e" || creates[1] != "create canti-e" || len(pulls) != 1 || strings.Contains(pulls[0], "ambient-platform") {
+		t.Fatalf("ambient platform reached create/pull: %v %v", creates, pulls)
 	}
 }

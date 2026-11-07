@@ -79,9 +79,9 @@ func TestOnlyARecordedExitIsFinal(t *testing.T) {
 	}
 
 	killed := harness.Effect{ID: id("killed"), Command: "echo started; touch /workspace/began; sleep 300"}
-	bound, err := x.Bind(ctx, killed)
+	bound, err := x.Drive(ctx, accepted(x, killed))
 	if err == nil {
-		_, err = x.Start(ctx, killed.ID)
+		_, err = x.Drive(ctx, accepted(x, killed))
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -94,16 +94,16 @@ func TestOnlyARecordedExitIsFinal(t *testing.T) {
 			t.Fatalf("%s = %+v, want job %s unknown with detail %q", what, job, bound.ID, noRecord)
 		}
 	}
-	unknown("Inspect()", inspect(ctx, t, x, killed.ID))
+	unknown("Inspect()", inspect(ctx, t, x, killed))
 	restarted := open(t, cfg)
-	unknown("restarted Inspect()", inspect(ctx, t, restarted, killed.ID))
-	if err := restarted.Cancel(ctx, killed.ID); err != nil {
+	unknown("restarted Inspect()", inspect(ctx, t, restarted, killed))
+	if _, err := restarted.Cancel(ctx, accepted(restarted, killed)); err != nil {
 		t.Fatal(err)
 	}
-	if job, err := restarted.Start(ctx, killed.ID); err != nil || job.ID != bound.ID || job.Status != harness.JobUnknown || job.Output != (harness.ArtifactRef{}) {
+	if job, err := restarted.Drive(ctx, accepted(restarted, killed)); err != nil || job.ID != bound.ID || job.Status != harness.JobUnknown || job.Output.Detail != noRecord {
 		t.Fatalf("Start() = %+v, %v; want job %s unknown without reading its exit record", job, err, bound.ID)
 	}
-	unknown("Inspect() after Cancel", inspect(ctx, t, open(t, cfg), killed.ID))
+	unknown("Inspect() after Cancel", inspect(ctx, t, open(t, cfg), killed))
 	if _, err := os.Stat(filepath.Join(cfg.State, "jobs", killed.ID, "output.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the unknown job was recorded: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestOnlyARecordedExitIsFinal(t *testing.T) {
 	}
 
 	stopped := harness.Effect{ID: id("stopped"), Command: "trap 'echo got TERM; exit 7' TERM; touch /workspace/stopping; sleep 300 & wait"}
-	if bound, err = x.Bind(ctx, stopped); err == nil {
-		_, err = x.Start(ctx, stopped.ID)
+	if bound, err = x.Drive(ctx, accepted(x, stopped)); err == nil {
+		_, err = x.Drive(ctx, accepted(x, stopped))
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestOnlyARecordedExitIsFinal(t *testing.T) {
 		t.Fatalf("docker stop: %v: %s", err, out)
 	}
 	took := time.Since(began)
-	if job := await(ctx, t, x, stopped.ID, finished); job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 7 || job.Preview != "got TERM\n" || took > 10*time.Second {
+	if job := await(ctx, t, x, stopped, finished); job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 7 || job.Preview != "got TERM\n" || took > 10*time.Second {
 		t.Fatalf("job stopped outside canti = %+v after %v; want its own handling of SIGTERM recorded as exit status 7", job, took)
 	}
 }
@@ -139,9 +139,9 @@ func TestAnOutOfMemoryKillIsFinalOnlyWhenRecorded(t *testing.T) {
 		t.Fatalf("job killed out of memory = %+v, want failed with the recorded exit status 137", job)
 	}
 	survivor := harness.Effect{ID: id("survivor"), Command: hog + "; echo after $?; touch /workspace/survived; sleep 300"}
-	bound, err := x.Bind(ctx, survivor)
+	bound, err := x.Drive(ctx, accepted(x, survivor))
 	if err == nil {
-		_, err = x.Start(ctx, survivor.ID)
+		_, err = x.Drive(ctx, accepted(x, survivor))
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestAnOutOfMemoryKillIsFinalOnlyWhenRecorded(t *testing.T) {
 		t.Fatal("Docker does not report the earlier out-of-memory kill")
 	}
 	const detail = noRecord + "; Docker observed an out-of-memory kill in the container"
-	if job := inspect(ctx, t, open(t, cfg), survivor.ID); job.ID != bound.ID || job.Status != harness.JobUnknown || job.ExitCode != nil || job.Output.Detail != detail {
+	if job := inspect(ctx, t, open(t, cfg), survivor); job.ID != bound.ID || job.Status != harness.JobUnknown || job.ExitCode != nil || job.Output.Detail != detail {
 		t.Fatalf("job killed after surviving an out-of-memory kill = %+v, want unknown with detail %q", job, detail)
 	}
 }

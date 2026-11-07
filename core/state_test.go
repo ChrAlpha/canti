@@ -15,7 +15,7 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
-const legalPairs = 29
+const legalPairs = 20
 
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
@@ -35,10 +35,6 @@ func withExec(s *core.State) {
 	s.Decision = core.Decision{Kind: core.Exec, Payload: "printf ok"}
 	s.EffectID = "effect-1"
 }
-
-func withJob(s *core.State) { s.JobID = "job-1" }
-
-func withStarted(s *core.State) { s.Started = true }
 
 func withReason(reason core.StopReason) func(*core.State) {
 	return func(s *core.State) { s.Reason = reason }
@@ -103,8 +99,7 @@ func eventSamples() []struct {
 		{core.ResponseSaved{Step: 1, Attempt: 1}, "response_saved"},
 		{core.ResponseIncomplete{Step: 1, Attempt: 1}, "response_incomplete"},
 		{core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, "response_loaded"},
-		{core.JobBound{EffectID: "effect-1", JobID: "job-1"}, "job_bound"},
-		{core.JobStarted{EffectID: "effect-1", JobID: "job-1"}, "job_started"},
+		{core.EffectRecovered{EffectID: "effect-1"}, "effect_recovered"},
 		{core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, "observed"},
 		{core.Performed{EffectID: "effect-1"}, "performed"},
 		{core.OutcomeUnknown{EffectID: "effect-1"}, "outcome_unknown"},
@@ -134,39 +129,26 @@ func legalTransitions() []transition {
 		{"saved response repairs invalid decision with a new request", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: invalidBody}, at(core.PhaseIdle, withRev(1), withAttempt(2))},
 		{"saved response stops", at(core.PhaseResponseSaved, withRev(1)), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withRev(1), withReason(core.StopCancelled))},
 
-		{"saved effect binds job", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
 		{"saved effect observes failed start", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
 		{"saved effect is performed without a job", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{EffectID: "effect-1"}, at(core.PhaseIdle, withStep(2))},
 		{"saved effect keeps unknown outcome", at(core.PhaseEffectSaved, withRev(1), withExec), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec)},
 		{"saved effect cancels", at(core.PhaseEffectSaved, withRev(1), withExec), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled))},
 
-		{"bound job starts", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.JobStarted{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted)},
-		{"bound job observes result", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseIdle, withStep(2))},
-		{"bound job keeps unknown outcome", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob)},
-		{"bound job cancels", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-
-		{"awaiting observation advances", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseIdle, withStep(2))},
-		{"awaiting observation keeps unknown outcome", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withStarted)},
-		{"awaiting observation cancels", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.StopRequested{Reason: core.StopBudgetExhausted}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withStarted, withReason(core.StopBudgetExhausted))},
-
-		{"cancelling finds job", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"cancelling confirms known job", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
 		{"cancelling records missing job as cancelled", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionCancelled}, at(core.PhaseStopped, withRev(1), withExec, withReason(core.StopCancelled))},
-		{"cancelling records true result", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"cancelling keeps unknown outcome", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"cancelling keeps first stop reason", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
+		{"cancelling records true result", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"cancelling keeps unknown outcome", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"cancelling keeps first stop reason", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled))},
 
-		{"resolution records found job for starting", at(core.PhaseNeedsResolution, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
-		{"resolution reconfirms known job for starting", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
-		{"resolution resumes inspection after a committed start", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withStarted), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted)},
-		{"resolution with pending stop records found job", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"resolution continues", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
+		{"unknown effect recovers", at(core.PhaseNeedsResolution, withRev(1), withExec), core.EffectRecovered{EffectID: "effect-1"}, at(core.PhaseEffectSaved, withRev(1), withExec)},
+		{"unknown effect recovers with pending stop", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.EffectRecovered{EffectID: "effect-1"}, at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"accepted effect observes exit", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseIdle, withStep(2))},
+		{"resolution continues", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
 		{"jobless resolution records a failed start", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
-		{"resolution completes pending stop", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"resolution abandons with the outcome unknown", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopUnresolved))},
-		{"resolution abandons keeping the pending stop reason", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"unresolved run records stop", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
-		{"unresolved run keeps first stop reason", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseNeedsResolution, withRev(1), withExec, withJob, withReason(core.StopCancelled))},
+		{"resolution completes pending stop", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"resolution abandons with the outcome unknown", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withReason(core.StopUnresolved))},
+		{"resolution abandons keeping the pending stop reason", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionUnknown}, at(core.PhaseStopped, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"unresolved run records stop", at(core.PhaseNeedsResolution, withRev(1), withExec), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled))},
+		{"unresolved run keeps first stop reason", at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseNeedsResolution, withRev(1), withExec, withReason(core.StopCancelled))},
 	}
 }
 
@@ -210,22 +192,14 @@ func TestValidateRejectsIncoherentStates(t *testing.T) {
 		{"negative request revision", at(core.PhaseIdle, withRev(-1))},
 		{"idle with decision", at(core.PhaseIdle, func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
 		{"idle with effect", at(core.PhaseIdle, func(s *core.State) { s.EffectID = "effect-1" })},
-		{"idle with job", at(core.PhaseIdle, withJob)},
 		{"idle with reason", at(core.PhaseIdle, withReason(core.StopCancelled))},
 		{"frozen request without revision", at(core.PhaseRequestFrozen)},
 		{"sent request with effect", at(core.PhaseRequestSent, withRev(1), withExec)},
 		{"saved effect without decision", at(core.PhaseEffectSaved, withRev(1), func(s *core.State) { s.EffectID = "effect-1" })},
 		{"saved effect with return decision", at(core.PhaseEffectSaved, withRev(1), withExec, func(s *core.State) { s.Decision.Kind = core.Return })},
 		{"saved effect without effect", at(core.PhaseEffectSaved, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
-		{"saved effect with job", at(core.PhaseEffectSaved, withRev(1), withExec, withJob)},
 		{"saved effect with reason", at(core.PhaseEffectSaved, withRev(1), withExec, withReason(core.StopCancelled))},
-		{"bound job without job", at(core.PhaseJobBound, withRev(1), withExec)},
-		{"bound job already started", at(core.PhaseJobBound, withRev(1), withExec, withJob, withStarted)},
-		{"awaiting observation without job", at(core.PhaseAwaitingObservation, withRev(1), withExec, withStarted)},
-		{"awaiting observation without a start", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob)},
-		{"saved effect already started", at(core.PhaseEffectSaved, withRev(1), withExec, withStarted)},
-		{"idle with start flag", at(core.PhaseIdle, withStarted)},
-		{"cancelling without reason", at(core.PhaseCancelling, withRev(1), withExec, withJob)},
+		{"cancelling without reason", at(core.PhaseCancelling, withRev(1), withExec)},
 		{"resolution without effect", at(core.PhaseNeedsResolution, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
 		{"returned with exec decision", at(core.PhaseReturned, withRev(1), func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
 		{"returned with effect", at(core.PhaseReturned, withRev(1), withExec, func(s *core.State) { s.Decision.Kind = core.Return })},
@@ -257,8 +231,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 4 {
-		t.Errorf("SemanticsVersion = %d, want 4", core.SemanticsVersion)
+	if core.SemanticsVersion != 5 {
+		t.Errorf("SemanticsVersion = %d, want 5", core.SemanticsVersion)
 	}
 }
 
@@ -358,7 +332,7 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 
 	phases := []core.Phase{
 		core.PhaseIdle, core.PhaseRequestFrozen, core.PhaseRequestSent, core.PhaseResponseSaved,
-		core.PhaseEffectSaved, core.PhaseJobBound, core.PhaseAwaitingObservation, core.PhaseCancelling,
+		core.PhaseEffectSaved, core.PhaseCancelling,
 		core.PhaseReturned, core.PhaseNeedsResolution, core.PhaseStopped, "", "future_phase",
 	}
 	var events []core.Event
@@ -373,7 +347,7 @@ func TestNextRejectsIllegalTransitions(t *testing.T) {
 				continue
 			}
 			checked++
-			from := at(phase, withRev(1), withExec, withJob, withReason(core.StopCancelled))
+			from := at(phase, withRev(1), withExec, withReason(core.StopCancelled))
 			got, err := from.Next(event)
 			if !errors.Is(err, core.ErrIllegalTransition) {
 				t.Errorf("%T in %q: error = %v, want illegal transition", event, phase, err)
@@ -396,6 +370,8 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		from  core.State
 		event core.Event
 	}{
+		{"recovery without effect", at(core.PhaseNeedsResolution, withRev(1), withExec), core.EffectRecovered{}},
+		{"recovery for foreign effect", at(core.PhaseNeedsResolution, withRev(1), withExec), core.EffectRecovered{EffectID: "effect-2"}},
 		{"nil event", at(core.PhaseIdle), nil},
 		{"pointer event", at(core.PhaseIdle), &core.RequestFrozen{}},
 		{"empty stop reason", at(core.PhaseIdle), core.StopRequested{}},
@@ -415,34 +391,19 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"stale incomplete response", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Step: 1, Attempt: 1}},
 		{"empty response body", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1}},
 		{"stale response loaded", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
-		{"empty job bound", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-1"}},
-		{"bound job without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{JobID: "job-1"}},
-		{"bound job for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-2", JobID: "job-1"}},
-		{"different job while cancelling", at(core.PhaseCancelling, withRev(1), withExec, withJob, withReason(core.StopCancelled)), core.JobBound{EffectID: "effect-1", JobID: "job-2"}},
-		{"different job while resolving", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.JobBound{EffectID: "effect-1", JobID: "job-2"}},
-		{"empty job started", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.JobStarted{EffectID: "effect-1"}},
-		{"start without effect", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.JobStarted{JobID: "job-1"}},
-		{"start of a different job", at(core.PhaseJobBound, withRev(1), withExec, withJob), core.JobStarted{EffectID: "effect-1", JobID: "job-2"}},
-		{"start of an unbound job", at(core.PhaseJobBound, withRev(1), withExec), core.JobStarted{EffectID: "effect-1", JobID: "job-1"}},
-		{"observation without effect", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{Execution: core.ExecutionExited}},
-		{"observation for foreign effect", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{EffectID: "effect-2", Execution: core.ExecutionExited}},
-		{"unknown outcome without effect", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.OutcomeUnknown{}},
-		{"unknown outcome for foreign effect", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.OutcomeUnknown{EffectID: "effect-2"}},
-		{"resolution for foreign effect", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-2", Execution: core.ExecutionExited}},
-		{"exit observed without job", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
+		{"observation without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{Execution: core.ExecutionExited}},
+		{"observation for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-2", Execution: core.ExecutionExited}},
+		{"unknown outcome without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.OutcomeUnknown{}},
+		{"unknown outcome for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.OutcomeUnknown{EffectID: "effect-2"}},
+		{"resolution for foreign effect", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-2", Execution: core.ExecutionExited}},
 		{"performed without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{}},
 		{"performed for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{EffectID: "effect-2"}},
-		{"cancel observed without job before dispatch", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionCancelled}},
-		{"exit observed without job while cancelling", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
-		{"failed start observed without job while cancelling", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}},
 		{"unsupported execution observed without job", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: "bogus"}},
-		{"unknown execution observed", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1", Execution: core.ExecutionUnknown}},
-		{"unsupported execution observed", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1", Execution: "bogus"}},
-		{"empty execution observed", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1"}},
-		{"empty execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1"}},
-		{"unsupported execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: "bogus"}},
-		{"exit resolved without job", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}},
-		{"timeout resolved without job", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionTimedOut}},
+		{"unknown execution observed", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionUnknown}},
+		{"unsupported execution observed", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: "bogus"}},
+		{"empty execution observed", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1"}},
+		{"empty execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1"}},
+		{"unsupported execution resolved", at(core.PhaseNeedsResolution, withRev(1), withExec), core.Resolved{EffectID: "effect-1", Execution: "bogus"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -485,8 +446,6 @@ func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
 	)
 	effect1 := effectSaved1.EffectID
 	idle2 := walk(t, effectSaved1,
-		core.JobBound{EffectID: effect1, JobID: "job-1"},
-		core.JobStarted{EffectID: effect1, JobID: "job-1"},
 		core.Observed{EffectID: effect1, Execution: core.ExecutionExited},
 	)
 	sent2 := walk(t, idle2, core.RequestFrozen{}, core.AttemptStarted{Step: 2, Attempt: 1})
@@ -496,8 +455,6 @@ func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
 	if effect1 == effect2 {
 		t.Fatal("steps share an effect identity")
 	}
-	bound2 := walk(t, effectSaved2, core.JobBound{EffectID: effect2, JobID: "job-2"})
-	awaiting2 := walk(t, bound2, core.JobStarted{EffectID: effect2, JobID: "job-2"})
 
 	echoes := []struct {
 		name  string
@@ -508,11 +465,9 @@ func TestTrajectoryRejectsEchoesFromEarlierPositions(t *testing.T) {
 		{"response of step 1", sent2, core.ResponseSaved{Step: 1, Attempt: 1}},
 		{"incomplete response of step 1", sent2, core.ResponseIncomplete{Step: 1, Attempt: 1}},
 		{"loaded response of step 1", saved2, core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
-		{"bind of step 1", effectSaved2, core.JobBound{EffectID: effect1, JobID: "job-1"}},
 		{"failed start of step 1", effectSaved2, core.Observed{EffectID: effect1, Execution: core.ExecutionFailedToStart}},
 		{"unknown outcome of step 1", effectSaved2, core.OutcomeUnknown{EffectID: effect1}},
-		{"start of step 1", bound2, core.JobStarted{EffectID: effect1, JobID: "job-1"}},
-		{"observation of step 1", awaiting2, core.Observed{EffectID: effect1, Execution: core.ExecutionExited}},
+		{"observation of step 1", effectSaved2, core.Observed{EffectID: effect1, Execution: core.ExecutionExited}},
 	}
 	for _, tt := range echoes {
 		t.Run(tt.name, func(t *testing.T) {
@@ -568,9 +523,6 @@ func TestIllegalPairsReportIllegalWhateverTheClaims(t *testing.T) {
 		from  core.State
 		event core.Event
 	}{
-		{"mismatched bind in awaiting observation", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.JobBound{EffectID: "effect-1", JobID: "job-2"}},
-		{"job bound for a stopped run", stopped, core.JobBound{EffectID: "effect-1", JobID: "job-1"}},
-		{"job started for a stopped run", stopped, core.JobStarted{EffectID: "effect-1", JobID: "job-1"}},
 		{"observation for a stopped run", stopped, core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
 		{"response for a stopped run", stopped, core.ResponseSaved{Step: 1, Attempt: 1}},
 	}
@@ -595,10 +547,10 @@ func TestNextEnforcesBudgets(t *testing.T) {
 		{"transport attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Step: 1, Attempt: 2}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
 		{"lost attempts exhausted", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 3}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
 		{"protocol attempts exhausted", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 2, Body: invalidBody}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopProtocolFailure))},
-		{"steps exhausted after observation", at(core.PhaseAwaitingObservation, withRev(1), withStep(3), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withStarted, withReason(core.StopStepsExhausted))},
+		{"steps exhausted after observation", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after failed start", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after a performed effect", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Performed{EffectID: "effect-1"}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
-		{"steps exhausted after resolution", at(core.PhaseNeedsResolution, withRev(1), withStep(3), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withReason(core.StopStepsExhausted))},
+		{"steps exhausted after resolution", at(core.PhaseNeedsResolution, withRev(1), withStep(3), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -618,19 +570,17 @@ func TestIntent(t *testing.T) {
 	t.Parallel()
 
 	tests := map[core.Phase]core.Intent{
-		core.PhaseIdle:                core.IntentPrepareRequest,
-		core.PhaseRequestFrozen:       core.IntentSendRequest,
-		core.PhaseRequestSent:         core.IntentSendRequest,
-		core.PhaseResponseSaved:       core.IntentDecode,
-		core.PhaseEffectSaved:         core.IntentBind,
-		core.PhaseJobBound:            core.IntentStart,
-		core.PhaseAwaitingObservation: core.IntentInspect,
-		core.PhaseCancelling:          core.IntentCancel,
-		core.PhaseReturned:            core.IntentHalt,
-		core.PhaseNeedsResolution:     core.IntentHalt,
-		core.PhaseStopped:             core.IntentHalt,
-		"":                            core.IntentHalt,
-		"future_phase":                core.IntentHalt,
+		core.PhaseIdle:            core.IntentPrepareRequest,
+		core.PhaseRequestFrozen:   core.IntentSendRequest,
+		core.PhaseRequestSent:     core.IntentSendRequest,
+		core.PhaseResponseSaved:   core.IntentDecode,
+		core.PhaseEffectSaved:     core.IntentEffect,
+		core.PhaseCancelling:      core.IntentCancel,
+		core.PhaseReturned:        core.IntentHalt,
+		core.PhaseNeedsResolution: core.IntentHalt,
+		core.PhaseStopped:         core.IntentHalt,
+		"":                        core.IntentHalt,
+		"future_phase":            core.IntentHalt,
 	}
 	for phase, want := range tests {
 		if got := at(phase).Intent(); got != want {
@@ -639,44 +589,17 @@ func TestIntent(t *testing.T) {
 	}
 }
 
-func TestCompatibleSemanticsVersions(t *testing.T) {
-	bounded := core.State{Limits: core.Limits{MaxSteps: 3, MaxAttempts: 1}}
-	unlimited := core.State{Limits: core.Limits{MaxSteps: 0, MaxAttempts: 1}}
-	purposed := bounded
-	purposed.Decision = core.Decision{Kind: core.Exec, Purpose: "check", Payload: "true"}
-	for _, tc := range []struct {
-		version int
-		state   core.State
-		ok      bool
-	}{
-		{0, bounded, false}, {1, bounded, true}, {1, unlimited, false}, {1, purposed, false},
-		{2, bounded, true}, {2, unlimited, true}, {2, purposed, false},
-		{3, unlimited, true}, {3, purposed, true}, {core.SemanticsVersion + 1, bounded, false},
-	} {
-		if err := core.Compatible(tc.version, tc.state); (err == nil) != tc.ok {
-			t.Errorf("Compatible(%d, %+v) = %v, want ok %v", tc.version, tc.state, err, tc.ok)
-		}
-		if err := core.KnownSemantics(tc.version); (err == nil) != (tc.version >= 1 && tc.version <= core.SemanticsVersion) {
-			t.Errorf("KnownSemantics(%d) = %v", tc.version, err)
-		}
-	}
-}
-
-func TestCompatibleEventsExistInTheirSemanticsVersion(t *testing.T) {
-	for _, e := range core.Events() {
-		for version := 1; version <= core.SemanticsVersion+1; version++ {
-			_, performed := e.(core.Performed)
-			want := version <= core.SemanticsVersion && (!performed || version >= 4)
-			if err := core.CompatibleEvent(version, e); (err == nil) != want {
-				t.Errorf("CompatibleEvent(%d, %s) = %v, want ok %v", version, e.Kind(), err, want)
-			}
+func TestKnownSemanticsAcceptsOnlyCurrentVersion(t *testing.T) {
+	for version := 0; version <= core.SemanticsVersion+1; version++ {
+		if err := core.KnownSemantics(version); (err == nil) != (version == core.SemanticsVersion) {
+			t.Errorf("KnownSemantics(%d) = %v", version, err)
 		}
 	}
 }
 
 func TestClosedPhases(t *testing.T) {
 	for _, p := range []core.Phase{core.PhaseIdle, core.PhaseRequestFrozen, core.PhaseRequestSent, core.PhaseResponseSaved, core.PhaseEffectSaved,
-		core.PhaseJobBound, core.PhaseAwaitingObservation, core.PhaseCancelling, core.PhaseNeedsResolution, core.PhaseReturned, core.PhaseStopped} {
+		core.PhaseCancelling, core.PhaseNeedsResolution, core.PhaseReturned, core.PhaseStopped} {
 		if got := (core.State{Phase: p}).Closed(); got != (p == core.PhaseReturned || p == core.PhaseStopped) {
 			t.Errorf("phase %s closed = %v", p, got)
 		}

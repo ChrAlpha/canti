@@ -166,8 +166,11 @@ type Facts struct {
 	Request     *Request
 	Response    *Response
 	Observation *Observation
-	Action      *Action  `json:",omitempty"`
-	Outcome     *Outcome `json:",omitempty"`
-	Window      *Window  `json:",omitempty"`
+	Action      *Action            `json:",omitempty"`
+	Execution   *ExecutionIdentity `json:",omitempty"`
+	Receipt     *Job               `json:",omitempty"`
+	Resolution  *Resolution        `json:",omitempty"`
+	Outcome     *Outcome           `json:",omitempty"`
+	Window      *Window            `json:",omitempty"`
 	Failure     string
 }

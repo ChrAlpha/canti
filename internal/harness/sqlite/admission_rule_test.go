@@ -17,8 +17,6 @@ import (
 func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 	type stepFn func(d *driver)
 	ex := func(d *driver) { d.decide(execBody("printf ok"), harness.Usage{}) }
-	bind := func(d *driver) { d.call(harness.Runner.Bind) }
-	start := func(d *driver) { d.call(harness.Runner.Start) }
 	unknown := func(d *driver) {
 		d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "lost"})
 	}
@@ -27,7 +25,7 @@ func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 	}
 	resolve := func(e core.ExecutionState) stepFn {
 		return func(d *driver) {
-			d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: e}, harness.Facts{Observation: observation(e, 0)})
+			d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: e}, harness.Facts{Observation: observation(e, 0), Resolution: &harness.Resolution{Source: harness.ResolutionOperator, OwnerID: "operator-owner"}})
 		}
 	}
 	scenarios := map[string][]stepFn{
@@ -36,18 +34,16 @@ func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 		"sent":                   {func(d *driver) { d.freeze(); d.send() }},
 		"saved":                  {func(d *driver) { d.freeze(); d.send(); d.save(execBody("x"), harness.Usage{}) }},
 		"effect":                 {ex},
-		"bound":                  {ex, bind},
-		"started":                {ex, bind, start},
-		"next step":              {ex, bind, start, func(d *driver) { d.observe(core.ExecutionExited, 0) }},
+		"next step":              {ex, func(d *driver) { d.observe(core.ExecutionExited, 0) }},
 		"returned":               {func(d *driver) { d.decide([]byte(`{"kind":"return","payload":"done"}`), harness.Usage{}) }},
 		"stopped idle":           {stop(core.StopCancelled)},
-		"cancelling":             {ex, bind, start, stop(core.StopCancelled)},
-		"cancelled":              {ex, bind, start, stop(core.StopCancelled), func(d *driver) { d.observe(core.ExecutionCancelled, 0) }},
-		"needs resolution":       {ex, bind, start, unknown},
-		"abandoned":              {ex, bind, start, unknown, resolve(core.ExecutionUnknown)},
-		"abandoned after a stop": {ex, bind, start, unknown, stop(core.StopTimedOut), resolve(core.ExecutionUnknown)},
-		"resolved after a stop":  {ex, bind, start, unknown, stop(core.StopTimedOut), resolve(core.ExecutionExited)},
-		"resolved and continued": {ex, bind, start, unknown, resolve(core.ExecutionExited)},
+		"cancelling":             {ex, stop(core.StopCancelled)},
+		"cancelled":              {ex, stop(core.StopCancelled), func(d *driver) { d.observe(core.ExecutionCancelled, 0) }},
+		"needs resolution":       {ex, unknown},
+		"abandoned":              {ex, unknown, resolve(core.ExecutionUnknown)},
+		"abandoned after a stop": {ex, unknown, stop(core.StopTimedOut), resolve(core.ExecutionUnknown)},
+		"resolved after a stop":  {ex, unknown, stop(core.StopTimedOut), resolve(core.ExecutionExited)},
+		"resolved and continued": {ex, unknown, resolve(core.ExecutionExited)},
 		"jobless abandoned":      {ex, unknown, resolve(core.ExecutionUnknown)},
 	}
 	blocks := map[string]bool{"": false, "returned": false, "stopped idle": false, "cancelled": false, "resolved after a stop": false}
@@ -58,8 +54,8 @@ func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 				ctx := context.Background()
 				drive := func(id string, steps []stepFn) {
 					if _, err := s.db.Exec(`INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`, id, core.SemanticsVersion,
-						`{"ID":"`+id+`","Goal":"g","Constraints":"","Budget":{"WallTime":0,"Tokens":0,"OutputBytes":0,"JobTimeout":0},"Created":"0001-01-01T00:00:00Z","Config":null}`,
-						`{"RunID":"`+id+`","Step":1,"Attempt":1,"RequestRev":0,"Phase":"idle","Limits":{"MaxSteps":3,"MaxAttempts":2},"Decision":{"kind":"","payload":""},"EffectID":"","JobID":"","Started":false,"Reason":""}`); err != nil {
+						`{"ID":"`+id+`","Goal":"g","Constraints":"","Budget":{"WallTime":0,"Tokens":0,"OutputBytes":0,"JobTimeout":0},"Created":"0001-01-01T00:00:00Z","Config":"eyJleGVjdXRvciI6InN0dWIifQ=="}`,
+						`{"RunID":"`+id+`","Step":1,"Attempt":1,"RequestRev":0,"Phase":"idle","Limits":{"MaxSteps":3,"MaxAttempts":2},"Decision":{"kind":"","payload":""},"EffectID":"","Reason":""}`); err != nil {
 						t.Fatal(err)
 					}
 					d := newDriver(t, s, harness.Snapshot{State: fresh(t, id, limits)})

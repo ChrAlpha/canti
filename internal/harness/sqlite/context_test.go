@@ -23,8 +23,6 @@ func contextHistory(t *testing.T) (*Store, *driver) {
 	d.send()
 	d.save(execBody("ls"), harness.Usage{})
 	d.load(execBody("ls"))
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	d.observe(core.ExecutionExited, 1)
 	d.freeze()
 	d.send()
@@ -37,11 +35,11 @@ func TestContextRecordsSelectsFrozenRevisionsAndPagesTheirInterval(t *testing.T)
 	for _, tc := range []struct {
 		step, revision, index, previous, next int
 	}{
-		{0, 0, 13, 4, -1},
-		{1, 0, 4, 0, 13},
+		{0, 0, 11, 4, -1},
+		{1, 0, 4, 0, 11},
 		{1, 1, 0, -1, 4},
-		{1, 2, 4, 0, 13},
-		{2, 1, 13, 4, -1},
+		{1, 2, 4, 0, 11},
+		{2, 1, 11, 4, -1},
 	} {
 		got, err := s.ContextRecords(ctx, "run-1", tc.step, tc.revision, 0, 100)
 		if err != nil {
@@ -152,7 +150,7 @@ func TestContextRecordsStrictlyDecodesSelectedRecords(t *testing.T) {
 		{`UPDATE transitions SET rev = 9 WHERE seq = 1`, 0},
 		{`UPDATE transitions SET from_state = json_set(from_state, '$.RunID', 'other') WHERE seq = 1`, 0},
 		{`UPDATE transitions SET facts = json_insert(facts, '$.Unknown', 1) WHERE seq = 2`, 1},
-		{`UPDATE transitions SET facts = json_insert(facts, '$.Unknown', 1) WHERE seq = 8`, 1},
+		{`UPDATE transitions SET facts = json_insert(facts, '$.Unknown', 1) WHERE seq = 5`, 1},
 		{`UPDATE runs SET semantics = 999`, 0},
 	} {
 		t.Run(tc.update, func(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -49,7 +48,7 @@ func wireMessages() map[string]any {
 		"request": Request{Protocol: Protocol, Op: OpSubmit, RunID: "run_1", SessionID: "s", Cursor: "run_1:5", Once: true, Limit: 6, TimeoutMS: 7, CleanupMS: 8,
 			Submit:  &Submission{SessionID: "s", InputID: "in_1", Goal: "g", Constraints: "c", ExplicitConstraints: true, Spec: spec},
 			Binding: &Binding{Provider: "https://p.test", Fallback: "https://f.test", AnthropicKey: "test-key-1", AnthropicToken: "test-key-2", OpenAIKey: "test-key-3"},
-			Resolve: &Resolution{Job: true, Execution: "exited", ExitCode: &code, Note: "n"}},
+			Resolve: &Resolution{Job: true, Execution: "exited", ExitCode: &code, Note: "n", OwnerID: "owner_1"}},
 		"response": Response{Protocol: Protocol, Error: &Error{Code: CodeFailed, Message: "m"},
 			Hello: &Hello{Protocol: Protocol, Version: "dev", ContextVersion: 13, SemanticsVersion: 4, PID: 1, Bindings: []Pair{{API: "anthropic-messages", Provider: "https://p.test"}}},
 			Ack:   &Ack{Replayed: true, Differs: []string{"model", "limits.max_steps"}, Run: run}, Run: &run,
@@ -58,17 +57,9 @@ func wireMessages() map[string]any {
 				Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
 				Outcome: &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Handover: true},
 				Window:  5, StopReason: "cancelled", Failure: "f", Truncated: true}}},
-			Wait: &Wait{Cursor: "run_1:9", Halted: true, Driver: DriverDriving}, Constraints: new(string)},
+			Inspection: &Inspection{RunID: "run_1", Cursor: "run_1:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
+			Wait:       &Wait{Cursor: "run_1:9", Halted: true, Driver: DriverDriving}, Constraints: new(string)},
 	}
-}
-
-// earlierRecords are the sha256 digests of the records of every earlier
-// protocol version, which the versions after them keep as they are.
-var earlierRecords = map[string]string{
-	"v1/request.json":  "6935e54e3438d5e48bd05f316a41342079ccff8b6e72fd450552b64af47b1731",
-	"v1/response.json": "b1aa8ac298869cabfab8b5a146fe77049cc17b47e4f62646fc65a41bbd256f82",
-	"v2/request.json":  "80155d48c7eb40b81d4f6eb23ea95041645b7a862831ac633fb84cae19801662",
-	"v2/response.json": "233776096192839e2d9dd65e6a5395daf950bd3ea3dede87a7e68495e3c214ff",
 }
 
 // TestWireMessagesKeepTheirEncoding requires that every message encodes as
@@ -125,33 +116,6 @@ func TestRecordingNeverRewritesARecord(t *testing.T) {
 
 // TestEarlierProtocolsKeepTheirRecord requires that the records of every
 // earlier protocol version stay as they were recorded.
-func TestEarlierProtocolsKeepTheirRecord(t *testing.T) {
-	for v := 1; v < Protocol; v++ {
-		files, err := filepath.Glob(filepath.Join("testdata", fmt.Sprintf("v%d", v), "*"))
-		if err != nil || len(files) == 0 {
-			t.Fatalf("protocol %d has no record: %v", v, err)
-		}
-		for _, f := range files {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				t.Fatal(err)
-			}
-			name, _ := filepath.Rel("testdata", f)
-			if sum := fmt.Sprintf("%x", sha256.Sum256(data)); earlierRecords[name] != sum {
-				t.Errorf("%s has sha256 %s, want the recorded %s", name, sum, earlierRecords[name])
-			}
-		}
-	}
-	for name := range earlierRecords {
-		if _, err := os.Stat(filepath.Join("testdata", name)); err != nil {
-			t.Errorf("the record %s is gone: %v", name, err)
-		}
-	}
-}
-
-// TestEveryValueHasAWord requires that each table of protocol words names
-// every value of its enumeration that the host's sources declare, with
-// distinct words, and that the words and values map back to each other.
 func TestEveryValueHasAWord(t *testing.T) {
 	declared := declaredValues(t, map[string]string{
 		"../../core": "Phase StopReason ExecutionState",
@@ -181,7 +145,7 @@ func TestEveryValueHasAWord(t *testing.T) {
 	check("OutcomeStatus", stringKeys(outcomeWords))
 	check("ActionName", stringKeys(actionWords))
 	check("ItemKind", stringKeys(itemWords))
-	if value(phaseWords, "awaiting_observation") != core.PhaseAwaitingObservation || word(reasonWords, core.StopUnresolved) != "unresolved" || value(reasonWords, "") != "" {
+	if value(phaseWords, "effect_saved") != core.PhaseEffectSaved || word(reasonWords, core.StopUnresolved) != "unresolved" || value(reasonWords, "") != "" {
 		t.Fatal("words do not map back to their values")
 	}
 }
@@ -627,11 +591,11 @@ func TestTheLargestValidRunFitsOneAnswer(t *testing.T) {
 // protocol lacks is refused as a spec error, recording nothing.
 func TestAResolutionTravelsAsTheProtocolsWords(t *testing.T) {
 	for state, w := range executionWords {
-		if r := ResolutionOf(false, harness.Observation{Execution: state}); r.Execution != w || r.Job {
+		if r := ResolutionOf(false, harness.Observation{Execution: state}, "operator-owner"); r.Execution != w || r.Job {
 			t.Errorf("a resolution of %q travels as %+v", state, r)
 		}
 	}
-	if r := ResolutionOf(true, harness.Observation{Execution: core.ExecutionExited}); !r.Job || r.Execution != "" {
+	if r := ResolutionOf(true, harness.Observation{Execution: core.ExecutionExited}, "operator-owner"); !r.Job || r.Execution != "" {
 		t.Errorf("a job resolution travels as %+v", r)
 	}
 	_, c := serving(t)

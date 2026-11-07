@@ -34,7 +34,7 @@ var (
 	created = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	limits  = core.Limits{MaxSteps: 5, MaxAttempts: 3}
 	usage   = harness.Usage{InputTokens: 100, OutputTokens: 10}
-	cycle   = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}
+	cycle   = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "observed"}
 	closing = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}
 )
 
@@ -145,49 +145,88 @@ type fakeExec struct {
 
 func jobID(effectID string) string { return "job-" + strings.TrimPrefix(effectID, "effect_")[:12] }
 
-func (x *fakeExec) Bind(_ context.Context, e harness.Effect) (harness.Job, error) {
+func (x *fakeExec) Specification(command string) string {
+	return harness.ConfigDigest([]byte("fixture:" + command))
+}
+
+func (x *fakeExec) Drive(ctx context.Context, e harness.Effect) (harness.Job, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	x.calls = append(x.calls, "bind")
+	x.calls = append(x.calls, "drive")
+	if err := ctx.Err(); err != nil {
+		return harness.Job{}, err
+	}
+	if e.Spec != x.Specification(e.Command) {
+		return harness.Job{}, errors.New("changed specification")
+	}
 	j := x.jobs[e.ID]
 	if j == nil {
-		j = &fakeJob{Job: harness.Job{ID: jobID(e.ID), Status: harness.JobPending}, command: e.Command}
 		if x.fenced[e.ID] {
-			j.Status = harness.JobCancelled
+			return harness.Job{EffectID: e.ID, Spec: e.Spec, Status: harness.JobCancelled, Fenced: true}, nil
 		}
+		j = &fakeJob{Job: harness.Job{ID: jobID(e.ID), EffectID: e.ID, Spec: e.Spec, Status: harness.JobRunning, StartedAt: x.clock.Now()}, command: e.Command, runs: 1}
 		x.jobs[e.ID] = j
 	}
 	if j.command != e.Command {
-		return harness.Job{}, errors.New("effect is bound to a different command")
+		return harness.Job{}, errors.New("changed command")
 	}
-	return j.Job, nil
+	return x.sample(e)
 }
 
-func (x *fakeExec) Start(_ context.Context, effectID string) (harness.Job, error) {
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	x.calls = append(x.calls, "start")
-	j := x.jobs[effectID]
-	if j == nil {
-		return harness.Job{}, errors.New("unbound effect")
-	}
-	if j.Status == harness.JobPending {
-		j.Status, j.StartedAt = harness.JobRunning, x.clock.Now()
-		j.runs++
-	}
-	return j.Job, nil
-}
-
-func (x *fakeExec) Inspect(_ context.Context, effectID string) (harness.Job, bool, error) {
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	x.calls = append(x.calls, "inspect")
+func (x *fakeExec) sample(e harness.Effect) (harness.Job, error) {
 	if x.inspect != nil {
-		return x.inspect(effectID)
+		j, found, err := x.inspect(e.ID)
+		if err != nil {
+			return j, err
+		}
+		if !found {
+			status := harness.JobAbsent
+			if x.fenced[e.ID] {
+				status = harness.JobCancelled
+			}
+			return harness.Job{EffectID: e.ID, Spec: e.Spec, Status: status, Fenced: x.fenced[e.ID]}, nil
+		}
+		if j.EffectID == "" {
+			j.EffectID = e.ID
+		}
+		if j.Spec == "" {
+			j.Spec = e.Spec
+		}
+		if x.fenced[e.ID] {
+			j.Fenced = true
+		}
+		if j.Status == harness.JobRunning && j.StartedAt.IsZero() {
+			j.StartedAt = created
+		}
+		if j.Status == harness.JobSucceeded || j.Status == harness.JobFailed {
+			if j.StartedAt.IsZero() {
+				j.StartedAt = created
+			}
+			if j.FinishedAt.IsZero() {
+				j.FinishedAt = x.clock.Now()
+			}
+		}
+		if j.Status == harness.JobCancelled && !j.StartedAt.IsZero() {
+			if j.ExitCode == nil {
+				code := 143
+				j.ExitCode = &code
+			}
+			if j.FinishedAt.IsZero() {
+				j.FinishedAt = x.clock.Now()
+			}
+		}
+		if j.Status == harness.JobCancelled {
+			j.Fenced = true
+		}
+		return j, nil
 	}
-	j := x.jobs[effectID]
+	j := x.jobs[e.ID]
 	if j == nil {
-		return harness.Job{}, false, nil
+		status := harness.JobAbsent
+		if x.fenced[e.ID] {
+			status = harness.JobCancelled
+		}
+		return harness.Job{EffectID: e.ID, Spec: e.Spec, Status: status, Fenced: x.fenced[e.ID]}, nil
 	}
 	if j.Status == harness.JobRunning {
 		if !x.hold {
@@ -196,24 +235,59 @@ func (x *fakeExec) Inspect(_ context.Context, effectID string) (harness.Job, boo
 			x.tick()
 		}
 	}
-	return j.Job, true, nil
+	return j.Job, nil
 }
-
-func (x *fakeExec) Cancel(_ context.Context, effectID string) error {
+func (x *fakeExec) Inspect(ctx context.Context, e harness.Effect) (harness.Job, error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.calls = append(x.calls, "inspect")
+	if err := ctx.Err(); err != nil {
+		return harness.Job{}, err
+	}
+	if e.Spec != x.Specification(e.Command) {
+		return harness.Job{}, errors.New("changed specification")
+	}
+	if j := x.jobs[e.ID]; j != nil && j.command != e.Command {
+		return harness.Job{}, errors.New("changed command")
+	}
+	return x.sample(e)
+}
+func (x *fakeExec) Cancel(ctx context.Context, e harness.Effect) (harness.Job, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.calls = append(x.calls, "cancel")
-	switch j := x.jobs[effectID]; {
-	case j == nil:
-		x.fenced[effectID] = true
-	case j.Status == harness.JobPending || j.Status == harness.JobRunning:
-		x.finish(j, harness.JobCancelled)
+	if err := ctx.Err(); err != nil {
+		return harness.Job{}, err
 	}
-	return nil
+	if e.Spec != x.Specification(e.Command) {
+		return harness.Job{}, errors.New("changed specification")
+	}
+	j := x.jobs[e.ID]
+	if j != nil && j.command != e.Command {
+		return harness.Job{}, errors.New("changed command")
+	}
+	if j == nil {
+		x.fenced[e.ID] = true
+	} else if j.Status == harness.JobPending || j.Status == harness.JobRunning {
+		x.fenced[e.ID] = true
+		x.finish(j, harness.JobCancelled)
+		j.Fenced = true
+	}
+	return x.sample(e)
 }
 
 func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {
 	j.Status, j.FinishedAt, j.Preview = status, x.clock.Now(), "ran: "+j.command
+	if status == harness.JobCancelled && j.StartedAt.IsZero() {
+		j.FinishedAt = time.Time{}
+		j.Preview = ""
+		j.Output = harness.ArtifactRef{}
+		return
+	}
+	if status == harness.JobCancelled && !j.StartedAt.IsZero() {
+		code := 143
+		j.ExitCode = &code
+	}
 	if status == harness.JobSucceeded {
 		code := 0
 		j.ExitCode = &code
@@ -224,7 +298,7 @@ func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {
 func TestFakeExecutorPassesStartLatchCheck(t *testing.T) {
 	x := &fakeExec{clock: &clock{now: created}, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
 	effect := func(name string) harness.Effect {
-		return harness.Effect{ID: fmt.Sprintf("effect_%x", sha256.Sum256([]byte(name))), Command: "run " + name}
+		return harness.Effect{ID: fmt.Sprintf("effect_%x", sha256.Sum256([]byte(name))), Command: "run " + name, Spec: x.Specification("run " + name)}
 	}
 	held := effect("start-cancel").ID
 	x.inspect = func(effectID string) (harness.Job, bool, error) {
@@ -736,4 +810,41 @@ func runWorkingSet(tb testing.TB, sc workingSetScenario, restart bool) (*sqlite.
 			return store, snap
 		}
 	}
+}
+
+func fixtureExecution(command string) *harness.ExecutionIdentity {
+	return &harness.ExecutionIdentity{Spec: harness.ConfigDigest([]byte("fixture:" + command)), ConfigDigest: harness.ConfigDigest(nil)}
+}
+func fixtureReceipt(s core.State, obs harness.Observation) harness.Job {
+	j := harness.Job{EffectID: s.EffectID, Spec: fixtureExecution(s.Decision.Payload).Spec, ID: jobID(s.EffectID), StartedAt: created, FinishedAt: created, ExitCode: obs.ExitCode, Preview: obs.Preview, Output: obs.Output}
+	switch obs.Execution {
+	case core.ExecutionExited:
+		j.Status = harness.JobSucceeded
+		if obs.ExitCode != nil && *obs.ExitCode != 0 {
+			j.Status = harness.JobFailed
+		}
+	case core.ExecutionCancelled, core.ExecutionTimedOut:
+		j.Status, j.Fenced = harness.JobCancelled, true
+		if j.ExitCode == nil {
+			code := 143
+			j.ExitCode = &code
+		}
+	case core.ExecutionFailedToStart:
+		j.Status = harness.JobFailedToStart
+		j.StartedAt = time.Time{}
+		j.ExitCode = nil
+	case core.ExecutionUnknown:
+		j.Status = harness.JobUnknown
+	}
+	return j
+}
+
+func (f *fixture) runningEffect() harness.Snapshot {
+	f.t.Helper()
+	snap := f.steps(f.loop(), 3)
+	e := harness.Effect{ID: snap.State.EffectID, Command: snap.State.Decision.Payload, Spec: f.exec.Specification(snap.State.Decision.Payload)}
+	if _, err := f.exec.Drive(f.bounded(), e); err != nil {
+		f.t.Fatal(err)
+	}
+	return snap
 }

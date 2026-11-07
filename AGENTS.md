@@ -29,9 +29,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   contract its trusted implementation guarantees, a repeatable read, a local
   change, or an external effect, commits it with the acceptance, and routes,
   performs, cancels, and recovers by that action, never by payload prefixes
-  or job IDs. The one exception is an acceptance whose row predates
-  recorded actions by its semantics version: only its legacy reading, which
-  stopping it relies on, reads its `read_` job ID. Its concrete
+  or physical owner IDs. Its concrete
   adapters are `sqlite`, `docker`, and the model adapters `anthropic`
   (Messages) and `openai` (Responses), which share `provider`; storage,
   execution, and provider guarantees require the integration evidence
@@ -81,8 +79,8 @@ transitions are recorded with `-record-semantics`; a rule outside the
 explored limits needs its own test. Before changing a harness boundary,
 specify its durable commit point, attached facts, and behavior after restart.
 Model request bytes and provenance must be committed before sending; a
-decision and its normalized action before it is performed or bound; the bound
-job before starting; a result together with run progress, and with any
+decision and its normalized action before it is performed or bound; the executor publishes its durable owner binding before consuming its launch
+latch; a result together with run progress, and with any
 change of harness state it causes, such as the context window, in one
 `Transition`. Events carry the step, attempt, or effect they belong to, and
 commits are sequenced: changing either identity scheme is a semantics change

@@ -133,7 +133,7 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestContextCaptureLegacyQuerySurvivesStrictSQLiteDecode(t *testing.T) {
+func TestContextCaptureRefusesUnsupportedQueryField(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
 	f.steps(f.loop(), 1)
 	db, err := sql.Open("sqlite", f.path)
@@ -141,13 +141,10 @@ func TestContextCaptureLegacyQuerySurvivesStrictSQLiteDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	legacy := `[{"Step":1,"Query":{"operation":"search","path":"/canti/imports/evidence","reason":"legacy full query","query":"ORIGINAL"},"More":true,"Incomplete":true,"Error":"legacy error"}]`
-	if _, err := db.ExecContext(f.bounded(), `UPDATE transitions SET facts = json_set(facts, '$.Request.Context.Retrievals', json(?)) WHERE kind = 'request_frozen'`, legacy); err != nil {
+	if _, err = db.Exec(`UPDATE transitions SET facts=json_set(facts,'$.Request.Context.Retrievals',json('[{"Step":1,"Query":{"operation":"read"}}]')) WHERE kind='request_frozen'`); err != nil {
 		t.Fatal(err)
 	}
-	r := capturedRequest(t, f, 1, 1)
-	if len(r.Context.Retrievals) != 1 || r.Context.Retrievals[0].Query == nil || r.Context.Retrievals[0].Query.Reason != "legacy full query" || !r.Context.Retrievals[0].More || !r.Context.Retrievals[0].Incomplete || r.Context.Retrievals[0].Error != "legacy error" {
-		t.Fatalf("legacy context query changed: %+v", r.Context.Retrievals)
+	if _, err = f.store.Request(f.bounded(), runID, 1, 1); err == nil {
+		t.Fatal("unsupported context field accepted")
 	}
-	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
 }

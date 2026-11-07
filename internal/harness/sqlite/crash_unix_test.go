@@ -55,7 +55,7 @@ func crashChild(path string) {
 		fmt.Printf("ack %d\n", tr.Seq)
 		acked.Store(tr.Seq)
 		return nil
-	}), executor{})
+	}))
 	if err != nil {
 		fail(err)
 	}

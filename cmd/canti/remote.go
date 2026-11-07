@@ -392,9 +392,8 @@ func (a *app) remoteReport(r hostrpc.Run, err error) (int, error) {
 }
 
 // remoteRun is with for a host process: it selects the run and reports what
-// op does with it. With resume, a run of another context version is only
-// reported once it has halted and refused before that.
-func (a *app) remoteRun(ctx context.Context, resume bool, active int, op func(*hostrpc.Client, hostrpc.Run) (int, error)) (int, error) {
+// op does with it. Unsupported context versions are refused before the operation.
+func (a *app) remoteRun(ctx context.Context, op func(*hostrpc.Client, hostrpc.Run) (int, error)) (int, error) {
 	// A command that acts on an existing run starts no host for a state
 	// directory that holds no journal, which no host can have served.
 	if _, err := os.Stat(filepath.Join(a.state, "canti.db")); errors.Is(err, os.ErrNotExist) {
@@ -408,12 +407,8 @@ func (a *app) remoteRun(ctx context.Context, resume bool, active int, op func(*h
 	if err != nil {
 		return exitError, err
 	}
-	if resume && r.ContextVersion != host.ContextVersion {
-		if r.Status == hostrpc.StatusActive {
-			return exitError, fmt.Errorf("run %s is %s and %s", r.RunID, r.Phase, host.Unresumable(r.RunID, host.RunConfig{ContextVersion: r.ContextVersion}))
-		}
-		code, err := a.remoteReport(r, nil)
-		return cmpCode(code, active), err
+	if r.ContextVersion != host.ContextVersion {
+		return exitError, fmt.Errorf("run %s %s", r.RunID, host.Unresumable(host.RunConfig{ContextVersion: r.ContextVersion}))
 	}
 	return op(c, r)
 }

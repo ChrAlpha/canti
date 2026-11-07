@@ -26,7 +26,7 @@ import (
 // recorded once and never rewritten; a host and a client of different
 // versions refuse each other. Versions 1 and 2 are recorded in testdata/v1
 // and testdata/v2; version 3 adds the word of the carry action.
-const Protocol = 3
+const Protocol = 4
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -47,8 +47,9 @@ type Request struct {
 // The operations.
 const (
 	OpHello     = "hello"
-	OpSubmit    = "submit"    // admit a run, then drive it with the binding
-	OpDrive     = "drive"     // drive an admitted run with the binding
+	OpSubmit    = "submit" // admit a run, then drive it with the binding
+	OpDrive     = "drive"  // drive an admitted run with the binding
+	OpInspect   = "inspect"
 	OpView      = "view"      // the state of a run; the latest when RunID is empty
 	OpProgress  = "progress"  // a page of a run's progress after Cursor
 	OpWait      = "wait"      // wait for a run to pass Cursor, at most TimeoutMS
@@ -60,14 +61,15 @@ const (
 
 // Response answers one request: Error, or the result of its operation.
 type Response struct {
-	Protocol    int     `json:"protocol"`
-	Error       *Error  `json:"error,omitempty"`
-	Hello       *Hello  `json:"hello,omitempty"`
-	Ack         *Ack    `json:"ack,omitempty"`
-	Run         *Run    `json:"run,omitempty"`
-	Page        *Page   `json:"page,omitempty"`
-	Wait        *Wait   `json:"wait,omitempty"`
-	Constraints *string `json:"constraints,omitempty"`
+	Inspection  *Inspection `json:"inspection,omitempty"`
+	Protocol    int         `json:"protocol"`
+	Error       *Error      `json:"error,omitempty"`
+	Hello       *Hello      `json:"hello,omitempty"`
+	Ack         *Ack        `json:"ack,omitempty"`
+	Run         *Run        `json:"run,omitempty"`
+	Page        *Page       `json:"page,omitempty"`
+	Wait        *Wait       `json:"wait,omitempty"`
+	Constraints *string     `json:"constraints,omitempty"`
 }
 
 // Error is a refused or failed operation. Code classifies it for the client.
@@ -173,16 +175,17 @@ type Resolution struct {
 	Execution string `json:"execution,omitempty"`
 	ExitCode  *int   `json:"exit_code,omitempty"`
 	Note      string `json:"note,omitempty"`
+	OwnerID   string `json:"owner_id,omitempty"`
 }
 
 // ResolutionOf is the wire form of a resolution: with job, the job the
 // executor finds, and otherwise the confirmed outcome obs, whose execution
 // state travels as the protocol's word for it.
-func ResolutionOf(job bool, obs harness.Observation) Resolution {
+func ResolutionOf(job bool, obs harness.Observation, ownerID string) Resolution {
 	if job {
 		return Resolution{Job: true}
 	}
-	return Resolution{Execution: word(executionWords, obs.Execution), ExitCode: obs.ExitCode, Note: obs.Preview}
+	return Resolution{Execution: word(executionWords, obs.Execution), ExitCode: obs.ExitCode, Note: obs.Preview, OwnerID: ownerID}
 }
 
 // Ack acknowledges a durably admitted submission, or names the run an
@@ -310,8 +313,8 @@ const (
 var (
 	phaseWords = map[core.Phase]string{
 		core.PhaseIdle: "idle", core.PhaseRequestFrozen: "request_frozen", core.PhaseRequestSent: "request_sent",
-		core.PhaseResponseSaved: "response_saved", core.PhaseEffectSaved: "effect_saved", core.PhaseJobBound: "job_bound",
-		core.PhaseAwaitingObservation: "awaiting_observation", core.PhaseCancelling: "cancelling", core.PhaseReturned: "returned",
+		core.PhaseResponseSaved: "response_saved", core.PhaseEffectSaved: "effect_saved",
+		core.PhaseCancelling: "cancelling", core.PhaseReturned: "returned",
 		core.PhaseNeedsResolution: "needs_resolution", core.PhaseStopped: "stopped",
 	}
 	reasonWords = map[core.StopReason]string{
@@ -325,14 +328,14 @@ var (
 	}
 	itemWords = map[host.ItemKind]string{
 		host.ItemDecided: "decided", host.ItemReturned: "returned", host.ItemRetrying: "retrying", host.ItemCompleted: "completed",
-		host.ItemStopRequested: "stop_requested", host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped",
+		host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested", host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped",
 	}
 	outcomeWords = map[harness.OutcomeStatus]string{
 		harness.OutcomeDone: "done", harness.OutcomeFailed: "failed", harness.OutcomeRefused: "refused",
 	}
 	actionWords = map[harness.ActionName]string{
 		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionHandover: "handover",
-		harness.ActionHandoverCarry: "handover_carry", harness.ActionUnknown: "unknown", harness.ActionLegacy: "legacy",
+		harness.ActionHandoverCarry: "handover_carry", harness.ActionUnknown: "unknown",
 	}
 )
 

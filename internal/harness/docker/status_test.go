@@ -44,7 +44,12 @@ func TestDeriveStatus(t *testing.T) {
 			c.State.ExitCode = tt.exit
 			c.State.StartedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			c.State.FinishedAt = c.State.StartedAt.Add(time.Second)
-			job := derive(tt.latch, c, tt.marked, nil)
+			var recorded *int
+			if tt.code && !tt.marked {
+				code := tt.exit
+				recorded = &code
+			}
+			job := derive(tt.latch, c, tt.marked, recorded)
 			if job.ID != "c1" || job.Status != tt.want {
 				t.Fatalf("derive() = %q %q, want c1 %q", job.ID, job.Status, tt.want)
 			}
@@ -132,9 +137,6 @@ func TestDeriveTrustsOnlyARecordedExit(t *testing.T) {
 			"recorded exit status 0 differs from the container's exit code 137"},
 		{"cancelled", true, "exited", 143, false, true, nil, harness.JobCancelled, ""},
 		{"cancelled after a recorded exit", true, "exited", 0, false, true, code(0), harness.JobCancelled, ""},
-		{"earlier revision", false, "exited", 255, false, false, nil, harness.JobFailed, ""},
-		{"earlier revision succeeded", false, "exited", 0, false, false, nil, harness.JobSucceeded, ""},
-		{"earlier revision dead", false, "dead", 137, false, false, nil, harness.JobFailed, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var c container

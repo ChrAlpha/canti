@@ -14,7 +14,7 @@ func TestUnlimitedSteps(t *testing.T) {
 	}
 	for step := 1; step <= 25; step++ {
 		s = walk(t, s, core.RequestFrozen{}, core.AttemptStarted{Step: step, Attempt: 1}, core.ResponseSaved{Step: step, Attempt: 1}, core.ResponseLoaded{Step: step, Attempt: 1, Body: execBody})
-		s = walk(t, s, core.JobBound{EffectID: s.EffectID, JobID: "job"}, core.JobStarted{EffectID: s.EffectID, JobID: "job"}, core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited})
+		s = walk(t, s, core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited})
 		if err := s.Validate(); err != nil {
 			t.Fatal(err)
 		}
@@ -40,7 +40,7 @@ func TestUnlimitedStepsRetainRetriesAndCancellation(t *testing.T) {
 }
 
 func TestUnlimitedStepIntegerLimit(t *testing.T) {
-	s := at(core.PhaseAwaitingObservation, withRev(1), withStep(math.MaxInt), withExec, withJob, withStarted)
+	s := at(core.PhaseEffectSaved, withRev(1), withStep(math.MaxInt), withExec)
 	s.Limits.MaxSteps = 0
 	s = walk(t, s, core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited})
 	if err := s.Validate(); err != nil {

@@ -14,10 +14,6 @@ const latestRunsSQL = `SELECT r.id, r.semantics, r.initial, t.kind, t.semantics,
 LEFT JOIN transitions t ON t.run_id = r.id AND t.seq = (SELECT max(seq) FROM transitions WHERE run_id = r.id)
 ORDER BY r.n`
 
-// ErrNoSessions reports a session read of a schema-1 journal opened
-// read-only: the journal predates sessions and has no session table.
-var ErrNoSessions = errors.New("sqlite: the journal predates sessions")
-
 // ValidKey reports whether id can name a session or an input: 1 to 128
 // ASCII letters, digits, underscores, or hyphens.
 func ValidKey(id string) bool {
@@ -93,18 +89,15 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 	}
 	var result harness.Run
 	err := s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		var data string
-		err := tx.QueryRowContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, run.SessionID, run.InputID).Scan(&data)
+		var err error
+		result, err = s.run(tx.QueryRowContext(ctx, `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, run.SessionID, run.InputID))
 		if err == nil {
-			if err := strict(data, &result); err != nil {
-				return err
-			}
 			if result.Goal != run.Goal || result.Constraints != run.Constraints {
 				return fmt.Errorf("sqlite: input %q conflicts with its stored goal or constraints", run.InputID)
 			}
 			return nil
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
+		if !errors.Is(err, harness.ErrNotFound) {
 			return err
 		}
 		if err := s.checkAdmission(ctx, tx); err != nil {
@@ -143,10 +136,7 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 	if sessionID != "" && !ValidKey(sessionID) || !ValidKey(inputID) {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
-	if !s.sessions {
-		return harness.Run{}, ErrNoSessions
-	}
-	return s.run(s.db.QueryRowContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
+	return s.run(s.db.QueryRowContext(ctx, `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
 }
 
 // SessionRuns returns newest-first runs, excluding before when positive.
@@ -154,28 +144,21 @@ func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64,
 	if !ValidKey(sessionID) || before < 0 || limit <= 0 {
 		return nil, errors.New("sqlite: invalid session page")
 	}
-	if !s.sessions {
-		return nil, ErrNoSessions
-	}
 	if limit > 32 {
 		limit = 32
 	}
 	if before == 0 {
 		before = int64(^uint64(0) >> 1)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.seq < ? ORDER BY sr.seq DESC LIMIT ?`, sessionID, before, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.seq < ? ORDER BY sr.seq DESC LIMIT ?`, sessionID, before, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	runs := make([]harness.Run, 0, limit)
 	for rows.Next() {
-		var data string
-		var run harness.Run
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
-		if err := strict(data, &run); err != nil {
+		run, err := s.run(rows)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)

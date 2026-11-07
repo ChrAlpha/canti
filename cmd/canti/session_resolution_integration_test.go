@@ -27,7 +27,7 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 			path := dockerProxy(t, unavailableInspection(unavailable))
 
 			_, wait := f.start(path, "run", "-session", "s", "-input", "one", "-goal", "do once", "-image", image)
-			awaitPhase(t, f, core.PhaseAwaitingObservation)
+			awaitRunningEffect(t, f)
 			waitFor(t, func() bool {
 				data, err := os.ReadFile(filepath.Join(f.workspace, "count"))
 				return err == nil && string(data) == "x\n"
@@ -38,13 +38,13 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 			}
 			before := f.history()
 			s := f.status()
-			if !slices.Equal(kinds(before), slices.Concat(stepKinds[:6], []string{"outcome_unknown"})) ||
+			if !slices.Equal(kinds(before), slices.Concat(stepKinds[:4], []string{"outcome_unknown"})) ||
 				s.Phase != core.PhaseNeedsResolution || s.Run.SessionID != "s" || s.Run.InputID != "one" ||
-				s.JobID == "" || s.EffectID == "" || !strings.Contains(before[len(before)-1].Facts.Failure, "job status unavailable") {
+				effectOwner(t, f, s.EffectID) == "" || s.EffectID == "" || !strings.Contains(before[len(before)-1].Facts.Failure, "job status unavailable") {
 				t.Fatalf("unknown state: status=%+v history=%q", s, kinds(before))
 			}
-			if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "running" {
-				t.Fatalf("running job = %+v, want %s", cs, s.JobID)
+			if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "running" {
+				t.Fatalf("running job = %+v, want %s", cs, effectOwner(t, f, s.EffectID))
 			}
 			for _, args := range [][]string{
 				{"-session", "s", "-input", "two", "-goal", "next"},
@@ -59,13 +59,13 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 				t.Fatalf("unknown resolution = %+v, want usage error", r)
 			}
 			if now := f.status(); now.Seq != s.Seq || now.Phase != s.Phase || now.EffectID != s.EffectID ||
-				now.JobID != s.JobID || now.Run.ID != s.Run.ID {
+				now.Run.ID != s.Run.ID {
 				t.Fatalf("rejected operations changed state: before=%+v after=%+v", s, now)
 			}
 			if h := f.history(); !extends(h, before) || len(h) != len(before) {
 				t.Fatalf("rejected operations changed history: %q", kinds(h))
 			}
-			if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "running" {
+			if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "running" {
 				t.Fatalf("rejected operations changed job: %+v", cs)
 			}
 			checkFile(t, filepath.Join(f.workspace, "count"), "x\n")
@@ -89,12 +89,12 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 			}
 			resolved := f.history()
 			last := resolved[len(resolved)-1]
-			wantPhase := core.PhaseAwaitingObservation
+			wantPhase := core.PhaseEffectSaved
 			if stopping {
 				wantPhase = core.PhaseCancelling
 			}
-			if !extends(resolved, before) || last.Kind != "job_bound" || last.From != core.PhaseNeedsResolution ||
-				last.To != wantPhase || last.State.JobID != s.JobID || last.State.EffectID != s.EffectID {
+			if !extends(resolved, before) || last.Kind != "effect_recovered" || last.From != core.PhaseNeedsResolution ||
+				last.To != wantPhase || last.Facts.Receipt == nil || last.Facts.Receipt.ID != effectOwner(t, f, s.EffectID) || last.State.EffectID != s.EffectID {
 				t.Fatalf("job resolution = %+v", last)
 			}
 			if !stopping {
@@ -102,12 +102,12 @@ func TestSessionUnknownResolutionPreservesTheRunningEffect(t *testing.T) {
 			}
 			r := f.cli(nil, "resume")
 			final := f.history()
-			wantKinds := slices.Concat(stepKinds[:6], []string{"outcome_unknown", "job_bound", "observed"}, stepKinds[:4])
+			wantKinds := slices.Concat(stepKinds[:4], []string{"outcome_unknown", "effect_recovered", "observed"}, stepKinds[:4])
 			if stopping {
-				wantKinds = slices.Concat(stepKinds[:6], []string{"outcome_unknown", "stop_requested", "job_bound", "observed"})
+				wantKinds = slices.Concat(stepKinds[:4], []string{"outcome_unknown", "stop_requested", "effect_recovered", "observed"})
 			}
 			if !extends(final, resolved) || !slices.Equal(kinds(final), wantKinds) ||
-				len(boundJobs(t, final)) != 1 || boundJobs(t, final)[s.EffectID] != s.JobID {
+				len(boundJobs(t, final)) != 1 || boundJobs(t, final)[s.EffectID] != effectOwner(t, f, s.EffectID) {
 				t.Fatalf("final history = %q", kinds(final))
 			}
 			if stopping {

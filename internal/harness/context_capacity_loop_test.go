@@ -292,11 +292,12 @@ func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, tr := range history {
-				if tr.From.Step == 2 && (tr.Event.Kind() == "job_bound" || tr.Event.Kind() == "job_started") {
-					t.Fatalf("the refused step %s a job", tr.Event.Kind())
+				if tr.From.Step == 2 && tr.Facts.Receipt != nil {
+					t.Fatal("refused local step gained execution evidence")
 				}
 			}
-			if calls := f.exec.log(); len(calls) != 3 {
+
+			if calls := f.exec.log(); len(calls) != 1 {
 				t.Fatalf("only first work step may reach executor: %v", calls)
 			}
 		})

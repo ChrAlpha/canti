@@ -96,13 +96,11 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 			event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
 		case core.PhaseResponseSaved:
 			event = core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: historyResponse(s.Step).Body}
-			facts = harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}}
+			facts = harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution(stringPayload(historyResponse(s.Step).Body))}
 		case core.PhaseEffectSaved:
-			event = core.JobBound{EffectID: s.EffectID, JobID: jobID(s.EffectID)}
-		case core.PhaseJobBound:
-			event = core.JobStarted{EffectID: s.EffectID, JobID: s.JobID}
-		case core.PhaseAwaitingObservation:
-			event, facts = core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: historyObservation(s)}
+			obs := historyObservation(s)
+			receipt := fixtureReceipt(s, *obs)
+			event, facts = core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: obs, Receipt: &receipt}
 		default:
 			t.Fatalf("seeding reached %+v", s)
 		}
@@ -227,7 +225,7 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := harness.NewRunner(f.store, f.exec)
+	r, err := harness.NewRunner(f.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,4 +314,12 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 			t.Errorf("request of step %d = %d bytes, %v; want the %d bytes frozen then", historyLadder[i]+1, len(req.Body), err, len(s.req.Body))
 		}
 	}
+}
+
+func stringPayload(body []byte) string {
+	var d core.Decision
+	if err := json.Unmarshal(body, &d); err != nil {
+		panic(err)
+	}
+	return d.Payload
 }

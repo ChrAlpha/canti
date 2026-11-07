@@ -52,7 +52,7 @@ func checkGreeting(t *testing.T, f *fixture, r result) {
 	if r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
-	each := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}
+	each := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "observed"}
 	want := slices.Concat(each, each, each[:4])
 	h := f.history()
 	if !slices.Equal(kinds(h), want) || h[len(h)-1].To != core.PhaseReturned || h[len(h)-1].State.Decision.Payload != "done" {

@@ -48,7 +48,7 @@ Cloning requires repository access while the repository is private.
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
 | `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
 | `go test ./core -run 'TestNext\|TestIntent\|TestValidate\|TestTrajectory\|TestIllegal' -v` | Transition table, budgets, invariants, trajectories, and rejected events |
-| `go test ./internal/harness -run 'TestCommit\|TestBind\|TestStart\|TestRunner\|TestStale\|TestOffline' -v` | Commit protocol, bind/start, failure, and cancellation cases |
+| `go test ./internal/harness -run 'TestCommit\|TestLoop\|TestEffect\|TestRunner\|TestStale\|TestOffline' -v` | Commit protocol, accepted-effect execution, failure, and cancellation cases |
 | `go test ./internal/harness/sqlite -run TestCrashKeepsAcknowledgedCommits -v` | SIGKILL of a committing process and recovery of every acknowledged commit |
 | `git diff --check` | Check pending patches for whitespace errors |
 
@@ -282,30 +282,17 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores the context version of the canti that created it, which names
-the rules that render and account for its prompts. `resume` refuses an open
-run of another context version, or of none, with status 1 before it calls the
-model or commits anything, and reports a halted one as it is. Such a run stays
-readable through `status`, `history`, and `context`; `stop` closes it, after
-`resolve` if it needs resolution, and the state directory then takes new runs,
-unless the run ended with an outcome resolved as unknown, which keeps blocking
-them. A later run of its session still quotes its dialogue. A run whose stored
-configuration this canti cannot decode is refused by every command and
-requires a fresh state directory.
+Each run stores current context version 16. Schema 3, semantics 5, executor
+record format 2 and host protocol 4 form one current contract. Unsupported
+formats and context versions are rejected; use a fresh state directory. No
+migration or old-run settlement path is supported. Same-version frozen bytes,
+provider bindings, accepted identities and results remain immutable.
 
-A state directory written by the canti before the runtime host (the C1
-action contracts) keeps schema version 2. Its runs are of context version
-13, so `resume` refuses an open one, with status 1 and no write, and reports
-a halted one as it is. Reading the directory, and stopping or resolving one
-of its runs (a host also finishes a stop that the earlier canti left
-pending), change nothing that canti cannot read, and it keeps reading and
-writing the directory. Its upgrade point is the
-first run this canti creates, which stores its provider: from then on the
-earlier canti refuses every command on the directory, as an unreadable config,
-and writes nothing, so it can never admit a run beside a keyed input.
-Standalone input IDs are keys of `session_runs` under the empty session ID,
-which the earlier canti neither writes nor reads, so no schema version
-changes.
+`canti status` and progress pages read only the journal. `canti inspect` performs
+one bounded non-starting physical inspection and reports its sample timestamp
+and any unavailability. `canti resolve -job` records active recovery or inspected
+terminal evidence; an operator assertion uses `-execution`, a required `-note`,
+and `-owner` for exited/timed-out work. Resolution never stops a running owner.
 
 A CLI check without Docker or credentials proves only that the command builds
 and parses its arguments; the integration tests drive real runs with a
@@ -344,27 +331,12 @@ into the rules of the current context version, which
 goldens of a scenario, or adding one, which may observe a changed rule,
 requires a new context version, recorded with
 `go test ./cmd/canti -run TestContextVersionPinsItsRules -record-context`.
-A scenario whose request bodies the new version changes keeps the earlier
-version's files under `internal/harness/testdata/frozen-requests-v<version>`,
-copied from the commit that recorded them: `TestEarlierVersionsKeepTheirCorpus`
-checks them against that version's record, and
-`TestEarlierVersionRequestsAreSentAsFrozen` sends them unchanged.
-
-`TestLegacyJournals` reads every journal under
-`internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an
-unmodified historical `canti` binary wrote and whose `manifest.json` records
-how, read-only and after the migration a writable open performs, and
-requires every recorded row to stay as it was; a writable open adds only the
-index of performed steps, and to a schema-1 journal the session table.
-`TestLegacyRunsAreClosedAndFollowedByNewRuns` recreates each one at its
-recorded paths and requires that its open run, of another context version,
-is refused by `canti resume`, which with `status`, `history`, and `context`
-leaves every row and schema object but those as it was, closed by
-`canti stop`, and followed by a new run. A case is never rewritten. The generator that wrote the corpus,
-`internal/harness/legacy_journal_gen_test.go` and
-`legacy_journal_export_test.go` behind the `legacygen` build tag, was
-removed once no test continued these runs; restore it from the history of
-`main` to add a case.
+Review changes to current request bytes separately from journal identity changes.
+The current corpus verifies same-version frozen requests, including cold restart
+and lost acknowledgements. Historical files remain audit evidence; current
+readers do not interpret old semantics or migrate old databases. Rejection tests
+cover unsupported formats. Same-version corruption tests cover accepted identity,
+receipt provenance, carry references and exact immutable request bytes.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.
