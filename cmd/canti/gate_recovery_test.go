@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -483,4 +484,133 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 	checkReleased(t, f, final)
 	checkReplay(t, h[0].State.RunID, final)
 	evidence(t, "single workspace writer", "concurrent resume and stop, then SIGKILL of the writer in awaiting_observation", image, f, final)
+}
+
+// localSteps returns the transitions that perform a local action in h.
+func localSteps(h []entry) []entry {
+	return slices.DeleteFunc(slices.Clone(h), func(e entry) bool { return e.Kind != "performed" })
+}
+
+func TestGateCrashAtLocalActionCommits(t *testing.T) {
+	list := core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`}
+	handover := core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Counted once in count. Next: report done."}
+	count := core.Decision{Kind: core.Exec, Payload: "echo x >> count; echo one"}
+	done := core.Decision{Kind: core.Return, Payload: "done"}
+	local := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "performed"}
+	for _, tc := range []struct {
+		name   string
+		script map[int]core.Decision
+		flags  []string
+		want   []string
+		kinds  []string
+	}{
+		{"retrieval", map[int]core.Decision{1: list, 2: done}, nil, slices.Concat(local, stepKinds[:4]), []string{"response_loaded", "performed"}},
+		{"handover", map[int]core.Decision{1: count, 2: handover, 3: done}, []string{"-window-steps", "1"},
+			slices.Concat(stepKinds, local, stepKinds[:4]), []string{"performed"}},
+	} {
+		for _, kind := range tc.kinds {
+			for _, when := range []string{"before", "after"} {
+				crash := when + ":" + kind
+				t.Run(tc.name+"/"+crash, func(t *testing.T) {
+					t.Parallel()
+					f, image := recoveryFixture(t, tc.script)
+					crashRun(t, f, crash, "run", append([]string{"-goal", "count", "-image", image}, tc.flags...)...)
+					pre := f.history()
+					// The crash hits the first commit of its kind.
+					cut := slices.Index(tc.want, kind)
+					if when == "after" {
+						cut++
+					}
+					if !slices.Equal(kinds(pre), tc.want[:cut]) {
+						t.Fatalf("history after the crash = %q, want %q", kinds(pre), tc.want[:cut])
+					}
+					if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+						t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+					}
+					h := f.history()
+					if !extends(h, pre) || !slices.Equal(kinds(h), tc.want) {
+						t.Fatalf("history = %q\nwant %q extending the confirmed %q", kinds(h), tc.want, kinds(pre))
+					}
+					performed := localSteps(h)
+					if len(performed) != 1 || performed[0].Facts.Outcome == nil || performed[0].Facts.Outcome.Status != harness.OutcomeDone {
+						t.Fatalf("performed %+v, want one done local action", performed)
+					}
+					if tc.name == "handover" {
+						if w := performed[0].Facts.Window; w == nil || w.FirstStep != 3 || w.SourceStep != 2 {
+							t.Fatalf("the handover committed the window %+v", w)
+						}
+						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.Window == nil || *last.Facts.Request.Window != *performed[0].Facts.Window {
+							t.Fatalf("the next request renders %+v, not the committed window", last.Facts.Request)
+						}
+					}
+					if requests := f.model.requests(); len(requests) != len(tc.script) {
+						t.Errorf("%d model requests, want one per step", len(requests))
+					}
+					checkReleased(t, f, h)
+					checkRecords(t, f, "count", h)
+					checkReplay(t, f.status().Run.ID, h)
+					evidence(t, "crash at local action commits", tc.name+" "+crash, image, f, h)
+				})
+			}
+		}
+	}
+}
+
+func TestGateColdRestartAcrossLocalActions(t *testing.T) {
+	script := map[int]core.Decision{
+		1: {Kind: core.Exec, Payload: "echo x >> count; wc -l < count"},
+		2: {Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`},
+		3: {Kind: core.Exec, Payload: harness.HandoverPrefix + "Counted once in count. Next: report done."},
+		4: {Kind: core.Return, Payload: "done"},
+	}
+	flags := []string{"-goal", "count", "-window-steps", "2"}
+	cold, image := recoveryFixture(t, script)
+	processes := 0
+	for r := cold.cli(nil, "run", append([]string{"-once", "-image", image}, flags...)...); ; r = cold.cli(nil, "resume", "-once") {
+		processes++
+		if r.code == exitOK {
+			if r.stdout != "done\n" {
+				t.Fatalf("process %d stdout: %s", processes, r.stdout)
+			}
+			break
+		}
+		if r.code != exitActive || processes > 40 {
+			t.Fatalf("process %d = %d\nstderr: %s", processes, r.code, r.stderr)
+		}
+	}
+	if processes != 17 {
+		t.Errorf("%d processes drove the run, want one per intent: 17", processes)
+	}
+	if r := cold.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume of the returned run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	h := cold.history()
+	warm, _ := recoveryFixture(t, script)
+	if r := warm.cli(nil, "run", append([]string{"-image", image}, flags...)...); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("uninterrupted run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	w := warm.history()
+	anonymous := func(e entry) string {
+		run := e.State.RunID
+		s, _ := json.Marshal([]any{e.Kind, e.From, e.To, e.Facts.Action, e.Facts.Outcome, e.Facts.Window})
+		return strings.ReplaceAll(string(s), run, "run")
+	}
+	if len(h) != len(w) || !slices.Equal(kinds(h), kinds(w)) {
+		t.Fatalf("cold-restart history %q\nuninterrupted %q", kinds(h), kinds(w))
+	}
+	for i := range h {
+		if anonymous(h[i]) != anonymous(w[i]) {
+			t.Errorf("seq %d: cold restart %s\nuninterrupted %s", i+1, anonymous(h[i]), anonymous(w[i]))
+		}
+	}
+	for _, f := range []*fixture{cold, warm} {
+		jobs := checkReleased(t, f, f.history())
+		if len(jobs) != 1 || len(localSteps(f.history())) != 2 {
+			t.Errorf("%d jobs and %d performed steps, want one job for the command and two local steps", len(jobs), len(localSteps(f.history())))
+		}
+		checkFile(t, filepath.Join(f.workspace, "count"), "x\n")
+		checkRecords(t, f, "count", f.history())
+		checkReplay(t, f.status().Run.ID, f.history())
+	}
+	evidence(t, "cold restart across local actions", fmt.Sprintf("process exit after each of %d intents", processes), image, cold, h)
 }

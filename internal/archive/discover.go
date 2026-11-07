@@ -113,7 +113,7 @@ func discoveryStart(q RetrievalQuery, through int) (discoveryCursor, error) {
 	}
 	for _, skip := range cursor.Skipped {
 		if skip.Step < 1 || skip.Step > cursor.Through || (skip.Field != "command" && skip.Field != "preview" && skip.Field != "artifact") ||
-			(skip.Reason != "nul" && skip.Reason != "utf8") {
+			(skip.Reason != "nul" && skip.Reason != "utf8" && (skip.Reason != SkipUnclassified || skip.Field != "command")) {
 			return cursor, invalid
 		}
 	}
@@ -143,13 +143,12 @@ type pendingMeta struct {
 // and reports whether discovery stops in it.
 func (d *discovery) step(ctx context.Context) (bool, error) {
 	stepPath := path.Join(d.q.Path, StepDir(d.cursor.Step))
-	command, err := d.r.discoveryData(ctx, stepPath+"/"+CommandFile, 64, false)
+	excluded, stop, err := d.excluded(ctx, stepPath+"/"+CommandFile)
 	if err != nil {
 		return false, fmt.Errorf("discover command %d: %w", d.cursor.Step, err)
 	}
-	d.remaining -= len(command)
-	if slices.ContainsFunc(d.r.Excluded, func(prefix string) bool { return strings.HasPrefix(string(command), prefix) }) {
-		return false, nil
+	if excluded || stop {
+		return stop, nil
 	}
 	meta, files, incomplete, err := d.r.discoverySources(ctx, stepPath, d.cursor.Step)
 	if err != nil {
@@ -172,6 +171,55 @@ func (d *discovery) step(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// excludedSpace is the leading whitespace that discovery skips before it
+// compares a command with Excluded.
+const excludedSpace = " \t\n\r"
+
+// SkipUnclassified is the reason of a skipped step whose command discovery
+// could not compare with Excluded within MaxBytes.
+const SkipUnclassified = "unclassified"
+
+// excluded reports whether the command in file, after leading
+// excludedSpace, begins with one of Excluded. It reads 64 bytes, and only
+// when those leave the comparison open, because they are whitespace or the
+// start of an exclusion, reads up to MaxBytes again, charging every byte of
+// both reads to the scan budget. When the budget cannot pay for the second
+// read beyond the reserve of the rest of the step, it reports stop, so that
+// the discovery continues at this step. A command that MaxBytes still
+// leaves open is skipped unscanned and recorded as a SkipUnclassified skip,
+// which makes the scan incomplete.
+func (d *discovery) excluded(ctx context.Context, file string) (excluded, stop bool, err error) {
+	command, err := d.r.discoveryData(ctx, file, 64, false)
+	if err != nil {
+		return false, false, err
+	}
+	d.remaining -= len(command)
+	if len(command) == 64 && open(command, d.r.Excluded) {
+		if d.remaining < 2*MaxBytes+d.matchBytes+utf8.UTFMax {
+			return false, true, nil
+		}
+		longer, err := d.r.discoveryData(ctx, file, MaxBytes, false)
+		if err != nil {
+			return false, false, err
+		}
+		d.remaining -= len(longer)
+		if len(longer) == MaxBytes && open(longer, d.r.Excluded) {
+			d.skip(Skip{Step: d.cursor.Step, Field: CommandFile, Reason: SkipUnclassified})
+			return true, false, nil
+		}
+		command = longer
+	}
+	rest := strings.TrimLeft(string(command), excludedSpace)
+	return slices.ContainsFunc(d.r.Excluded, func(prefix string) bool { return strings.HasPrefix(rest, prefix) }), false, nil
+}
+
+// open reports whether command, read up to its limit, could still begin
+// with one of excluded after its leading excludedSpace once more is read.
+func open(command []byte, excluded []string) bool {
+	rest := strings.TrimLeft(string(command), excludedSpace)
+	return slices.ContainsFunc(excluded, func(prefix string) bool { return len(rest) < len(prefix) && strings.HasPrefix(prefix, rest) })
 }
 
 // search looks for one match in file from the cursor's offset, presenting

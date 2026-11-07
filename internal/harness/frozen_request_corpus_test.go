@@ -82,11 +82,11 @@ func frozenScenarios() []frozenScenario {
 				corpusDecision(core.Return, "Line 2 of the listing mentions beta."),
 			}, steps: []string{
 				"1 exited 0 output complete",
-				"2 exited 0 retrieval 1 sources 0 entries",
-				"3 exited 0 retrieval 0 sources 2 entries",
-				"4 exited 0 retrieval 1 sources 0 entries",
-				"5 exited 0 retrieval 2 sources 0 entries",
-				"6 exited 0 retrieval 3 sources 0 entries",
+				"2 done retrieval 1 sources 0 entries",
+				"3 done retrieval 0 sources 2 entries",
+				"4 done retrieval 1 sources 0 entries",
+				"5 done retrieval 2 sources 0 entries",
+				"6 done retrieval 3 sources 0 entries",
 			}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"Step 1 of at most 20, attempt 1 of 3.", "## Current window steps\nNone.\n"},
@@ -104,7 +104,7 @@ func frozenScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace: go.mod and main.go. Next: report them."),
 				corpusDecision(core.Return, "The workspace holds go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 done handover"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\n", "## Handover required\n"},
 				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", "Next: report them.", "## Current window steps\nNone.\n"},
@@ -145,7 +145,7 @@ func frozenScenarios() []frozenScenario {
 				corpusDecision(core.Exec, harness.HandoverPrefix+"Nothing done yet."),
 				corpusDecision(core.Exec, "ls /workspace"),
 				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 1 action failed", "2 exited 0 output complete"}}},
+			}, steps: []string{"1 failed", "2 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"Step 1 (unlimited steps), attempt 1 of 3."},
 				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3.", "Context action failed: handover was not requested for this step"},
@@ -263,6 +263,21 @@ func (r *corpusRig) checkOutcomes(t *testing.T, run frozenRun) {
 // stepOutcome reports how a completed step ended: its execution, exit code,
 // explicit resolution, and the result it recorded.
 func stepOutcome(s harness.StepRecord) string {
+	if o := s.Outcome; o != nil {
+		out := fmt.Sprintf("%d %s", s.Step, o.Status)
+		switch r := o.Retrieval; {
+		case r != nil && r.Error != "":
+			out += " retrieval error"
+		case r != nil:
+			out += fmt.Sprintf(" retrieval %d sources %d entries", len(r.Sources), len(r.Entries))
+			if r.More {
+				out += " more"
+			}
+		case o.Handover != nil:
+			out += " handover"
+		}
+		return out
+	}
 	o := s.Observation
 	out := fmt.Sprintf("%d %s", s.Step, o.Execution)
 	if o.ExitCode != nil {
@@ -271,18 +286,7 @@ func stepOutcome(s harness.StepRecord) string {
 	if s.Resolved {
 		out += " resolved"
 	}
-	switch r := o.Retrieval; {
-	case r != nil && r.Error != "":
-		out += " retrieval error"
-	case r != nil:
-		out += fmt.Sprintf(" retrieval %d sources %d entries", len(r.Sources), len(r.Entries))
-		if r.More {
-			out += " more"
-		}
-	case o.Handover != nil:
-		out += " handover"
-	case strings.HasPrefix(o.Preview, "Context action failed: "):
-		out += " action failed"
+	switch {
 	case o.Output.Complete:
 		out += " output complete"
 	case o.Output.Available:

@@ -99,6 +99,11 @@ type Observed struct {
 	Execution ExecutionState
 }
 
+// Performed reports that the harness carried out the named effect itself,
+// with no backend job, and recorded its outcome. Only an effect that no job
+// owns can be performed, so a local completion never displaces a job.
+type Performed struct{ EffectID string }
+
 // OutcomeUnknown reports that the named effect's fate could not be determined.
 type OutcomeUnknown struct{ EffectID string }
 
@@ -121,6 +126,7 @@ func (ResponseLoaded) event()     {}
 func (JobBound) event()           {}
 func (JobStarted) event()         {}
 func (Observed) event()           {}
+func (Performed) event()          {}
 func (OutcomeUnknown) event()     {}
 func (StopRequested) event()      {}
 func (Resolved) event()           {}
@@ -133,6 +139,7 @@ func (ResponseLoaded) Kind() string     { return "response_loaded" }
 func (JobBound) Kind() string           { return "job_bound" }
 func (JobStarted) Kind() string         { return "job_started" }
 func (Observed) Kind() string           { return "observed" }
+func (Performed) Kind() string          { return "performed" }
 func (OutcomeUnknown) Kind() string     { return "outcome_unknown" }
 func (StopRequested) Kind() string      { return "stop_requested" }
 func (Resolved) Kind() string           { return "resolved" }
@@ -141,7 +148,7 @@ func (Resolved) Kind() string           { return "resolved" }
 func Events() []Event {
 	return []Event{
 		RequestFrozen{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
-		ResponseLoaded{}, JobBound{}, JobStarted{}, Observed{},
+		ResponseLoaded{}, JobBound{}, JobStarted{}, Observed{}, Performed{},
 		OutcomeUnknown{}, StopRequested{}, Resolved{},
 	}
 }

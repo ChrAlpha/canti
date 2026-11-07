@@ -58,7 +58,7 @@ func TestChatShowsBuiltinSteps(t *testing.T) {
 	})
 	_, wait := f.startWith(strings.NewReader("look around\n"), []string{"PATH=" + t.TempDir()}, "chat")
 	r := wait()
-	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "$ canti:retrieve {\"operation\":\"list\",\"path\":\"/canti/runs\",\"reason\":\"look\"}\n") || !strings.Contains(r.stderr, "\n└ exit 0\n") {
+	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "$ canti:retrieve {\"operation\":\"list\",\"path\":\"/canti/runs\",\"reason\":\"look\"}\n") || !strings.Contains(r.stderr, "\n│ retrieved 0 sources and 1 directory entries\n└ done\n") || strings.Contains(r.stderr, "exit 0") {
 		t.Fatalf("chat: %+v", r)
 	}
 }

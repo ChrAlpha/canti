@@ -80,7 +80,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			observe()
 		}
 		act(harness.HandoverPrefix + "Continue deployment. Check original release decisions and any amendments before applying settings.")
-		if observe().Handover == nil {
+		if latestOutcome(t, f.history()).Handover == nil {
 			t.Fatal("handover was not committed")
 		}
 	}
@@ -88,7 +88,7 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		t.Helper()
 		body, _ := json.Marshal(q)
 		act("canti:retrieve " + string(body))
-		o := observe()
+		o := latestOutcome(t, f.history())
 		if o.Retrieval == nil || o.Retrieval.Error != "" {
 			t.Fatalf("retrieval failed: %+v", o)
 		}

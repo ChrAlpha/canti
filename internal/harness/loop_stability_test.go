@@ -302,38 +302,45 @@ func TestLoopLongStability(t *testing.T) {
 				want.Steps++
 				if o := tr.Facts.Observation; o != nil {
 					want.OutputBytes += o.Output.Bytes
-					payload := tr.From.Decision.Payload
-					if strings.HasPrefix(payload, "canti:retrieve ") != (o.Retrieval != nil) || strings.HasPrefix(payload, "canti:handover ") != (o.Handover != nil) {
-						t.Fatal("builtin decision and observed result disagree")
+					if strings.HasPrefix(tr.From.Decision.Payload, "canti:") || o.Retrieval != nil || o.Handover != nil {
+						t.Fatal("a harness action was observed as a command")
 					}
-					if o.Retrieval != nil || o.Handover != nil {
-						if o.Execution != core.ExecutionExited || o.ExitCode == nil || *o.ExitCode != 0 {
-							t.Fatal("builtin observation did not exit successfully")
-						}
+				}
+			case "performed":
+				want.Steps++
+				o := tr.Facts.Outcome
+				payload := tr.From.Decision.Payload
+				if o == nil || o.Status != harness.OutcomeDone || tr.Facts.Observation != nil {
+					t.Fatalf("builtin action did not complete: %+v", tr.Facts)
+				}
+				if strings.HasPrefix(payload, "canti:retrieve ") != (o.Retrieval != nil) || strings.HasPrefix(payload, "canti:handover ") != (o.Handover != nil) {
+					t.Fatal("builtin decision and performed outcome disagree")
+				}
+				if o.Retrieval != nil {
+					if o.Retrieval.Error != "" || len(o.Retrieval.Sources) == 0 {
+						t.Fatal("scheduled retrieval did not deliver source evidence")
 					}
-					if o.Retrieval != nil {
-						if o.Retrieval.Error != "" || len(o.Retrieval.Sources) == 0 {
-							t.Fatal("scheduled retrieval did not deliver source evidence")
-						}
-						retrievals++
-						if !strings.Contains(payload, o.Retrieval.Query.Path) {
-							t.Fatal("retrieval observed a different source path")
-						}
-						if len(o.Retrieval.Evidence) != len(o.Retrieval.Sources) {
-							t.Fatal("retrieval did not commit the evidence of every source")
-						}
-						for i, source := range o.Retrieval.Sources {
-							text := o.Retrieval.Evidence[i]
-							evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
-							evidenceCounts[evidence]++
-							unique[source.Path] = true
-							retrievedBytes += source.Length
-						}
+					retrievals++
+					if !strings.Contains(payload, o.Retrieval.Query.Path) {
+						t.Fatal("retrieval performed a different source path")
 					}
-					if o.Handover != nil {
-						handovers++
-						pendingHandover = o.Handover
-						pendingStep = tr.From.Step
+					if len(o.Retrieval.Evidence) != len(o.Retrieval.Sources) {
+						t.Fatal("retrieval did not commit the evidence of every source")
+					}
+					for i, source := range o.Retrieval.Sources {
+						text := o.Retrieval.Evidence[i]
+						evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
+						evidenceCounts[evidence]++
+						unique[source.Path] = true
+						retrievedBytes += source.Length
+					}
+				}
+				if o.Handover != nil {
+					handovers++
+					pendingHandover = o.Handover
+					pendingStep = tr.From.Step
+					if w := tr.Facts.Window; w == nil || *w != (harness.Window{FirstStep: pendingStep + 1, SourceStep: pendingStep, Handover: o.Handover.Text}) {
+						t.Fatalf("the handover committed the window %+v", w)
 					}
 				}
 			}

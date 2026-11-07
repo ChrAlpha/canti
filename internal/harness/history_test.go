@@ -19,9 +19,9 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-// seed commits one step of d through r. An exec step completes with obs:
-// observed without a job when it failed to start, otherwise observed or,
-// when resolved is set, resolved after an unknown outcome of its job.
+// seed commits one step of d, a command or a return, through r. A command
+// binds and starts a job and completes with obs: observed or, when resolved
+// is set, resolved after an unknown outcome of its job.
 func seed(t *testing.T, f *fixture, r harness.Runner, d core.Decision, obs harness.Observation, resolved bool) {
 	t.Helper()
 	ctx := context.Background()
@@ -40,15 +40,15 @@ func seed(t *testing.T, f *fixture, r harness.Runner, d core.Decision, obs harne
 	commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte("frozen"), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
 	commit(core.AttemptStarted{Step: step, Attempt: snap.State.Attempt}, harness.Facts{})
 	commit(core.ResponseSaved{Step: step, Attempt: snap.State.Attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
-	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{})
 	if d.Kind == core.Return {
+		commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{})
 		return
 	}
+	a := harness.NormalizeAction(d.Payload, false, true)
+	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{Action: &a})
 	effect := snap.State.EffectID
-	if obs.Execution != core.ExecutionFailedToStart || resolved {
-		commit(core.JobBound{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
-		commit(core.JobStarted{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
-	}
+	commit(core.JobBound{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
+	commit(core.JobStarted{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
 	if resolved {
 		commit(core.OutcomeUnknown{EffectID: effect}, harness.Facts{Failure: "job lost"})
 		commit(core.Resolved{EffectID: effect, Execution: obs.Execution}, harness.Facts{Observation: &obs})

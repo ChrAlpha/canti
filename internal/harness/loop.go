@@ -105,7 +105,7 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	}
 	if cfg.Reader != nil {
 		r := *cfg.Reader
-		r.Excluded = []string{RetrievePrefix, handoverName, DiscoveryMarker}
+		r.Excluded = []string{ActionNamespace, DiscoveryMarker}
 		cfg.Reader = &r
 	}
 	return cfg, nil
@@ -153,16 +153,6 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: reason}, Facts{Failure: why})
 		}
 	}
-	switch r, err := l.route(ctx, snap.State); {
-	case err != nil:
-		return snap, err
-	case r == refused:
-		return l.refuseWork(ctx, snap)
-	case r == inProcess:
-		if next, handled, err := l.builtin(ctx, snap); handled {
-			return next, err
-		}
-	}
 	switch snap.State.Intent() {
 	case core.IntentPrepareRequest:
 		return l.prepare(ctx, run, snap)
@@ -170,14 +160,8 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 		return l.send(ctx, run, snap)
 	case core.IntentDecode:
 		return l.decode(ctx, snap)
-	case core.IntentBind:
-		return l.runner.Bind(ctx, snap)
-	case core.IntentStart:
-		return l.runner.Start(ctx, snap)
-	case core.IntentInspect:
-		return l.watch(ctx, run, snap)
-	case core.IntentCancel:
-		return l.cancel(ctx, run, snap)
+	case core.IntentBind, core.IntentStart, core.IntentInspect, core.IntentCancel:
+		return l.effect(ctx, run, snap)
 	}
 	return snap, nil
 }
@@ -368,13 +352,25 @@ func (l *Loop) backoff(attempt int) time.Duration {
 	return min(d, maxBackoff)
 }
 
+// decode commits the decision of the saved response and, when it accepts an
+// exec decision, the action the harness reads it as under the request it
+// answers.
 func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt)
 	if err != nil {
 		return snap, err
 	}
-	next, err := l.runner.Commit(ctx, snap, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.decision(resp)}, Facts{})
+	event, facts := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.decision(resp)}, Facts{}
+	if accepted, err := s.Next(event); err == nil && accepted.Phase == core.PhaseEffectSaved {
+		req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
+		if err != nil {
+			return snap, err
+		}
+		a := NormalizeAction(accepted.Decision.Payload, req.Window != nil && req.Window.Requested, l.cfg.Reader != nil)
+		facts.Action = &a
+	}
+	next, err := l.runner.Commit(ctx, snap, event, facts)
 	if err == nil && next.State.Phase == core.PhaseIdle {
 		l.note(ctx, slog.LevelWarn, "retrying an undecodable response", next, "attempt", next.State.Attempt)
 	}

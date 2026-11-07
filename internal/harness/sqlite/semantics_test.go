@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
@@ -38,6 +39,19 @@ func recordBytes(t *testing.T, s *Store, through int64) string {
 	return data
 }
 
+// asLegacy returns commits as a journal of semantics version records them:
+// with that version and, before harness.ActionSemantics, without actions.
+func asLegacy(commits []harness.Transition, version int) []harness.Transition {
+	out := slices.Clone(commits)
+	for i := range out {
+		out[i].Semantics = version
+		if version < harness.ActionSemantics {
+			out[i].Facts.Action = nil
+		}
+	}
+	return out
+}
+
 func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct{ version, maxSteps int }{{1, 3}, {2, 3}, {2, 0}, {3, 0}} {
@@ -66,9 +80,10 @@ func TestSemanticsVersionsResumeAndRetryWithoutRewriting(t *testing.T) {
 			}
 			d := newDriver(t, s, initial)
 			d.step("printf first", harness.Usage{InputTokens: 5, OutputTokens: 3}, 10)
-			if _, err := s.db.Exec(`UPDATE runs SET semantics = ?; UPDATE transitions SET semantics = ?`, tc.version, tc.version); err != nil {
+			if _, err := s.db.Exec(`UPDATE runs SET semantics = ?; UPDATE transitions SET semantics = ?, facts = json_remove(facts, '$.Action')`, tc.version, tc.version); err != nil {
 				t.Fatal(err)
 			}
+			d.commits = asLegacy(d.commits, tc.version)
 			oldSeq, oldBytes := d.snap.Seq, recordBytes(t, s, d.snap.Seq)
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
@@ -145,8 +160,8 @@ func TestSemanticsNewWritesUseCurrentVersion(t *testing.T) {
 	d := newDriver(t, s, harness.Snapshot{State: initial})
 	d.freeze()
 	var nonCurrent int
-	if err := s.db.QueryRow(`SELECT count(*) FROM (SELECT semantics FROM runs UNION ALL SELECT semantics FROM transitions) WHERE semantics != 3`).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
-		t.Fatalf("new records with non-v3 semantics = %d, %v", nonCurrent, err)
+	if err := s.db.QueryRow(`SELECT count(*) FROM (SELECT semantics FROM runs UNION ALL SELECT semantics FROM transitions) WHERE semantics != ?`, core.SemanticsVersion).Scan(&nonCurrent); err != nil || nonCurrent != 0 {
+		t.Fatalf("new records with non-current semantics = %d, %v", nonCurrent, err)
 	}
 }
 
@@ -176,7 +191,7 @@ func TestSemanticsRejectVersionOneNonpositiveSteps(t *testing.T) {
 
 func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct{ version, maxSteps int }{{1, 0}, {1, -1}, {0, 3}, {4, 3}} {
+	for _, tc := range []struct{ version, maxSteps int }{{1, 0}, {1, -1}, {0, 3}, {core.SemanticsVersion + 1, 3}} {
 		t.Run(fmt.Sprintf("v%d/steps%d", tc.version, tc.maxSteps), func(t *testing.T) {
 			path := tempPath(t)
 			s := open(t, path)
@@ -193,7 +208,7 @@ func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 			}
 		})
 	}
-	for _, version := range []int{0, 4} {
+	for _, version := range []int{0, core.SemanticsVersion + 1} {
 		t.Run(fmt.Sprintf("transitions/v%d", version), func(t *testing.T) {
 			s := open(t, tempPath(t))
 			d := newDriver(t, s, createRun(t, s, "run-1", limits))
@@ -212,7 +227,7 @@ func TestSemanticsRejectInvalidInitialAndUnknownVersions(t *testing.T) {
 
 func TestSemanticsRetryRejectsIncompatibleHistoricalRecord(t *testing.T) {
 	for _, mutation := range []string{
-		`semantics = 4`,
+		fmt.Sprintf(`semantics = %d`, core.SemanticsVersion+1),
 		`semantics = 1, from_state = json_set(from_state, '$.Limits.MaxSteps', 0)`,
 		`semantics = 1, to_state = json_set(to_state, '$.Limits.MaxSteps', 0)`,
 	} {
@@ -256,7 +271,7 @@ func TestSemanticsLegacyContextRequestKeepsSelectedRecordIsolated(t *testing.T) 
 		t.Fatal(err)
 	}
 	got, err := s.ContextRequest(context.Background(), "run-1", 1, 2)
-	if err != nil || !reflect.DeepEqual(got, d.commits[4]) {
+	if err != nil || !reflect.DeepEqual(got, asLegacy(d.commits[4:5], 1)[0]) {
 		t.Fatalf("selected v1 request = %#v, %v", got, err)
 	}
 }

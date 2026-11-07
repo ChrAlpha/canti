@@ -70,8 +70,8 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				if err != nil || len(steps) != 3 {
 					t.Fatalf("observations = %d, %v", len(steps), err)
 				}
-				failed := steps[0].Observation
-				if failed.Retrieval == nil || failed.Retrieval.Query != q || failed.Retrieval.Error == "" || failed.ExitCode == nil || *failed.ExitCode != 1 || steps[0].Command != "canti:retrieve "+string(encoded) {
+				failed := steps[0].Outcome
+				if failed == nil || failed.Status != harness.OutcomeFailed || failed.Retrieval == nil || failed.Retrieval.Query != q || failed.Retrieval.Error == "" || steps[0].Command != "canti:retrieve "+string(encoded) {
 					t.Fatal("failed original observation lost its full query or error")
 				}
 				if len(f.exec.log()) != 0 {

@@ -66,7 +66,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 3
+const SemanticsVersion = 4
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -101,6 +101,18 @@ func Compatible(version int, s State) error {
 		return errors.New("core: semantics version 1 requires positive max steps")
 	case version < 3 && s.Decision.Purpose != "":
 		return fmt.Errorf("core: semantics version %d has no decision purpose", version)
+	}
+	return nil
+}
+
+// CompatibleEvent reports whether event, committed under semantics version,
+// existed in it: Performed arrived with version 4.
+func CompatibleEvent(version int, event Event) error {
+	if err := KnownSemantics(version); err != nil {
+		return err
+	}
+	if _, ok := event.(Performed); ok && version < 4 {
+		return fmt.Errorf("core: semantics version %d has no %s event", version, event.Kind())
 	}
 	return nil
 }
@@ -347,6 +359,13 @@ func (s State) Next(event Event) (State, error) {
 			}
 			return s.advance(), nil
 		}
+	case Performed:
+		if s.Phase == PhaseEffectSaved {
+			if err := s.claimEffect(e.EffectID); err != nil {
+				return s, err
+			}
+			return s.advance(), nil
+		}
 	case OutcomeUnknown:
 		switch s.Phase {
 		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
@@ -420,6 +439,10 @@ func validateEvent(event Event) error {
 		}
 		return knownExecution(e.Execution)
 	case OutcomeUnknown:
+		if e.EffectID == "" {
+			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
+		}
+	case Performed:
 		if e.EffectID == "" {
 			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
 		}

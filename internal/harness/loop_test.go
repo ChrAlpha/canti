@@ -114,6 +114,8 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	if err != nil || len(all) != n {
 		t.Fatalf("Recent() = %d records, %v; want %d", len(all), err, n)
 	}
+	// Preparation reads the previous step's completion, one record in one
+	// page, and then the window in pages of historyPage records.
 	for _, tc := range []struct{ total, pages int }{{1 << 20, 2}} {
 		f.cfg.Limits = harness.DefaultPromptLimits()
 		f.cfg.Limits.Total = tc.total
@@ -136,7 +138,7 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
 			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
 		}
-		if p.pages != tc.pages || p.records != min(n, tc.pages*historyPage) {
+		if p.pages != tc.pages+1 || p.records != min(n, tc.pages*historyPage)+1 {
 			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.records, p.pages, tc.pages)
 		}
 	}

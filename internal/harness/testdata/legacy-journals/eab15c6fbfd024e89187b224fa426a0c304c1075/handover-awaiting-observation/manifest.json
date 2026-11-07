@@ -1,0 +1,371 @@
+{
+	"format": 1,
+	"case": "eab15c6fbfd024e89187b224fa426a0c304c1075/handover-awaiting-observation",
+	"producer": {
+		"sha": "eab15c6fbfd024e89187b224fa426a0c304c1075",
+		"tree": "5e8f4aafcf9ded69a100268186dec05822757c49",
+		"binary": {
+			"path": "cmd/canti",
+			"bytes": 19516993,
+			"sha256": "4a60c4774281902acb18e464d90aaa5557976aa222102c837bf92722dec2513c"
+		},
+		"go_version": "go1.26.10",
+		"build": [
+			"path github.com/ChrAlpha/canti/cmd/canti",
+			"mod github.com/ChrAlpha/canti (devel)",
+			"dep charm.land/bubbles/v2 v2.2.1 h1:Fq1+qm5hV6GkvzLQDhCBpXXE5tLgvh1PRriCLwSvIQU=",
+			"dep charm.land/bubbletea/v2 v2.0.8 h1:SxTJMhCAI3lbPmy4SgX5LWZ24AdINr4I6UEqzZvYJuY=",
+			"dep charm.land/lipgloss/v2 v2.0.5 h1:kbNxgeeUOYv5J0YdpxFjfvf3dFvqH8Aci4zB6xqFtrY=",
+			"dep github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=",
+			"dep github.com/charmbracelet/colorprofile v0.4.3 h1:QPa1IWkYI+AOB+fE+mg/5/4HRMZcaXex9t5KX76i20Q=",
+			"dep github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 h1:3FmWoGNWK4STvqg0O0Aeav2T7rodWJAPeF0QpH+8gFw=",
+			"dep github.com/charmbracelet/x/ansi v0.11.7 h1:kzv1kJvjg2S3r9KHo8hDdHFQLEqn4RBCb39dAYC84jI=",
+			"dep github.com/charmbracelet/x/term v0.2.2 h1:xVRT/S2ZcKdhhOuSP4t5cLi5o+JxklsoEObBSgfgZRk=",
+			"dep github.com/charmbracelet/x/termios v0.1.1 h1:o3Q2bT8eqzGnGPOYheoYS8eEleT5ZVNYNy8JawjaNZY=",
+			"dep github.com/charmbracelet/x/windows v0.2.2 h1:IofanmuvaxnKHuV04sC0eBy/smG6kIKrWG2/jYn2GuM=",
+			"dep github.com/clipperhouse/displaywidth v0.11.0 h1:lBc6kY44VFw+TDx4I8opi/EtL9m20WSEFgwIwO+UVM8=",
+			"dep github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=",
+			"dep github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=",
+			"dep github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+			"dep github.com/lucasb-eyer/go-colorful v1.4.0 h1:UtrWVfLdarDgc44HcS7pYloGHJUjHV/4FwW4TvVgFr4=",
+			"dep github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=",
+			"dep github.com/mattn/go-runewidth v0.0.27 h1:Feg/Oou5zI/wnpgDF6omIU0OokC9GxLC/WRknhVlIR0=",
+			"dep github.com/muesli/cancelreader v0.2.2 h1:3I4Kt4BQjOR54NavqnDogx/MIoWBFa0StPA8ELUXHmA=",
+			"dep github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=",
+			"dep github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=",
+			"dep github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=",
+			"dep golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=",
+			"dep golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+			"dep modernc.org/libc v1.75.7 h1:o3DTP9/0p9pKmY2WCKQaySW6wIiZhNM7wc2lUoyhfew=",
+			"dep modernc.org/mathutil v1.7.1 h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU=",
+			"dep modernc.org/memory v1.12.1 h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g=",
+			"dep modernc.org/sqlite v1.59.0 h1:X1es1GpqBlS/5T+vbM4HLUdaa8OtQx468DF2vrx+38A=",
+			"build -buildmode=exe",
+			"build -compiler=gc",
+			"build -trimpath=true",
+			"build DefaultGODEBUG=cryptocustomrand=1,httpservecontentmaxranges=1,tlssecpmlkem=0,urlstrictcolons=0",
+			"build CGO_ENABLED=0",
+			"build GOARCH=amd64",
+			"build GOOS=linux",
+			"build GOAMD64=v1"
+		]
+	},
+	"generator": {
+		"files": [
+			{
+				"path": "legacy_journal_gen_test.go",
+				"bytes": 22283,
+				"sha256": "3b34a5a3ef631316f65477f30ec40a75d89e67a4b84adb68a2ec3dbd9b0142cb"
+			},
+			{
+				"path": "legacy_journal_export_test.go",
+				"bytes": 12468,
+				"sha256": "8070247d34d89f7c79b5cceaf55c99a6c67166d03004034addafe095a85f8305"
+			},
+			{
+				"path": "legacy_journal_fixture_test.go",
+				"bytes": 11132,
+				"sha256": "325825d7f0bbdb41bcc0751148901abf6d66e6af9c09305b0c4987b8659cb662"
+			},
+			{
+				"path": "legacy_journal_raw_test.go",
+				"bytes": 7515,
+				"sha256": "3f35ef2761b600bc622ee511e579f26086480dfb8401c53199e1e39ca1ffec2c"
+			}
+		],
+		"go_version": "go1.26.10",
+		"sqlite": "3.53.4"
+	},
+	"paths": {
+		"root": "/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation",
+		"workspace": "/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+		"state": "/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+		"imports": "/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/imports"
+	},
+	"environment": [
+		"PATH=/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/bin",
+		"HOME=/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/home",
+		"TMPDIR=/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/tmp",
+		"ANTHROPIC_API_KEY=(fake credential withheld)"
+	],
+	"invocations": [
+		{
+			"args": [
+				"run",
+				"-goal",
+				"Summarize the imported notes.",
+				"-history-imports",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/imports",
+				"-window-steps",
+				"1",
+				"-once",
+				"-api",
+				"anthropic-messages",
+				"-model",
+				"claude-opus-5",
+				"-wall-time",
+				"0",
+				"-job-timeout",
+				"0",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "request_frozen"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "response_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "effect_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "job_bound"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "awaiting_observation"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "idle"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "request_frozen"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "response_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "effect_saved"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "job_bound"
+		},
+		{
+			"args": [
+				"resume",
+				"-once",
+				"-workspace",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/workspace",
+				"-state",
+				"/tmp/canti-legacy-w0a/eab15c6-handover-awaiting-observation/state",
+				"-model-url",
+				"{model-url}"
+			],
+			"exit": "5",
+			"phase": "awaiting_observation"
+		}
+	],
+	"replies": [
+		{
+			"run": 1,
+			"step": 1,
+			"attempt": 1,
+			"request_sha256": "0020ba4bc5d7c45cffecf85d507043e62e8b76a1ec7af3700937943cc00856af",
+			"decision": "{\"kind\":\"exec\",\"payload\":\"canti:retrieve {\\\"operation\\\":\\\"read\\\",\\\"path\\\":\\\"/canti/imports/notes.txt\\\",\\\"reason\\\":\\\"Read the imported notes.\\\"}\"}"
+		},
+		{
+			"run": 1,
+			"step": 2,
+			"attempt": 1,
+			"request_sha256": "3ecd89e0cbb3dce69563cd8c134e5da2308dfacf4cd2c7418a4d65c3b84f4bb3",
+			"decision": "{\"kind\":\"exec\",\"payload\":\"canti:handover Read the notes at step 1. Next: summarize them.\"}"
+		}
+	],
+	"checkpoint": {
+		"busy": 0,
+		"log": 0,
+		"checkpointed": 0,
+		"integrity": "ok",
+		"journal_mode": "wal"
+	},
+	"journal": {
+		"db": {
+			"path": "journal.db",
+			"bytes": 90112,
+			"sha256": "3cbffb0e68ecf33aa3cf0279248aef73b167290d3182177b309c1eb9e8dc4309"
+		},
+		"user_version": 2,
+		"rows": {
+			"runs": 1,
+			"session_runs": 0,
+			"transitions": 13
+		},
+		"kinds": [
+			"attempt_started",
+			"job_bound",
+			"job_started",
+			"observed",
+			"request_frozen",
+			"response_loaded",
+			"response_saved"
+		],
+		"runs": [
+			{
+				"n": 1,
+				"id": "run_f083339524d54c985ab5af3a845f1e7e",
+				"semantics": 3,
+				"seq": 13,
+				"phase": "awaiting_observation",
+				"step": 2,
+				"attempt": 1,
+				"request_rev": 1,
+				"effect_id": "effect_7c0338602d12a9e3f37f8761c7a72b783a95042d9ce8b0f8b1b809d41405bc1a",
+				"job_id": "read_effect_7c0338602d12a9e3f37f8761c7a72b783a95042d9ce8b0f8b1b809d41405bc1a"
+			}
+		]
+	},
+	"coverage": [
+		"schema 2",
+		"semantics 3",
+		"context version 12",
+		"a requested handover",
+		"paused in awaiting_observation with the read_ job of a built-in handover"
+	],
+	"files": [
+		{
+			"path": "journal.db.gz",
+			"bytes": 11978,
+			"sha256": "09bdd5cb5736d6f53c93e88220b12297d04200364e2096a020ff11bb170af13f"
+		},
+		{
+			"path": "roots.tar.gz",
+			"bytes": 713,
+			"sha256": "9bb9a0bb19bfbd6d8ef37bb54f55b9d0d6f21b3253ab3061d608ac8776af6eca"
+		}
+	],
+	"roots": [
+		{
+			"path": "history/run_f083339524d54c985ab5af3a845f1e7e/goal",
+			"bytes": 29,
+			"sha256": "d67e34735fe850401c551afb61f032f957268d86ec58b814655a9aa8425133c6"
+		},
+		{
+			"path": "history/run_f083339524d54c985ab5af3a845f1e7e/steps/00000001/command",
+			"bytes": 105,
+			"sha256": "6fe62b97e8d8ed834c22ba252cef9d951ce54fe1df8fae1ff9f63c43b6209f0e"
+		},
+		{
+			"path": "history/run_f083339524d54c985ab5af3a845f1e7e/steps/00000001/meta",
+			"bytes": 114,
+			"sha256": "aaa2943b60044e8d1d1ce629f26c5ad78d1802d000c0aff77e91c1ab436d881f"
+		},
+		{
+			"path": "history/run_f083339524d54c985ab5af3a845f1e7e/steps/00000001/preview",
+			"bytes": 281,
+			"sha256": "ee92ec4e1cced8d2f678a79b9ceeb6770ffd213a45942e5e6b62764eb98aa83f"
+		},
+		{
+			"path": "history/run_f083339524d54c985ab5af3a845f1e7e/steps/00000001/purpose",
+			"bytes": 0,
+			"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"path": "imports/notes.txt",
+			"bytes": 1560,
+			"sha256": "68435c49611d55f0994c24977aaaed7ebbc1d820eb3fc0a95e40efde67d0d782"
+		}
+	]
+}

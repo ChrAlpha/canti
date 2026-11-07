@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -340,8 +341,9 @@ func exerciseLegacySessions(t *testing.T, store *sqlite.Store, db legacyDB, raw 
 
 // compareLegacy fails unless after, at schema version, keeps every row of
 // before byte for byte and adds nothing but, to a schema-1 journal it
-// migrated, exactly the session table a new journal has.
-func compareLegacy(t *testing.T, before, after legacyDB, version int) {
+// migrated, exactly the session table a new journal has and, after a
+// writable open, the index of performed steps a new journal has.
+func compareLegacy(t *testing.T, before, after legacyDB, version int, writable bool) {
 	t.Helper()
 	if after.version != version {
 		t.Errorf("schema version %d, want %d after version %d", after.version, version, before.version)
@@ -367,6 +369,9 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int) {
 	if before.version == 1 && version == 2 {
 		session = legacySessionSchema(t)
 	}
+	if _, ok := before.tables["sqlite_schema"].rows[performedIndex]; !ok && writable {
+		session[performedIndex] = freshSchemaObject(t, performedIndex)
+	}
 	for name, table := range after.tables {
 		for key, row := range table.rows {
 			if _, ok := before.tables[name].rows[key]; ok {
@@ -388,6 +393,29 @@ func compareLegacy(t *testing.T, before, after legacyDB, version int) {
 	for name := range session {
 		t.Errorf("the migration did not create %s", name)
 	}
+}
+
+// performedIndex is the schema object that a writable open adds to a
+// journal of an earlier producer without changing its schema version.
+const performedIndex = "transitions_performed"
+
+// freshSchemaObject returns the schema object name of a new journal.
+func freshSchemaObject(t *testing.T, name string) legacyRow {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "canti.db")
+	s, err := sqlite.Open(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	row, ok := snapshotLegacy(t, file).tables["sqlite_schema"].rows[name]
+	if !ok {
+		t.Fatalf("a new journal has no %s", name)
+	}
+	delete(row, "rootpage")
+	return row
 }
 
 // legacySessionSchema returns the schema objects of the session table that

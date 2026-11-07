@@ -33,8 +33,10 @@ observable.
   complete run projection and its pure transition rules. It imports only the
   standard library and keeps no state between calls.
 - `internal/harness` builds each request from committed facts within byte
-  limits, commits one transition per fact, and drives committed intents to a
-  halt with step, attempt, wall-time, token, output-byte, and job-time budgets.
+  limits, commits one transition per fact, reads each accepted decision once
+  into an action whose recovery contract it commits with it, and drives
+  committed intents to a halt with step, attempt, wall-time, token,
+  output-byte, and job-time budgets.
 - `internal/archive` reads the step records, artifacts, and imported history
   that jobs see, for the harness's retrieval action, without following a
   symlink below its root directories or reading environment files.
@@ -113,7 +115,8 @@ stopped, and 4 that it needs resolution; see the
    concrete until a second implementation needs the abstraction.
 5. A `return` decision is a control-flow result, not a business-success flag.
 6. The execution state of a process is kept separate from the business effect
-   that process may have caused.
+   that process may have caused, and an action the harness performs itself
+   records an outcome, never a process execution.
 7. Run rules live in `core.State.Next`. The harness executes intents and
    never restates a transition; adding a capability adds no event kind.
 

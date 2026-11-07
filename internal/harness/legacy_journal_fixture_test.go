@@ -27,12 +27,14 @@ import (
 // fixture gets a new case name.
 var legacyDir = filepath.Join("testdata", "legacy-journals")
 
-// The producers of the corpus: the last schema-1 revision, and a semantics-2
+// The producers of the corpus: the last schema-1 revision, a semantics-2
 // revision whose production code equals the current one at the time of
-// generation.
+// generation, and the last revision of context version 12 and semantics 3,
+// before actions were recorded.
 const (
 	legacySchema1    = "b9446723f59eb87923d81912b4a7a78fce8dbc68"
 	legacySemantics2 = "7624f85e8d0c2ad759c1b18c80a2facc57c9b41a"
+	legacyContext12  = "eab15c6fbfd024e89187b224fa426a0c304c1075"
 )
 
 const (
@@ -338,7 +340,8 @@ func legacyUntar(t *testing.T, data []byte, dir string) map[string][]byte {
 	}
 }
 
-// legacyConfig is the CLI configuration the producers stored with each run.
+// legacyConfig is the CLI configuration the producers stored with each run;
+// the context-version-12 producer adds the model API and effort.
 type legacyConfig struct {
 	Workspace      string `json:"workspace"`
 	Image          string `json:"image"`
@@ -347,8 +350,10 @@ type legacyConfig struct {
 	CPUs           string `json:"cpus"`
 	Pids           int    `json:"pids"`
 	OutputLimit    int64  `json:"output_limit"`
+	API            string `json:"api,omitempty"`
 	Model          string `json:"model"`
 	MaxTokens      int    `json:"max_tokens"`
+	Effort         string `json:"effort,omitempty"`
 	Structured     bool   `json:"structured"`
 	DecisionFormat string `json:"decision_format,omitempty"`
 	Fallbacks      bool   `json:"fallbacks"`

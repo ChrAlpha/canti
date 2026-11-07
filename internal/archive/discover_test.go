@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func discoveryFixture(t *testing.T) Reader {
@@ -479,5 +482,95 @@ func TestDiscoveryNoMatchRetainsIncompleteCoverageAcrossPages(t *testing.T) {
 				t.Fatalf("terminal cursor lost earlier output gap: %+v", last)
 			}
 		})
+	}
+}
+
+// TestDiscoveryExcludesAfterLeadingWhitespaceWithinItsBound requires that
+// discovery skips a step whose command begins with an exclusion after
+// leading spaces, tabs, line feeds, or carriage returns, reading past the
+// first 64 bytes only to decide one that they leave open; that it skips a
+// command whose leading whitespace exceeds MaxBytes as unclassified,
+// reporting the scan incomplete; and that it scans a command that only
+// begins like an exclusion.
+func TestDiscoveryExcludesAfterLeadingWhitespaceWithinItsBound(t *testing.T) {
+	r := discoveryFixture(t)
+	r.Excluded = []string{"canti:", "# canti:discovery"}
+	commands := map[int]string{
+		1: "run original job",
+		2: "\t\ncanti:retrieve {}",
+		3: strings.Repeat(" ", 100) + "canti:handover Next.",
+		4: strings.Repeat(" ", MaxBytes) + "canti:retrieve {}",
+		5: "  # canti:discovery\nfind /canti/runs",
+		6: strings.Repeat(" ", 60) + "cantiX run",
+		7: "\r\ncanti:",
+		8: "#canti:discovery",
+	}
+	for step := 1; step <= len(commands); step++ {
+		discoveryStep(t, r, step, commands[step], fmt.Sprintf("needle %d", step), "", false)
+	}
+	result := retrieveOK(t, r, discoveryQuery())
+	var found []int
+	for step := range len(commands) + 1 {
+		if strings.Contains(strings.Join(slices.Collect(maps.Values(discoveryTexts(t, r, result))), "\n"), fmt.Sprintf("needle %d", step)) {
+			found = append(found, step)
+		}
+	}
+	if result.More || !slices.Equal(found, []int{1, 6, 8}) {
+		t.Fatalf("discovery scanned steps %v, want 1, 6, and 8: %+v", found, result)
+	}
+	if !result.Incomplete || result.SkippedCount != 1 || !slices.Equal(result.Skipped, []Skip{{Step: 4, Field: CommandFile, Reason: SkipUnclassified}}) {
+		t.Fatalf("the unclassified step 4 is not reported: %+v", result)
+	}
+}
+
+// TestDiscoveryChargesEveryByteItReadsOfACommand requires that deciding a
+// command charges the first read and the whole second read to the scan
+// budget, and that an unclassified command is charged and skipped.
+func TestDiscoveryChargesEveryByteItReadsOfACommand(t *testing.T) {
+	r := discoveryFixture(t)
+	r.Excluded = []string{"canti:"}
+	for _, tc := range []struct {
+		command         string
+		charge          int
+		excluded, skips bool
+	}{
+		{"run original job", len("run original job"), false, false},
+		{strings.Repeat(" ", 100) + "canti:x", 64 + 107, true, false},
+		{strings.Repeat(" ", 100) + "ls", 64 + 102, false, false},
+		{strings.Repeat(" ", MaxBytes+1) + "canti:x", 64 + MaxBytes, true, true},
+	} {
+		discoveryStep(t, r, 1, tc.command, "preview", "", false)
+		d := discovery{r: r, q: discoveryQuery(), cursor: discoveryCursor{Step: 1, Through: 1}, result: &Retrieval{}, remaining: DiscoveryScanBytes}
+		excluded, stop, err := d.excluded(t.Context(), filepath.Join(RunsRoot, "run", "steps", StepDir(1), CommandFile))
+		if err != nil || stop || excluded != tc.excluded || DiscoveryScanBytes-d.remaining != tc.charge || (d.result.SkippedCount == 1) != tc.skips {
+			t.Errorf("%d-byte command: excluded %v, stop %v, charged %d of %d, skipped %+v, %v",
+				len(tc.command), excluded, stop, DiscoveryScanBytes-d.remaining, tc.charge, d.result.Skipped, err)
+		}
+	}
+}
+
+// TestDiscoveryStopsBeforeAnUndecidedCommandItCannotPayFor requires that a
+// discovery whose scan budget cannot pay for deciding a command with long
+// leading whitespace stops before that step, reporting more, and that its
+// continuation, with a fresh budget, decides and skips it.
+func TestDiscoveryStopsBeforeAnUndecidedCommandItCannotPayFor(t *testing.T) {
+	r := discoveryFixture(t)
+	r.Excluded = []string{"canti:"}
+	discoveryStep(t, r, 1, "run original job", "needle 1", "", false)
+	discoveryStep(t, r, 2, strings.Repeat(" ", 100)+"canti:retrieve {}", "needle 2", "", false)
+	meta := discoveryStep(t, r, 3, "fill", "x", "", false)
+	q := discoveryQuery()
+	reserve := MaxBytes + 65 + queryMatchBytes(q) + utf8.UTFMax
+	fill := DiscoveryScanBytes - len("fill") - len(meta) - (reserve + MaxBytes/2)
+	discoveryStep(t, r, 3, "fill", strings.Repeat("x", fill), "", false)
+	first := retrieveOK(t, r, q)
+	if !first.More || len(first.Sources) != 0 {
+		t.Fatalf("the first discovery did not stop before step 2: %+v", first)
+	}
+	q.Cursor = first.NextCursor
+	next := retrieveOK(t, r, q)
+	texts := strings.Join(slices.Collect(maps.Values(discoveryTexts(t, r, next))), "\n")
+	if next.More || strings.Contains(texts, "needle 2") || !strings.Contains(texts, "needle 1") {
+		t.Fatalf("the continuation did not skip step 2 and scan step 1: %+v", next)
 	}
 }

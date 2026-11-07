@@ -86,9 +86,9 @@ func TestContextRecordsDoesNotDecodeLookahead(t *testing.T) {
 func TestContextRecordsOversizedDecisionAdvancesAlone(t *testing.T) {
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))
-	body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: strings.Repeat("z", 9<<20)})
+	body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: "canti:" + strings.Repeat("z", 9<<20)})
 	d.decide(body, harness.Usage{})
-	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionFailedToStart}, harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart}})
+	d.perform()
 	p, err := s.ContextRecords(context.Background(), "run-1", 1, 1, 0, 100)
 	if err != nil {
 		t.Fatal(err)

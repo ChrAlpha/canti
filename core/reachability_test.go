@@ -42,7 +42,8 @@ func candidates(s core.State) []core.Event {
 		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
 	}
 	for _, effect := range []string{s.EffectID, "other"} {
-		out = append(out, core.JobBound{EffectID: effect, JobID: job}, core.JobStarted{EffectID: effect, JobID: job}, core.OutcomeUnknown{EffectID: effect})
+		out = append(out, core.JobBound{EffectID: effect, JobID: job}, core.JobStarted{EffectID: effect, JobID: job}, core.OutcomeUnknown{EffectID: effect},
+			core.Performed{EffectID: effect})
 	}
 	out = append(out, core.JobBound{EffectID: s.EffectID, JobID: "other"}, core.JobStarted{EffectID: s.EffectID, JobID: "other"},
 		core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited})

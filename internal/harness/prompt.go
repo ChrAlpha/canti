@@ -193,7 +193,7 @@ func (f Frame) progress(hidden int) string {
 }
 
 func (f Frame) step(s StepRecord, l PromptLimits) string {
-	o := s.Observation
+	o := s.presented()
 	var b strings.Builder
 	evidence := evidence(o.Retrieval)
 	b.Grow(max(0, min(len(s.Command), l.Command)) + max(0, min(len(s.Purpose), l.Purpose)) + max(0, min(len(o.Preview), l.Preview)) + len(evidence) + 256)

@@ -15,7 +15,7 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
-const legalPairs = 28
+const legalPairs = 29
 
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
@@ -106,6 +106,7 @@ func eventSamples() []struct {
 		{core.JobBound{EffectID: "effect-1", JobID: "job-1"}, "job_bound"},
 		{core.JobStarted{EffectID: "effect-1", JobID: "job-1"}, "job_started"},
 		{core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, "observed"},
+		{core.Performed{EffectID: "effect-1"}, "performed"},
 		{core.OutcomeUnknown{EffectID: "effect-1"}, "outcome_unknown"},
 		{core.StopRequested{Reason: core.StopCancelled}, "stop_requested"},
 		{core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, "resolved"},
@@ -135,6 +136,7 @@ func legalTransitions() []transition {
 
 		{"saved effect binds job", at(core.PhaseEffectSaved, withRev(1), withExec), core.JobBound{EffectID: "effect-1", JobID: "job-1"}, at(core.PhaseJobBound, withRev(1), withExec, withJob)},
 		{"saved effect observes failed start", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
+		{"saved effect is performed without a job", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{EffectID: "effect-1"}, at(core.PhaseIdle, withStep(2))},
 		{"saved effect keeps unknown outcome", at(core.PhaseEffectSaved, withRev(1), withExec), core.OutcomeUnknown{EffectID: "effect-1"}, at(core.PhaseNeedsResolution, withRev(1), withExec)},
 		{"saved effect cancels", at(core.PhaseEffectSaved, withRev(1), withExec), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled))},
 
@@ -255,8 +257,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 3 {
-		t.Errorf("SemanticsVersion = %d, want 3", core.SemanticsVersion)
+	if core.SemanticsVersion != 4 {
+		t.Errorf("SemanticsVersion = %d, want 4", core.SemanticsVersion)
 	}
 }
 
@@ -428,6 +430,8 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"unknown outcome for foreign effect", at(core.PhaseAwaitingObservation, withRev(1), withExec, withJob, withStarted), core.OutcomeUnknown{EffectID: "effect-2"}},
 		{"resolution for foreign effect", at(core.PhaseNeedsResolution, withRev(1), withExec, withJob), core.Resolved{EffectID: "effect-2", Execution: core.ExecutionExited}},
 		{"exit observed without job", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
+		{"performed without effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{}},
+		{"performed for foreign effect", at(core.PhaseEffectSaved, withRev(1), withExec), core.Performed{EffectID: "effect-2"}},
 		{"cancel observed without job before dispatch", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionCancelled}},
 		{"exit observed without job while cancelling", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}},
 		{"failed start observed without job while cancelling", at(core.PhaseCancelling, withRev(1), withExec, withReason(core.StopCancelled)), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}},
@@ -593,6 +597,7 @@ func TestNextEnforcesBudgets(t *testing.T) {
 		{"protocol attempts exhausted", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 2, Body: invalidBody}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopProtocolFailure))},
 		{"steps exhausted after observation", at(core.PhaseAwaitingObservation, withRev(1), withStep(3), withExec, withJob, withStarted), core.Observed{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withStarted, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after failed start", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
+		{"steps exhausted after a performed effect", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Performed{EffectID: "effect-1"}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after resolution", at(core.PhaseNeedsResolution, withRev(1), withStep(3), withExec, withJob), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withJob, withReason(core.StopStepsExhausted))},
 	}
 	for _, tt := range tests {
@@ -653,6 +658,18 @@ func TestCompatibleSemanticsVersions(t *testing.T) {
 		}
 		if err := core.KnownSemantics(tc.version); (err == nil) != (tc.version >= 1 && tc.version <= core.SemanticsVersion) {
 			t.Errorf("KnownSemantics(%d) = %v", tc.version, err)
+		}
+	}
+}
+
+func TestCompatibleEventsExistInTheirSemanticsVersion(t *testing.T) {
+	for _, e := range core.Events() {
+		for version := 1; version <= core.SemanticsVersion+1; version++ {
+			_, performed := e.(core.Performed)
+			want := version <= core.SemanticsVersion && (!performed || version >= 4)
+			if err := core.CompatibleEvent(version, e); (err == nil) != want {
+				t.Errorf("CompatibleEvent(%d, %s) = %v, want ok %v", version, e.Kind(), err, want)
+			}
 		}
 	}
 }

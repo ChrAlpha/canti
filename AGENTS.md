@@ -17,13 +17,21 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   decision, the `State` projection, and the pure `Next`/`Intent` transition
   rules. It holds no per-run state between calls and must not acquire model
   I/O, history, storage, clocks, execution, or dependencies outside the
-  standard library. A capability, such as retrieval or handover, adds no
-  event kind: the harness parses its exec payload once, keeps its durable
-  state as facts of existing events, and gives a change to what it renders a
-  new context version.
+  standard library. Its events name recovery semantics, not capabilities: a
+  capability, such as retrieval or handover, adds no event kind or core
+  rule, and a new event kind needs a recovery semantic that no existing
+  event expresses. The core never interprets an exec payload, an archive
+  query, or a context window.
 - `internal/harness/` owns durable facts, input construction, model calls,
   persistence, execution, and the interpretation of intents. It must not
-  restate transition rules that `core.State.Next` defines. Its concrete
+  restate transition rules that `core.State.Next` defines. It reads an
+  accepted exec decision once into a normalized action with the recovery
+  contract its trusted implementation guarantees, a repeatable read, a local
+  change, or an external effect, commits it with the acceptance, and routes,
+  performs, cancels, and recovers by that action, never by payload prefixes
+  or job IDs. The one exception is an acceptance whose row predates
+  recorded actions by its semantics version: only its legacy reading, which
+  stopping it relies on, reads its `read_` job ID. Its concrete
   adapters are `sqlite`, `docker`, and the model adapters `anthropic`
   (Messages) and `openai` (Responses), which share `provider`; storage,
   execution, and provider guarantees require the integration evidence
@@ -55,11 +63,13 @@ any of them fails until `core.SemanticsVersion` is bumped and its
 transitions are recorded with `-record-semantics`; a rule outside the
 explored limits needs its own test. Before changing a harness boundary,
 specify its durable commit point, attached facts, and behavior after restart.
-Model request bytes and provenance must be committed before sending; decisions
-and effects before binding; the bound job before starting; observations
-together with run progress in one `Transition`. Events carry the step,
-attempt, or effect they belong to, and commits are sequenced: changing either
-identity scheme is a semantics change and must bump `core.SemanticsVersion`.
+Model request bytes and provenance must be committed before sending; a
+decision and its normalized action before it is performed or bound; the bound
+job before starting; a result together with run progress, and with any
+change of harness state it causes, such as the context window, in one
+`Transition`. Events carry the step, attempt, or effect they belong to, and
+commits are sequenced: changing either identity scheme is a semantics change
+and must bump `core.SemanticsVersion`.
 
 The context version (`contextVersion` in `cmd/canti/config.go`) names the
 rules that render and account for a request. Give the next one when, for the

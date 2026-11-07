@@ -49,25 +49,24 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 	if err != nil {
 		return snap, err
 	}
-	if err := facts.check(event); err != nil {
+	if err := facts.check(event, next); err != nil {
 		return snap, err
 	}
-	if facts.Request != nil && facts.Request.Window != nil {
-		if err := facts.Request.Window.Validate(snap.State.Step); err != nil {
-			return snap, fmt.Errorf("%w: %v", ErrFacts, err)
-		}
+	if err := facts.checkWindows(snap.State.Step); err != nil {
+		return snap, fmt.Errorf("%w: %v", ErrFacts, err)
 	}
 	id, err := core.EventID(snap.State.RunID, snap.Seq+1, event)
 	if err != nil {
 		return snap, err
 	}
 	transition := Transition{
-		Seq:     snap.Seq + 1,
-		EventID: id,
-		From:    snap.State,
-		Event:   event,
-		To:      next,
-		Facts:   facts,
+		Seq:       snap.Seq + 1,
+		EventID:   id,
+		From:      snap.State,
+		Event:     event,
+		To:        next,
+		Facts:     facts,
+		Semantics: core.SemanticsVersion,
 	}
 	if err := r.store.Commit(ctx, transition); err != nil {
 		return snap, fmt.Errorf("harness: commit %T: %w", event, err)
@@ -137,7 +136,9 @@ func (r Runner) keepUnknown(ctx context.Context, snap Snapshot, cause error) (Sn
 	return next, nil
 }
 
-func (f Facts) check(event core.Event) error {
+// check reports whether f holds exactly the records event permits, which
+// leads to next.
+func (f Facts) check(event core.Event, next core.State) error {
 	var allowed Facts
 	switch e := event.(type) {
 	case core.RequestFrozen:
@@ -155,6 +156,24 @@ func (f Facts) check(event core.Event) error {
 			return fmt.Errorf("%w: incomplete response cannot be marked complete", ErrFacts)
 		}
 		allowed.Response, allowed.Failure = f.Response, f.Failure
+	case core.ResponseLoaded:
+		if next.Phase == core.PhaseEffectSaved {
+			if f.Action == nil {
+				return fmt.Errorf("%w: an accepted exec decision requires its action", ErrFacts)
+			}
+			if err := f.Action.Validate(); err != nil {
+				return fmt.Errorf("%w: %v", ErrFacts, err)
+			}
+			allowed.Action = f.Action
+		}
+	case core.Performed:
+		if f.Outcome == nil {
+			return fmt.Errorf("%w: a performed effect requires its outcome", ErrFacts)
+		}
+		if err := f.Outcome.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrFacts, err)
+		}
+		allowed.Outcome, allowed.Window = f.Outcome, f.Window
 	case core.Observed:
 		if err := f.checkObservation(e.Execution); err != nil {
 			return err
@@ -180,6 +199,23 @@ func (f Facts) checkObservation(execution core.ExecutionState) error {
 	}
 	if f.Observation.Execution != execution {
 		return fmt.Errorf("%w: observation %q does not match event %q", ErrFacts, f.Observation.Execution, execution)
+	}
+	if f.Observation.Retrieval != nil || f.Observation.Handover != nil {
+		return fmt.Errorf("%w: an observation holds no retrieval or handover; a performed outcome does", ErrFacts)
+	}
+	return nil
+}
+
+// checkWindows validates the window a request renders at step and the
+// window a performed step commits for the step after it.
+func (f Facts) checkWindows(step int) error {
+	if f.Request != nil && f.Request.Window != nil {
+		if err := f.Request.Window.Validate(step); err != nil {
+			return err
+		}
+	}
+	if f.Window != nil {
+		return f.Window.Validate(step + 1)
 	}
 	return nil
 }

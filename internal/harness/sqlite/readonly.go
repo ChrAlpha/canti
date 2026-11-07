@@ -29,6 +29,9 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 		err = fmt.Errorf("%w: schema version %d, want 1 or %d", ErrIncompatible, version, schemaVersion)
 	}
 	s.sessions = version == schemaVersion
+	if err == nil {
+		err = s.probePerformed(ctx)
+	}
 	for _, query := range queries {
 		if err == nil {
 			s.stmts[query], err = db.PrepareContext(ctx, query)
@@ -39,4 +42,15 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("sqlite: open read-only %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// probePerformed records whether the journal holds performedIndex, which a
+// writable open of another store may add after this one opened.
+func (s *Store) probePerformed(ctx context.Context) error {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'transitions_performed'`).Scan(&n)
+	if err == nil {
+		s.performed.Store(n == 1)
+	}
+	return err
 }

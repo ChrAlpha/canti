@@ -133,7 +133,7 @@ func latestHandover(ctx context.Context, j Journal, runID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(last) == 1 && last[0].Observation.acceptedHandover() != nil {
+	if len(last) == 1 && last[0].acceptedHandover() != nil {
 		return last[0].Step, nil
 	}
 	req, err := j.LatestRequest(ctx, runID)

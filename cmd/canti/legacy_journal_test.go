@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,7 +68,7 @@ func TestLegacyRunsKeepTheirConfig(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if c, err := decodeConfig(run, m.Paths.Workspace); err != nil || c.ContextVersion != 1 {
+				if c, err := decodeConfig(run, m.Paths.Workspace); err != nil || c.ContextVersion != legacy.contextVersion() {
 					t.Errorf("legacy run %s decodes to context version %d: %v", id, c.ContextVersion, err)
 				}
 			}
@@ -158,6 +159,61 @@ type legacyCase struct {
 	}
 }
 
+// contextVersion returns the context version that the producer of c stored
+// with its runs: 12 for the last revision before actions were recorded, 1
+// for the earlier producers.
+func (c legacyCase) contextVersion() int {
+	if strings.HasPrefix(c.name, "eab15c6/") {
+		return 12
+	}
+	return 1
+}
+
+// legacyDump renders, read-only, the schema version, every schema object but
+// the index of performed steps that a writable open adds, and every row of
+// the journal in file; for a schema-1 journal, which every writable open
+// migrates to schema 2, without the version and the session table that the
+// migration adds.
+func legacyDump(t *testing.T, file string, schema1 bool) string {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+file+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var b strings.Builder
+	queries := []string{"PRAGMA user_version",
+		"SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name != 'transitions_performed' ORDER BY name",
+		"SELECT * FROM runs ORDER BY n", "SELECT * FROM transitions ORDER BY run_id, seq",
+		"SELECT * FROM session_runs ORDER BY session_id, seq"}
+	if schema1 {
+		queries = []string{"SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name != 'transitions_performed' AND tbl_name != 'session_runs' ORDER BY name",
+			"SELECT * FROM runs ORDER BY n", "SELECT * FROM transitions ORDER BY run_id, seq"}
+	}
+	for _, query := range queries {
+		rows, err := raw.Query(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		columns, _ := rows.Columns()
+		for rows.Next() {
+			values := make([]any, len(columns))
+			ptrs := make([]any, len(columns))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "%v\n", values)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return b.String()
+}
+
 // legacyCases returns every case of the corpus with its manifest.
 func legacyCases(t *testing.T) []legacyCase {
 	t.Helper()
@@ -218,9 +274,11 @@ func TestLegacyRunsAreClosedAndFollowedByNewRuns(t *testing.T) {
 			m := c.manifest
 			last := m.Journal.Runs[len(m.Journal.Runs)-1]
 			db, history := c.recreate(t)
+			schema1 := m.Journal.UserVersion == 1
+			before := legacyDump(t, db, schema1)
 			f := &fixture{t: t, workspace: m.Paths.Workspace, state: m.Paths.State, key: "sk-test-legacy",
 				model: newScriptedModel(t, "sk-test-legacy", map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})}
-			if r := f.cli(nil, "resume"); r.code != exitError || !refusesResume(r.stderr, last.ID, "1") {
+			if r := f.cli(nil, "resume"); r.code != exitError || !refusesResume(r.stderr, last.ID, strconv.Itoa(c.contextVersion())) {
 				t.Fatalf("resume = %d\nstderr: %s", r.code, r.stderr)
 			}
 			if _, seq, rows := legacyRows(t, db, last.ID); seq != last.Seq || rows != int(last.Seq) {
@@ -240,6 +298,12 @@ func TestLegacyRunsAreClosedAndFollowedByNewRuns(t *testing.T) {
 			}
 			if r := f.cli(nil, "context"); r.code != exitOK || !strings.Contains(r.stdout, last.ID) {
 				t.Errorf("context = %d\nstderr: %s", r.code, r.stderr)
+			}
+			if after := legacyDump(t, db, schema1); after != before {
+				t.Errorf("the refused resume and the inspections changed the journal beyond the index of performed steps:\n%s\nwant\n%s", after, before)
+			}
+			if version, _, _ := legacyRows(t, db, last.ID); version != 2 {
+				t.Errorf("the journal has schema version %d after a writable open, want 2", version)
 			}
 			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitError || !strings.Contains(r.stderr, fmt.Sprintf("is %s: stop it first", last.Phase)) {
 				t.Errorf("run beside the open run = %d\nstderr: %s", r.code, r.stderr)

@@ -16,7 +16,8 @@ import (
 // TestLegacyJournals opens every journal of the corpus with the current
 // store, read-only and then writable, reads it through every journal,
 // session, and context read, and requires that no recorded row changes,
-// apart from the session table the migration of a schema-1 journal adds.
+// apart from the session table the migration of a schema-1 journal adds and
+// the index of performed steps that every writable open adds.
 func TestLegacyJournals(t *testing.T) {
 	names := legacyCaseNames(t)
 	if len(names) == 0 {
@@ -54,7 +55,7 @@ func testLegacyJournal(t *testing.T, name string) int64 {
 	if data, err := os.ReadFile(c.db); err != nil || legacyHash(data) != c.manifest.Journal.DB.SHA256 {
 		t.Fatalf("the read-only store changed the journal file: %v", err)
 	}
-	compareLegacy(t, before, snapshotLegacy(t, c.db), before.version)
+	compareLegacy(t, before, snapshotLegacy(t, c.db), before.version, false)
 	if store, err = sqlite.Open(ctx, c.db); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func testLegacyJournal(t *testing.T, name string) int64 {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	compareLegacy(t, before, snapshotLegacy(t, c.db), 2)
+	compareLegacy(t, before, snapshotLegacy(t, c.db), 2, true)
 	return c.stored
 }
 

@@ -22,7 +22,7 @@ const (
 	persistedJob    = "9d4c1f6e2b7a8053c1e4f7a2b9d0c3e6f8a1b4d7c0e3f6a9b2c5d8e1f4a7b0c3"
 	plainRun        = "run_fedcba9876543210fedcba9876543210"
 	plainEffect     = "effect_77d03f6fc12313fbd499e665dd6bb0204147df9de19b77d3c09cb6e343d89a3a"
-	plainJob        = "read_" + plainEffect
+	plainLater      = "effect_89b5b4d4db8084ad8a1af610709c3579665f2fd0eeafa8670a7ab1ea46f23ffd"
 )
 
 // persistedRuns returns a session run, which Submit records, and a run
@@ -53,10 +53,12 @@ type commit struct {
 
 // persistedChains returns legal chains of the two runs that commit every
 // event kind with the facts it permits: the session run retries a lost
-// response, observes step 1, and resolves an unknown step 2 as stopped; the
-// plain run observes a retrieval and exhausts its single step.
+// response, observes the command of step 1, and resolves an unknown step 2
+// as stopped; the plain run performs a retrieval that the archive reports
+// an error for, then, at a request that requires a handover, a handover
+// that opens the window of a step its budget leaves no room for.
 func persistedChains() (session, plain []commit) {
-	exit, zero := 2, 0
+	exit := 2
 	query := archive.RetrievalQuery{Operation: "search", Path: "/canti/runs/" + persistedRun + "/steps", Reason: "find the failing assertion",
 		Offset: 128, Limit: 4096, Query: "FAIL", Cursor: "eyJiaW5kaW5nIjoiYSJ9", IgnoreCase: true}
 	source := archive.SourceRange{Path: "/canti/artifacts/" + persistedEffect + "/output", Offset: 512, Length: 64,
@@ -64,7 +66,7 @@ func persistedChains() (session, plain []commit) {
 	full := &harness.Request{
 		Body: []byte(`{"model":"claude-opus-5","max_tokens":16000}`), Model: "claude-opus-5",
 		Protocol: "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01", Adapter: "canti-anthropic/2",
-		Window: &harness.Window{FirstStep: 2, Handover: "Rerun the parser tests.", SourceStep: 1, Requested: true, Failures: 1},
+		Window: &harness.Window{FirstStep: 2, Handover: "Rerun the parser tests.", SourceStep: 1},
 		Context: &harness.ContextCapture{
 			Bytes: harness.ContextBytes{Total: 21000, Limit: 262144, System: 4100, Goal: 40, Constraints: 30, Environment: 600,
 				Session: 300, Window: 90, Handover: 120, StepHeader: 25, EmptySteps: 7, Progress: 60, HandoverRequired: 520, Repair: 210,
@@ -80,11 +82,13 @@ func persistedChains() (session, plain []commit) {
 	observed := &harness.Observation{
 		Execution: core.ExecutionExited, ExitCode: &exit, Preview: "--- FAIL: TestParse\n",
 		Output: harness.ArtifactRef{Path: persistedEffect + "/output", Bytes: 9000, Complete: true, Available: true, Detail: "kept 9000 of 9100 bytes"},
-		Retrieval: &archive.Retrieval{Query: query, Sources: []archive.SourceRange{source}, Entries: []string{"/canti/runs/run_prev/steps/00000001"},
-			NextOffset: 8192, NextCursor: "eyJzdGVwIjoyfQ", More: true, Incomplete: true, SkippedCount: 3,
-			Skipped: []archive.Skip{{Step: 1, Field: "artifact", Reason: "utf8"}}, Error: "directory contains a non-UTF-8 path"},
-		Handover: &harness.Handover{RunID: persistedRun, FirstStep: 7, Text: "Rerun the parser tests."},
 	}
+	retrieval := &archive.Retrieval{Query: query, Sources: []archive.SourceRange{source}, Entries: []string{"/canti/runs/run_prev/steps/00000001"},
+		Evidence: []string{"--- FAIL: TestParse"}, NextOffset: 8192, NextCursor: "eyJzdGVwIjoyfQ", More: true, Incomplete: true, SkippedCount: 3,
+		Skipped: []archive.Skip{{Step: 1, Field: "artifact", Reason: "utf8"}}, Error: "directory contains a non-UTF-8 path"}
+	command := harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}
+	read := harness.Action{Name: harness.ActionRetrieve, Recovery: harness.RecoveryRead, Args: len("canti:retrieve ")}
+	handover := harness.Action{Name: harness.ActionHandover, Recovery: harness.RecoveryLocal, Args: len("canti:handover ")}
 	session = []commit{
 		{core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{}`), Model: "claude-opus-5",
 			Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2"}}},
@@ -96,7 +100,7 @@ func persistedChains() (session, plain []commit) {
 		{core.ResponseSaved{Step: 1, Attempt: 2}, harness.Facts{Response: &harness.Response{Body: []byte(`{"stop_reason":"end_turn"}`), Complete: true,
 			Model: "claude-opus-5-live", Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/3-tool",
 			Usage: harness.Usage{InputTokens: 1200, OutputTokens: 34}}}},
-		{core.ResponseLoaded{Step: 1, Attempt: 2, Body: []byte(`{"kind":"exec","payload":"go test ./..."}`)}, harness.Facts{}},
+		{core.ResponseLoaded{Step: 1, Attempt: 2, Body: []byte(`{"kind":"exec","payload":"go test ./..."}`)}, harness.Facts{Action: &command}},
 		{core.JobBound{EffectID: persistedEffect, JobID: persistedJob}, harness.Facts{}},
 		{core.JobStarted{EffectID: persistedEffect, JobID: persistedJob}, harness.Facts{}},
 		{core.Observed{EffectID: persistedEffect, Execution: core.ExecutionExited}, harness.Facts{Observation: observed}},
@@ -105,7 +109,7 @@ func persistedChains() (session, plain []commit) {
 		{core.ResponseSaved{Step: 2, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{"stop_reason":"end_turn"}`), Complete: true,
 			Model: "claude-opus-5", Protocol: "anthropic-messages/2023-06-01+server-side-fallback-2026-07-01", Adapter: "canti-anthropic/2",
 			Usage: harness.Usage{InputTokens: 2100, OutputTokens: 20}}}},
-		{core.ResponseLoaded{Step: 2, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"go vet ./..."}`)}, harness.Facts{}},
+		{core.ResponseLoaded{Step: 2, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"go vet ./..."}`)}, harness.Facts{Action: &command}},
 		{core.OutcomeUnknown{EffectID: persistedLater}, harness.Facts{Failure: `executor returned no job ID with status "unknown"`}},
 		{core.StopRequested{Reason: core.StopBudgetExhausted}, harness.Facts{Failure: "1000000 tokens reached the 1000000-token budget"}},
 		{core.Resolved{EffectID: persistedLater, Execution: core.ExecutionFailedToStart},
@@ -120,13 +124,19 @@ func persistedChains() (session, plain []commit) {
 		{core.AttemptStarted{Step: 1, Attempt: 1}, harness.Facts{}},
 		{core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`), Complete: true,
 			Model: "claude-opus-5", Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2"}}},
-		{core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"canti:retrieve {\"operation\":\"read\",\"path\":\"/canti/runs\",\"reason\":\"check\"}"}`)},
-			harness.Facts{}},
-		{core.JobBound{EffectID: plainEffect, JobID: plainJob}, harness.Facts{}},
-		{core.JobStarted{EffectID: plainEffect, JobID: plainJob}, harness.Facts{}},
-		{core.Observed{EffectID: plainEffect, Execution: core.ExecutionExited}, harness.Facts{Observation: &harness.Observation{
-			Execution: core.ExecutionExited, ExitCode: &zero,
-			Retrieval: &archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: "/canti/runs", Reason: "check"}}}}},
+		{core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"canti:retrieve {\"operation\":\"search\",\"path\":\"/canti/runs\",\"reason\":\"check\"}"}`)},
+			harness.Facts{Action: &read}},
+		{core.Performed{EffectID: plainEffect}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Retrieval: retrieval}}},
+		{core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{}`), Model: "claude-opus-5",
+			Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2", Window: &harness.Window{FirstStep: 1, Requested: true, Failures: 1}}}},
+		{core.AttemptStarted{Step: 2, Attempt: 1}, harness.Facts{}},
+		{core.ResponseSaved{Step: 2, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`), Complete: true,
+			Model: "claude-opus-5", Protocol: "anthropic-messages/2023-06-01", Adapter: "canti-anthropic/2"}}},
+		{core.ResponseLoaded{Step: 2, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"canti:handover Rerun the parser tests."}`)},
+			harness.Facts{Action: &handover}},
+		{core.Performed{EffectID: plainLater}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone,
+			Handover: &harness.Handover{RunID: plainRun, FirstStep: 1, Text: "Rerun the parser tests."}},
+			Window: &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Rerun the parser tests."}}},
 	}
 	return session, plain
 }
@@ -173,7 +183,7 @@ func TestPersistedRecordsKeepTheirEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plainInitial, err := core.NewState(plain.ID, core.Limits{MaxSteps: 1, MaxAttempts: 3})
+	plainInitial, err := core.NewState(plain.ID, core.Limits{MaxSteps: 2, MaxAttempts: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

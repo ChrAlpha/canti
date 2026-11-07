@@ -268,11 +268,13 @@ requires a new context version, recorded with
 `internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an
 unmodified historical `canti` binary wrote and whose `manifest.json` records
 how, read-only and after the migration a writable open performs, and
-requires every recorded row to stay as it was.
+requires every recorded row to stay as it was; a writable open adds only the
+index of performed steps, and to a schema-1 journal the session table.
 `TestLegacyRunsAreClosedAndFollowedByNewRuns` recreates each one at its
 recorded paths and requires that its open run, of another context version,
-is refused by `canti resume`, closed by `canti stop`, and followed by a new
-run. A case is never rewritten. The generator that wrote the corpus,
+is refused by `canti resume`, which with `status`, `history`, and `context`
+leaves every row and schema object but those as it was, closed by
+`canti stop`, and followed by a new run. A case is never rewritten. The generator that wrote the corpus,
 `internal/harness/legacy_journal_gen_test.go` and
 `legacy_journal_export_test.go` behind the `legacygen` build tag, was
 removed once no test continued these runs; restore it from the history of

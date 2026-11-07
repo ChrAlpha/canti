@@ -102,7 +102,19 @@ func (d *driver) save(body []byte, usage harness.Usage) {
 
 func (d *driver) load(body []byte) {
 	d.t.Helper()
-	d.do(core.ResponseLoaded{Step: d.snap.State.Step, Attempt: d.snap.State.Attempt, Body: body}, harness.Facts{})
+	event := core.ResponseLoaded{Step: d.snap.State.Step, Attempt: d.snap.State.Attempt, Body: body}
+	d.do(event, acceptance(d.snap.State, event))
+}
+
+// acceptance returns the facts of event, from s, which carry the action of
+// an accepted exec decision under a request that requires no handover.
+func acceptance(s core.State, event core.ResponseLoaded) harness.Facts {
+	next, err := s.Next(event)
+	if err != nil || next.Phase != core.PhaseEffectSaved {
+		return harness.Facts{}
+	}
+	a := harness.NormalizeAction(next.Decision.Payload, false, true)
+	return harness.Facts{Action: &a}
 }
 
 func (d *driver) observe(execution core.ExecutionState, outputBytes int64) {
@@ -126,6 +138,17 @@ func (d *driver) step(command string, usage harness.Usage, outputBytes int64) {
 	d.call(harness.Runner.Bind)
 	d.call(harness.Runner.Start)
 	d.observe(core.ExecutionExited, outputBytes)
+}
+
+// perform completes the effect of the current step, a local action, with
+// the outcome that its invalid arguments yield.
+func (d *driver) perform() {
+	d.t.Helper()
+	a := harness.NormalizeAction(d.snap.State.Decision.Payload, false, true)
+	if a.Invalid == "" {
+		d.t.Fatalf("perform needs an invalid local action, not %+v", a)
+	}
+	d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: a.Problem()}})
 }
 
 func execBody(command string) []byte {

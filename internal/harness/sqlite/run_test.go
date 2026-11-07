@@ -146,6 +146,8 @@ func completed(commits []harness.Transition) []harness.StepRecord {
 		case core.Observed, core.Resolved:
 			_, resolved := tr.Event.(core.Resolved)
 			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Observation: *tr.Facts.Observation, Resolved: resolved})
+		case core.Performed:
+			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Outcome: tr.Facts.Outcome, Window: tr.Facts.Window})
 		}
 	}
 	return out
@@ -163,8 +165,8 @@ func TestRecentPagesBackwardBySequence(t *testing.T) {
 	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: observation(core.ExecutionExited, 2)})
 	d.decide([]byte("not a decision"), harness.Usage{})
 	d.step("make vet", harness.Usage{}, 3)
-	d.decide(execBody("make lint"), harness.Usage{})
-	d.observe(core.ExecutionFailedToStart, 0)
+	d.decide(execBody("canti:lint"), harness.Usage{})
+	d.perform()
 	d.step("make install", harness.Usage{}, 5)
 	if s := d.snap.State; s.Phase != core.PhaseStopped || s.Reason != core.StopStepsExhausted {
 		t.Fatalf("final state = %#v, want steps_exhausted", s)
@@ -318,4 +320,164 @@ func TestCommitStoresFactTextAsValidUTF8(t *testing.T) {
 		t.Fatalf("stored preview = %q, want %q", got, want)
 	}
 	replay(t, fresh(t, "run-1", limits), stored)
+}
+
+// TestAcceptedIsRecordedLegacyOrRefused requires that Accepted returns the
+// action of the acceptance of an exec decision, reads an acceptance of a
+// version before harness.ActionSemantics without an action as legacy, and
+// fails closed for one of a later version without a valid action and for
+// one of an earlier version that holds an action.
+func TestAcceptedIsRecordedLegacyOrRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, mutation string
+		want           harness.Provenance
+	}{
+		{"recorded", ``, harness.ProvenanceRecorded},
+		{"legacy", `UPDATE transitions SET semantics = 3, facts = json_remove(facts, '$.Action') WHERE kind = 'response_loaded'`, harness.ProvenanceLegacy},
+		{"current without action", `UPDATE transitions SET facts = json_remove(facts, '$.Action') WHERE kind = 'response_loaded'`, ""},
+		{"current with another recovery", `UPDATE transitions SET facts = json_set(facts, '$.Action.Recovery', 'local_change') WHERE kind = 'response_loaded'`, ""},
+		{"current with an unknown field", `UPDATE transitions SET facts = json_set(facts, '$.Action.Extra', 1) WHERE kind = 'response_loaded'`, ""},
+		{"legacy with action", `UPDATE transitions SET semantics = 3 WHERE kind = 'response_loaded'`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody(`canti:retrieve {"operation":"read"}`), harness.Usage{})
+			if tc.mutation != "" {
+				if _, err := s.db.Exec(tc.mutation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a, err := s.Accepted(ctx, "run-1", 1, 1)
+			if tc.want == "" {
+				if !errors.Is(err, ErrIncompatible) {
+					t.Fatalf("Accepted = %+v, %v; want ErrIncompatible", a, err)
+				}
+				if _, err := harness.ActionOf(ctx, s, d.snap.State); !errors.Is(err, ErrIncompatible) {
+					t.Fatalf("ActionOf = %v; want ErrIncompatible", err)
+				}
+				return
+			}
+			want := harness.Action{Name: harness.ActionRetrieve, Recovery: harness.RecoveryRead, Args: len(harness.RetrievePrefix)}
+			if tc.want == harness.ProvenanceLegacy {
+				want = harness.Action{Name: harness.ActionLegacy}
+			}
+			if err != nil || a.Provenance != tc.want || a.Action != want {
+				t.Fatalf("Accepted = %+v, %v; want %s %+v", a, err, tc.want, want)
+			}
+		})
+	}
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.decide([]byte("not a decision"), harness.Usage{})
+	if _, err := s.Accepted(ctx, "run-1", 1, 1); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("Accepted of a rejected decision = %v, want ErrNotFound", err)
+	}
+	if _, err := s.Accepted(ctx, "run-1", 1, 2); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("Accepted of an unsent attempt = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCommitChecksEffectsAgainstTheirAcceptanceInItsTransaction requires
+// that the store refuses, writing nothing, a job bound to a local action, a
+// performed command, and a performed handover whose window its request does
+// not explain.
+func TestCommitChecksEffectsAgainstTheirAcceptanceInItsTransaction(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		event         func(core.State) core.Event
+		facts         harness.Facts
+	}{
+		{"job of a local action", "canti:lint", func(s core.State) core.Event { return core.JobBound{EffectID: s.EffectID, JobID: "job-1"} }, harness.Facts{}},
+		{"performed command", "make", func(s core.State) core.Event { return core.Performed{EffectID: s.EffectID} },
+			harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: "x"}}},
+		{"unexplained window", "canti:lint", func(s core.State) core.Event { return core.Performed{EffectID: s.EffectID} },
+			harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: "unknown harness action; the actions are canti:retrieve and canti:handover"},
+				Window: &harness.Window{FirstStep: 1, Requested: true, Failures: 1}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody(tc.payload), harness.Usage{})
+			if err := d.try(tc.event(d.snap.State), tc.facts); !errors.Is(err, harness.ErrFacts) {
+				t.Fatalf("commit = %v, want ErrFacts", err)
+			}
+			unchanged(t, s, "run-1", d.commits, harness.Totals{Usage: harness.Usage{}})
+		})
+	}
+}
+
+// TestActionOfRefusesAnActionItsDecisionDoesNotMatch requires that a
+// recorded action of a valid shape that is no reading of its decision, such
+// as a command recorded for a reserved payload or arguments at another
+// offset, fails ActionOf closed, so that the loop never binds it.
+func TestActionOfRefusesAnActionItsDecisionDoesNotMatch(t *testing.T) {
+	ctx := context.Background()
+	for name, action := range map[string]string{
+		"command for a reserved payload": `{"Name":"command","Recovery":"external_effect"}`,
+		"arguments elsewhere":            `{"Name":"retrieve","Recovery":"repeatable_read","Args":3}`,
+		"another action's word":          `{"Name":"handover","Recovery":"local_change","Args":15}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody(`canti:retrieve {"operation":"read"}`), harness.Usage{})
+			if _, err := s.db.Exec(`UPDATE transitions SET facts = json_set(facts, '$.Action', json(?)) WHERE kind = 'response_loaded'`, action); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Accepted(ctx, "run-1", 1, 1); err != nil {
+				t.Fatalf("Accepted of a valid shape = %v", err)
+			}
+			if _, err := harness.ActionOf(ctx, s, d.snap.State); !errors.Is(err, harness.ErrIncompatible) {
+				t.Fatalf("ActionOf = %v, want harness.ErrIncompatible", err)
+			}
+		})
+	}
+}
+
+// TestRecentRefusesStepsOfAShapeTheirVersionNeverRecords requires that a
+// completed step of the current version whose facts take a shape no commit
+// writes fails Recent closed, and that the same observation of a legacy
+// version reads as recorded.
+func TestRecentRefusesStepsOfAShapeTheirVersionNeverRecords(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		build    func(d *driver)
+		mutation string
+		legacyOK bool
+	}{
+		"performed with an invalid outcome": {func(d *driver) { d.decide(execBody("canti:x"), harness.Usage{}); d.perform() },
+			`UPDATE transitions SET facts = json_set(facts, '$.Outcome.Status', 'bogus') WHERE kind = 'performed'`, false},
+		"performed with an observation": {func(d *driver) { d.decide(execBody("canti:x"), harness.Usage{}); d.perform() },
+			`UPDATE transitions SET facts = json_set(facts, '$.Observation', json('{"Execution":"exited","ExitCode":0,"Preview":"","Output":{"Path":"","Bytes":0,"Complete":false,"Available":false,"Detail":""}}')) WHERE kind = 'performed'`, false},
+		"performed with a window outside the next step": {func(d *driver) { d.decide(execBody("canti:x"), harness.Usage{}); d.perform() },
+			`UPDATE transitions SET facts = json_set(facts, '$.Window', json('{"FirstStep":5,"Handover":"x","SourceStep":4,"Requested":false,"Failures":0}')) WHERE kind = 'performed'`, false},
+		"observation with a retrieval": {func(d *driver) { d.step("make", harness.Usage{}, 1) },
+			`UPDATE transitions SET facts = json_set(facts, '$.Observation.Retrieval', json('{"query":{"operation":"read","path":"/canti/runs","reason":"x"},"next_offset":0,"more":false}')) WHERE kind = 'observed'`, true},
+		"observation with an outcome": {func(d *driver) { d.step("make", harness.Usage{}, 1) },
+			`UPDATE transitions SET facts = json_set(facts, '$.Outcome', json('{"Status":"failed","Detail":"x"}')) WHERE kind = 'observed'`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := tempPath(t)
+			s := open(t, path)
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			tc.build(d)
+			if _, err := s.db.Exec(tc.mutation); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Recent(ctx, "run-1", 0, 10); !errors.Is(err, ErrIncompatible) {
+				t.Fatalf("Recent of a corrupt step = %v, want ErrIncompatible", err)
+			}
+			if !tc.legacyOK {
+				return
+			}
+			if _, err := s.db.Exec(`UPDATE runs SET semantics = 3; UPDATE transitions SET semantics = 3, facts = json_remove(facts, '$.Action')`); err != nil {
+				t.Fatal(err)
+			}
+			if steps, err := s.Recent(ctx, "run-1", 0, 10); err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
+				t.Fatalf("Recent of a legacy step that recorded a retrieval = %+v, %v", steps, err)
+			}
+		})
+	}
 }

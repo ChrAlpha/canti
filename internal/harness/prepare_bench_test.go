@@ -52,13 +52,21 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 				facts.Request = &harness.Request{Body: []byte(`{"seed":"` + strings.Repeat("x", 32<<10) + `"}`), Window: w}
 			case core.ResponseSaved:
 				facts.Response = &harness.Response{Body: body, Complete: true}
+			case core.ResponseLoaded:
+				facts.Action = &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}
 			}
 			snap, err = runner.Commit(ctx, snap, event, facts)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
-		snap, err = runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart},
+		effect := snap.State.EffectID
+		for _, event := range []core.Event{core.JobBound{EffectID: effect, JobID: "job-" + effect}, core.JobStarted{EffectID: effect, JobID: "job-" + effect}} {
+			if snap, err = runner.Commit(ctx, snap, event, harness.Facts{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		snap, err = runner.Commit(ctx, snap, core.Observed{EffectID: effect, Execution: core.ExecutionFailedToStart},
 			harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}})
 		if err != nil {
 			t.Fatal(err)
@@ -110,7 +118,10 @@ func TestPrepareReadsOnlyActiveWindow(t *testing.T) {
 			if err != nil || snap.State.Phase != core.PhaseRequestFrozen || p.frozen == nil {
 				t.Fatalf("prepare: %+v, %v", snap.State, err)
 			}
-			if p.records != tc.window || p.pages != (tc.window+historyPage-1)/historyPage {
+			// After the first step, preparation also reads the previous
+			// step's completion, which selects the window, in one record.
+			completion := min(tc.completed, 1)
+			if p.records != tc.window+completion || p.pages != (tc.window+historyPage-1)/historyPage+completion {
 				t.Fatalf("read %d records in %d pages for a %d-step window", p.records, p.pages, tc.window)
 			}
 			body := string(p.frozen.Body)

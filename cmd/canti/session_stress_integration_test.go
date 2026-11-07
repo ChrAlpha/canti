@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/harness"
 )
 
 func TestSessionMultiRunWindowStress(t *testing.T) {
@@ -171,7 +172,12 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 				if obs.Execution != core.ExecutionExited || obs.ExitCode == nil || *obs.ExitCode != 0 {
 					t.Fatalf("round %d observation failed: %+v", round, obs)
 				}
-				if obs.Handover != nil {
+			}
+			if o := e.Facts.Outcome; o != nil {
+				if o.Status != harness.OutcomeDone {
+					t.Fatalf("round %d local action failed: %+v", round, o)
+				}
+				if o.Handover != nil {
 					handovers++
 				}
 			}

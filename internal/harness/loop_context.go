@@ -31,62 +31,80 @@ func (f Frame) contextSystem() string {
 	return s
 }
 
+// errHandoverFailedTwice stops a run whose window recorded no handover at
+// two consecutive requests that required one.
+var errHandoverFailedTwice = errors.New("harness: handover failed twice; refusing to discard the current context")
+
 // contextError reports committed context that fails an integrity or policy
 // check, which no retry repairs.
 type contextError struct{ error }
 
-func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) error {
+// contextFrame sets the window of f: at the first revision of a step after
+// the first, the window committed with the previous step's completion, or
+// else the window of that step's latest request; at a later revision, the
+// window of the step's latest request. It returns the previous step's
+// completion when it read one. The window must follow from the request
+// window by windowAfter, so a window that the committed facts do not
+// explain is a context error, as is a missing request after progress.
+func (l *Loop) contextFrame(ctx context.Context, snap Snapshot, f *Frame) (*StepRecord, error) {
+	s := snap.State
 	w := Window{FirstStep: 1}
-	req, err := l.journal.LatestRequest(ctx, snap.State.RunID)
+	req, err := l.journal.LatestRequest(ctx, s.RunID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
+		return nil, err
 	}
-	if errors.Is(err, ErrNotFound) && (snap.State.Step != 1 || snap.State.RequestRev != 0) {
-		return contextError{errors.New("harness: durable context window request is missing after progress")}
+	if errors.Is(err, ErrNotFound) && (s.Step != 1 || s.RequestRev != 0) {
+		return nil, contextError{errors.New("harness: durable context window request is missing after progress")}
 	}
+	var last *StepRecord
 	if err == nil {
 		if req.Window == nil {
-			return contextError{errors.New("harness: window configuration changed during a run")}
+			return nil, contextError{errors.New("harness: window configuration changed during a run")}
 		}
 		w = *req.Window
-	}
-	if err := w.Validate(snap.State.Step); err != nil {
-		return contextError{err}
-	}
-	f.Window = &w
-	return nil
-}
-
-func (l *Loop) advanceWindow(snap Snapshot, f *Frame) error {
-	w := *f.Window
-	if snap.State.RequestRev == 0 && w.Requested && len(f.Steps) > 0 {
-		last := f.Steps[len(f.Steps)-1]
-		if h := last.Observation.acceptedHandover(); h != nil {
-			if err := h.Validate(snap.State.RunID, w.FirstStep, l.cfg.HandoverBytes); err != nil {
-				return err
+		if s.RequestRev == 0 {
+			if last, err = l.completion(ctx, snap); err != nil {
+				return nil, err
 			}
-			w = Window{FirstStep: snap.State.Step, SourceStep: last.Step, Handover: h.Text}
-		} else {
-			w.Failures++
-			if w.Failures >= 2 {
-				return errors.New("harness: handover failed twice; refusing to discard the current context")
+			var want *Window
+			switch {
+			case last.Outcome != nil:
+				want = windowAfter(last.Step, w, *last.Outcome)
+			case w.Requested:
+				return nil, contextError{fmt.Errorf("harness: step %d completed without the handover its request required", last.Step)}
+			}
+			if !sameWindow(want, last.Window) {
+				return nil, contextError{fmt.Errorf("harness: the window committed with step %d does not follow from its request", last.Step)}
+			}
+			if last.Window != nil {
+				w = *last.Window
 			}
 		}
 	}
-	if err := w.Validate(snap.State.Step); err != nil {
-		return err
-	}
-	for len(f.Steps) > 0 && f.Steps[0].Step < w.FirstStep {
-		f.Steps = f.Steps[1:]
+	if err := w.Validate(s.Step); err != nil {
+		return nil, contextError{err}
 	}
 	f.Window = &w
-	return nil
+	return last, nil
+}
+
+// completion returns the completion of the step before the current one of
+// snap, which its latest transition committed.
+func (l *Loop) completion(ctx context.Context, snap Snapshot) (*StepRecord, error) {
+	steps, err := l.journal.Recent(ctx, snap.State.RunID, snap.Seq+1, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(steps) != 1 || steps[0].Step != snap.State.Step-1 {
+		return nil, contextError{fmt.Errorf("harness: step %d has no committed completion", snap.State.Step-1)}
+	}
+	return &steps[0], nil
 }
 
 // captureRetrievals records the retrievals of the steps of f.
 func (f *Frame) captureRetrievals() {
 	for _, s := range f.Steps {
-		if r := s.Observation.Retrieval; r != nil {
+		if r := s.retrieval(); r != nil {
 			observed := ContextRetrieval{Step: s.Step, Operation: r.Query.Operation, More: r.More, Incomplete: r.Incomplete, Error: clip(r.Error, 512)}
 			observed.Operation = observed.OperationName()
 			f.capture.Retrievals = append(f.capture.Retrievals, observed)
@@ -160,8 +178,8 @@ func ContextFit(cfg LoopConfig, run Run, limits core.Limits) (Fit, error) {
 func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	f := l.frame(run, s)
-	var err error
-	if err := l.contextFrame(ctx, snap, &f); err != nil {
+	last, err := l.contextFrame(ctx, snap, &f)
+	if err != nil {
 		return l.refuse(ctx, snap, err)
 	}
 	if err := l.sessionContext(ctx, run, &f); err != nil {
@@ -177,11 +195,15 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if f.Steps, err = l.windowSteps(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}
-	if err := publishHistory(ctx, l.journal, l.cfg.History, run, s, f.Steps); err != nil {
+	latest := f.Steps
+	if last != nil {
+		latest = []StepRecord{*last}
+	}
+	if err := publishHistory(ctx, l.journal, l.cfg.History, run, s, latest); err != nil {
 		return snap, err
 	}
-	if err := l.advanceWindow(snap, &f); err != nil {
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
+	if f.Window.Failures >= 2 {
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: errHandoverFailedTwice.Error()})
 	}
 	f.captureRetrievals()
 	f.Earlier = s.Step - 1 - len(f.Steps)

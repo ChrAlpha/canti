@@ -31,7 +31,7 @@ func retrievalScenarios() []frozenScenario {
 					corpusRetrieve("read", earlier+"/goal", "", "Read the previous goal."),
 					corpusRetrieve("read", current+"/session", "", "Check the session record."),
 					corpusDecision(core.Return, "The previous run named ./cmd/canti."),
-				}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 retrieval 1 sources 0 entries", "3 exited 0 retrieval 1 sources 0 entries"}},
+				}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries"}},
 			},
 			marks: map[string][]string{
 				"run2-step02-rev1.json": {"Source " + earlier + "/result:\n", "phase: returned\n\nThe build target is ./cmd/canti.\n"},
@@ -48,17 +48,17 @@ func retrievalScenarios() []frozenScenario {
 					corpusDecision(core.Exec, "ls /workspace"),
 					corpusDecision(core.Exec, harness.HandoverPrefix+"Listed go.mod and main.go."),
 					corpusDecision(core.Return, "go.mod and main.go."),
-				}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}},
+				}, steps: []string{"1 exited 0 output complete", "2 done handover"}},
 				{id: corpusNextRun, goal: "Name the module.", replies: []string{
 					corpusDecision(core.Exec, "cat go.mod"),
 					corpusDecision(core.Exec, "cat go.mod"),
 					corpusDecision(core.Exec, harness.HandoverPrefix+"go.mod names module example; report it."),
-				}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}, stop: core.StopStepsExhausted},
+				}, steps: []string{"1 exited 0 output complete", "2 refused", "3 done handover"}, stop: core.StopStepsExhausted},
 				{id: corpusThirdRun, goal: "Continue where the session stopped.", replies: []string{
 					corpusRetrieve("read", current+"/steps/00000003/command", "", "Read where the stopped run handed over."),
 					corpusDecision(core.Exec, harness.HandoverPrefix+"The module is example."),
 					corpusDecision(core.Return, "The module is example."),
-				}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 handover"}},
+				}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done handover"}},
 			},
 			marks: map[string][]string{
 				"run3-step01-rev1.json": {
@@ -88,7 +88,7 @@ func retrievalScenarios() []frozenScenario {
 				corpusRetrieve("discover", corpusSteps, `,"query":"beta","limit":256`, "Find the steps that printed beta."),
 				corpusRetrieve("discover", corpusSteps, `,"query":"beta","limit":256,"cursor":"`+stepCursor+`"`, "Continue the discovery."),
 				corpusDecision(core.Return, "Steps 1 and 2 printed beta."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 exited 0 retrieval 3 sources 0 entries more", "4 exited 0 retrieval 3 sources 0 entries"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 done retrieval 3 sources 0 entries more", "4 done retrieval 3 sources 0 entries"}}},
 			marks: map[string][]string{
 				"run1-step04-rev1.json": {`Retrieval continuation: {"next_offset":0,"next_cursor":"` + stepCursor + `","more":true}`, "Source " + corpusSteps + "/00000002/meta:\n"},
 				"run1-step05-rev1.json": {`Retrieval continuation: {"next_offset":0,"more":false}`, "Source " + corpusSteps + "/00000001/meta:\n"},
@@ -101,7 +101,7 @@ func retrievalScenarios() []frozenScenario {
 				corpusRetrieve("search", step1, `,"query":"beta","limit":24`, "Find beta in the step records."),
 				corpusRetrieve("search", step1, `,"query":"beta","limit":24,"cursor":"`+metaCursor+`"`, "Continue the search."),
 				corpusDecision(core.Return, "The command and the preview of step 1 mention beta."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 retrieval 1 sources 0 entries more", "3 exited 0 retrieval 1 sources 0 entries"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries more", "3 done retrieval 1 sources 0 entries"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {`Retrieval continuation: {"next_offset":0,"next_cursor":"` + metaCursor + `","more":true}`, "Source " + step1 + "/command:\n"},
 				"run1-step04-rev1.json": {`Retrieval continuation: {"next_offset":0,"more":false}`, "Source " + step1 + "/preview:\n"},
@@ -115,7 +115,7 @@ func retrievalScenarios() []frozenScenario {
 				corpusRetrieve("read", step1+"/purpose", "", "Recall why step 1 ran."),
 				corpusDecision(core.Exec, harness.HandoverPrefix+"Step 1 listed /workspace to find go.mod."),
 				corpusDecision(core.Return, "Step 1 listed /workspace to find go.mod and its module name."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover", "3 exited 0 retrieval 1 sources 0 entries", "4 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 done handover", "3 done retrieval 1 sources 0 entries", "4 done handover"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then check go.mod for the module name.\n"},
 				"run1-step04-rev1.json": {"This window begins at step 3.", "Source " + step1 + "/purpose:\n",
@@ -138,9 +138,9 @@ func retrievalScenarios() []frozenScenario {
 				corpusRetrieve("discover", corpusSteps, `,"query":"needle","cursor":"`+stepCursor+`"`, "Continue with a cursor of another discovery."),
 				corpusRetrieve("discover", corpusSteps, `,"query":"needle"`, "Start the discovery again."),
 				corpusDecision(core.Return, "c.txt, d.txt, and step 1 mention the needle."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 1 retrieval error", "3 exited 0 retrieval 0 sources 3 entries",
-				"4 exited 0 retrieval 1 sources 0 entries", "5 exited 1 retrieval error", "6 exited 0 retrieval 1 sources 0 entries",
-				"7 exited 1 retrieval error", "8 exited 0 retrieval 3 sources 0 entries"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 failed retrieval error", "3 done retrieval 0 sources 3 entries",
+				"4 done retrieval 1 sources 0 entries", "5 failed retrieval error", "6 done retrieval 1 sources 0 entries",
+				"7 failed retrieval error", "8 done retrieval 3 sources 0 entries"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {`"error":"directory search failed at b.bin with no results, which is not proof of absence; list the directory and read or search its files one at a time: source contains NUL; only UTF-8 text is supported"`},
 				"run1-step05-rev1.json": {"Source /canti/imports/mixed/c.txt:\n"},

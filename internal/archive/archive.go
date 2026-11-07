@@ -76,8 +76,12 @@ type Retrieval struct {
 
 // Reader reads the archive under RunsRoot, ArtifactsRoot, and ImportsRoot
 // from the host directories History, Artifacts, and Imports; an empty one is
-// unavailable. Discovery skips the steps whose command begins with one of
-// Excluded, which must be shorter than 64 bytes.
+// unavailable. Discovery skips the steps whose command, after leading
+// spaces, tabs, line feeds, and carriage returns, begins with one of
+// Excluded, each shorter than 64 bytes. It reads 64 bytes of a command and,
+// when those leave the comparison open, up to MaxBytes again, charged to its
+// scan budget; a command that MaxBytes still leaves open is skipped as
+// unclassified, which makes the scan incomplete.
 type Reader struct {
 	History   string
 	Artifacts string

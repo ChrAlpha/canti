@@ -390,14 +390,15 @@ type status struct {
 
 // entry is one line the history command prints.
 type entry struct {
-	Seq     int64           `json:"seq"`
-	EventID string          `json:"event_id"`
-	Kind    string          `json:"kind"`
-	Event   json.RawMessage `json:"event"`
-	From    core.Phase      `json:"from"`
-	To      core.Phase      `json:"to"`
-	State   core.State      `json:"state"`
-	Facts   harness.Facts   `json:"facts"`
+	Seq       int64           `json:"seq"`
+	EventID   string          `json:"event_id"`
+	Kind      string          `json:"kind"`
+	Semantics int             `json:"semantics"`
+	Event     json.RawMessage `json:"event"`
+	From      core.Phase      `json:"from"`
+	To        core.Phase      `json:"to"`
+	State     core.State      `json:"state"`
+	Facts     harness.Facts   `json:"facts"`
 }
 
 func (f *fixture) status(args ...string) status {

@@ -60,7 +60,7 @@ func (s *Store) checkAdmission(ctx context.Context, tx *sql.Tx) error {
 		var state core.State
 		var last core.Event
 		if kind.Valid {
-			last, err = decodeEvent(kind.String, event.String)
+			last, err = decodeEvent(kind.String, event.String, int(semantics.Int64))
 			if err == nil {
 				err = decodeState(int(semantics.Int64), to.String, &state)
 			}

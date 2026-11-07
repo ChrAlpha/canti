@@ -28,7 +28,7 @@ func stopRun(t *testing.T, s *Store, run harness.Run) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Commit(ctx, harness.Transition{Seq: 1, EventID: "stop-" + run.ID, From: from, Event: event, To: to}); err != nil {
+	if err := s.Commit(ctx, harness.Transition{Seq: 1, EventID: "stop-" + run.ID, From: from, Event: event, To: to, Semantics: core.SemanticsVersion}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -169,7 +170,8 @@ func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
 }
 
 // checkRecords checks that the step records of the run of h hold goal, the
-// command and preview of every completed step and no other, and the run's
+// command and preview of every completed step and no other, a performed
+// step's preview as context version 13 presents its outcome, and the run's
 // result once it is closed.
 func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
 	t.Helper()
@@ -178,13 +180,17 @@ func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
 	checkFile(t, filepath.Join(dir, "goal"), goal)
 	var want, got []string
 	for i, e := range h {
-		if e.Kind != "observed" && e.Kind != "resolved" {
+		if e.Kind != "observed" && e.Kind != "resolved" && e.Kind != "performed" {
 			continue
 		}
 		s := h[i-1].State
 		step := filepath.Join(dir, "steps", fmt.Sprintf("%08d", s.Step))
 		checkFile(t, filepath.Join(step, "command"), s.Decision.Payload)
-		checkFile(t, filepath.Join(step, "preview"), e.Facts.Observation.Preview)
+		if e.Facts.Outcome != nil {
+			checkFile(t, filepath.Join(step, "preview"), outcomePreview(t, *e.Facts.Outcome))
+		} else {
+			checkFile(t, filepath.Join(step, "preview"), e.Facts.Observation.Preview)
+		}
 		want = append(want, filepath.Base(step))
 	}
 	entries, err := os.ReadDir(filepath.Join(dir, "steps"))
@@ -206,6 +212,25 @@ func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
 	}
 }
 
+// outcomePreview is the preview that context version 13 publishes for a
+// step that the harness performed with outcome o, as version 12 did.
+func outcomePreview(t *testing.T, o harness.Outcome) string {
+	t.Helper()
+	switch {
+	case o.Detail != "":
+		return "Context action failed: " + o.Detail
+	case o.Retrieval != nil:
+		refs := *o.Retrieval
+		refs.Evidence = nil
+		data, err := json.Marshal(refs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	return "Handover recorded; the next request starts a new context window."
+}
+
 func decodeEvent[E core.Event](raw string) (core.Event, error) {
 	var e E
 	err := strict(raw, &e)
@@ -216,7 +241,7 @@ var eventDecoders = map[string]func(string) (core.Event, error){
 	"request_frozen": decodeEvent[core.RequestFrozen], "attempt_started": decodeEvent[core.AttemptStarted],
 	"response_saved": decodeEvent[core.ResponseSaved], "response_incomplete": decodeEvent[core.ResponseIncomplete],
 	"response_loaded": decodeEvent[core.ResponseLoaded], "job_bound": decodeEvent[core.JobBound],
-	"job_started": decodeEvent[core.JobStarted], "observed": decodeEvent[core.Observed],
+	"job_started": decodeEvent[core.JobStarted], "observed": decodeEvent[core.Observed], "performed": decodeEvent[core.Performed],
 	"outcome_unknown": decodeEvent[core.OutcomeUnknown], "stop_requested": decodeEvent[core.StopRequested],
 	"resolved": decodeEvent[core.Resolved],
 }
@@ -325,4 +350,24 @@ func evidence(t *testing.T, gate, injected, image string, f *fixture, h []entry)
 	t.Logf("evidence gate=%q label=%q injected=%q platform=%s/%s go=%s image=%s run=%s final=%s seqs=1..%d requests=%d jobs=%v",
 		gate, "concrete backend integration with a scripted provider", injected, runtime.GOOS, runtime.GOARCH, runtime.Version(),
 		image, last.State.RunID, last.To, last.Seq, len(f.model.requests()), jobs)
+}
+
+// latestOutcome returns the outcome of the latest step of h that the harness
+// performed itself, failing unless that step is the latest completed one and
+// its action was done.
+func latestOutcome(t *testing.T, h []entry) harness.Outcome {
+	t.Helper()
+	for _, e := range slices.Backward(h) {
+		switch e.Kind {
+		case "performed":
+			if o := e.Facts.Outcome; o != nil && o.Status == harness.OutcomeDone {
+				return *o
+			}
+			t.Fatalf("the latest local action did not complete: %+v", e.Facts.Outcome)
+		case "observed", "resolved":
+			t.Fatalf("the latest completed step ran a command: %+v", e.Facts.Observation)
+		}
+	}
+	t.Fatal("no completed step")
+	return harness.Outcome{}
 }

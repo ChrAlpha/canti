@@ -319,7 +319,29 @@ func (r rendering) Commit(ctx context.Context, t harness.Transition) error {
 		}
 		fmt.Fprintf(r.w, "└ %s\n", status)
 	}
+	if o := t.Facts.Outcome; o != nil {
+		for _, line := range excerpt(outcomeSummary(*o), true) {
+			fmt.Fprintf(r.w, "│ %s\n", line)
+		}
+		fmt.Fprintf(r.w, "└ %s\n", o.Status)
+	}
 	return nil
+}
+
+// outcomeSummary describes the outcome of an action the harness performed,
+// which ran no process.
+func outcomeSummary(o harness.Outcome) string {
+	switch {
+	case o.Detail != "":
+		return o.Detail
+	case o.Retrieval != nil && o.Retrieval.Error != "":
+		return "retrieval error: " + o.Retrieval.Error
+	case o.Retrieval != nil:
+		return fmt.Sprintf("retrieved %d sources and %d directory entries", len(o.Retrieval.Sources), len(o.Retrieval.Entries))
+	case o.Handover != nil:
+		return "handover recorded"
+	}
+	return ""
 }
 
 // cleaned writes what clean keeps of each write.
