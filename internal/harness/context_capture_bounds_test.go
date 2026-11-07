@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
@@ -49,7 +51,9 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				}
 				f.cfg.Reader = &archive.Reader{Imports: imported}
 				f.cfg.WindowSteps = 2
-				ctx := f.bounded()
+				// The deadline is a fixture watchdog; byte and transition bounds below are the contract.
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
 				for i := 0; ; i++ {
 					if i == 50 {
 						t.Fatal("retrieval did not recover within 50 transitions")
