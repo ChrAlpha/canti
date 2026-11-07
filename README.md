@@ -119,11 +119,10 @@ stopped, and 4 that it needs resolution; see the
 
 ## Status
 
-Verified on Linux at the revision in the
-[evidence record](docs/v1-acceptance.md#evidence-record): offline tests of the
-core, harness, and adapters; tests against real SQLite files, including
-SIGKILL recovery and request construction over 2,000 stored steps; and Docker
-Engine 29.7 integration tests in which CLI processes drive runs end to end.
+Verified on Linux: offline tests of the core, harness, and adapters; tests
+against real SQLite files, including SIGKILL recovery and request
+construction over 2,000 stored steps; and Docker Engine 29.7 integration
+tests in which CLI processes drive runs end to end.
 Those cover cold restarts after every step, SIGKILL before and after each
 commit of an exec step, a job that outlives its controller, unknown outcomes,
 competing writers, retries with frozen bytes, large outputs, cancellation,

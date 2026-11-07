@@ -34,7 +34,7 @@ is not.
 | `internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
 | `internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
 | `internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
-| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
+| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `cmd/canti` | CLI: commands, state directory, workspace lock, signals, credential | Subprocess tests; Docker-backed gate tests |
 
 The core imports only the standard library and holds no per-run state between
