@@ -114,7 +114,7 @@ func startChatWithBlockedStderr(t *testing.T, f *fixture, image string, env []st
 	if err := r.SetReadDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, exe, append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image}, fixtureModel...)...)
+	cmd := exec.CommandContext(ctx, exe, pinHost(append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image}, fixtureModel...))...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)

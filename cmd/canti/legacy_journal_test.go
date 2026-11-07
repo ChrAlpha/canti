@@ -26,6 +26,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 // TestLegacyRunsKeepTheirConfig requires that the CLI still decodes the
@@ -68,7 +69,7 @@ func TestLegacyRunsKeepTheirConfig(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if c, err := decodeConfig(run, m.Paths.Workspace); err != nil || c.ContextVersion != legacy.contextVersion() {
+				if c, err := host.DecodeConfig(run, m.Paths.Workspace); err != nil || c.ContextVersion != legacy.contextVersion() {
 					t.Errorf("legacy run %s decodes to context version %d: %v", id, c.ContextVersion, err)
 				}
 			}

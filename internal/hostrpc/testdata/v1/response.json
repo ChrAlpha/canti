@@ -1,0 +1,120 @@
+{
+  "protocol": 1,
+  "error": {
+    "code": "failed",
+    "message": "m"
+  },
+  "hello": {
+    "protocol": 1,
+    "version": "dev",
+    "context_version": 13,
+    "semantics_version": 4,
+    "pid": 1
+  },
+  "ack": {
+    "replayed": true,
+    "run": {
+      "run_id": "run_1",
+      "session_id": "s",
+      "session_seq": 2,
+      "input_id": "in_1",
+      "goal": "g",
+      "constraints": "c",
+      "status": "stopped",
+      "phase": "stopped",
+      "step": 4,
+      "stop_reason": "cancelled",
+      "result": "r",
+      "effect_id": "effect_1",
+      "seq": 9,
+      "context_version": 13,
+      "api": "anthropic-messages",
+      "provider": "https://p.test",
+      "driving": true,
+      "drive_error": "e",
+      "totals": {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "output_bytes": 3,
+        "steps": 4
+      },
+      "budget": {
+        "wall_time": "30m0s",
+        "tokens": 5,
+        "output_bytes": 6,
+        "job_timeout": "10m0s"
+      }
+    }
+  },
+  "run": {
+    "run_id": "run_1",
+    "session_id": "s",
+    "session_seq": 2,
+    "input_id": "in_1",
+    "goal": "g",
+    "constraints": "c",
+    "status": "stopped",
+    "phase": "stopped",
+    "step": 4,
+    "stop_reason": "cancelled",
+    "result": "r",
+    "effect_id": "effect_1",
+    "seq": 9,
+    "context_version": 13,
+    "api": "anthropic-messages",
+    "provider": "https://p.test",
+    "driving": true,
+    "drive_error": "e",
+    "totals": {
+      "input_tokens": 1,
+      "output_tokens": 2,
+      "output_bytes": 3,
+      "steps": 4
+    },
+    "budget": {
+      "wall_time": "30m0s",
+      "tokens": 5,
+      "output_bytes": 6,
+      "job_timeout": "10m0s"
+    }
+  },
+  "page": {
+    "items": [
+      {
+        "seq": 3,
+        "step": 1,
+        "kind": "completed",
+        "command": "x",
+        "purpose": "p",
+        "action": "retrieve",
+        "result": "r",
+        "local": true,
+        "resolved": true,
+        "execution": "exited",
+        "exit_code": 3,
+        "preview": "pv",
+        "detail": "d",
+        "outcome": {
+          "status": "done",
+          "detail": "d",
+          "retrieval": true,
+          "retrieval_error": "re",
+          "sources": 1,
+          "entries": 2,
+          "handover": true
+        },
+        "window": 5,
+        "stop_reason": "cancelled",
+        "failure": "f"
+      }
+    ],
+    "next": 9,
+    "more": true
+  },
+  "wait": {
+    "seq": 9,
+    "halted": true,
+    "driving": true
+  },
+  "constraints": ""
+}

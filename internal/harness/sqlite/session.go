@@ -77,11 +77,15 @@ func (s *Store) checkAdmission(ctx context.Context, tx *sql.Tx) error {
 	return rows.Err()
 }
 
-// Submit creates one durable session input and its run in a single write transaction.
-// Reusing an input ID with the same goal and constraints returns the original run;
-// generated run IDs, creation times, budgets, and host config are ignored on retry.
+// Submit creates one durable input and its run in a single write transaction.
+// The input belongs to run.SessionID or, when that is empty, to no session:
+// session_runs keys every input, and its empty session ID holds the
+// standalone ones, whose runs take no session sequence. Reusing an input ID
+// with the same goal and constraints returns the original run; generated run
+// IDs, creation times, budgets, and host config are ignored on retry, so a
+// result with another run ID than run's reports a retry.
 func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State) (harness.Run, error) {
-	if !ValidKey(run.SessionID) || !ValidKey(run.InputID) || run.SessionSeq != 0 {
+	if run.SessionID != "" && !ValidKey(run.SessionID) || !ValidKey(run.InputID) || run.SessionSeq != 0 {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
 	if _, _, err := encodeRun(run, initial); err != nil {
@@ -110,7 +114,9 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(max(seq), 0) + 1 FROM session_runs WHERE session_id = ?`, run.SessionID).Scan(&seq); err != nil {
 			return err
 		}
-		run.SessionSeq = seq
+		if run.SessionID != "" {
+			run.SessionSeq = seq
+		}
 		data, state, err := encodeRun(run, initial)
 		if err != nil {
 			return err
@@ -131,9 +137,10 @@ func (s *Store) Submit(ctx context.Context, run harness.Run, initial core.State)
 	return result, nil
 }
 
-// SessionInput returns the run first admitted for this input identity.
+// SessionInput returns the run first admitted for this input identity; an
+// empty sessionID names a standalone input.
 func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (harness.Run, error) {
-	if !ValidKey(sessionID) || !ValidKey(inputID) {
+	if sessionID != "" && !ValidKey(sessionID) || !ValidKey(inputID) {
 		return harness.Run{}, errors.New("sqlite: invalid session or input identity")
 	}
 	if !s.sessions {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
@@ -22,23 +23,23 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := runSpec(t, tc.args...)
-			s.config.Workspace = "/work"
-			run, _, err := newRun("goal", "", s, time.Time{})
+			s.Config.Workspace = "/work"
+			run, _, err := host.NewRun("goal", "", s, time.Time{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			stored, err := decodeConfig(run, "/work")
+			stored, err := host.DecodeConfig(run, "/work")
 			if err != nil || stored.DecisionFormat != tc.stored {
 				t.Fatalf("decodeConfig = %+v, %v", stored, err)
 			}
-			if got := anthropicConfig(stored, "http://localhost", credential{anthropicKey: "test"}).DecisionFormat; got != tc.stored {
+			if got := host.AnthropicConfig(stored, "http://localhost", host.Keys{AnthropicKey: "test"}).DecisionFormat; got != tc.stored {
 				t.Fatalf("model format = %q", got)
 			}
 		})
 	}
 	old := runSpec(t)
-	old.config.Workspace = "/work"
-	raw, err := json.Marshal(old.config)
+	old.Config.Workspace = "/work"
+	raw, err := json.Marshal(old.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,14 +50,14 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 	if _, ok := fields["decision_format"]; ok {
 		t.Fatal("old config shape changed")
 	}
-	if got, err := decodeConfig(harness.Run{ID: "old", Config: raw}, "/work"); err != nil || got.DecisionFormat != "" {
+	if got, err := host.DecodeConfig(harness.Run{ID: "old", Config: raw}, "/work"); err != nil || got.DecisionFormat != "" {
 		t.Fatalf("old config = %+v, %v", got, err)
 	}
 }
 
 func TestDecisionFormatRejectsUnknownValue(t *testing.T) {
 	s := runSpec(t, "-decision-format", "other")
-	if _, _, err := newRun("goal", "", s, time.Time{}); err == nil {
+	if _, _, err := host.NewRun("goal", "", s, time.Time{}); err == nil {
 		t.Fatal("unknown decision format accepted")
 	}
 }
@@ -95,8 +96,8 @@ func TestDecisionFormatAdmitsContextByItsSystem(t *testing.T) {
 	smallest := func(format string) int {
 		admits := func(n int) bool {
 			s := runSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(n))
-			s.config.Workspace = "/work"
-			_, _, err := newRun("goal", "", s, time.Time{})
+			s.Config.Workspace = "/work"
+			_, _, err := host.NewRun("goal", "", s, time.Time{})
 			return err == nil
 		}
 		lo, hi := 1, 1<<20

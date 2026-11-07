@@ -36,7 +36,9 @@ is not.
 | `internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
 | `internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
-| `cmd/canti` | CLI: commands, state directory, workspace lock, signals, credential | Subprocess tests; Docker-backed gate tests |
+| `internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
+| `internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 2; version 1's record kept), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `cmd/canti` | CLI: commands, flags, signals, terminal, environment and credential | Subprocess tests; Docker-backed gate tests |
 
 The core imports only the standard library and holds no per-run state between
 calls. The module's one direct dependency is `modernc.org/sqlite`, a cgo-free
@@ -394,7 +396,9 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
   commit sequence: it returns the latest steps completed below a given
   sequence, each with the sequence of the transition that completed it.
 - `CreateRun` and `Submit` record a new run in the same transaction that
-  admits it: they refuse while any run of the journal is open or was
+  admits it, `Submit` with its input ID, of a session or, under the empty
+  session ID of `session_runs`, of no session, which a retry of the input
+  finds instead of creating another run: they refuse while any run of the journal is open or was
   abandoned with an effect whose outcome stays unknown (`harness.Blocks`,
   applied to every run's latest state and event); an identical retry of a
   recorded run is confirmed without admission. `CheckAdmission` applies the
@@ -407,10 +411,11 @@ Survival of an OS crash or power loss depends on the filesystem and device
 honouring fsync and is not tested.
 
 The store does not lock the workspace, and a database that rejects a stale
-writer does not stop that writer from touching the execution backend. The CLI
-therefore takes a non-blocking `flock` on `lock` in the state directory for
-every command that can commit (`run`, `resume`, `stop`, `resolve`) and holds
-it until it exits; a second writer exits with status 6. `status` and `history`
+writer does not stop that writer from touching the execution backend. The
+host of the state directory (`internal/host`) therefore takes a non-blocking
+`flock` on `lock` there for its lifetime; every command that can commit
+(`run`, `resume`, `stop`, `resolve`) opens one, and a second writer exits
+with status 6. `status` and `history`
 read without it. The lock excludes processes that share a state directory,
 which by default is derived from the workspace's resolved path; two state
 directories used for one workspace do not exclude each other. It is a lock on
@@ -549,6 +554,49 @@ moves its run on.
 open or needs resolution, and publishes the step records of that run first,
 refusing when it cannot.
 
+A command drives its run through the host of the state directory: by
+default (`-host auto`) the host process that serves the state directory
+(`canti host`, started on demand), which outlives its clients; with
+`-host embedded` one in its own process, whose lifetime is the command's, so
+the signal rules above end the run with the command. Three events then stay distinct:
+
+| Event | Journal | Drive | Job |
+| --- | --- | --- | --- |
+| A client goes away (detach): its connection closes, a second signal, a hangup, or a chat that quits mid-run | Nothing | Continues in the host | Continues |
+| An explicit stop: `canti stop`, or the first signal of an attached client | `StopRequested{cancelled}` and the cancel path to the true result; the host bounds the cleanup, not the client | Interrupted, then stopped | Cancelled and recorded |
+| The host shuts down: a signal to it, `canti host -stop`, or idleness | Nothing of its own: at most the commit each drive is in lands | Interrupted; nothing new is admitted or started from the moment the shutdown begins | Continues; the next host's drive inspects it |
+
+Every submission, stop, resolution, and protocol request is an operation of
+the host. A shutdown refuses new ones from its first moment, ends the
+context of every drive and operation, including one still waiting for its
+run's lock or for admission, which then commits nothing, and releases the
+journal and the lock only after all of them have ended. A stop whose
+cleanup it ends leaves the run `cancelling`, which a later stop or drive
+finishes. The server first stops accepting, removes the socket, and ends its
+open connections. A host that cannot end its drives and operations within
+`-shutdown-timeout` exits holding the lock, so that no other host acts
+beside a controller that still might. A
+host holds the credentials it is given only for the drives it is given them
+for, and a foreground host also those of its own environment, each bound to
+an exact model API and provider. A host that starts continues the open run
+it can continue by itself (`ResumeOpen`): it finishes a pending stop, which
+needs no credential, or drives a run of its context version whose pair one of
+its credentials is bound to. Every other open run, one of another context
+version, one whose effect's outcome is unknown, or one that needs a
+credential the host lacks, is left untouched, reported as not drivable with
+the reason, until a client acts on it.
+
+Readers follow a run through bounded progress pages, a projection of its
+committed transitions: one primary-key read of at most 64 rows that never
+selects a request, a response, or retrieved evidence, and that clips every
+text in SQL to its cap (a command or purpose 2 KiB, a returned result
+8 KiB, a preview 4 KiB, any other text 2 KiB), then cuts it at a rune
+boundary and marks the item `Truncated`. Every item therefore fits a page
+of 256 KiB, and `View` keeps the full result. A protocol answer is bounded
+by the JSON its valid facts take at worst, six bytes per byte of a full
+result, goal, and constraints, plus 1 MiB (about 55 MiB); it is written
+without HTML escaping, and the client reads no further than that bound.
+
 ## Input
 
 Every request is prepared from committed facts and a durable handover window.
@@ -656,8 +704,14 @@ instructions or proof that a side effect completed.
 
 A run names its model API, `anthropic-messages` or `openai-responses`, and
 its model; canti has no default for either and refuses the Chat Completions
-API by name. The provider is the API's base URL, from `-model-url` or the
-API's base URL variable, and is not stored with the run. Both adapters build a
+API by name. The provider is the API's base URL: a new run stores it, from
+`-model-url`, the API's base URL variable, or the adapter's default, and is
+driven against it only, so no later process, terminal, or host supplies
+another; it must hold no user information, query, or fragment. Credentials
+are never stored: a drive is given the keys of the run's API and holds them
+only while it runs, and a key is sent only to the exact provider its caller
+resolved, which must be the run's; otherwise the drive is refused before any
+request. Both adapters build a
 deterministic body that never contains credentials from the system prompt and
 one user message with a text part per prompt block, describe the decision
 with `harness.DecisionSchema`, and send the run's effort only when the run

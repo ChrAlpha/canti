@@ -444,7 +444,7 @@ func cliCommand(t *testing.T, env []string, args ...string) *exec.Cmd {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(exe, args...)
+	cmd := exec.Command(exe, pinHost(args)...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)
@@ -508,7 +508,7 @@ func startCLIWithBlockedStderr(t *testing.T, stdin io.Reader, env []string, args
 	}
 	fillPipe(t, w)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := exec.CommandContext(ctx, exe, pinHost(args)...)
 	t.Cleanup(func() {
 		cancel()
 		if cmd.Process != nil && cmd.ProcessState == nil {

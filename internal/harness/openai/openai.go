@@ -30,6 +30,9 @@ const (
 		`","parameters":` + harness.DecisionSchema + `,"strict":true}]`
 )
 
+// DefaultBaseURL is the base URL of a Config that names none.
+const DefaultBaseURL = "https://api.openai.com/v1"
+
 // Efforts lists the reasoning effort levels a Config may name.
 var Efforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
@@ -71,7 +74,7 @@ func New(cfg Config) (*Model, error) {
 	if cfg.DecisionFormat != "text" && cfg.DecisionFormat != "tool" {
 		return nil, fmt.Errorf("openai: unsupported decision format %q", cfg.DecisionFormat)
 	}
-	cfg.BaseURL = cmp.Or(cfg.BaseURL, "https://api.openai.com/v1")
+	cfg.BaseURL = cmp.Or(cfg.BaseURL, DefaultBaseURL)
 	cfg.MaxTokens = cmp.Or(cfg.MaxTokens, 16000)
 	endpoint, err := provider.New(provider.Config{Name: "openai", URL: provider.TrimBase(cfg.BaseURL, "/responses"),
 		Secret: cfg.APIKey, Timeout: cfg.Timeout, MaxResponseBytes: cfg.MaxResponseBytes, Client: cfg.Client})

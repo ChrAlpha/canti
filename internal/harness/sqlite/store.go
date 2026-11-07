@@ -130,7 +130,7 @@ const (
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
-	stepsSQL, savedSQL, acceptedSQL, windowSQL,
+	stepsSQL, savedSQL, acceptedSQL, windowSQL, progressSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe

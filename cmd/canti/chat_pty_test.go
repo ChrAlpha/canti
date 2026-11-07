@@ -92,7 +92,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
 	argv := append(append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, fixtureModel...), args...)
-	cmd := exec.CommandContext(ctx, exe, argv...)
+	cmd := exec.CommandContext(ctx, exe, pinHost(argv)...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)
@@ -728,5 +728,35 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 	}
 	if final := f.status(); final.Phase != core.PhaseStopped || final.Reason != core.StopCancelled || final.Run.SessionSeq != 1 {
 		t.Fatalf("manual stop did not finish original run: %+v", final)
+	}
+}
+
+func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
+	f := newFixture(t, nil)
+	gate := make(chan struct{})
+	f.model.decide = func(int, string) (core.Decision, error) {
+		<-gate
+		return core.Decision{Kind: core.Return, Payload: "answered after the hangup"}, nil
+	}
+	f.autoHost()
+	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-host", "auto")
+	p.await(t, "ready", 0)
+	p.send(t, "busy request\r")
+	waitFor(t, func() bool { return len(f.model.requests()) == 1 })
+	p.waited = true
+	ended := make(chan error, 1)
+	go func() { ended <- p.cmd.Wait() }()
+	if err := p.master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("chat did not exit after its terminal hung up")
+	}
+	close(gate)
+	waitFor(t, func() bool { return f.status().Phase == core.PhaseReturned })
+	if h := f.history(); slicesContain(kinds(h), "stop_requested") || len(f.model.requests()) != 1 {
+		t.Fatalf("a hangup of a chat attached to a host stopped its run: %q", kinds(h))
 	}
 }

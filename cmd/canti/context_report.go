@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 type contextReport struct {
@@ -59,7 +60,7 @@ func contextCommand(fs *flag.FlagSet, a *app) action {
 		if err != nil {
 			return exitError, err
 		}
-		report, err := describeContext(page, f.bodies, c.ContextVersion == contextVersion)
+		report, err := describeContext(page, f.bodies, c.ContextVersion == host.ContextVersion)
 		if err != nil {
 			return exitError, err
 		}

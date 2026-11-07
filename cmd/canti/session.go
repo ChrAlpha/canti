@@ -7,99 +7,69 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
+	"github.com/ChrAlpha/canti/internal/hostrpc"
 )
 
-func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s spec, url string, once bool) (int, error) {
+func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s host.Spec, url string, once bool) (int, error) {
 	if code, err := a.checkSession(session, input, goal, constraints, s, url); err != nil {
 		return code, err
+	}
+	if a.remoteMode() {
+		return a.remoteSubmit(ctx, hostrpc.Submission{SessionID: session, InputID: input, Goal: goal, Constraints: constraints,
+			ExplicitConstraints: explicitConstraints, Spec: hostrpc.SpecOf(s)}, a.binding(s.Config.API, url), once)
 	}
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
 		return exitError, err
 	}
-	store, done, err := a.open(ctx, true)
+	h, err := a.openHost(ctx, true)
 	if err != nil {
 		return exitError, err
 	}
-	defer done()
-	previous, err := store.SessionInput(ctx, session, input)
-	if err == nil {
-		if previous.Goal != goal || explicitConstraints && previous.Constraints != constraints {
-			return exitError, errors.New("session input ID already exists with different content")
-		}
-		c, err := decodeConfig(previous, a.workspace)
-		if err != nil {
-			return exitError, err
-		}
-		snap, err := store.Latest(ctx, previous.ID)
-		done()
-		return a.report(snap, err, exitActive, c)
-	}
-	if !errors.Is(err, harness.ErrNotFound) {
-		return exitError, err
-	}
-	if !explicitConstraints {
-		prior, err := store.SessionRuns(ctx, session, 0, 1)
-		if err != nil {
-			return exitError, err
-		}
-		if len(prior) > 0 {
-			constraints = prior[0].Constraints
-		}
-	}
-	if err := a.closed(ctx, store); err != nil {
-		return exitError, err
-	}
-	run, initial, err := newRun(goal, constraints, s, time.Now())
-	if err != nil {
-		return exitUsage, err
-	}
-	if a.credErr != nil {
-		return exitError, a.credErr
-	}
-	m, err := newModel(s.config, url, a.cred)
-	if err != nil {
-		return exitError, err
-	}
-	x, err := newExecutor(s.config, a.state)
-	if err != nil {
-		return exitError, err
-	}
+	defer h.Close()
 	drive, release := a.drive(ctx, once)
 	defer release()
-	l, err := a.loop(store, x, m, s.config, run.Budget)
-	if err != nil {
+	b := a.binding(s.Config.API, url)
+	ack, err := h.Submit(ctx, host.Submission{SessionID: session, InputID: input, Goal: goal, Constraints: constraints,
+		ExplicitConstraints: explicitConstraints, Spec: s, Binding: b, Now: time.Now()})
+	switch {
+	case errors.Is(err, host.ErrConflict):
 		return exitError, err
+	case err != nil:
+		return submitCode(err), err
+	case ack.Replayed:
+		a.noteDiffers(input, ack.Run.ID, ack.Differs)
+		h.Close()
+		return a.report(ack.Snapshot, nil, exitActive, ack.Config)
 	}
-	run.SessionID, run.InputID = session, input
-	run, err = store.Submit(ctx, run, initial)
+	snap, err := drive(h, ack.Run.ID, b)
 	if err != nil {
-		return exitError, err
+		label := "session " + session + " run "
+		if session == "" {
+			label = "input " + input + " run "
+		}
+		return exitError, fmt.Errorf("%s%s: %w", label, ack.Run.ID, err)
 	}
-	a.log.Info("accepted session input", "session_id", session, "session_seq", run.SessionSeq, "input_id", input, "run_id", run.ID)
-	snap, err := drive(l, run.ID)
-	if err != nil {
-		return exitError, fmt.Errorf("session %s run %s: %w", session, run.ID, err)
-	}
-	done()
-	return a.report(snap, nil, exitActive, s.config)
+	h.Close()
+	return a.report(snap, nil, exitActive, ack.Config)
 }
 
 var inputChecked = func() {}
 
-// checkSession refuses an invalid session input before submitSession
-// touches the state, and one that a state without a journal refuses before
-// it creates the state. A journal that exists once a check fails may hold
-// the input, whose retry the lookup under the lock reports.
-func (a *app) checkSession(session, input, goal, constraints string, s spec, url string) (int, error) {
-	if session == "" || input == "" {
-		return exitUsage, errors.New("-session and -input are required together")
+// checkSession refuses an invalid input, of a session or of none, before
+// submitSession touches the state, and one that a state without a journal
+// refuses before it creates the state. A journal that exists once a check
+// fails may hold the input, whose retry the lookup under the lock reports.
+func (a *app) checkSession(session, input, goal, constraints string, s host.Spec, url string) (int, error) {
+	if input == "" {
+		return exitUsage, errors.New("-session requires -input")
 	}
-	if !sqlite.ValidKey(session) || !sqlite.ValidKey(input) {
+	if session != "" && !sqlite.ValidKey(session) || !sqlite.ValidKey(input) {
 		return exitUsage, errors.New("-session and -input must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
 	}
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
@@ -113,15 +83,22 @@ func (a *app) checkSession(session, input, goal, constraints string, s spec, url
 	return exitOK, nil
 }
 
-func (a *app) checkNewInput(goal, constraints string, s spec, url string) (int, error) {
-	if _, _, err := newRun(goal, constraints, s, time.Now()); err != nil {
+func (a *app) checkNewInput(goal, constraints string, s host.Spec, url string) (int, error) {
+	if _, _, err := host.NewRun(goal, constraints, s, time.Now()); err != nil {
 		return exitUsage, err
 	}
-	if a.credErr != nil {
-		return exitError, a.credErr
-	}
-	if _, err := newModel(s.config, url, a.cred); err != nil {
+	if err := a.checkCredential(context.Background(), s.Config, url); err != nil {
 		return exitError, err
 	}
 	return exitOK, nil
+}
+
+// noteDiffers says on stderr, for a submission of input that replayed run,
+// the settings the submission named otherwise, if any, which the run does
+// not take: it keeps its own.
+func (a *app) noteDiffers(input, run string, differs []string) {
+	if len(differs) > 0 {
+		fmt.Fprintf(a.stderr, "canti: input %s names run %s, which keeps its own settings; this submission differs in %s\n",
+			input, run, strings.Join(differs, ", "))
+	}
 }

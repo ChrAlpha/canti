@@ -12,6 +12,7 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func statusCommand(fs *flag.FlagSet, a *app) action {
@@ -100,16 +101,16 @@ func (a *app) encoder() *json.Encoder {
 
 // read opens the workspace journal read-only, without the lock, and finds
 // the run and its stored config.
-func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, config, error) {
+func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, host.RunConfig, error) {
 	path := filepath.Join(a.state, "canti.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, harness.Run{}, config{}, fmt.Errorf("no runs in workspace %s", a.workspace)
+		return nil, harness.Run{}, host.RunConfig{}, fmt.Errorf("no runs in workspace %s", a.workspace)
 	}
 	store, err := sqlite.OpenReadOnly(ctx, path)
 	if err != nil {
-		return nil, harness.Run{}, config{}, err
+		return nil, harness.Run{}, host.RunConfig{}, err
 	}
-	run, c, err := a.find(ctx, store)
+	run, c, err := host.Find(ctx, store, a.workspace, a.runID)
 	if err != nil {
 		store.Close()
 	}
@@ -120,7 +121,7 @@ func (a *app) read(ctx context.Context) (*sqlite.Store, harness.Run, config, err
 // exit status, or active while the run is still active. Callers release the
 // workspace lock first: behind a stderr queue each line waits up to
 // stderrFinalTime.
-func (a *app) report(snap harness.Snapshot, err error, active int, c config) (int, error) {
+func (a *app) report(snap harness.Snapshot, err error, active int, c host.RunConfig) (int, error) {
 	s := snap.State
 	out := a.stderr
 	if a.display != nil {
@@ -146,7 +147,7 @@ func (a *app) report(snap harness.Snapshot, err error, active int, c config) (in
 		return exitResolution, nil
 	}
 	next := "resume"
-	switch why := unresumable(s.RunID, c); {
+	switch why := host.Unresumable(s.RunID, c); {
 	case why != "":
 		fmt.Fprintf(out, "canti: run %s is %s and %s.\n", s.RunID, s.Phase, why)
 		return active, nil

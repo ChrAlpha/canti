@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func TestRunUnlimitedSteps(t *testing.T) {
 	s := runSpec(t, "-max-steps", "0")
-	run, initial, err := newRun("goal", "", s, time.Now())
+	run, initial, err := host.NewRun("goal", "", s, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,21 +22,21 @@ func TestRunUnlimitedSteps(t *testing.T) {
 	if err := initial.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if s := runSpec(t); s.limits.MaxSteps != 20 {
-		t.Fatalf("default steps = %d, want 20", s.limits.MaxSteps)
+	if s := runSpec(t); s.Limits.MaxSteps != 20 {
+		t.Fatalf("default steps = %d, want 20", s.Limits.MaxSteps)
 	}
 }
 
 func TestUnlimitedStepsFlagHelp(t *testing.T) {
-	var s spec
+	var s host.Spec
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	s.register(fs)
+	registerSpec(fs, &s)
 	if !strings.Contains(fs.Lookup("max-steps").Usage, "0 is unlimited") {
 		t.Fatal("missing unlimited steps help")
 	}
 	s = runSpec(t)
-	s.limits.MaxSteps = -1
-	_, _, err := newRun("goal", "", s, time.Now())
+	s.Limits.MaxSteps = -1
+	_, _, err := host.NewRun("goal", "", s, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "-max-steps must be nonnegative") {
 		t.Fatalf("invalid steps: %v", err)
 	}

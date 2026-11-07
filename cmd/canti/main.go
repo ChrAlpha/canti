@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -27,7 +26,8 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
-	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
+	"github.com/ChrAlpha/canti/internal/hostrpc"
 )
 
 const version = "dev"
@@ -44,9 +44,12 @@ const (
 
 const stopCleanup = 30 * time.Second
 
-var errLocked = errors.New("locked by another canti process")
-
-var wrapJournal = func(j harness.Journal) harness.Journal { return j }
+// wrapJournal and checkpoint are the host options that tests set to fail,
+// kill, or pause a process at a commit or a named point.
+var (
+	wrapJournal = func(j harness.Journal) harness.Journal { return j }
+	checkpoint  = func(string) {}
+)
 
 const usage = `canti drives an agent run in a workspace until it returns or stops.
 
@@ -81,7 +84,7 @@ type action func(context.Context) (int, error)
 var commands = map[string]func(*flag.FlagSet, *app) action{
 	"run": runCommand, "chat": chatCommand, "resume": resumeCommand, "stop": stopCommand,
 	"resolve": resolveCommand, "status": statusCommand, "history": historyCommand,
-	"context": contextCommand,
+	"context": contextCommand, "host": hostCommand,
 }
 
 type app struct {
@@ -94,8 +97,12 @@ type app struct {
 	signal           os.Signal
 	stopSignals      chan os.Signal
 	displayFailure   <-chan error
-	cred             credential
+	cred             host.Keys
 	credErr          error
+	bound            map[host.Pair]host.Keys // the credentials a foreground host binds
+	hostMode         string
+	hostWait         time.Duration
+	detach           chan struct{} // closed by a chat that ends attached to a host process
 }
 
 func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -193,6 +200,9 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if name != "context" {
 			a.cred, a.credErr = credentials()
 		}
+		if name == "host" {
+			a.credErr = nil
+		}
 		code, err = act(ctx)
 	}
 	if err != nil {
@@ -201,7 +211,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		switch {
 		case code == exitUsage:
 			help(&out)
-		case errors.Is(err, errLocked):
+		case errors.Is(err, host.ErrLocked):
 			code = exitLocked
 		}
 		io.WriteString(final, out.String())
@@ -240,16 +250,23 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	goal := fs.String("goal", "", "the task of the run; required")
 	constraints := fs.String("constraints", "", "rules the agent must follow")
 	session := fs.String("session", "", "serial conversation ID; requires -input; reuse the same workspace and state")
-	input := fs.String("input", "", "submission ID within the session; reuse only to retry this input")
+	input := fs.String("input", "", "submission ID, within the session if any; a retry with the same ID names the same run")
 	once := fs.Bool("once", false, "perform exactly one step after creating the run")
 	url := modelURL(fs)
-	var s spec
-	s.register(fs)
+	var s host.Spec
+	registerSpec(fs, &s)
+	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
 		if err := checkTask("-goal", *goal, *constraints); err != nil {
 			return exitUsage, err
 		}
-		s.config.Workspace = a.workspace
+		if err := canonicalImports(&s.Config, *input != ""); err != nil {
+			return exitUsage, err
+		}
+		if err := a.checkHostMode(); err != nil {
+			return exitUsage, err
+		}
+		s.Config.Workspace = a.workspace
 		if *session != "" || *input != "" {
 			setConstraints := false
 			fs.Visit(func(f *flag.Flag) {
@@ -259,49 +276,51 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 			})
 			return a.submitSession(ctx, *session, *input, *goal, *constraints, setConstraints, s, *url, *once)
 		}
-		run, initial, err := newRun(*goal, *constraints, s, time.Now())
-		if err != nil {
+		if _, _, err := host.NewRun(*goal, *constraints, s, time.Now()); err != nil {
 			return exitUsage, err
 		}
-		if a.credErr != nil {
-			return exitError, a.credErr
+		if err := a.checkCredential(ctx, s.Config, *url); err != nil {
+			return exitError, err
 		}
 		drive, release := a.drive(ctx, *once)
 		defer release()
-		m, err := newModel(s.config, *url, a.cred)
-		if err != nil {
-			return exitError, err
-		}
 		if err := docker.CheckLayout(a.workspace, a.state); err != nil {
 			return exitError, err
+		}
+		if a.remoteMode() {
+			return a.remoteSubmit(ctx, hostrpc.Submission{Goal: *goal, Constraints: *constraints, ExplicitConstraints: true, Spec: hostrpc.SpecOf(s)},
+				a.binding(s.Config.API, *url), *once)
 		}
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
 			return exitError, err
 		}
-		x, err := newExecutor(s.config, a.state)
+		if _, err := host.NewExecutor(s.Config, a.state); err != nil {
+			return exitError, err
+		}
+		h, err := a.openHost(ctx, true)
 		if err != nil {
 			return exitError, err
 		}
-		store, done, err := a.open(ctx, true)
+		defer h.Close()
+		b := a.binding(s.Config.API, *url)
+		ack, err := h.Submit(ctx, host.Submission{Goal: *goal, Constraints: *constraints, Spec: s, Binding: b, Now: time.Now()})
 		if err != nil {
-			return exitError, err
+			return submitCode(err), err
 		}
-		defer done()
-		if err := a.closed(ctx, store); err != nil {
-			return exitError, err
-		}
-		l, err := a.loop(store, x, m, s.config, run.Budget)
-		if err == nil {
-			err = store.CreateRun(ctx, run, initial)
-		}
-		if err != nil {
-			return exitError, err
-		}
-		a.log.Info("created run", "run_id", run.ID, "workspace", a.workspace, "state", a.state)
-		snap, err := drive(l, run.ID)
-		done()
-		return a.report(snap, err, exitActive, s.config)
+		a.log.Info("created run", "run_id", ack.Run.ID, "workspace", a.workspace, "state", a.state)
+		snap, err := drive(h, ack.Run.ID, b)
+		h.Close()
+		return a.report(snap, err, exitActive, ack.Config)
 	}
+}
+
+// submitCode is the exit status of a submission that err refused: usage for
+// a task or configuration no run can be created from.
+func submitCode(err error) int {
+	if errors.As(err, new(host.SpecError)) {
+		return exitUsage
+	}
+	return exitError
 }
 
 func checkTask(label, goal, constraints string) error {
@@ -323,28 +342,51 @@ func resumeCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	once := fs.Bool("once", false, "perform exactly one step")
 	url := modelURL(fs)
+	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
-		if a.credErr != nil {
+		if err := a.checkHostMode(); err != nil {
+			return exitUsage, err
+		}
+		if a.credErr != nil && !a.remoteMode() {
 			return exitError, a.credErr
+		}
+		if a.remoteMode() {
+			return a.remoteRun(ctx, true, exitActive, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+				return a.remoteResume(ctx, c, r, *url, *once)
+			})
 		}
 		drive, release := a.drive(ctx, *once)
 		defer release()
-		model := func(c config) (harness.Model, error) { return newModel(c, *url, a.cred) }
-		return a.with(ctx, model, true, exitActive, drive)
+		return a.with(ctx, true, exitActive, func(h *host.Host, run harness.Run, c host.RunConfig) (harness.Snapshot, error) {
+			return drive(h, run.ID, a.binding(c.API, *url))
+		})
 	}
 }
 
 func stopCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	cleanup := fs.Duration("cleanup", stopCleanup, "`deadline` for cancelling the job and recording its result")
+	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
 		if *cleanup <= 0 {
 			return exitUsage, errors.New("-cleanup must be positive")
 		}
+		if err := a.checkHostMode(); err != nil {
+			return exitUsage, err
+		}
+		if a.remoteMode() {
+			return a.remoteRun(ctx, false, exitActive, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+				v, err := c.Stop(ctx, r.RunID, *cleanup)
+				if err != nil {
+					err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\", with a longer -cleanup if the job wrote a large output", r.RunID, err)
+				}
+				return a.remoteReport(v, err)
+			})
+		}
 		ctx, cancel := context.WithTimeout(ctx, *cleanup)
 		defer cancel()
-		return a.with(ctx, withoutModel, false, exitActive, func(l *harness.Loop, id string) (harness.Snapshot, error) {
-			return stop(ctx, l, id)
+		return a.with(ctx, false, exitActive, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
+			return stop(ctx, h, run.ID)
 		})
 	}
 }
@@ -357,7 +399,11 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 	execution := fs.String("execution", "", "record a confirmed outcome `state`: exited, failed_to_start, cancelled, or timed_out")
 	exitCode := fs.Int("exit-code", 0, "exit `code` of an exited effect; required for exited only")
 	note := fs.String("note", "", "operator `text` recorded as the output preview")
+	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
+		if err := a.checkHostMode(); err != nil {
+			return exitUsage, err
+		}
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		obs := harness.Observation{Execution: core.ExecutionState(*execution), Preview: *note, Output: harness.ArtifactRef{Detail: "resolved by operator"}}
@@ -376,11 +422,23 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 		if set["exit-code"] {
 			obs.ExitCode = exitCode
 		}
-		return a.with(ctx, withoutModel, false, exitOK, func(l *harness.Loop, id string) (harness.Snapshot, error) {
+		if a.remoteMode() {
+			return a.remoteRun(ctx, false, exitOK, func(c *hostrpc.Client, r hostrpc.Run) (int, error) {
+				v, err := c.Resolve(ctx, r.RunID, hostrpc.ResolutionOf(*job, obs))
+				if *job && err != nil && strings.Contains(err.Error(), harness.ErrJobUnknown.Error()) {
+					err = fmt.Errorf("%w; recording the job cannot resolve effect %s: inspect it, as with \"docker logs canti-%[2]s\", "+
+						"then record its outcome with \"canti resolve -run %s -execution STATE\"", err, v.EffectID, r.RunID)
+				}
+				code, rerr := a.remoteReport(v, err)
+				return cmpCode(code, exitOK), rerr
+			})
+		}
+		return a.with(ctx, false, exitOK, func(h *host.Host, run harness.Run, _ host.RunConfig) (harness.Snapshot, error) {
+			id := run.ID
 			if !*job {
-				return l.Resolve(ctx, id, obs)
+				return h.Resolve(ctx, id, obs)
 			}
-			snap, err := l.ResolveJob(ctx, id)
+			snap, err := h.ResolveJob(ctx, id)
 			if errors.Is(err, harness.ErrJobUnknown) {
 				err = fmt.Errorf("%w; recording the job cannot resolve effect %s: inspect it, as with \"docker logs canti-%[2]s\", "+
 					"then record its outcome with \"canti resolve -run %s -execution STATE\"", err, snap.State.EffectID, id)
@@ -390,161 +448,61 @@ func resolveCommand(fs *flag.FlagSet, a *app) action {
 	}
 }
 
-// open opens the workspace journal, holding the workspace lock until done.
-// Unless create is set, a missing journal is an error.
-func (a *app) open(ctx context.Context, create bool) (*sqlite.Store, func(), error) {
-	path := filepath.Join(a.state, "canti.db")
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && !create {
-		return nil, nil, fmt.Errorf("no runs in workspace %s", a.workspace)
-	}
-	f, err := os.OpenFile(filepath.Join(a.state, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			err = fmt.Errorf("workspace %s is %w", a.workspace, errLocked)
-		}
-		return nil, nil, err
-	}
-	store, err := sqlite.Open(ctx, path)
-	if err != nil {
-		f.Close()
-		return nil, nil, err
-	}
-	return store, sync.OnceFunc(func() { store.Close(); f.Close() }), nil
+// openHost opens the host of the state directory, holding its lock until it
+// is closed. Unless create is set, a missing journal is an error.
+func (a *app) openHost(ctx context.Context, create bool) (*host.Host, error) {
+	return host.Open(ctx, host.Options{Workspace: a.workspace, State: a.state, Logger: a.log, WrapJournal: wrapJournal, Checkpoint: checkpoint,
+		Credentials: a.bound}, create)
 }
 
-// find returns the selected run and its stored config.
-func (a *app) find(ctx context.Context, store *sqlite.Store) (harness.Run, config, error) {
-	var run harness.Run
-	var err error
-	if a.runID != "" {
-		if run, err = store.Run(ctx, a.runID); errors.Is(err, harness.ErrNotFound) {
-			err = fmt.Errorf("run %q not found in workspace %s", a.runID, a.workspace)
-		}
-	} else if run, err = store.LastRun(ctx); errors.Is(err, harness.ErrNotFound) {
-		err = fmt.Errorf("no runs in workspace %s", a.workspace)
-	}
-	if err != nil {
-		return run, config{}, err
-	}
-	c, err := decodeConfig(run, a.workspace)
-	return run, c, err
+// binding is what a run of model API api is driven with: the provider url
+// names, else the API's base URL variable for a run that stores none, and
+// the keys of this process.
+func (a *app) binding(api, url string) host.Binding {
+	return host.Binding{Provider: url, Fallback: baseURL(api), Keys: a.cred}
 }
 
-// closed fails unless the latest run of the state directory, if any, is
-// closed and its step records are published.
-func (a *app) closed(ctx context.Context, store *sqlite.Store) error {
-	last, err := store.LastRun(ctx)
-	if errors.Is(err, harness.ErrNotFound) {
-		return nil
+// baseURL is the value of the base URL variable of model API api.
+func baseURL(api string) string {
+	if variable := map[string]string{host.APIMessages: "ANTHROPIC_BASE_URL", host.APIResponses: "OPENAI_BASE_URL"}[api]; variable != "" {
+		return os.Getenv(variable)
 	}
-	var snap harness.Snapshot
-	var c config
-	if err == nil {
-		c, err = decodeConfig(last, a.workspace)
-	}
-	if err == nil {
-		snap, err = store.Latest(ctx, last.ID)
-	}
-	switch p := snap.State.Phase; {
-	case err != nil:
-		return err
-	case snap.State.Closed():
-		if err := store.CheckAdmission(ctx); err != nil {
-			return err
-		}
-		if err := harness.PublishHistory(ctx, store, historyRoot(a.state), last.ID); err != nil {
-			return fmt.Errorf("publishing the step records of run %s: %w", last.ID, err)
-		}
-		return nil
-	case p == core.PhaseNeedsResolution:
-		return fmt.Errorf("run %s needs resolution: resolve it first", last.ID)
-	}
-	next := "resume or stop"
-	if c.ContextVersion != contextVersion {
-		next = "stop"
-	}
-	return fmt.Errorf("run %s is %s: %s it first", last.ID, snap.State.Phase, next)
+	return ""
 }
 
-// halted returns the snapshot of run id, of config c of another context
-// version, once it has halted, and otherwise fails naming how to close it:
-// this binary renders the context of contextVersion only.
-func halted(ctx context.Context, store *sqlite.Store, id string, c config) (harness.Snapshot, error) {
-	snap, err := store.Latest(ctx, id)
-	if err == nil {
-		err = snap.Validate()
-	}
-	if err == nil && snap.State.Intent() != core.IntentHalt {
-		err = fmt.Errorf("run %s is %s and %s", id, snap.State.Phase, unresumable(id, c))
-	}
-	return snap, err
-}
-
-func (a *app) loop(j harness.Journal, x harness.Executor, m harness.Model, c config, b harness.Budget) (*harness.Loop, error) {
-	j = wrapJournal(j)
-	if a.steps != nil {
-		j = rendering{j, a.steps}
-	}
-	cfg := contextConfig(c, b)
-	cfg.History, cfg.Logger = historyRoot(a.state), a.log
-	cfg.Reader.History, cfg.Reader.Artifacts = cfg.History, filepath.Join(a.state, "artifacts")
-	return harness.NewLoop(j, x, m, cfg)
-}
-
-// with locks the workspace, rebuilds the loop of the selected run from its
-// stored config and the model that model builds from it, and reports what op
-// does with the loop. With resume, a run of another context version is only
-// reported once it has halted and refused before that. Without resume, op
-// renders no request, so the loop ignores the context settings of the run,
-// which another version may have stored.
-func (a *app) with(ctx context.Context, model func(config) (harness.Model, error), resume bool, active int, op func(*harness.Loop, string) (harness.Snapshot, error)) (int, error) {
-	store, done, err := a.open(ctx, false)
+// with locks the workspace, finds the selected run, and reports what op
+// does with it. With resume, a run of another context version is only
+// reported once it has halted and refused before that.
+func (a *app) with(ctx context.Context, resume bool, active int, op func(*host.Host, harness.Run, host.RunConfig) (harness.Snapshot, error)) (int, error) {
+	h, err := a.openHost(ctx, false)
 	if err != nil {
 		return exitError, err
 	}
-	defer done()
-	run, c, err := a.find(ctx, store)
-	if err == nil && resume && c.ContextVersion != contextVersion {
+	defer h.Close()
+	run, c, err := h.Find(ctx, a.runID)
+	if err == nil && resume && c.ContextVersion != host.ContextVersion {
 		var snap harness.Snapshot
-		if snap, err = halted(ctx, store, run.ID, c); err == nil {
-			done()
+		if snap, err = h.Halted(ctx, run.ID, c); err == nil {
+			h.Close()
 			return a.report(snap, nil, active, c)
 		}
 	}
-	loop := c
-	if !resume {
-		loop.ContextBytes, loop.HandoverBytes, loop.WindowSteps, loop.WindowBytes = harness.DefaultPromptLimits().Total, 0, 0, 0
-	}
-	var m harness.Model
-	var x *docker.Executor
-	var l *harness.Loop
-	if err == nil {
-		m, err = model(c)
-	}
-	if err == nil {
-		x, err = newExecutor(c, a.state)
-	}
-	if err == nil {
-		l, err = a.loop(store, x, m, loop, run.Budget)
-	}
 	if err != nil {
 		return exitError, err
 	}
-	snap, err := op(l, run.ID)
-	done()
+	snap, err := op(h, run, c)
+	h.Close()
 	return a.report(snap, err, active, c)
 }
 
-// drive catches SIGINT and SIGTERM until release and returns op, which runs
-// the loop, or one step of it with once. The first signal, also one caught
-// before op, shuts the controller down and then stops the run persistently
-// within the cleanup deadline; the second abandons the cleanup. release
-// records in a.signal SIGTERM if it was caught, else the first signal.
-func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, string) (harness.Snapshot, error), release func()) {
+// drive catches SIGINT and SIGTERM until release and returns op, which drives
+// the run through its host to a halt, or one step with once. The first
+// signal, also one caught before op, shuts the run's controller down and
+// then stops the run persistently within the cleanup deadline; the second
+// abandons the cleanup. release records in a.signal SIGTERM if it was
+// caught, else the first signal. While op drives, a.steps shows the run's
+// progress, read from the journal, never from the commit path.
+func (a *app) drive(ctx context.Context, once bool) (op func(*host.Host, string, host.Binding) (harness.Snapshot, error), release func()) {
 	c := a.stopControl()
 	loopCtx, shutdown := context.WithCancel(ctx)
 	cleanupCtx, abandon := context.WithCancel(context.WithoutCancel(ctx))
@@ -555,19 +513,32 @@ func (a *app) drive(ctx context.Context, once bool) (op func(*harness.Loop, stri
 		defer close(handled)
 		c.watch(cleanupCtx.Done(), startWatch)
 	}()
-	op = func(l *harness.Loop, id string) (harness.Snapshot, error) {
+	op = func(h *host.Host, id string, b host.Binding) (harness.Snapshot, error) {
 		startWatch <- c.pending()
-		step := l.Run
-		if once {
-			step = l.Step
+		f, err := a.follow(h, id)
+		if err != nil {
+			return harness.Snapshot{}, err
 		}
-		snap, err := step(loopCtx, id)
-		if loopCtx.Err() == nil || ctx.Err() != nil {
-			return snap, err
+		defer f.finish()
+		if loopCtx.Err() == nil {
+			d, err := h.Drive(loopCtx, id, b, host.DriveOptions{Once: once})
+			if err != nil {
+				return harness.Snapshot{}, err
+			}
+			f.start()
+			select {
+			case <-d.Done():
+				return d.Result()
+			case <-loopCtx.Done():
+			}
+			if ctx.Err() != nil {
+				h.Interrupt(id)
+				return d.Result()
+			}
 		}
 		cleanup, cancel := context.WithTimeout(cleanupCtx, stopCleanup)
 		defer cancel()
-		return stop(cleanup, l, id)
+		return stop(cleanup, h, id)
 	}
 	return op, func() {
 		abandon()
@@ -646,8 +617,8 @@ func (a *app) record(signals chan os.Signal) {
 	}
 }
 
-func stop(ctx context.Context, l *harness.Loop, id string) (harness.Snapshot, error) {
-	snap, err := l.Stop(ctx, id, core.StopCancelled)
+func stop(ctx context.Context, h *host.Host, id string) (harness.Snapshot, error) {
+	snap, err := h.Stop(ctx, id)
 	if err != nil {
 		err = fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\", with a longer -cleanup if the job wrote a large output", id, err)
 	}

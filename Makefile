@@ -33,6 +33,7 @@ PTY_TESTS = \
 	TestChatPTYEndsWithUsageWhenNoInputFits \
 	TestChatPTYExitPreservesCompleteTranscript \
 	TestChatPTYHangupCancelsTheDockerJob \
+	TestChatPTYHangupDetachesFromAHostProcess \
 	TestChatPTYHangupStopsTheActiveRun \
 	TestChatPTYInterruptsDockerJobAndKeepsSession \
 	TestChatPTYResolutionGuidanceSurvivesAltScreen \

@@ -109,16 +109,22 @@ A run names its model API with `-api`, `anthropic-messages` or
 `-api openai-completions` is refused. `run`, `chat`, and `resume` read the
 credential of the run's API, `ANTHROPIC_API_KEY` or else
 `ANTHROPIC_AUTH_TOKEN` for `anthropic-messages` and `OPENAI_API_KEY` for
-`openai-responses`, and the API base URL from `-model-url`, or else
-`ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, or else the API's public endpoint;
-neither is saved with the run, and the URL must use `https` unless it is a
-loopback address. Every command removes all three credential variables from
+`openai-responses`. A new run stores its provider, the API base URL from
+`-model-url`, or else `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, or else the
+API's public endpoint; the URL must use `https` unless it is a loopback
+address and hold no user information, query, or fragment. A later command
+drives the run against the stored provider only. A credential is bound to
+the exact provider its command resolves, from `-model-url`, the base URL
+variable, or the default, so a command whose resolution names another
+provider than the run stores is refused before any request, and its key is
+never sent; a run stored before runs kept their provider takes the
+command's, as `run` does. The credential is never saved. Every command removes all three credential variables from
 its environment before it starts a process. `-effort` takes a level of the
 run's API and is sent only when set; `-fallbacks` requires
 `anthropic-messages`. The goal, constraints, and the image, limit, model,
 prompt, and budget flags of
 `run` are stored with the run and reused by every later command; `-once`,
-`-model-url`, `-state`, and `-log-level` apply to one invocation, and
+`-state`, and `-log-level` apply to one invocation, and
 `-workspace` must name the run's workspace. Defaults: image
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, 16,000 output tokens per
@@ -128,6 +134,13 @@ constraints, and the reserves for one more step and a failed handover, about
 68 KiB with a short goal and the default handover; `run` refuses a smaller
 value with the total it needs), 20 steps, 3 attempts per step, 30 min wall
 time, no token budget, 256 MiB of output per run, and 10 min per job.
+
+`run -input ID` names the submission: a later `run` with the same input ID,
+within its `-session` if one is given and otherwise among standalone inputs,
+names the same run instead of creating another, reporting it as it stands,
+and fails when the goal or the constraints differ. A run without `-input`
+always creates new work. Use the same ID to retry a submission whose outcome
+was lost.
 
 `chat` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
 accepted input becomes the next run of one serial session. `-session ID`
@@ -154,6 +167,54 @@ not preserve a complete native terminal or tmux scrollback. Use `canti history`
 for a run's full recorded transitions. Display history is separate from the
 session context supplied to the model; the next input still receives earlier
 dialogue as far as it fits `-context-bytes`.
+
+**Host process.** `run`, `chat`, `resume`, `stop`, and `resolve` drive the
+run through the host process that serves the state directory (`-host auto`,
+the default), which keeps driving it when the command ends; `-host embedded`
+drives it in the command's own process instead, which the signal rules of
+the run then end with the command. The tests pin `-host embedded` for every
+command that names no `-host`. A client that finds no host and an unlocked
+state directory starts `canti host` in a session of
+its own, with no credential in its environment and logging to `host.log` in
+the state directory, and waits up to `-host-wait` (10 s) for it to serve; it
+refuses a host of another protocol version, naming its process and how to
+stop it, the canti that started it or SIGTERM, since it is never replaced
+while it may drive a run, and exits with status 6 when an
+embedded command holds the state directory. An autostarted host exits after
+10 minutes without clients or drives; `canti host` in a terminal serves
+until a signal or `canti host -stop`. A client gives the host the key of its
+run's API with each submission or resume, and the host keeps it only while it
+drives that run. A `canti host` started in a terminal binds each key of its
+own environment to the provider its base URL variable names, or the
+default, prints each pair without the key, and drives with it a run of that
+exact pair whose client gives no key; when it starts it continues the open
+run it can continue by itself, as it finishes a pending stop. A host that a
+client starts holds no key. `run` without `-input` names its submission with a new
+input ID, which it prints, and sends it again while an answer is lost, to a
+new host if the old one went away; when the answer then names the run its
+lost attempt admitted, it drives that run, once, and follows it. `-input ID`
+retries it later, reporting the run as it is. A client that arrives while a
+host exits waits for it and starts the next one. Without a key for the run's
+API, a client with `-host auto` may still submit or resume a run whose API
+and provider the serving host holds a credential for. An attached client's first signal stops the run, the
+host bounding the cleanup; a second signal, or the end of the client,
+detaches: the host keeps driving the run, which `resume -host auto` follows
+again. The socket path must fit a Unix socket, 107 bytes.
+
+A host process runs the `docker` CLI with the environment it started in,
+for its whole lifetime: `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+`DOCKER_DEFAULT_PLATFORM`, and the `PATH` it finds `docker` and its
+credential helpers on. An autostarted host has the environment of the
+client that started it, without its credential variables. A later client's
+environment does not rebind a running host. Only the environment is fixed:
+the CLI still reads its context and configuration files, and resolves its
+binaries and helpers, on each call, so a change to those files or to the
+binaries on that `PATH` reaches the host's next call. To use another Docker
+environment, stop the host once it drives nothing, with `canti host -stop`
+or SIGTERM to the process it reports, and run the next command from that
+environment, which starts a new host; or run the command with
+`-host embedded`, which uses its own environment. The model provider is not
+resolved this way: each run stores its own.
 
 **Pipe or file input (non-TTY):** inputs are read one line at a time, or as a
 block after `<<WORD` or `<<'WORD'`, ending at a line exactly equal to `WORD`.
@@ -213,7 +274,11 @@ windows, and with failing cases fed back they took three to six times the steps
 of capacity-triggered runs, so keep zero for long work.
 `-handover-bytes` bounds the continuation text (2048 bytes by default).
 History retrieval is always available; `-history-imports` adds a read-only
-archive. Workspace notes are ordinary files and are not automatically read.
+archive, a directory named relative to the command's working directory and
+stored canonical. A new run needs it to exist; a retry of an input names its
+admitted run even after the directory is gone, and names `history_imports`
+among its differences when it names another one. Workspace notes are
+ordinary files and are not automatically read.
 
 Each run stores the context version of the canti that created it, which names
 the rules that render and account for its prompts. `resume` refuses an open
@@ -225,6 +290,18 @@ unless the run ended with an outcome resolved as unknown, which keeps blocking
 them. A later run of its session still quotes its dialogue. A run whose stored
 configuration this canti cannot decode is refused by every command and
 requires a fresh state directory.
+
+A state directory written by the canti before the runtime host (the C1
+action contracts) keeps schema version 2. Reading it, resuming a run that has
+halted, and stopping or resolving one change nothing that canti cannot read,
+and it keeps reading and writing the directory; resuming one of its open
+runs writes rows it still reads. Its upgrade point is the
+first run this canti creates, which stores its provider: from then on the
+earlier canti refuses every command on the directory, as an unreadable config,
+and writes nothing, so it can never admit a run beside a keyed input.
+Standalone input IDs are keys of `session_runs` under the empty session ID,
+which the earlier canti neither writes nor reads, so no schema version
+changes.
 
 A CLI check without Docker or credentials proves only that the command builds
 and parses its arguments; the integration tests drive real runs with a

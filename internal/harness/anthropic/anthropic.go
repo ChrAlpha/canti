@@ -33,6 +33,9 @@ const (
 	decisionToolChoice = `{"type":"auto","disable_parallel_tool_use":true}`
 )
 
+// DefaultBaseURL is the base URL of a Config that names none.
+const DefaultBaseURL = "https://api.anthropic.com"
+
 // Efforts lists the output_config effort levels a Config may name.
 var Efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
@@ -81,7 +84,7 @@ func New(cfg Config) (*Model, error) {
 		return nil, fmt.Errorf("anthropic: unsupported decision format %q", cfg.DecisionFormat)
 	}
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.anthropic.com"
+		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = 16000

@@ -5,25 +5,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func TestRunRejectsContextWithoutRoomForMaximumHandover(t *testing.T) {
 	s := runSpec(t, "-context-bytes", "65536", "-handover-bytes", "8192", "-window-steps", "1")
-	if _, _, err := newRun(strings.Repeat("g", 23000), "", s, time.Now()); err == nil {
+	if _, _, err := host.NewRun(strings.Repeat("g", 23000), "", s, time.Now()); err == nil {
 		t.Fatal("accepted a run whose next window cannot accommodate a legal handover")
 	}
 }
 
 func TestRunRejectsContextWithoutRetrievalReserve(t *testing.T) {
 	s := runSpec(t, "-context-bytes", "65536")
-	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err == nil || !strings.Contains(err.Error(), "handover reserve") {
+	if _, _, err := host.NewRun("Complete the task", "Preserve evidence", s, time.Now()); err == nil || !strings.Contains(err.Error(), "handover reserve") {
 		t.Fatalf("accepted context without room for a full retrieval and handover: %v", err)
 	}
 }
 
 func TestRunAcceptsDefaultHandoverWithRetrievalReserve(t *testing.T) {
 	s := runSpec(t, "-context-bytes", "98304")
-	if _, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now()); err != nil {
+	if _, _, err := host.NewRun("Complete the task", "Preserve evidence", s, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -37,7 +39,7 @@ func TestRunNamesTheContextItRequires(t *testing.T) {
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192", "-history-imports", imports}} {
 		create := func(n int) error {
 			s := runSpec(t, append([]string{"-context-bytes", strconv.Itoa(n)}, flags...)...)
-			_, _, err := newRun("Complete the task", "Preserve evidence", s, time.Now())
+			_, _, err := host.NewRun("Complete the task", "Preserve evidence", s, time.Now())
 			return err
 		}
 		refused, admitted := 1, 1<<20

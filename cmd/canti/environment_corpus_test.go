@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 // TestDefaultEnvironmentMatchesTheRequestCorpus reads the environment the
@@ -29,7 +31,7 @@ func TestDefaultEnvironmentMatchesTheRequestCorpus(t *testing.T) {
 		t.Fatalf("%s declares corpusEnvironment %d times", path, len(corpus))
 	}
 	s := runSpec(t)
-	if got := environment(s.config, s.budget); got != corpus[0] {
+	if got := host.Environment(s.Config, s.Budget); got != corpus[0] {
 		t.Errorf("default environment\n%s\ndiffers from the corpus environment\n%s", got, corpus[0])
 	}
 }
