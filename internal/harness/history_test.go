@@ -45,21 +45,28 @@ func seed(t *testing.T, f *fixture, r harness.Runner, d core.Decision, obs harne
 		return
 	}
 	a := harness.NormalizeAction(d.Payload, false, true)
-	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{Action: &a})
+	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{Action: &a, Execution: fixtureExecution(d.Payload)})
 	effect := snap.State.EffectID
-	commit(core.JobBound{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
-	commit(core.JobStarted{EffectID: effect, JobID: jobID(effect)}, harness.Facts{})
 	if resolved {
+		obs.Output = harness.ArtifactRef{Detail: "resolved by operator"}
+		if obs.Execution != core.ExecutionExited {
+			obs.ExitCode = nil
+		}
 		commit(core.OutcomeUnknown{EffectID: effect}, harness.Facts{Failure: "job lost"})
-		commit(core.Resolved{EffectID: effect, Execution: obs.Execution}, harness.Facts{Observation: &obs})
+		commit(core.Resolved{EffectID: effect, Execution: obs.Execution}, harness.Facts{Observation: &obs, Resolution: &harness.Resolution{Source: harness.ResolutionOperator, OwnerID: jobID(effect)}})
 		return
 	}
-	commit(core.Observed{EffectID: effect, Execution: obs.Execution}, harness.Facts{Observation: &obs})
+	if obs.Execution == core.ExecutionCancelled && obs.ExitCode == nil {
+		code := 143
+		obs.ExitCode = &code
+	}
+	receipt := fixtureReceipt(snap.State, obs)
+	commit(core.Observed{EffectID: effect, Execution: obs.Execution}, harness.Facts{Observation: &obs, Receipt: &receipt})
 }
 
 func runner(t *testing.T, f *fixture) harness.Runner {
 	t.Helper()
-	r, err := harness.NewRunner(f.store, f.exec)
+	r, err := harness.NewRunner(f.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +550,7 @@ func TestLoopFreezesNothingWhileStepRecordsCannotBePublished(t *testing.T) {
 		if names := stepNames(t, filepath.Join(f.cfg.History, runID)); len(names) != done/len(cycle) {
 			t.Fatalf("steps %v published before request %d", names, done/len(cycle)+1)
 		}
-		f.steps(l, 5)
+		f.steps(l, 3)
 	}
 }
 

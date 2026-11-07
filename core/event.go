@@ -77,19 +77,9 @@ type ResponseLoaded struct {
 	Body    []byte
 }
 
-// JobBound reports the backend job that owns the named effect. Binding
-// records identity only; it does not report or authorize execution.
-type JobBound struct {
-	EffectID string
-	JobID    string
-}
-
-// JobStarted reports that a start was issued for the bound job of the named
-// effect. From here on, side effects may exist.
-type JobStarted struct {
-	EffectID string
-	JobID    string
-}
+// EffectRecovered reports authoritative pending or running evidence for an
+// unresolved effect. Its receipt belongs to the harness, not core state.
+type EffectRecovered struct{ EffectID string }
 
 // Observed reports a known execution outcome of the named effect. Unknown
 // outcomes must use OutcomeUnknown so they cannot be mistaken for a completed
@@ -100,8 +90,7 @@ type Observed struct {
 }
 
 // Performed reports that the harness carried out the named effect itself,
-// with no backend job, and recorded its outcome. Only an effect that no job
-// owns can be performed, so a local completion never displaces a job.
+// with no backend job, and recorded its outcome. The harness validates the accepted recovery contract before committing it.
 type Performed struct{ EffectID string }
 
 // OutcomeUnknown reports that the named effect's fate could not be determined.
@@ -110,7 +99,7 @@ type OutcomeUnknown struct{ EffectID string }
 // StopRequested asks the run to stop for a reason the harness observed.
 type StopRequested struct{ Reason StopReason }
 
-// Resolved records an explicit human resolution of the named effect's unknown
+// Resolved records an inspected or operator resolution of the named effect's unknown
 // outcome. Resolving to ExecutionUnknown abandons the run and preserves the
 // uncertainty instead of fabricating an outcome.
 type Resolved struct {
@@ -123,8 +112,7 @@ func (AttemptStarted) event()     {}
 func (ResponseSaved) event()      {}
 func (ResponseIncomplete) event() {}
 func (ResponseLoaded) event()     {}
-func (JobBound) event()           {}
-func (JobStarted) event()         {}
+func (EffectRecovered) event()    {}
 func (Observed) event()           {}
 func (Performed) event()          {}
 func (OutcomeUnknown) event()     {}
@@ -136,8 +124,7 @@ func (AttemptStarted) Kind() string     { return "attempt_started" }
 func (ResponseSaved) Kind() string      { return "response_saved" }
 func (ResponseIncomplete) Kind() string { return "response_incomplete" }
 func (ResponseLoaded) Kind() string     { return "response_loaded" }
-func (JobBound) Kind() string           { return "job_bound" }
-func (JobStarted) Kind() string         { return "job_started" }
+func (EffectRecovered) Kind() string    { return "effect_recovered" }
 func (Observed) Kind() string           { return "observed" }
 func (Performed) Kind() string          { return "performed" }
 func (OutcomeUnknown) Kind() string     { return "outcome_unknown" }
@@ -148,7 +135,7 @@ func (Resolved) Kind() string           { return "resolved" }
 func Events() []Event {
 	return []Event{
 		RequestFrozen{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
-		ResponseLoaded{}, JobBound{}, JobStarted{}, Observed{}, Performed{},
+		ResponseLoaded{}, EffectRecovered{}, Observed{}, Performed{},
 		OutcomeUnknown{}, StopRequested{}, Resolved{},
 	}
 }

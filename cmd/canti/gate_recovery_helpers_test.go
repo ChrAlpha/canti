@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -66,28 +68,88 @@ func effectContainers(t *testing.T, state string) []effectContainer {
 	return cs
 }
 
-// boundJobs maps every effect of h to the one job its job_bound transitions
-// name.
+// boundJobs maps receipt evidence to the single physical owner of each effect.
 func boundJobs(t *testing.T, h []entry) map[string]string {
 	t.Helper()
 	jobs := map[string]string{}
 	for _, e := range h {
-		if e.Kind != "job_bound" {
+		r := e.Facts.Receipt
+		if r == nil {
 			continue
 		}
-		if job, ok := jobs[e.State.EffectID]; ok && job != e.State.JobID {
-			t.Errorf("effect %s is bound to jobs %s and %s", e.State.EffectID, job, e.State.JobID)
+		if old := jobs[r.EffectID]; old != "" && old != r.ID {
+			t.Errorf("effect %s changed owner from %s to %s", r.EffectID, old, r.ID)
 		}
-		jobs[e.State.EffectID] = e.State.JobID
+		jobs[r.EffectID] = r.ID
 	}
 	return jobs
+}
+
+// effectOwner reads the executor's durable binding, independently of Run state.
+func effectOwner(t *testing.T, f *fixture, effect string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.state, "jobs", effect, "binding.json"))
+	var binding struct {
+		Format                          int
+		EffectID, Spec, CommandHash, ID string
+	}
+	if err == nil {
+		err = strict(string(data), &binding)
+	}
+	if err != nil || binding.Format != 2 || binding.EffectID != effect || binding.ID == "" {
+		t.Fatalf("binding for %s: %+v, %v", effect, binding, err)
+	}
+	return binding.ID
+}
+
+// init injects a crash only after Docker confirms the bound owner is running.
+// The observer lives in the actual controller process, including an auto host.
+func init() {
+	if os.Getenv("CANTI_TEST_MAIN") != "1" || os.Getenv("CANTI_TEST_EXECUTOR_CRASH") != "running" {
+		return
+	}
+	// Auto clients observe the host; only the process owning the drive dies.
+	if len(os.Args) > 1 && os.Args[1] != "host" {
+		for i, arg := range os.Args {
+			if arg == "-host" && i+1 < len(os.Args) && os.Args[i+1] == "auto" {
+				return
+			}
+		}
+	}
+	state := ""
+	for i, arg := range os.Args {
+		if arg == "-state" && i+1 < len(os.Args) {
+			state = os.Args[i+1]
+		}
+	}
+	if state == "" {
+		return
+	}
+	go func() {
+		for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			paths, _ := filepath.Glob(filepath.Join(state, "jobs", "*", "binding.json"))
+			for _, path := range paths {
+				data, err := os.ReadFile(path)
+				var binding struct{ ID string }
+				if err != nil || json.Unmarshal(data, &binding) != nil || binding.ID == "" {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", binding.ID).Output()
+				cancel()
+				if err == nil && strings.TrimSpace(string(out)) == "true" {
+					kill()
+				}
+			}
+		}
+	}()
 }
 
 // jobRecord is the final record the executor publishes for the finished job
 // of an effect before it releases the job's container.
 type jobRecord struct {
 	harness.Job
-	Spec string
+	Format int
 }
 
 // readRecord returns the final record of effect, if it has one.
@@ -131,14 +193,13 @@ func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
 		t.Errorf("containers left = %+v, want every finished job released", cs)
 	}
 	jobs, observed := boundJobs(t, h), map[string]*harness.Observation{}
+	receipts := map[string]*harness.Job{}
 	for _, e := range h {
 		switch e.Kind {
-		case "job_started":
-			if s := evEvent[core.JobStarted](t, e); s.JobID != jobs[s.EffectID] {
-				t.Errorf("effect %s started job %s, bound %s", s.EffectID, s.JobID, jobs[s.EffectID])
-			}
 		case "observed":
-			observed[evEvent[core.Observed](t, e).EffectID] = e.Facts.Observation
+			effect := evEvent[core.Observed](t, e).EffectID
+			observed[effect] = e.Facts.Observation
+			receipts[effect] = e.Facts.Receipt
 		}
 	}
 	if got, want := records(t, f), slices.Sorted(maps.Keys(jobs)); !slices.Equal(got, want) {
@@ -160,7 +221,7 @@ func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
 			}
 		}
 		want := harness.Observation{Execution: obs.Execution, ExitCode: rec.ExitCode, Preview: rec.Preview, Output: rec.Output}
-		if rec.ID != job || rec.Status != status || rec.ExitCode == nil || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt) ||
+		if rec.Format != 2 || rec.EffectID != effect || !reflect.DeepEqual(&rec.Job, receipts[effect]) || rec.ID != job || rec.Status != status || job != "" && (rec.ExitCode == nil || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt)) ||
 			!reflect.DeepEqual(*obs, want) {
 			t.Errorf("record of effect %s = %+v\nwant the finished job %s as observed: %+v", effect, rec, job, *obs)
 		}
@@ -240,8 +301,7 @@ func decodeEvent[E core.Event](raw string) (core.Event, error) {
 var eventDecoders = map[string]func(string) (core.Event, error){
 	"request_frozen": decodeEvent[core.RequestFrozen], "attempt_started": decodeEvent[core.AttemptStarted],
 	"response_saved": decodeEvent[core.ResponseSaved], "response_incomplete": decodeEvent[core.ResponseIncomplete],
-	"response_loaded": decodeEvent[core.ResponseLoaded], "job_bound": decodeEvent[core.JobBound],
-	"job_started": decodeEvent[core.JobStarted], "observed": decodeEvent[core.Observed], "performed": decodeEvent[core.Performed],
+	"response_loaded": decodeEvent[core.ResponseLoaded], "effect_recovered": decodeEvent[core.EffectRecovered], "observed": decodeEvent[core.Observed], "performed": decodeEvent[core.Performed],
 	"outcome_unknown": decodeEvent[core.OutcomeUnknown], "stop_requested": decodeEvent[core.StopRequested],
 	"resolved": decodeEvent[core.Resolved],
 }
@@ -284,7 +344,11 @@ func extends(h, prefix []entry) bool {
 // process died by SIGKILL.
 func crashRun(t *testing.T, f *fixture, crash, command string, args ...string) {
 	t.Helper()
-	cmd, wait := f.start([]string{"CANTI_TEST_CRASH=" + crash}, command, args...)
+	env := []string{"CANTI_TEST_CRASH=" + crash}
+	if crash == "executor:running" {
+		env = []string{"CANTI_TEST_EXECUTOR_CRASH=running"}
+	}
+	cmd, wait := f.start(env, command, args...)
 	if r := wait(); !killed(cmd) {
 		t.Fatalf("canti %s with %s = %d, not killed\nstdout: %s\nstderr: %s", command, crash, r.code, r.stdout, r.stderr)
 	}
@@ -313,13 +377,21 @@ func unavailableInspection(unavailable string) func(http.ResponseWriter, *http.R
 	}
 }
 
-// awaitPhase waits until the latest run of f reports phase.
-func awaitPhase(t *testing.T, f *fixture, phase core.Phase) {
+// awaitRunningEffect waits for both accepted Run state and a running physical owner.
+func awaitRunningEffect(t *testing.T, f *fixture) {
 	t.Helper()
 	waitFor(t, func() bool {
 		r := f.cli(nil, "status")
 		var s status
-		return r.code == exitOK && strict(r.stdout, &s) == nil && s.Phase == phase
+		if r.code != exitOK || strict(r.stdout, &s) != nil || s.Phase != core.PhaseEffectSaved {
+			return false
+		}
+		for _, c := range effectContainers(t, f.state) {
+			if c.effect == s.EffectID && c.state == "running" {
+				return true
+			}
+		}
+		return false
 	})
 }
 
@@ -342,8 +414,8 @@ func evidence(t *testing.T, gate, injected, image string, f *fixture, h []entry)
 	t.Helper()
 	var jobs []string
 	for _, e := range h {
-		if e.Kind == "job_bound" {
-			jobs = append(jobs, fmt.Sprintf("step%d:%s=%s", e.State.Step, e.State.EffectID, e.State.JobID))
+		if r := e.Facts.Receipt; r != nil {
+			jobs = append(jobs, fmt.Sprintf("step%d:%s=%s", e.State.Step, r.EffectID, r.ID))
 		}
 	}
 	last := h[len(h)-1]

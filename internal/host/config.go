@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,15 +47,9 @@ type RunConfig struct {
 	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
-// ActionsContextVersion is the first context version whose runs record
-// their actions. A host finishes by itself a pending stop of a run of it or
-// later, of any context version; it leaves one of an earlier version, whose
-// journal a commit of this canti upgrades, to an explicit stop.
-const ActionsContextVersion = 13
-
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 15
+const ContextVersion = 16
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -68,6 +63,9 @@ type Spec struct {
 // with its initial state.
 func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.Config, s.Budget
+	if c.ContextVersion != ContextVersion {
+		return harness.Run{}, core.State{}, fmt.Errorf("context version %d is unsupported; want %d", c.ContextVersion, ContextVersion)
+	}
 	switch {
 	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
 		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
@@ -150,8 +148,17 @@ func DecodeConfig(run harness.Run, workspace string) (RunConfig, error) {
 	if err := d.Decode(&c); err != nil {
 		return c, fmt.Errorf("run %s has an unreadable config: %w; runs of an earlier revision are not supported, so use a fresh -state", run.ID, err)
 	}
+	if _, err := d.Token(); err != io.EOF {
+		return c, fmt.Errorf("run %s has trailing configuration data; use fresh state", run.ID)
+	}
 	if c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool" {
 		return c, fmt.Errorf("run %s has an unsupported decision format %q", run.ID, c.DecisionFormat)
+	}
+	if c.ContextVersion != ContextVersion {
+		return c, fmt.Errorf("run %s uses unsupported context version %d; use fresh state", run.ID, c.ContextVersion)
+	}
+	if err := CheckProvider(c.Provider); err != nil {
+		return c, fmt.Errorf("run %s has invalid stored provider: %w", run.ID, err)
 	}
 	if c.Workspace != workspace {
 		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)
@@ -159,9 +166,8 @@ func DecodeConfig(run harness.Run, workspace string) (RunConfig, error) {
 	return c, nil
 }
 
-// Unresumable names, for run id of config c, why this binary does not
-// resume it and how to close it, unless c records contextVersion.
-func Unresumable(id string, c RunConfig) string {
+// Unresumable explains an unsupported context version and its remedy.
+func Unresumable(c RunConfig) string {
 	if c.ContextVersion == ContextVersion {
 		return ""
 	}
@@ -169,7 +175,7 @@ func Unresumable(id string, c RunConfig) string {
 	if c.ContextVersion != 0 {
 		stored = strconv.Itoa(c.ContextVersion)
 	}
-	return fmt.Sprintf("uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", stored, ContextVersion, id)
+	return fmt.Sprintf("uses context version %s, which this canti, of context version %d, does not support; use fresh state", stored, ContextVersion)
 }
 
 // PromptLimits are the prompt limits of a run of c.

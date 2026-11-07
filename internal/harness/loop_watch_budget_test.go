@@ -19,7 +19,7 @@ func TestLoopWatchPersistsWallTimeStopAfterInspectionFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{WallTime: time.Second}, execReply("sleep 600"))
 			f.cfg.InspectRetries = tc.retries
-			wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+			wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 			f.exec.inspect = func(string) (harness.Job, bool, error) {
 				f.clock.Advance(tc.delay)
 				return harness.Job{}, false, errors.New("daemon unavailable")
@@ -31,23 +31,23 @@ func TestLoopWatchPersistsWallTimeStopAfterInspectionFailure(t *testing.T) {
 			}
 			if snap.State.Phase != core.PhaseCancelling || snap.State.Reason != core.StopTimedOut {
 				t.Fatalf("after %d failed inspections at %v: state=%+v; want durable timed_out cancellation intent",
-					count(f.exec.log(), "inspect"), f.clock.Now().Sub(created), snap.State)
+					count(f.exec.log(), "drive"), f.clock.Now().Sub(created), snap.State)
 			}
 			if count(f.exec.log(), "cancel") != 0 {
 				t.Fatal("cancellation was dispatched before its intent was committed")
 			}
-			if calls := count(f.exec.log(), "inspect"); calls != tc.calls {
+			if calls := count(f.exec.log(), "drive"); calls != tc.calls {
 				t.Fatalf("inspected %d times, want %d before recording the timeout", calls, tc.calls)
 			}
 			f.wantKinds(running, []string{"stop_requested"})
-			wantContains(t, f.last().Facts.Failure, "wall-time budget", "daemon unavailable")
+			wantContains(t, f.last().Facts.Failure, "wall-time budget")
 			if err := f.store.Close(); err != nil {
 				t.Fatal(err)
 			}
 			f.store = f.open()
 			wantState(t, f.run(f.loop()), core.PhaseNeedsResolution, core.StopTimedOut)
 			f.wantKinds(running, []string{"stop_requested", "outcome_unknown"})
-			if count(f.exec.log(), "cancel") != 1 || count(f.exec.log(), "start") != 1 {
+			if count(f.exec.log(), "cancel") != f.cfg.InspectRetries+1 || count(f.exec.log(), "drive") < 1 {
 				t.Fatalf("executor calls after reopen = %v", f.exec.log())
 			}
 		})
@@ -62,7 +62,7 @@ func TestLoopWatchPreservesTerminalResultReturnedAfterWallTime(t *testing.T) {
 	}{{"succeeded", harness.JobSucceeded, 0}, {"failed", harness.JobFailed, 7}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{WallTime: time.Second}, execReply("make check"))
-			wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+			wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 			output := harness.ArtifactRef{Path: "result.log", Bytes: 12, Complete: true, Available: true}
 			f.exec.inspect = func(id string) (harness.Job, bool, error) {
 				f.clock.Advance(2 * time.Second)
@@ -83,7 +83,7 @@ func TestLoopWatchPreservesTerminalResultReturnedAfterWallTime(t *testing.T) {
 			}
 			wantState(t, f.run(f.fresh()), core.PhaseStopped, core.StopTimedOut)
 			f.wantKinds(cycle, []string{"stop_requested"})
-			if count(f.exec.log(), "cancel") != 0 || count(f.exec.log(), "inspect") != 1 {
+			if count(f.exec.log(), "cancel") != 0 || count(f.exec.log(), "drive") != 1 {
 				t.Fatalf("confirmed terminal job was cancelled or inspected again: %v", f.exec.log())
 			}
 			if _, sent := f.model.calls(); sent != 1 {
@@ -101,21 +101,21 @@ func TestLoopWatchIsolatesUnknownResultReturnedAfterWallTime(t *testing.T) {
 	}{
 		{"foreign job", func(string) (harness.Job, bool, error) {
 			code := 0
-			return harness.Job{ID: "foreign", Status: harness.JobSucceeded, ExitCode: &code}, true, nil
-		}, "not the recorded job"},
+			return harness.Job{EffectID: "foreign", ID: "foreign", Status: harness.JobSucceeded, ExitCode: &code}, true, nil
+		}, "accepted effect"},
 		{"lost job", func(string) (harness.Job, bool, error) {
 			return harness.Job{}, false, errors.Join(harness.ErrJobLost, errors.New("container removed"))
 		}, "container removed"},
 		{"missing job", func(string) (harness.Job, bool, error) {
 			return harness.Job{}, false, nil
-		}, "no job owns effect"},
+		}, "reports absent"},
 		{"unknown status", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobUnknown}, true, nil
 		}, "reports unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{WallTime: time.Second}, execReply("make check"))
-			wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+			wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 			f.exec.inspect = func(id string) (harness.Job, bool, error) {
 				f.clock.Advance(2 * time.Second)
 				return tc.inspect(id)
@@ -135,7 +135,7 @@ func TestLoopWatchIsolatesUnknownResultReturnedAfterWallTime(t *testing.T) {
 			if got := f.run(f.loop()); got != snap {
 				t.Fatalf("unknown outcome changed after reopen: got=%+v want=%+v", got, snap)
 			}
-			if calls := f.exec.log(); count(calls, "inspect") != 1 || count(calls, "cancel") != 0 || count(calls, "start") != 1 {
+			if calls := f.exec.log(); count(calls, "drive") != 1 || count(calls, "cancel") != 0 {
 				t.Fatalf("unknown job was inspected again, cancelled, or restarted: %v", calls)
 			}
 			if _, sent := f.model.calls(); sent != 1 {

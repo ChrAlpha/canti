@@ -12,19 +12,14 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 	for _, operation := range []string{"read", "list", "search", "discover", strings.Repeat("\"\\\n界", 1<<17)} {
-		for _, legacy := range []bool{false, true} {
+		{
 			r := harness.ContextRetrieval{Step: 7, Operation: operation, More: true, Incomplete: true}
-			if legacy {
-				r.Operation = ""
-				r.Query = &archive.RetrievalQuery{Operation: operation, Path: "/canti/imports/legacy", Reason: strings.Repeat("REASON", 1<<17)}
-			}
 			report := contextReport{RunID: "original-run", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Retrievals: []harness.ContextRetrieval{r}}}}
 			var out bytes.Buffer
 			if err := report.writeText(&out); err != nil {
@@ -35,7 +30,7 @@ func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 				want = "invalid"
 			}
 			if out.Len() > 1024 || !strings.Contains(out.String(), "Retrieval at step 7: "+want+"; original query in observation; more true; incomplete true") || strings.Contains(out.String(), "REASON") || strings.Contains(out.String(), "/canti/imports/legacy") {
-				t.Fatalf("legacy %t retrieval text = %q", legacy, out.String())
+				t.Fatalf("retrieval text = %q", out.String())
 			}
 		}
 	}
@@ -214,9 +209,7 @@ func TestContextTextPreservesStopReason(t *testing.T) {
 }
 
 // TestContextNamesTheDecoderOfTheRunsOwnRulesOnly requires that context
-// gives a rejected response the current decoder's diagnostic only for a run
-// of the current context version, whose rules include the decoder's
-// diagnostics; for a run of another version the rejection keeps no cause.
+// gives the current decoder diagnostic and refuses an unsupported run version.
 func TestContextNamesTheDecoderOfTheRunsOwnRulesOnly(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	f.model.answer(1, 1, reply{text: `{"kind":"exec","purpose":1,"payload":"true"}`})
@@ -243,7 +236,7 @@ func TestContextNamesTheDecoderOfTheRunsOwnRulesOnly(t *testing.T) {
 		t.Fatalf("current run: %+v", e)
 	}
 	setContextVersion(t, f.state, id, strconv.Itoa(host.ContextVersion-1))
-	if e := rejection(); e.Outcome != "protocol_rejected" || e.Failure != "" {
-		t.Fatalf("run of version %d: %+v", host.ContextVersion-1, e)
+	if r := f.cli(nil, "context", "-step", "1", "-revision", "1"); r.code != exitError || !strings.Contains(r.stderr, "unsupported context version") || !strings.Contains(r.stderr, "use fresh state") {
+		t.Fatalf("unsupported context: %+v", r)
 	}
 }

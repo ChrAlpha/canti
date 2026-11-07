@@ -13,17 +13,15 @@ import (
 type Phase string
 
 const (
-	PhaseIdle                Phase = "idle"
-	PhaseRequestFrozen       Phase = "request_frozen"
-	PhaseRequestSent         Phase = "request_sent"
-	PhaseResponseSaved       Phase = "response_saved"
-	PhaseEffectSaved         Phase = "effect_saved"
-	PhaseJobBound            Phase = "job_bound"
-	PhaseAwaitingObservation Phase = "awaiting_observation"
-	PhaseCancelling          Phase = "cancelling"
-	PhaseReturned            Phase = "returned"
-	PhaseNeedsResolution     Phase = "needs_resolution"
-	PhaseStopped             Phase = "stopped"
+	PhaseIdle            Phase = "idle"
+	PhaseRequestFrozen   Phase = "request_frozen"
+	PhaseRequestSent     Phase = "request_sent"
+	PhaseResponseSaved   Phase = "response_saved"
+	PhaseEffectSaved     Phase = "effect_saved"
+	PhaseCancelling      Phase = "cancelling"
+	PhaseReturned        Phase = "returned"
+	PhaseNeedsResolution Phase = "needs_resolution"
+	PhaseStopped         Phase = "stopped"
 )
 
 // Intent is the single action the harness may take from a committed State.
@@ -33,9 +31,7 @@ const (
 	IntentPrepareRequest Intent = "prepare_request"
 	IntentSendRequest    Intent = "send_request"
 	IntentDecode         Intent = "decode"
-	IntentBind           Intent = "bind"
-	IntentStart          Intent = "start"
-	IntentInspect        Intent = "inspect"
+	IntentEffect         Intent = "effect"
 	IntentCancel         Intent = "cancel"
 	IntentHalt           Intent = "halt"
 )
@@ -57,8 +53,6 @@ type State struct {
 	Limits     Limits
 	Decision   Decision
 	EffectID   string
-	JobID      string
-	Started    bool
 	Reason     StopReason
 }
 
@@ -66,7 +60,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 4
+const SemanticsVersion = 5
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -80,39 +74,10 @@ var (
 	ErrInvalidState = errors.New("core: invalid state")
 )
 
-// KnownSemantics reports whether this package reads records of semantics
-// version: versions 1 to SemanticsVersion.
+// KnownSemantics rejects records outside the current fresh-state contract.
 func KnownSemantics(version int) error {
-	if version < 1 || version > SemanticsVersion {
-		return fmt.Errorf("core: semantics version %d, want 1 to %d", version, SemanticsVersion)
-	}
-	return nil
-}
-
-// Compatible reports whether s, committed under semantics version, keeps
-// its meaning under this package: version 1 had no unlimited steps and
-// versions before 3 no decision purpose.
-func Compatible(version int, s State) error {
-	if err := KnownSemantics(version); err != nil {
-		return err
-	}
-	switch {
-	case version == 1 && s.Limits.MaxSteps <= 0:
-		return errors.New("core: semantics version 1 requires positive max steps")
-	case version < 3 && s.Decision.Purpose != "":
-		return fmt.Errorf("core: semantics version %d has no decision purpose", version)
-	}
-	return nil
-}
-
-// CompatibleEvent reports whether event, committed under semantics version,
-// existed in it: Performed arrived with version 4.
-func CompatibleEvent(version int, event Event) error {
-	if err := KnownSemantics(version); err != nil {
-		return err
-	}
-	if _, ok := event.(Performed); ok && version < 4 {
-		return fmt.Errorf("core: semantics version %d has no %s event", version, event.Kind())
+	if version != SemanticsVersion {
+		return fmt.Errorf("core: semantics version %d, want %d; use fresh state", version, SemanticsVersion)
 	}
 	return nil
 }
@@ -142,11 +107,7 @@ func (s State) Intent() Intent {
 	case PhaseResponseSaved:
 		return IntentDecode
 	case PhaseEffectSaved:
-		return IntentBind
-	case PhaseJobBound:
-		return IntentStart
-	case PhaseAwaitingObservation:
-		return IntentInspect
+		return IntentEffect
 	case PhaseCancelling:
 		return IntentCancel
 	default:
@@ -192,10 +153,10 @@ func (s State) Validate() error {
 		if s.Phase != PhaseIdle && s.RequestRev < 1 {
 			return fail("a frozen request is required in phase %q", s.Phase)
 		}
-		if hasDecision || s.EffectID != "" || s.JobID != "" || s.Started || s.Reason != "" {
-			return fail("no decision, effect, job, start, or reason is allowed in phase %q", s.Phase)
+		if hasDecision || s.EffectID != "" || s.Reason != "" {
+			return fail("no decision, effect, or reason is allowed in phase %q", s.Phase)
 		}
-	case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling, PhaseNeedsResolution:
+	case PhaseEffectSaved, PhaseCancelling, PhaseNeedsResolution:
 		if s.RequestRev < 1 {
 			return fail("a frozen request is required in phase %q", s.Phase)
 		}
@@ -207,22 +168,6 @@ func (s State) Validate() error {
 		}
 		switch s.Phase {
 		case PhaseEffectSaved:
-			if s.JobID != "" {
-				return fail("no job is allowed before binding")
-			}
-			if s.Started {
-				return fail("no start is allowed before binding")
-			}
-			if s.Reason != "" {
-				return fail("no stop reason is allowed in phase %q", s.Phase)
-			}
-		case PhaseJobBound, PhaseAwaitingObservation:
-			if s.JobID == "" {
-				return fail("a bound job is required in phase %q", s.Phase)
-			}
-			if s.Started != (s.Phase == PhaseAwaitingObservation) {
-				return fail("phase %q contradicts the committed start", s.Phase)
-			}
 			if s.Reason != "" {
 				return fail("no stop reason is allowed in phase %q", s.Phase)
 			}
@@ -238,8 +183,8 @@ func (s State) Validate() error {
 		if s.Decision.Kind != Return {
 			return fail("a return decision is required in phase %q", s.Phase)
 		}
-		if s.EffectID != "" || s.JobID != "" || s.Started || s.Reason != "" {
-			return fail("no effect, job, start, or reason is allowed in phase %q", s.Phase)
+		if s.EffectID != "" || s.Reason != "" {
+			return fail("no effect or reason is allowed in phase %q", s.Phase)
 		}
 	case PhaseStopped:
 		if s.Reason == "" {
@@ -313,44 +258,21 @@ func (s State) Next(event Event) (State, error) {
 			}
 			return s.decide(e.Body), nil
 		}
-	case JobBound:
-		switch s.Phase {
-		case PhaseEffectSaved, PhaseCancelling, PhaseNeedsResolution:
-			if err := s.claimJob(e.EffectID, e.JobID); err != nil {
-				return s, err
-			}
-			s.JobID = e.JobID
-			switch s.Phase {
-			case PhaseEffectSaved:
-				s.Phase = PhaseJobBound
-			case PhaseNeedsResolution:
-				switch {
-				case s.Reason != "":
-					s.Phase = PhaseCancelling
-				case s.Started:
-					s.Phase = PhaseAwaitingObservation
-				default:
-					s.Phase = PhaseJobBound
-				}
-			}
-			return s, nil
-		}
-	case JobStarted:
-		if s.Phase == PhaseJobBound {
+	case EffectRecovered:
+		if s.Phase == PhaseNeedsResolution {
 			if err := s.claimEffect(e.EffectID); err != nil {
 				return s, err
 			}
-			if e.JobID != s.JobID {
-				return s, fmt.Errorf("%w: job %q is not the bound job %q", ErrInvalidEvent, e.JobID, s.JobID)
+			s.Phase = PhaseEffectSaved
+			if s.Reason != "" {
+				s.Phase = PhaseCancelling
 			}
-			s.Phase = PhaseAwaitingObservation
-			s.Started = true
 			return s, nil
 		}
 	case Observed:
 		switch s.Phase {
-		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
-			if err := s.claimObservation(e.EffectID, e.Execution); err != nil {
+		case PhaseEffectSaved, PhaseCancelling:
+			if err := s.claimEffect(e.EffectID); err != nil {
 				return s, err
 			}
 			if s.Phase == PhaseCancelling {
@@ -368,7 +290,7 @@ func (s State) Next(event Event) (State, error) {
 		}
 	case OutcomeUnknown:
 		switch s.Phase {
-		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation, PhaseCancelling:
+		case PhaseEffectSaved, PhaseCancelling:
 			if err := s.claimEffect(e.EffectID); err != nil {
 				return s, err
 			}
@@ -381,7 +303,7 @@ func (s State) Next(event Event) (State, error) {
 			s.Phase = PhaseStopped
 			s.Reason = e.Reason
 			return s, nil
-		case PhaseEffectSaved, PhaseJobBound, PhaseAwaitingObservation:
+		case PhaseEffectSaved:
 			s.Phase = PhaseCancelling
 			s.Reason = e.Reason
 			return s, nil
@@ -402,9 +324,6 @@ func (s State) Next(event Event) (State, error) {
 					s.Reason = StopUnresolved
 				}
 				return s, nil
-			}
-			if s.JobID == "" && (e.Execution == ExecutionExited || e.Execution == ExecutionTimedOut) {
-				return s, fmt.Errorf("%w: %s cannot be resolved without a bound job", ErrInvalidEvent, e.Execution)
 			}
 			if s.Reason != "" {
 				s.Phase = PhaseStopped
@@ -429,10 +348,10 @@ func validateEvent(event Event) error {
 		if len(e.Body) == 0 {
 			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
 		}
-	case JobBound:
-		return requireJobIdentity(e.EffectID, e.JobID)
-	case JobStarted:
-		return requireJobIdentity(e.EffectID, e.JobID)
+	case EffectRecovered:
+		if e.EffectID == "" {
+			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
+		}
 	case Observed:
 		if e.EffectID == "" {
 			return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
@@ -469,16 +388,6 @@ func validateEvent(event Event) error {
 	return nil
 }
 
-func requireJobIdentity(effectID, jobID string) error {
-	if effectID == "" {
-		return fmt.Errorf("%w: effect ID is required", ErrInvalidEvent)
-	}
-	if jobID == "" {
-		return fmt.Errorf("%w: job ID is required", ErrInvalidEvent)
-	}
-	return nil
-}
-
 func (s State) claimStep(step int) error {
 	if step != s.Step {
 		return fmt.Errorf("%w: step %d does not match current step %d", ErrInvalidEvent, step, s.Step)
@@ -501,33 +410,6 @@ func (s State) claimEffect(effectID string) error {
 		return fmt.Errorf("%w: effect %q does not match current effect %q", ErrInvalidEvent, effectID, s.EffectID)
 	}
 	return nil
-}
-
-func (s State) claimJob(effectID, jobID string) error {
-	if err := s.claimEffect(effectID); err != nil {
-		return err
-	}
-	if s.JobID != "" && s.JobID != jobID {
-		return fmt.Errorf("%w: job %q does not match known job %q", ErrInvalidEvent, jobID, s.JobID)
-	}
-	return nil
-}
-
-func (s State) claimObservation(effectID string, execution ExecutionState) error {
-	if err := s.claimEffect(effectID); err != nil {
-		return err
-	}
-	if s.JobID == "" {
-		if want, ok := joblessObservation[s.Phase]; ok && execution != want {
-			return fmt.Errorf("%w: only %s can be observed without a job in phase %q", ErrInvalidEvent, want, s.Phase)
-		}
-	}
-	return nil
-}
-
-var joblessObservation = map[Phase]ExecutionState{
-	PhaseEffectSaved: ExecutionFailedToStart,
-	PhaseCancelling:  ExecutionCancelled,
 }
 
 func knownExecution(execution ExecutionState) error {
@@ -581,8 +463,6 @@ func (s State) advance() State {
 	s.Phase = PhaseIdle
 	s.Decision = Decision{}
 	s.EffectID = ""
-	s.JobID = ""
-	s.Started = false
 	return s
 }
 

@@ -42,16 +42,27 @@ func compareCreated(t *testing.T) {
 	id := fmt.Sprintf("eq%d", time.Now().UnixNano())
 	e := harness.Effect{ID: id, Command: "echo hi"}
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", "canti-"+id, "canti-"+id+"-cli").Run() })
-	run := x.runArgs(e.Command)
-	if err := x.create(t.Context(), e, specHash(run)); err != nil {
+	e.Spec = x.Specification(e.Command)
+	if err := x.create(t.Context(), e, e.Spec); err != nil {
 		t.Fatal(err)
 	}
-	n := len(run) - 1
-	args := append([]string{"create", "--name", "canti-" + id + "-cli", "--label", "canti.effect=" + id, "--label", "canti.state=" + x.cfg.State,
-		"--label", "canti.spec=" + specHash(run), "--label", exitLabel + "=" + exitFile, "-e", "TINI_KILL_PROCESS_GROUP=1"}, run[:n]...)
-	if out, err := exec.Command("docker", append(args, wrapper, "canti", run[n])...).CombinedOutput(); err != nil {
+	args := []string{"create", "--name", "canti-" + id + "-cli", "--label", "canti.effect=" + id, "--label", "canti.state=" + x.cfg.State, "--label", "canti.spec=" + e.Spec, "--label", exitLabel + "=" + exitFile,
+		"--network", x.cfg.Network, "--user", x.cfg.User, "--workdir", WorkDir, "--memory", "256m", "--cpus", "0.5", "--pids-limit", "64", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init", "--log-driver", "json-file", "--log-opt", "max-size=1p", "--log-opt", "mode=blocking",
+		"--volume", x.cfg.Workspace + ":" + WorkDir, "--volume", x.cfg.State + "/artifacts:/canti/artifacts:ro", "--volume", x.cfg.Mounts[0].Source + ":/canti/runs:ro", "--env", "TINI_KILL_PROCESS_GROUP=1"}
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
+		args = append(args, "--env", key+"=", "--env", strings.ToLower(key)+"=")
+	}
+	args = append(args, "--entrypoint", "/bin/sh", x.cfg.Image, "-c", wrapper, "canti", "exec 2>&1\necho hi")
+	cmd := exec.Command("docker", args...)
+	for _, v := range os.Environ() {
+		if !strings.HasPrefix(v, "DOCKER_DEFAULT_PLATFORM=") {
+			cmd.Env = append(cmd.Env, v)
+		}
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("docker create: %v: %s", err, out)
 	}
+
 	api, cli := created(t, "canti-"+id), created(t, "canti-"+id+"-cli")
 	if !bytes.Equal(api, cli) {
 		t.Fatalf("container created through the API:\n%s\nthrough the docker CLI:\n%s", api, cli)

@@ -13,7 +13,7 @@ import (
 func TestContextRequestSelectsOnlyFrozenRevision(t *testing.T) {
 	s, d := contextHistory(t)
 	for _, tc := range []struct{ step, revision, index int }{
-		{0, 0, 13}, {1, 0, 4}, {1, 1, 0}, {1, 2, 4}, {2, 1, 13},
+		{0, 0, 11}, {1, 0, 4}, {1, 1, 0}, {1, 2, 4}, {2, 1, 11},
 	} {
 		got, err := s.ContextRequest(context.Background(), "run-1", tc.step, tc.revision)
 		if err != nil || !reflect.DeepEqual(got, d.commits[tc.index]) {
@@ -88,7 +88,7 @@ func TestContextRequestRejectsInvalidSelectionAndMissingRequest(t *testing.T) {
 	}
 }
 
-func TestContextRequestBeforeFirstFreezeAndLegacyMetadata(t *testing.T) {
+func TestContextRequestBeforeFirstFreezeAndCurrentMetadata(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
 	d := newDriver(t, w, createRun(t, w, "run-1", core.Limits{MaxSteps: 1, MaxAttempts: 1}))
@@ -97,9 +97,6 @@ func TestContextRequestBeforeFirstFreezeAndLegacyMetadata(t *testing.T) {
 		t.Fatalf("before first freeze error = %v", err)
 	}
 	d.freeze()
-	if _, err := w.db.Exec(`PRAGMA user_version=1`); err != nil {
-		t.Fatal(err)
-	}
 	s = readOnly(t, path)
 	got, err := s.ContextRequest(context.Background(), "run-1", 0, 0)
 	if err != nil || !reflect.DeepEqual(got, d.commits[0]) || got.Facts.Request.Context != nil {

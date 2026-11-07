@@ -14,9 +14,8 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/openai"
 )
 
-// Binding is what a driving loop calls the model of one run with: the
-// provider a caller names, the provider it would use for a run that stores
-// none, and the keys of the run's model API. A host holds a binding only
+// Binding supplies a caller's explicit provider, fallback endpoint and model
+// credential. Its resolved pair must match the run's stored pair. A host holds it only
 // while it drives the run it was given for, and never stores, logs, or
 // returns its keys.
 type Binding struct {
@@ -102,29 +101,17 @@ func (p Pair) String() string { return p.API + " at " + p.Provider }
 // provider neither its caller nor the host holds a credential.
 var ErrNoCredential = errors.New("no credential is given or bound")
 
-// provider is the provider a run of c is driven with: the one it stores, or
-// else, for a run created before runs stored one, the one the binding names
-// or its fallback, and the adapter's default when both are empty. A drive
-// checks it with CheckProvider before it builds a model: only a stored
-// provider was checked when its run was admitted.
-func provider(c RunConfig, b Binding) string {
-	if c.Provider != "" {
-		return c.Provider
-	}
-	return cmp.Or(b.Provider, b.Fallback, DefaultProvider(c.API))
-}
-
 // keysFor returns the keys that a drive or the submission of run id, of
 // config c and provider p, calls the model with. A credential is bound to
 // the exact API and provider its caller resolved: the keys of b, for c's API
 // only, when the provider b resolves to, the one it names, else its
-// fallback, else the adapter's default, is p, as it is for a run that stores
-// no provider; otherwise the host's own credential for that API and p, when
+// fallback, else the adapter's default, is p; otherwise the host's own
+// credential for that API and p, when
 // it holds one. A binding that names another provider is refused, also
 // without keys, and its keys are never sent to p.
 func (h *Host) keysFor(id string, c RunConfig, p string, b Binding) (Keys, error) {
 	resolved := cmp.Or(b.Provider, b.Fallback, DefaultProvider(c.API))
-	mismatch := c.Provider != "" && resolved != p
+	mismatch := resolved != p
 	if k := b.Keys.For(c.API); k != (Keys{}) {
 		if mismatch {
 			return Keys{}, fmt.Errorf("%s calls the model at %s, but the credential given is for %s at %s; "+

@@ -82,8 +82,7 @@ func TestLoopLongStability(t *testing.T) {
 	ackKinds := func() map[string]bool {
 		return map[string]bool{
 			"request_frozen": true, "attempt_started": true, "response_incomplete": true,
-			"response_saved": true, "response_loaded": true, "job_bound": true,
-			"job_started": true, "observed": true,
+			"response_saved": true, "response_loaded": true, "performed": true, "observed": true,
 		}
 	}
 	ack := &lostStabilityAck{Journal: f.store, remaining: ackKinds(), covered: map[string]int{}}

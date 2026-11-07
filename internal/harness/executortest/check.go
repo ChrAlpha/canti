@@ -1,64 +1,54 @@
-// Package executortest checks a harness.Executor against its start latch
-// contract.
+// Package executortest checks the resumable harness.Executor contract.
 package executortest
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-// Fixture opens the executor under test and observes its executions. Open
-// must return a new executor on every call that shares only clients and
-// durable backend state, as a restarted or competing controller would see
-// it; Check opens one for every operation and leaves releasing them to the
-// fixture. Effect must return a fresh effect with a distinct command for each
-// name, and Runs must report how many times the command of an effect has
-// started running.
+// Fixture opens fresh controllers sharing only durable backend state. Effect
+// returns a fresh accepted descriptor for each name; Runs counts actual command
+// launches. The fixture releases resources after Check. Crash and publication
+// fault injection remain concrete-adapter tests.
 type Fixture struct {
 	Open   func(context.Context) (harness.Executor, error)
-	Effect func(name string) harness.Effect
-	Runs   func(ctx context.Context, effectID string) (int, error)
+	Effect func(string) harness.Effect
+	Runs   func(context.Context, string) (int, error)
 }
 
-// Check runs every contract case against f and returns the violations
-// joined, or nil. After the cases it counts every run again, so an execution
-// that lands before Check returns still fails its case. ctx bounds the whole
-// check, including waits for started jobs to finish. Check cannot inject
-// crashes, and it detects a start racing a cancel only when the two calls
-// overlap.
+// Check exercises restart, identity, fencing, authoritative terminal evidence,
+// cancellation and concurrency across the exact production seam. ctx bounds all
+// operations. Physical effect counters detect a repeat even after a case ends.
 func Check(ctx context.Context, f Fixture) error {
-	c := checker{Fixture: f, x: fresh(f.Open)}
-	type passed struct {
-		name   string
+	c := checker{Fixture: f}
+	var errs []error
+	type result struct {
 		effect harness.Effect
 		runs   int
 	}
-	var done []passed
-	var errs []error
+	var done []result
 	for _, tc := range []struct {
-		name  string
-		check func(context.Context, harness.Effect) error
+		name string
+		run  func(context.Context, harness.Effect) error
 	}{
-		{"bind", c.bind},
-		{"changed-command", c.changedCommand},
-		{"start-once", c.startOnce},
-		{"unbound-start", c.unboundStart},
-		{"fence-bound", c.fenceBound},
-		{"fence-unbound", c.fenceUnbound},
-		{"concurrent-start", c.concurrentStart},
-		{"start-cancel", c.startCancel},
+		{"inspect-absent", c.absent}, {"changed-identity", c.changed},
+		{"drive-once", c.once}, {"fence-unbound", c.fenced},
+		{"cancelled-context", c.cancelledContext}, {"concurrent-drive", c.concurrent},
+		{"drive-cancel", c.race},
 	} {
 		e := f.Effect(tc.name)
-		err := tc.check(ctx, e)
+		err := tc.run(ctx, e)
 		if err == nil {
-			var runs int
-			if runs, err = f.Runs(ctx, e.ID); err == nil {
-				done = append(done, passed{tc.name, e, runs})
+			n, countErr := f.Runs(ctx, e.ID)
+			err = countErr
+			if err == nil {
+				done = append(done, result{e, n})
 			}
 		}
 		if err != nil {
@@ -67,117 +57,167 @@ func Check(ctx context.Context, f Fixture) error {
 	}
 	for _, p := range done {
 		if err := c.ran(ctx, p.effect, p.runs); err != nil {
-			errs = append(errs, fmt.Errorf("executortest: %s: after every case: %w", p.name, err))
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-type checker struct {
-	Fixture
-	x harness.Executor
-}
+type checker struct{ Fixture }
 
-func (c checker) bind(ctx context.Context, e harness.Effect) error {
-	job, err := c.x.Bind(ctx, e)
+func (c checker) raw(ctx context.Context, e harness.Effect, op string) (harness.Job, error) {
+	x, err := c.Open(ctx)
+	if err != nil {
+		return harness.Job{}, err
+	}
+	var j harness.Job
+	switch op {
+	case "drive":
+		j, err = x.Drive(ctx, e)
+	case "inspect":
+		j, err = x.Inspect(ctx, e)
+	case "cancel":
+		j, err = x.Cancel(ctx, e)
+	}
+	return j, err
+}
+func (c checker) call(ctx context.Context, e harness.Effect, op string) (harness.Job, error) {
+	j, err := c.raw(ctx, e, op)
+	if err == nil {
+		err = j.Validate(e)
+	}
+	return j, err
+}
+func (c checker) ran(ctx context.Context, e harness.Effect, want int) error {
+	n, err := c.Runs(ctx, e.ID)
+	if err == nil && n != want {
+		err = fmt.Errorf("effect %s ran %d times, want %d", e.ID, n, want)
+	}
+	return err
+}
+func (c checker) absent(ctx context.Context, e harness.Effect) error {
+	for range 2 {
+		j, err := c.call(ctx, e, "inspect")
+		if err != nil {
+			return err
+		}
+		if j.Status != harness.JobAbsent || j.ID != "" {
+			return fmt.Errorf("unbound inspection = %+v", j)
+		}
+	}
+	return c.ran(ctx, e, 0)
+}
+func (c checker) changed(ctx context.Context, e harness.Effect) error {
+	if _, err := c.call(ctx, e, "drive"); err != nil {
+		return err
+	}
+	final, err := c.settle(ctx, e)
 	if err != nil {
 		return err
 	}
-	if err := c.rebind(ctx, e, job.ID); err != nil {
+	before, err := c.Runs(ctx, e.ID)
+	if err != nil {
 		return err
 	}
-	return c.expect(ctx, e, c.inspect, harness.JobPending, 0)
+	for _, op := range []string{"drive", "inspect", "cancel"} {
+		x, err := c.Open(ctx)
+		if err != nil {
+			return err
+		}
+		changed := e
+		changed.Command += " changed"
+		changed.Spec = x.Specification(changed.Command)
+		if _, err = c.raw(ctx, changed, op); err == nil {
+			return fmt.Errorf("%s accepted a changed command", op)
+		}
+		changed = e
+		changed.Spec = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		if changed.Spec == e.Spec {
+			changed.Spec = "0000000000000000000000000000000000000000000000000000000000000000"
+		}
+		if _, err = c.raw(ctx, changed, op); err == nil {
+			return fmt.Errorf("%s accepted a foreign specification", op)
+		}
+	}
+	if err = c.ran(ctx, e, before); err != nil {
+		return err
+	}
+	return c.stable(ctx, e, final)
 }
-
-func (c checker) changedCommand(ctx context.Context, e harness.Effect) error {
-	if _, err := c.x.Bind(ctx, e); err != nil {
-		return err
+func terminal(s harness.JobStatus) bool {
+	return s == harness.JobSucceeded || s == harness.JobFailed || s == harness.JobCancelled || s == harness.JobFailedToStart
+}
+func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, error) {
+	for {
+		j, err := c.call(ctx, e, "inspect")
+		if err != nil || terminal(j.Status) {
+			return j, err
+		}
+		if j.Status == harness.JobAbsent || j.Status == harness.JobUnknown {
+			return j, fmt.Errorf("effect did not settle: %s", j.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return j, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-	changed := harness.Effect{ID: e.ID, Command: c.Effect("changed-command-other").Command}
-	if _, err := c.x.Bind(ctx, changed); err == nil {
-		return errors.New("binding a changed command under the same effect succeeded")
+}
+func (c checker) stable(ctx context.Context, e harness.Effect, want harness.Job) error {
+	for _, op := range []string{"drive", "inspect", "cancel", "inspect", "drive"} {
+		j, err := c.call(ctx, e, op)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(j, want) {
+			return fmt.Errorf("%s changed retained terminal receipt: got %+v, want %+v", op, j, want)
+		}
 	}
 	return nil
 }
-
-func (c checker) startOnce(ctx context.Context, e harness.Effect) error {
-	bound, err := c.x.Bind(ctx, e)
+func (c checker) once(ctx context.Context, e harness.Effect) error {
+	if _, err := c.call(ctx, e, "drive"); err != nil {
+		return err
+	}
+	final, err := c.settle(ctx, e)
 	if err != nil {
 		return err
 	}
-	if err := c.start(ctx, e, bound.ID); err != nil {
+	if err = c.stable(ctx, e, final); err != nil {
 		return err
 	}
-	settled, err := c.settle(ctx, e)
-	if err != nil {
-		return err
+	want := 1
+	if final.Status == harness.JobFailedToStart {
+		want = 0
 	}
-	if err := c.rebind(ctx, e, bound.ID); err != nil {
-		return err
-	}
-	if err := c.start(ctx, e, bound.ID); err != nil {
-		return err
-	}
-	if err := c.x.Cancel(ctx, e.ID); err != nil {
-		return err
-	}
-	return c.expect(ctx, e, c.inspect, settled.Status, 1)
+	return c.ran(ctx, e, want)
 }
-
-func (c checker) unboundStart(ctx context.Context, e harness.Effect) error {
-	if _, err := c.x.Start(ctx, e.ID); err == nil {
-		return errors.New("starting an unbound effect succeeded")
+func (c checker) fenced(ctx context.Context, e harness.Effect) error {
+	j, err := c.call(ctx, e, "cancel")
+	if err != nil {
+		return err
+	}
+	if j.Status != harness.JobCancelled || !j.Fenced || j.ID != "" {
+		return fmt.Errorf("unbound fence = %+v", j)
+	}
+	if err = c.stable(ctx, e, j); err != nil {
+		return err
+	}
+	return c.ran(ctx, e, 0)
+}
+func (c checker) cancelledContext(ctx context.Context, e harness.Effect) error {
+	cancelled, stop := context.WithCancel(ctx)
+	stop()
+	if _, err := c.call(cancelled, e, "drive"); err == nil {
+		return errors.New("cancelled Drive succeeded")
 	}
 	return c.absent(ctx, e)
 }
-
-func (c checker) fenceBound(ctx context.Context, e harness.Effect) error {
-	bound, err := c.x.Bind(ctx, e)
-	if err != nil {
-		return err
-	}
-	for range 2 {
-		if err := c.x.Cancel(ctx, e.ID); err != nil {
-			return err
-		}
-	}
-	if err := c.rebind(ctx, e, bound.ID); err != nil {
-		return err
-	}
-	if err := c.start(ctx, e, bound.ID); err != nil {
-		return err
-	}
-	return c.expect(ctx, e, c.inspect, harness.JobCancelled, 0)
-}
-
-func (c checker) fenceUnbound(ctx context.Context, e harness.Effect) error {
-	if err := c.x.Cancel(ctx, e.ID); err != nil {
-		return err
-	}
-	if err := c.absent(ctx, e); err != nil {
-		return err
-	}
-	bound, err := c.x.Bind(ctx, e)
-	if err != nil {
-		return err
-	}
-	if err := c.start(ctx, e, bound.ID); err != nil {
-		return err
-	}
-	return c.expect(ctx, e, c.inspect, harness.JobCancelled, 0)
-}
-
-func (c checker) concurrentStart(ctx context.Context, e harness.Effect) error {
-	errs := make([]error, 8)
+func (c checker) concurrent(ctx context.Context, e harness.Effect) error {
 	var wg sync.WaitGroup
+	errs := make([]error, 8)
 	for i := range errs {
-		wg.Go(func() {
-			bound, err := c.x.Bind(ctx, e)
-			if err == nil {
-				err = c.start(ctx, e, bound.ID)
-			}
-			errs[i] = err
-		})
+		wg.Go(func() { _, errs[i] = c.call(ctx, e, "drive") })
 	}
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil {
@@ -188,140 +228,23 @@ func (c checker) concurrentStart(ctx context.Context, e harness.Effect) error {
 	}
 	return c.ran(ctx, e, 1)
 }
-
-func (c checker) startCancel(ctx context.Context, e harness.Effect) error {
-	bound, err := c.x.Bind(ctx, e)
+func (c checker) race(ctx context.Context, e harness.Effect) error {
+	driven := make(chan error, 1)
+	go func() { _, err := c.call(ctx, e, "drive"); driven <- err }()
+	_, cancelErr := c.call(ctx, e, "cancel")
+	if err := errors.Join(cancelErr, <-driven); err != nil {
+		return err
+	}
+	j, err := c.settle(ctx, e)
 	if err != nil {
 		return err
 	}
-	started := make(chan error, 1)
-	go func() { started <- c.start(ctx, e, bound.ID) }()
-	time.Sleep(5 * time.Millisecond)
-	var cancelled harness.Job
-	var runs int
-	if err = c.x.Cancel(ctx, e.ID); err == nil {
-		cancelled, err = c.settle(ctx, e)
-	}
-	if err == nil {
-		runs, err = c.Runs(ctx, e.ID)
-	}
-	if err := errors.Join(err, <-started); err != nil {
+	if err = c.stable(ctx, e, j); err != nil {
 		return err
 	}
-	return c.expect(ctx, e, c.inspect, cancelled.Status, runs)
-}
-
-func (c checker) rebind(ctx context.Context, e harness.Effect, jobID string) error {
-	job, err := c.x.Bind(ctx, e)
-	if err == nil && job.ID != jobID {
-		err = fmt.Errorf("binding again returned job %q, want %q", job.ID, jobID)
+	n, err := c.Runs(ctx, e.ID)
+	if err == nil && (n < 0 || n > 1) {
+		err = fmt.Errorf("racing effect ran %d times", n)
 	}
 	return err
-}
-
-func (c checker) start(ctx context.Context, e harness.Effect, jobID string) error {
-	job, err := c.x.Start(ctx, e.ID)
-	if err == nil && job.ID != jobID {
-		err = fmt.Errorf("start reported job %q, want bound job %q", job.ID, jobID)
-	}
-	return err
-}
-
-func (c checker) inspect(ctx context.Context, e harness.Effect) (harness.Job, error) {
-	job, found, err := c.x.Inspect(ctx, e.ID)
-	if err == nil && !found {
-		err = errors.New("inspect found no job for a bound effect")
-	}
-	return job, err
-}
-
-func (c checker) settle(ctx context.Context, e harness.Effect) (harness.Job, error) {
-	for {
-		job, err := c.inspect(ctx, e)
-		if err == nil && job.Status == harness.JobFailedToStart {
-			if err = c.ran(ctx, e, 0); err != nil {
-				err = fmt.Errorf("job failed to start, but %w", err)
-			}
-		}
-		if err != nil || terminal(job.Status) {
-			return job, err
-		}
-		select {
-		case <-ctx.Done():
-			return job, fmt.Errorf("job is still %q: %w", job.Status, ctx.Err())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
-func terminal(status harness.JobStatus) bool {
-	switch status {
-	case harness.JobSucceeded, harness.JobFailed, harness.JobCancelled, harness.JobFailedToStart:
-		return true
-	}
-	return false
-}
-
-func (c checker) expect(ctx context.Context, e harness.Effect, observe func(context.Context, harness.Effect) (harness.Job, error), status harness.JobStatus, runs int) error {
-	job, err := observe(ctx, e)
-	if err != nil {
-		return err
-	}
-	if job.Status != status {
-		return fmt.Errorf("job is %q, want %q", job.Status, status)
-	}
-	return c.ran(ctx, e, runs)
-}
-
-func (c checker) absent(ctx context.Context, e harness.Effect) error {
-	_, found, err := c.x.Inspect(ctx, e.ID)
-	if err == nil && found {
-		err = errors.New("inspect found a job for an effect that was never bound")
-	}
-	return err
-}
-
-func (c checker) ran(ctx context.Context, e harness.Effect, want int) error {
-	runs, err := c.Runs(ctx, e.ID)
-	if err != nil {
-		return err
-	}
-	if runs != want {
-		return fmt.Errorf("command ran %d times, want %d", runs, want)
-	}
-	return nil
-}
-
-type fresh func(context.Context) (harness.Executor, error)
-
-func (open fresh) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
-	x, err := open(ctx)
-	if err != nil {
-		return harness.Job{}, err
-	}
-	return x.Bind(ctx, effect)
-}
-
-func (open fresh) Start(ctx context.Context, effectID string) (harness.Job, error) {
-	x, err := open(ctx)
-	if err != nil {
-		return harness.Job{}, err
-	}
-	return x.Start(ctx, effectID)
-}
-
-func (open fresh) Inspect(ctx context.Context, effectID string) (harness.Job, bool, error) {
-	x, err := open(ctx)
-	if err != nil {
-		return harness.Job{}, false, err
-	}
-	return x.Inspect(ctx, effectID)
-}
-
-func (open fresh) Cancel(ctx context.Context, effectID string) error {
-	x, err := open(ctx)
-	if err != nil {
-		return err
-	}
-	return x.Cancel(ctx, effectID)
 }

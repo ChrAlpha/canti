@@ -16,7 +16,8 @@ type waiting struct {
 	wait func(ctx context.Context, effectID string) error
 }
 
-func (w waiting) Wait(ctx context.Context, effectID string) error {
+func (w waiting) Wait(ctx context.Context, e harness.Effect) error {
+	effectID := e.ID
 	w.mu.Lock()
 	w.calls = append(w.calls, "wait")
 	w.mu.Unlock()
@@ -35,6 +36,7 @@ func (f *fixture) waitingLoop(wait func(ctx context.Context, effectID string) er
 func succeed(j *harness.Job) {
 	code := 0
 	j.Status, j.ExitCode, j.Preview = harness.JobSucceeded, &code, "done\n"
+	j.FinishedAt = created
 	j.Output = harness.ArtifactRef{Path: j.ID + ".log", Bytes: 5, Complete: true, Available: true}
 }
 
@@ -42,7 +44,7 @@ func TestLoopObservesAWaitedJobOnceItExits(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply("sleep 1"))
 	f.exec.hold = true
 	f.cfg.Poll = time.Hour
-	effect := f.steps(f.loop(), 5).State.EffectID
+	effect := f.runningEffect().State.EffectID
 	exited := make(chan struct{})
 	l := f.waitingLoop(func(ctx context.Context, _ string) error {
 		select {
@@ -85,7 +87,7 @@ func TestLoopWaitsNoLongerThanTheBudgetAllows(t *testing.T) {
 			f := newFixture(t, limits, tc.budget, execReply("sleep 600"))
 			f.exec.hold = true
 			f.cfg.Poll = time.Hour
-			wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+			wantState(t, f.runningEffect(), core.PhaseEffectSaved, "")
 			f.clock.Advance(tc.elapsed)
 			var got time.Duration
 			l := f.waitingLoop(func(ctx context.Context, effectID string) error {
@@ -121,7 +123,7 @@ func TestLoopPollsWhenAWaitIsNoUse(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, execReply("sleep 600"))
 			f.exec.hold = true
 			f.cfg.Poll = 100 * time.Millisecond
-			effect := f.steps(f.loop(), 5).State.EffectID
+			effect := f.runningEffect().State.EffectID
 			inspections := 0
 			f.exec.tick = func() {
 				if inspections++; inspections == 6 {

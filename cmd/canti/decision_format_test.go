@@ -37,9 +37,9 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 			}
 		})
 	}
-	old := runSpec(t)
-	old.Config.Workspace = "/work"
-	raw, err := json.Marshal(old.Config)
+	defaults := runSpec(t)
+	defaults.Config.Workspace = "/work"
+	raw, err := json.Marshal(defaults.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,10 +48,10 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := fields["decision_format"]; ok {
-		t.Fatal("old config shape changed")
+		t.Fatal("default config unexpectedly writes an empty decision format")
 	}
-	if got, err := host.DecodeConfig(harness.Run{ID: "old", Config: raw}, "/work"); err != nil || got.DecisionFormat != "" {
-		t.Fatalf("old config = %+v, %v", got, err)
+	if got, err := host.DecodeConfig(harness.Run{ID: "default", Config: raw}, "/work"); err != nil || got.DecisionFormat != "" {
+		t.Fatalf("default config = %+v, %v", got, err)
 	}
 }
 

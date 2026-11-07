@@ -452,7 +452,7 @@ func TestTheDefaultHostIsTheHostProcess(t *testing.T) {
 			t.Fatalf("%s without -host: %+v", args[0], r)
 		}
 	}
-	if r := f.cli(nil, "resolve", unpinned, "-execution", "exited", "-exit-code", "0"); r.code != exitError || !strings.Contains(r.stderr, "no unknown outcome") {
+	if r := f.cli(nil, "resolve", unpinned, "-execution", "exited", "-exit-code", "0", "-note", "verified", "-owner", "asserted-owner"); r.code != exitError || !strings.Contains(r.stderr, "no unknown outcome") {
 		t.Fatalf("resolve without -host: %+v", r)
 	}
 	if len(f.hostPIDs()) != 1 || len(f.model.requests()) != 1 {
@@ -599,22 +599,19 @@ func TestASubmissionFollowsFromWhatItHasNotShown(t *testing.T) {
 	}
 }
 
-// TestAResumeOfARunStoringNoProviderRefusesASecretBearingURL requires that
-// resuming a run stored before runs kept their provider, embedded or
-// through the host process, with a -model-url or a base URL variable that a
-// new run would be refused, is refused before any model request, without
+// TestAResumeRefusesASecretBearingURLWithoutChangingItsStoredProvider requires that
+// resuming a current run, embedded or through the host process, with a
+// credential bound to another endpoint is refused before any model request, without
 // committing anything, and with no part of the URL's secret on stderr, in
 // the host's log, or in any file of the state directory, while a valid
 // provider still resumes it.
-func TestAResumeOfARunStoringNoProviderRefusesASecretBearingURL(t *testing.T) {
+func TestAResumeRefusesASecretBearingURLWithoutChangingItsStoredProvider(t *testing.T) {
 	const marker = "DUMMYMARKER"
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 	f.autoHost()
 	if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
 		t.Fatalf("run -once: %+v", r)
 	}
-	id := f.status().Run.ID
-	setConfig(t, f.state, id, "provider", "")
 	before := f.history()
 	bad := f.model.URL + "/v?key=" + marker
 	for _, tc := range []struct {
@@ -628,7 +625,7 @@ func TestAResumeOfARunStoringNoProviderRefusesASecretBearingURL(t *testing.T) {
 		{"host variable", []string{"ANTHROPIC_BASE_URL=" + bad}, []string{"resume", "-host", "auto", "-once", "-model-url", ""}},
 	} {
 		r := f.cli(tc.env, tc.args[0], tc.args[1:]...)
-		if r.code != exitError || strings.Contains(r.stdout+r.stderr, marker) || !strings.Contains(r.stderr, "must hold no user information, query, or fragment") {
+		if r.code != exitError || strings.Contains(r.stdout+r.stderr, marker) || !strings.Contains(r.stderr, "credential given is for") {
 			t.Errorf("%s: %+v", tc.name, r)
 		}
 	}

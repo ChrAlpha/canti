@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
@@ -45,8 +46,6 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 	d.step("printf ok", harness.Usage{InputTokens: 10, OutputTokens: 5}, 42)
 
 	d.decide(execBody("make build"), harness.Usage{InputTokens: 12, OutputTokens: 6})
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "backend lost the job"})
 	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: observation(core.ExecutionExited, 7)})
 
@@ -122,8 +121,8 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 	}
 
 	want := []harness.StepRecord{
-		{Seq: 7, Step: 1, Command: "printf ok", Observation: *observation(core.ExecutionExited, 42)},
-		{Seq: 15, Step: 2, Command: "make build", Observation: *observation(core.ExecutionExited, 7), Resolved: true},
+		{Seq: 5, Step: 1, Command: "printf ok", Observation: *observation(core.ExecutionExited, 42)},
+		{Seq: 11, Step: 2, Command: "make build", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: observation(core.ExecutionExited, 0).ExitCode, Preview: "ok", Output: harness.ArtifactRef{Detail: "resolved by operator"}}, Resolved: true},
 	}
 	for limit, records := range map[int][]harness.StepRecord{1: want[1:], 2: want, 10: want} {
 		got, err := s.Recent(ctx, "run-1", 0, limit)
@@ -131,7 +130,7 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 			t.Fatalf("Recent(0, %d) = %#v, %v; want %#v", limit, got, err, records)
 		}
 	}
-	totals := harness.Totals{Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 49, Steps: 2}
+	totals := harness.Totals{Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 42, Steps: 2}
 	if got := totalsOf(t, s, "run-1"); got != totals {
 		t.Fatalf("Totals() = %#v, want %#v", got, totals)
 	}
@@ -209,8 +208,6 @@ func TestRecentPagesBackwardBySequence(t *testing.T) {
 	d := newDriver(t, s, createRun(t, s, "run-1", core.Limits{MaxSteps: 5, MaxAttempts: 2}))
 	d.step("make", harness.Usage{}, 1)
 	d.decide(execBody("make test"), harness.Usage{})
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "backend lost the job"})
 	d.do(core.Resolved{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: observation(core.ExecutionExited, 2)})
 	d.decide([]byte("not a decision"), harness.Usage{})
@@ -326,13 +323,13 @@ func TestCommitRefusesTransitionsItCannotReproduce(t *testing.T) {
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))
 	d.decide(execBody("cat binary"), harness.Usage{})
-	bound := core.JobBound{EffectID: d.snap.State.EffectID, JobID: "job-1"}
+	bound := core.OutcomeUnknown{EffectID: d.snap.State.EffectID}
 	pointer := derive(t, d.snap, bound, harness.Facts{})
 	pointer.Event = &bound
 	for name, tr := range map[string]harness.Transition{
-		"pointer event":        pointer,
-		"invalid UTF-8 in IDs": derive(t, d.snap, core.JobBound{EffectID: d.snap.State.EffectID, JobID: "job-\xff"}, harness.Facts{}),
-		"no event":             {Seq: d.snap.Seq + 1, From: d.snap.State, To: d.snap.State},
+		"pointer event": pointer,
+
+		"no event": {Seq: d.snap.Seq + 1, From: d.snap.State, To: d.snap.State},
 	} {
 		if err := s.Commit(ctx, tr); err == nil {
 			t.Errorf("Commit(%s) succeeded, want refusal", name)
@@ -352,11 +349,10 @@ func TestCommitStoresFactTextAsValidUTF8(t *testing.T) {
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))
 	d.decide(execBody("cat binary"), harness.Usage{})
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	raw := observation(core.ExecutionExited, 1)
 	raw.Preview = "ELF\x7f\xff truncated \xe2\x82"
-	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: raw})
+	j := receipt(d.snap.State, *raw)
+	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: raw, Receipt: &j})
 	last := d.commits[len(d.commits)-1]
 	if err := s.Commit(ctx, last); err != nil {
 		t.Fatalf("identical retry error = %v", err)
@@ -377,55 +373,34 @@ func TestCommitStoresFactTextAsValidUTF8(t *testing.T) {
 // version before harness.ActionSemantics without an action as legacy, and
 // fails closed for one of a later version without a valid action and for
 // one of an earlier version that holds an action.
-func TestAcceptedIsRecordedLegacyOrRefused(t *testing.T) {
+func TestAcceptedRequiresCurrentRecordedAction(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct {
-		name, mutation string
-		want           harness.Provenance
-	}{
-		{"recorded", ``, harness.ProvenanceRecorded},
-		{"legacy", `UPDATE transitions SET semantics = 3, facts = json_remove(facts, '$.Action') WHERE kind = 'response_loaded'`, harness.ProvenanceLegacy},
-		{"current without action", `UPDATE transitions SET facts = json_remove(facts, '$.Action') WHERE kind = 'response_loaded'`, ""},
-		{"current with another recovery", `UPDATE transitions SET facts = json_set(facts, '$.Action.Recovery', 'local_change') WHERE kind = 'response_loaded'`, ""},
-		{"current with an unknown field", `UPDATE transitions SET facts = json_set(facts, '$.Action.Extra', 1) WHERE kind = 'response_loaded'`, ""},
-		{"legacy with action", `UPDATE transitions SET semantics = 3 WHERE kind = 'response_loaded'`, ""},
+	for name, mutation := range map[string]string{
+		"recorded": "", "unsupported": "UPDATE transitions SET semantics=3 WHERE kind='response_loaded'",
+		"missing action": "UPDATE transitions SET facts=json_remove(facts,'$.Action') WHERE kind='response_loaded'",
+		"wrong recovery": "UPDATE transitions SET facts=json_set(facts,'$.Action.Recovery','external_effect') WHERE kind='response_loaded'",
+		"unknown field":  "UPDATE transitions SET facts=json_set(facts,'$.Action.Extra',1) WHERE kind='response_loaded'",
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			s := open(t, tempPath(t))
 			d := newDriver(t, s, createRun(t, s, "run-1", limits))
-			d.decide(execBody(`canti:retrieve {"operation":"read"}`), harness.Usage{})
-			if tc.mutation != "" {
-				if _, err := s.db.Exec(tc.mutation); err != nil {
+			d.decide(execBody("canti:retrieve {}"), harness.Usage{})
+			if mutation != "" {
+				if _, err := s.db.Exec(mutation); err != nil {
 					t.Fatal(err)
 				}
 			}
 			a, err := s.Accepted(ctx, "run-1", 1, 1)
-			if tc.want == "" {
+			if name != "recorded" {
 				if !errors.Is(err, ErrIncompatible) {
-					t.Fatalf("Accepted = %+v, %v; want ErrIncompatible", a, err)
-				}
-				if _, err := harness.ActionOf(ctx, s, d.snap.State); !errors.Is(err, ErrIncompatible) {
-					t.Fatalf("ActionOf = %v; want ErrIncompatible", err)
+					t.Fatalf("accepted corrupt facts: %+v %v", a, err)
 				}
 				return
 			}
-			want := harness.Action{Name: harness.ActionRetrieve, Recovery: harness.RecoveryRead, Args: len(harness.RetrievePrefix)}
-			if tc.want == harness.ProvenanceLegacy {
-				want = harness.Action{Name: harness.ActionLegacy}
-			}
-			if err != nil || a.Provenance != tc.want || a.Action != want {
-				t.Fatalf("Accepted = %+v, %v; want %s %+v", a, err, tc.want, want)
+			if err != nil || a.Action.Name != harness.ActionRetrieve || a.Execution != nil {
+				t.Fatalf("acceptance: %+v %v", a, err)
 			}
 		})
-	}
-	s := open(t, tempPath(t))
-	d := newDriver(t, s, createRun(t, s, "run-1", limits))
-	d.decide([]byte("not a decision"), harness.Usage{})
-	if _, err := s.Accepted(ctx, "run-1", 1, 1); !errors.Is(err, harness.ErrNotFound) {
-		t.Fatalf("Accepted of a rejected decision = %v, want ErrNotFound", err)
-	}
-	if _, err := s.Accepted(ctx, "run-1", 1, 2); !errors.Is(err, harness.ErrNotFound) {
-		t.Fatalf("Accepted of an unsent attempt = %v, want ErrNotFound", err)
 	}
 }
 
@@ -439,7 +414,9 @@ func TestCommitChecksEffectsAgainstTheirAcceptanceInItsTransaction(t *testing.T)
 		event         func(core.State) core.Event
 		facts         harness.Facts
 	}{
-		{"job of a local action", "canti:lint", func(s core.State) core.Event { return core.JobBound{EffectID: s.EffectID, JobID: "job-1"} }, harness.Facts{}},
+		{"job of a local action", "canti:lint", func(s core.State) core.Event {
+			return core.Observed{EffectID: s.EffectID, Execution: core.ExecutionFailedToStart}
+		}, harness.Facts{}},
 		{"performed command", "make", func(s core.State) core.Event { return core.Performed{EffectID: s.EffectID} },
 			harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: "x"}}},
 		{"unexplained window", "canti:lint", func(s core.State) core.Event { return core.Performed{EffectID: s.EffectID} },
@@ -476,10 +453,8 @@ func TestActionOfRefusesAnActionItsDecisionDoesNotMatch(t *testing.T) {
 			if _, err := s.db.Exec(`UPDATE transitions SET facts = json_set(facts, '$.Action', json(?)) WHERE kind = 'response_loaded'`, action); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.Accepted(ctx, "run-1", 1, 1); err != nil {
-				t.Fatalf("Accepted of a valid shape = %v", err)
-			}
-			if _, err := harness.ActionOf(ctx, s, d.snap.State); !errors.Is(err, harness.ErrIncompatible) {
+
+			if _, err := harness.ActionOf(ctx, s, d.snap.State); err == nil || !errors.Is(err, harness.ErrIncompatible) && !errors.Is(err, ErrIncompatible) {
 				t.Fatalf("ActionOf = %v, want harness.ErrIncompatible", err)
 			}
 		})
@@ -519,14 +494,111 @@ func TestRecentRefusesStepsOfAShapeTheirVersionNeverRecords(t *testing.T) {
 			if _, err := s.Recent(ctx, "run-1", 0, 10); !errors.Is(err, ErrIncompatible) {
 				t.Fatalf("Recent of a corrupt step = %v, want ErrIncompatible", err)
 			}
-			if !tc.legacyOK {
-				return
+
+		})
+	}
+}
+
+// A receipt is trusted only after it agrees transactionally with the committed
+// acceptance. A valid-looking foreign result must never advance progress.
+func TestCommitRejectsContradictoryExecutionReceipts(t *testing.T) {
+	for name, mutate := range map[string]func(*harness.Job, *harness.Observation){
+		"foreign effect":        func(j *harness.Job, _ *harness.Observation) { j.EffectID = "foreign" },
+		"foreign specification": func(j *harness.Job, _ *harness.Observation) { j.Spec = harness.ConfigDigest([]byte("other")) },
+		"no physical owner":     func(j *harness.Job, _ *harness.Observation) { j.ID = "" },
+		"wrong status":          func(j *harness.Job, _ *harness.Observation) { j.Status = harness.JobFailed },
+		"different preview":     func(j *harness.Job, _ *harness.Observation) { j.Preview = "forged" },
+		"different output":      func(j *harness.Job, _ *harness.Observation) { j.Output.Bytes++ },
+		"missing exit":          func(j *harness.Job, _ *harness.Observation) { j.ExitCode = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody("printf ok"), harness.Usage{})
+			obs := observation(core.ExecutionExited, 2)
+			j := receipt(d.snap.State, *obs)
+			mutate(&j, obs)
+			if err := d.try(core.Observed{EffectID: d.snap.State.EffectID, Execution: obs.Execution}, harness.Facts{Observation: obs, Receipt: &j}); !errors.Is(err, harness.ErrFacts) {
+				t.Fatalf("forged receipt: %v", err)
 			}
-			if _, err := s.db.Exec(`UPDATE runs SET semantics = 3; UPDATE transitions SET semantics = 3, facts = json_remove(facts, '$.Action')`); err != nil {
-				t.Fatal(err)
+			unchanged(t, s, "run-1", d.commits, harness.Totals{})
+		})
+	}
+}
+
+func TestAcceptanceIdentityUsesImmutableRunConfiguration(t *testing.T) {
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.freeze()
+	d.send()
+	body := execBody("printf ok")
+	d.save(body, harness.Usage{})
+	e := core.ResponseLoaded{Step: 1, Attempt: 1, Body: body}
+	facts := acceptance(d.snap.State, e)
+	facts.Execution.ConfigDigest = harness.ConfigDigest([]byte("other configuration"))
+	if err := d.try(e, facts); !errors.Is(err, harness.ErrFacts) {
+		t.Fatalf("wrong configuration accepted: %v", err)
+	}
+	unchanged(t, s, "run-1", d.commits, harness.Totals{})
+}
+
+func TestRecoveryRequiresCurrentPendingOrRunningOwnerEvidence(t *testing.T) {
+	for _, status := range []harness.JobStatus{harness.JobAbsent, harness.JobUnknown, harness.JobSucceeded, harness.JobPending, harness.JobRunning} {
+		t.Run(string(status), func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody("printf ok"), harness.Usage{})
+			d.do(core.OutcomeUnknown{EffectID: d.snap.State.EffectID}, harness.Facts{Failure: "lost"})
+			j := harness.Job{EffectID: d.snap.State.EffectID, Spec: harness.ConfigDigest([]byte("printf ok")), ID: "owner", Status: status}
+			if status == harness.JobAbsent {
+				j.ID = ""
 			}
-			if steps, err := s.Recent(ctx, "run-1", 0, 10); err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
-				t.Fatalf("Recent of a legacy step that recorded a retrieval = %+v, %v", steps, err)
+			if status == harness.JobRunning {
+				j.StartedAt = time.Unix(1, 0)
+			}
+			if status == harness.JobSucceeded {
+				obs := observation(core.ExecutionExited, 0)
+				j = receipt(d.snap.State, *obs)
+			}
+			before := d.snap
+			err := d.try(core.EffectRecovered{EffectID: d.snap.State.EffectID}, harness.Facts{Receipt: &j})
+			ok := status == harness.JobPending || status == harness.JobRunning
+			if (err == nil) != ok {
+				t.Fatalf("recovery %s: %v", status, err)
+			}
+			if ok {
+				if d.snap.State.Phase != core.PhaseEffectSaved || d.snap.State.Step != before.State.Step || d.snap.State.EffectID != before.State.EffectID {
+					t.Fatalf("recovery changed accepted work: %+v", d.snap)
+				}
+			} else if d.snap != before {
+				t.Fatal("rejected recovery advanced")
+			}
+		})
+	}
+}
+
+func TestLocalCancellationRejectsPhysicalExecutionClaims(t *testing.T) {
+	for _, claim := range []string{"exit", "output", "preview", "receipt"} {
+		t.Run(claim, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody("canti:unknown"), harness.Usage{})
+			d.do(core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})
+			obs := &harness.Observation{Execution: core.ExecutionCancelled, Preview: "Context action cancelled."}
+			facts := harness.Facts{Observation: obs}
+			switch claim {
+			case "exit":
+				code := 0
+				obs.ExitCode = &code
+			case "output":
+				obs.Output = harness.ArtifactRef{Path: "invented", Available: true}
+			case "preview":
+				obs.Preview = "ran external work"
+			case "receipt":
+				facts.Receipt = &harness.Job{EffectID: d.snap.State.EffectID, Spec: harness.ConfigDigest(nil), Status: harness.JobCancelled, Fenced: true}
+			}
+			if err := d.try(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionCancelled}, facts); !errors.Is(err, harness.ErrFacts) {
+				t.Fatalf("local physical claim accepted: %v", err)
 			}
 		})
 	}

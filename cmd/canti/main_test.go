@@ -314,235 +314,42 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 	}
 }
 
-// TestRunsOfAnotherContextVersionStayReadableAndClosable requires that a run
-// whose stored config records another context version, or none, can be
-// inspected and stopped, and that once it is closed the next run, alone or
-// in a session, is admitted after it.
-func TestRunsOfAnotherContextVersionStayReadableAndClosable(t *testing.T) {
-	for _, tc := range []struct{ name, version string }{{"missing", ""}, {"zero", "0"},
-		{"earlier", strconv.Itoa(host.ContextVersion - 1)}, {"later", strconv.Itoa(host.ContextVersion + 1)}} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-			if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
-				t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
-			}
-			frozen, steps := f.status(), f.history()
-			setContextVersion(t, f.state, frozen.Run.ID, tc.version)
-			if s := f.status(); s.Run.ID != frozen.Run.ID || s.Seq != frozen.Seq || s.Phase != core.PhaseRequestFrozen {
-				t.Errorf("status = %+v\nwant %+v", s, frozen)
-			}
-			if h := f.history(); !reflect.DeepEqual(h, steps) {
-				t.Errorf("history = %v, want %v", kinds(h), kinds(steps))
-			}
-			var report struct {
-				RunID string `json:"run_id"`
-			}
-			if r := f.cli(nil, "context"); r.code != exitOK || json.Unmarshal([]byte(r.stdout), &report) != nil || report.RunID != frozen.Run.ID {
-				t.Errorf("context = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-			}
-			if r := f.cli(nil, "context", "-raw"); r.code != exitOK || !json.Valid([]byte(r.stdout)) {
-				t.Errorf("context -raw = %d\nstderr: %s", r.code, r.stderr)
-			}
-			sent := len(f.model.requests())
-			for _, args := range [][]string{{"resume"}, {"resume", "-once"}} {
-				if r := f.cli(nil, args[0], args[1:]...); r.code != exitError || !refusesResume(r.stderr, frozen.Run.ID, tc.version) {
-					t.Errorf("%q = %d\nstderr: %s", args, r.code, r.stderr)
+// Unsupported versions fail before model, execution, or journal progress,
+// including commands that only read or settle an already-returned run.
+func TestUnsupportedContextVersionsRejectEveryCommandWithoutProgress(t *testing.T) {
+	for _, phase := range []string{"request_frozen", "returned"} {
+		for _, version := range []string{"", "0", strconv.Itoa(host.ContextVersion - 1), strconv.Itoa(host.ContextVersion + 1)} {
+			t.Run(phase+"/"+version, func(t *testing.T) {
+				f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+				args := []string{"-session", "s", "-input", "one", "-goal", "g"}
+				if phase == "request_frozen" {
+					args = append(args, "-once")
 				}
-			}
-			if h := f.history(); !reflect.DeepEqual(h, steps) || len(f.model.requests()) != sent {
-				t.Errorf("refused resumes appended %v and sent %d requests", kinds(h[len(steps):]), len(f.model.requests())-sent)
-			}
-			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitError || !strings.Contains(r.stderr, "is request_frozen: stop it first") {
-				t.Errorf("run beside the open run = %d\nstderr: %s", r.code, r.stderr)
-			}
-			if r := f.cli(nil, "stop"); r.code != exitStopped {
-				t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
-			}
-			if s := f.status(); s.Run.ID != frozen.Run.ID || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
-				t.Errorf("status after stop = %+v", s)
-			}
-			if r := f.cli(nil, "run", "-goal", "next"); r.code != exitOK || r.stdout != "done\n" {
-				t.Fatalf("run after stop = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-			}
-			input := []string{"run", "-session", "s", "-input", "first", "-goal", "first"}
-			if r := f.cli(nil, input[0], input[1:]...); r.code != exitOK || r.stdout != "done\n" {
-				t.Fatalf("first session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-			}
-			first := f.status()
-			setContextVersion(t, f.state, first.Run.ID, tc.version)
-			if r := f.cli(nil, input[0], input[1:]...); r.code != exitOK || r.stdout != "done\n" {
-				t.Errorf("retried session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-			}
-			if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "second"); r.code != exitOK || r.stdout != "done\n" {
-				t.Fatalf("next session input = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-			}
-			if s := f.status(); s.Run.ID == first.Run.ID || s.Run.SessionID != "s" || s.Run.SessionSeq != 2 || s.Phase != core.PhaseReturned {
-				t.Errorf("next session run = %+v", s)
-			}
-		})
-	}
-}
-
-// TestHintsForAnOpenRunOfAnotherContextVersionNameStop requires that resume
-// also refuses a run of another context version that saved a response or
-// whose unknown outcome was resolved, and that every hint for such a run,
-// after a resolution or a retried session input, names stop, which closes
-// it.
-func TestHintsForAnOpenRunOfAnotherContextVersionNameStop(t *testing.T) {
-	t.Run("response saved", func(t *testing.T) {
-		t.Parallel()
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-		if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
-			t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if r := f.cli(nil, "resume", "-once"); r.code != exitActive {
-			t.Fatalf("resume -once = %d\nstderr: %s", r.code, r.stderr)
-		}
-		s := f.status()
-		if s.Phase != core.PhaseResponseSaved {
-			t.Fatalf("status = %+v", s)
-		}
-		setContextVersion(t, f.state, s.Run.ID, "1")
-		steps, sent := f.history(), len(f.model.requests())
-		if r := f.cli(nil, "resume"); r.code != exitError || !refusesResume(r.stderr, s.Run.ID, "1") {
-			t.Errorf("resume = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if h := f.history(); !reflect.DeepEqual(h, steps) || len(f.model.requests()) != sent {
-			t.Errorf("the refused resume appended %v and sent %d requests", kinds(h[len(steps):]), len(f.model.requests())-sent)
-		}
-		if r := f.cli(nil, "stop"); r.code != exitStopped {
-			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if r := f.cli(nil, "run", "-goal", "next"); r.code != exitOK || r.stdout != "done\n" {
-			t.Errorf("run after stop = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-		}
-	})
-	t.Run("resolved", func(t *testing.T) {
-		t.Parallel()
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
-		noDocker := []string{"PATH=" + t.TempDir()}
-		input := []string{"-session", "s", "-input", "i", "-goal", "g"}
-		if r := f.cli(noDocker, "run", input...); r.code != exitResolution {
-			t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
-		}
-		id := f.status().Run.ID
-		setContextVersion(t, f.state, id, "1")
-		steps := f.history()
-		if r := f.cli(noDocker, "resume"); r.code != exitResolution || !strings.Contains(r.stderr, "needs resolution") {
-			t.Errorf("resume of the unresolved run = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if h := f.history(); !reflect.DeepEqual(h, steps) {
-			t.Errorf("resume of the unresolved run appended %v", kinds(h[len(steps):]))
-		}
-		stop := `stop it with "canti stop -run ` + id + `"`
-		r := runCLI(t, noDocker, "resolve", "-workspace", f.workspace, "-state", f.state, "-execution", "failed_to_start")
-		if r.code != exitOK || !strings.Contains(r.stderr, stop) || strings.Contains(r.stderr, "canti resume") {
-			t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if r := f.cli(noDocker, "run", input...); r.code != exitActive || !strings.Contains(r.stderr, stop) || strings.Contains(r.stderr, "canti resume") {
-			t.Errorf("retried session input = %d\nstderr: %s", r.code, r.stderr)
-		}
-		sent := len(f.model.requests())
-		if r := f.cli(nil, "resume"); r.code != exitError || !refusesResume(r.stderr, id, "1") {
-			t.Errorf("resume of the resolved run = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if r := f.cli(nil, "run", "-goal", "next"); r.code != exitError || !strings.Contains(r.stderr, "is idle: stop it first") {
-			t.Errorf("run beside the resolved run = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if len(f.model.requests()) != sent {
-			t.Error("a refused command called the model")
-		}
-		if r := f.cli(nil, "stop"); r.code != exitStopped {
-			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
-			t.Errorf("status after stop = %+v", s)
-		}
-	})
-}
-
-// TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion requires that
-// resume reports a run of another context version that has halted without
-// building the model or the executor or publishing its step records.
-func TestResumeOnlyReportsAHaltedRunOfAnotherContextVersion(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	if r := f.cli(nil, "run", "-goal", "g"); r.code != exitOK {
-		t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
-	}
-	id, steps, sent := f.status().Run.ID, f.history(), len(f.model.requests())
-	setContextVersion(t, f.state, id, "1")
-	for _, dir := range []string{"history", "jobs"} {
-		if err := os.RemoveAll(filepath.Join(f.state, dir)); err != nil {
-			t.Fatal(err)
+				r := f.cli(nil, "run", args...)
+				if r.code != exitOK && r.code != exitActive {
+					t.Fatalf("initial run: %+v", r)
+				}
+				id := f.status().Run.ID
+				before, sent := f.history(), len(f.model.requests())
+				setContextVersion(t, f.state, id, version)
+				for _, command := range [][]string{{"status"}, {"history"}, {"context"}, {"context", "-raw"}, {"inspect"}, {"resume"}, {"resume", "-once"}, {"stop"}, {"resolve", "-job"}, {"resolve", "-execution", "failed_to_start", "-note", "checked"}, {"run", "-goal", "new"}, {"run", "-session", "s", "-input", "one", "-goal", "g"}} {
+					r := f.cli(nil, command[0], command[1:]...)
+					if r.code != exitError || !strings.Contains(r.stderr, "unsupported context version") || !strings.Contains(r.stderr, "use fresh state") || r.stdout != "" {
+						t.Errorf("%q: %+v", command, r)
+					}
+				}
+				store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				snap, err := store.Latest(context.Background(), id)
+				if err != nil || snap.Seq != int64(len(before)) || snap.State != before[len(before)-1].State || len(f.model.requests()) != sent {
+					t.Fatalf("unsupported commands made progress: %+v, %v requests=%d", snap, err, len(f.model.requests()))
+				}
+			})
 		}
 	}
-	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
-		t.Errorf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
-	}
-	for _, dir := range []string{"history", "jobs"} {
-		if _, err := os.Stat(filepath.Join(f.state, dir)); !os.IsNotExist(err) {
-			t.Errorf("resume created %s: %v", dir, err)
-		}
-	}
-	if h := f.history(); !reflect.DeepEqual(h, steps) || len(f.model.requests()) != sent {
-		t.Errorf("resume appended %v and sent %d requests", kinds(h[len(steps):]), len(f.model.requests())-sent)
-	}
-}
-
-// TestRunsOfAnotherContextVersionCloseWhateverTheirContextSettings requires
-// that stop and resolve, which render no request, close a run of another
-// context version whose context settings this canti does not accept.
-func TestRunsOfAnotherContextVersionCloseWhateverTheirContextSettings(t *testing.T) {
-	foreign := func(f *fixture, id string) {
-		setContextVersion(t, f.state, id, "3")
-		setConfig(t, f.state, id, "handover_bytes", "16384")
-		setConfig(t, f.state, id, "context_bytes", "0")
-	}
-	t.Run("stop", func(t *testing.T) {
-		t.Parallel()
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-		if r := f.cli(nil, "run", "-once", "-goal", "g"); r.code != exitActive {
-			t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
-		}
-		id := f.status().Run.ID
-		foreign(f, id)
-		if r := f.cli(nil, "stop"); r.code != exitStopped {
-			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if s := f.status(); s.Run.ID != id || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
-			t.Errorf("status after stop = %+v", s)
-		}
-	})
-	t.Run("resolve", func(t *testing.T) {
-		t.Parallel()
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
-		noDocker := []string{"PATH=" + t.TempDir()}
-		if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
-			t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
-		}
-		id := f.status().Run.ID
-		foreign(f, id)
-		if r := runCLI(t, noDocker, "resolve", "-workspace", f.workspace, "-state", f.state, "-execution", "failed_to_start"); r.code != exitOK {
-			t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if r := f.cli(noDocker, "stop"); r.code != exitStopped {
-			t.Fatalf("stop = %d\nstderr: %s", r.code, r.stderr)
-		}
-		if s := f.status(); s.Run.ID != id || s.Phase != core.PhaseStopped {
-			t.Errorf("status after stop = %+v", s)
-		}
-	})
-}
-
-// refusesResume reports whether stderr refuses to resume run id of the
-// stored context version, as setContextVersion records it, and names stop.
-func refusesResume(stderr, id, version string) bool {
-	if version == "" || version == "0" {
-		version = "none"
-	}
-	return strings.Contains(stderr, fmt.Sprintf("run %s is ", id)) &&
-		strings.Contains(stderr, fmt.Sprintf(" and uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", version, host.ContextVersion, id))
 }
 
 // setContextVersion rewrites the stored config of run id to record context
@@ -1033,7 +840,7 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 	if r.code != exitResolution || !strings.Contains(r.stderr, "canti resolve -run") {
 		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
 	}
-	if s := f.status(); s.Phase != core.PhaseNeedsResolution || s.EffectID == "" || s.JobID != "" {
+	if s := f.status(); s.Phase != core.PhaseNeedsResolution || s.EffectID == "" {
 		t.Fatalf("status = %+v", s)
 	}
 	if r := f.cli(noDocker, "resume"); r.code != exitResolution {
@@ -1082,7 +889,7 @@ func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
 	if s := f.status(); s.Phase != core.PhaseNeedsResolution || s.Reason != core.StopCancelled {
 		t.Fatalf("status = %+v", s)
 	}
-	f.cli(noDocker, "resolve", "-execution", "failed_to_start")
+	f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", "checked by operator")
 	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
 		t.Fatalf("status after the resolution = %+v", s)
 	}
@@ -1139,7 +946,7 @@ func TestHistoryPrintsEveryPageInOrder(t *testing.T) {
 	if r := f.cli(noDocker, "run", "-goal", "g"); r.code != exitResolution {
 		t.Fatalf("run without docker = %d\nstderr: %s", r.code, r.stderr)
 	}
-	if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start"); r.code != exitOK {
+	if r := f.cli(noDocker, "resolve", "-execution", "failed_to_start", "-note", "checked by operator"); r.code != exitOK {
 		t.Fatalf("resolve = %d\nstderr: %s", r.code, r.stderr)
 	}
 	if r := f.cli(nil, "resume"); r.code != exitOK {
@@ -1226,7 +1033,9 @@ func parseSpec(t *testing.T, args ...string) host.Spec {
 // every run names.
 func runSpec(t *testing.T, args ...string) host.Spec {
 	t.Helper()
-	return parseSpec(t, append(slices.Clone(fixtureModel), args...)...)
+	s := parseSpec(t, append(slices.Clone(fixtureModel), args...)...)
+	s.Config.Provider = "http://127.0.0.1:1"
+	return s
 }
 
 func TestRunFlagsDefaults(t *testing.T) {
@@ -1253,6 +1062,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.Config.Workspace = "/work"
+	s.Config.Provider = "http://127.0.0.1:1"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	run, initial, err := host.NewRun("goal", "constraints", s, now)
 	if err != nil {

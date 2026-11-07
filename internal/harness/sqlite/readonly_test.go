@@ -34,14 +34,11 @@ func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
 	}
 }
 
-func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
+func TestOpenReadOnlyPreservesCurrentSchemaAndReadonlyFile(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
 	d := newDriver(t, w, createRun(t, w, "run-1", limits))
 	d.freeze()
-	if _, err := w.db.Exec(`DROP TABLE session_runs; PRAGMA user_version = 1`); err != nil {
-		t.Fatal(err)
-	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -49,43 +46,20 @@ func TestOpenReadOnlyPreservesLegacySchemaAndReadonlyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0400); err != nil {
+	if err = os.Chmod(path, 0400); err != nil {
 		t.Fatal(err)
 	}
 	s := readOnly(t, path)
-	var version, tables, queryOnly int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE name = 'session_runs'`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRow(`PRAGMA query_only`).Scan(&queryOnly); err != nil {
-		t.Fatal(err)
-	}
-	if version != 1 || tables != 0 || queryOnly != 1 {
-		t.Fatalf("version = %d, session tables = %d, query_only = %d", version, tables, queryOnly)
-	}
 	got, err := s.Request(context.Background(), "run-1", 1, 1)
 	if err != nil || !bytes.Equal(got.Body, d.commits[0].Facts.Request.Body) {
-		t.Fatalf("Request = %#v, %v", got, err)
+		t.Fatalf("read-only: %+v %v", got, err)
 	}
-	page, err := s.ContextRecords(context.Background(), "run-1", 0, 0, 0, 1)
-	if err != nil || page.AsOfSeq != 1 || page.Request.Seq != 1 || len(page.Events) != 0 {
-		t.Fatalf("legacy context = %#v, %v", page, err)
-	}
-	if runs, err := s.SessionRuns(context.Background(), "s", 0, 1); !errors.Is(err, ErrNoSessions) {
-		t.Fatalf("SessionRuns of a journal without sessions = %v, %v", runs, err)
-	}
-	if run, err := s.SessionInput(context.Background(), "s", "i"); !errors.Is(err, ErrNoSessions) {
-		t.Fatalf("SessionInput of a journal without sessions = %v, %v", run, err)
-	}
-	if err := s.Close(); err != nil {
+	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("database changed on read-only open: %v", err)
+		t.Fatal("read-only open changed current journal")
 	}
 }
 
@@ -178,7 +152,7 @@ func TestOpenReadOnlyReadsWALWithReadonlyDirectoryAndExistingSidecars(t *testing
 func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
-	if _, err := w.db.Exec(`PRAGMA user_version = 3`); err != nil {
+	if _, err := w.db.Exec(`PRAGMA user_version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := OpenReadOnly(context.Background(), path); !errors.Is(err, ErrIncompatible) {
@@ -202,62 +176,3 @@ func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 // which a writable open always adds, refuses Recent for a run whose latest
 // transition is of ActionSemantics or later, which may hold performed steps,
 // and reads a run of an earlier version with the earlier query.
-func TestReadOnlyRecentFailsClosedWithoutThePerformedIndex(t *testing.T) {
-	path := tempPath(t)
-	w := open(t, path)
-	d := newDriver(t, w, createRun(t, w, "run-1", limits))
-	d.decide(execBody("canti:lint"), harness.Usage{})
-	d.perform()
-	if _, err := w.db.Exec(`DROP INDEX transitions_performed`); err != nil {
-		t.Fatal(err)
-	}
-	s := readOnly(t, path)
-	if _, err := s.Recent(context.Background(), "run-1", 0, 10); !errors.Is(err, ErrIncompatible) {
-		t.Fatalf("Recent of a current run without the index = %v, want ErrIncompatible", err)
-	}
-	if _, err := w.db.Exec(`UPDATE runs SET semantics = 3; UPDATE transitions SET semantics = 3, kind = 'observed', facts = '{"Request":null,"Response":null,"Observation":{"Execution":"exited","ExitCode":1,"Preview":"","Output":{"Path":"","Bytes":0,"Complete":false,"Available":false,"Detail":""}},"Failure":""}' WHERE kind = 'performed';
-		UPDATE transitions SET semantics = 3, facts = json_remove(facts, '$.Action')`); err != nil {
-		t.Fatal(err)
-	}
-	steps, err := readOnly(t, path).Recent(context.Background(), "run-1", 0, 10)
-	if err != nil || len(steps) != 1 || steps[0].Observation.Execution != core.ExecutionExited {
-		t.Fatalf("Recent of a version-3 run without the index = %+v, %v", steps, err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if s := open(t, path); !s.performed.Load() {
-		t.Fatal("a writable open did not restore the index")
-	}
-	var n int
-	if err := readOnly(t, path).db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE name = 'transitions_performed'`).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("index after a writable open: %d, %v", n, err)
-	}
-}
-
-// TestReadOnlyStoreFindsAnIndexAddedAfterItOpened requires that a read-only
-// store opened on a journal without the index of performed steps reads the
-// performed steps a later writable open and commit add, without reopening.
-func TestReadOnlyStoreFindsAnIndexAddedAfterItOpened(t *testing.T) {
-	path := tempPath(t)
-	w := open(t, path)
-	createRun(t, w, "run-1", limits)
-	if _, err := w.db.Exec(`DROP INDEX transitions_performed`); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	r := readOnly(t, path)
-	if r.performed.Load() {
-		t.Fatal("the read-only store found an index the journal lacks")
-	}
-	w = open(t, path)
-	d := newDriver(t, w, latestOf(t, w, "run-1"))
-	d.decide(execBody("canti:lint"), harness.Usage{})
-	d.perform()
-	steps, err := r.Recent(context.Background(), "run-1", 0, 10)
-	if err != nil || len(steps) != 1 || steps[0].Outcome == nil {
-		t.Fatalf("Recent through the earlier read-only store = %+v, %v", steps, err)
-	}
-}

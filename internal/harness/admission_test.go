@@ -16,7 +16,7 @@ func TestBlocksWhileOpenOrAbandonedUnknown(t *testing.T) {
 		want  bool
 	}{
 		{"new run", core.State{Phase: core.PhaseIdle}, nil, true},
-		{"open step", core.State{Phase: core.PhaseAwaitingObservation}, core.JobStarted{}, true},
+		{"open step", core.State{Phase: core.PhaseEffectSaved}, core.ResponseLoaded{}, true},
 		{"needs resolution", core.State{Phase: core.PhaseNeedsResolution}, core.OutcomeUnknown{}, true},
 		{"returned", core.State{Phase: core.PhaseReturned}, core.ResponseLoaded{}, false},
 		{"stopped", stopped, core.StopRequested{Reason: core.StopCancelled}, false},

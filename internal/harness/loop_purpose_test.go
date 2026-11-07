@@ -22,7 +22,7 @@ func TestLoopShowsCommittedPurposesAcrossRestart(t *testing.T) {
 		reply{body: "not a decision", usage: usage},
 		purposeReply(core.Exec, long, "find . -name '*.go' | wc -l"),
 		purposeReply(core.Return, "the count is known", "There are 3 Go files."))
-	snap := f.steps(f.loop(), 9)
+	snap := f.steps(f.loop(), 7)
 	if s := snap.State; s.Phase != core.PhaseIdle || s.Step != 2 || s.Attempt != 2 || s.RequestRev != 1 {
 		t.Fatalf("before restart = %+v, want a rejected first response of step 2", s)
 	}

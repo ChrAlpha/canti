@@ -87,7 +87,6 @@ func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 func TestActionValidateAcceptsOnlyNormalizedReadings(t *testing.T) {
 	for _, a := range []Action{
 		{},
-		{Name: ActionLegacy},
 		{Name: ActionCommand, Recovery: RecoveryLocal},
 		{Name: ActionCommand, Recovery: RecoveryExternal, Args: 3},
 		{Name: ActionCommand, Recovery: RecoveryExternal, Invalid: codeUnknownAction},
@@ -195,33 +194,26 @@ func TestOutcomePresentationIsTheVersion12Observation(t *testing.T) {
 	}
 }
 
-// TestAcceptanceIsPositivelyLegacyOrRecorded requires that only an
-// acceptance before ActionSemantics without an action is legacy, that one of
-// ActionSemantics or later needs a valid action, and that ActionSemantics is
-// the version that added Performed.
-func TestAcceptanceIsPositivelyLegacyOrRecorded(t *testing.T) {
-	if core.CompatibleEvent(ActionSemantics, core.Performed{}) != nil || core.CompatibleEvent(ActionSemantics-1, core.Performed{}) == nil {
-		t.Fatal("ActionSemantics is not the version that added Performed")
-	}
+func TestAcceptanceRequiresCurrentRecordedIdentity(t *testing.T) {
 	command := Action{Name: ActionCommand, Recovery: RecoveryExternal}
+	local := NormalizeAction("canti:x", false, true)
+	execution := &ExecutionIdentity{Spec: ConfigDigest([]byte("command")), ConfigDigest: ConfigDigest(nil)}
 	for _, tc := range []struct {
-		semantics int
+		version   int
 		action    *Action
-		want      Provenance
+		execution *ExecutionIdentity
+		ok        bool
 	}{
-		{1, nil, ProvenanceLegacy}, {3, nil, ProvenanceLegacy}, {4, &command, ProvenanceRecorded},
-		{3, &command, ""}, {4, nil, ""}, {4, &Action{Name: ActionCommand}, ""}, {0, nil, ""}, {core.SemanticsVersion + 1, &command, ""},
+		{core.SemanticsVersion, &command, execution, true}, {core.SemanticsVersion, &local, nil, true},
+		{core.SemanticsVersion - 1, &command, execution, false}, {core.SemanticsVersion + 1, &command, execution, false},
+		{core.SemanticsVersion, nil, nil, false}, {core.SemanticsVersion, &command, nil, false},
+		{core.SemanticsVersion, &command, &ExecutionIdentity{Spec: "invalid", ConfigDigest: ConfigDigest(nil)}, false},
+		{core.SemanticsVersion, &local, execution, false},
 	} {
-		a, err := Acceptance(tc.semantics, tc.action)
-		if (err == nil) != (tc.want != "") || a.Provenance != tc.want {
-			t.Errorf("Acceptance(%d, %+v) = %+v, %v; want %q", tc.semantics, tc.action, a, err, tc.want)
+		a, err := Acceptance(tc.version, tc.action, tc.execution)
+		if (err == nil) != tc.ok {
+			t.Errorf("Acceptance(%+v)=%+v,%v", tc, a, err)
 		}
-		if tc.want == ProvenanceLegacy && (a.Action != Action{Name: ActionLegacy} || a.Local()) {
-			t.Errorf("legacy acceptance %+v asserts an intent", a)
-		}
-	}
-	if !LegacyInProcess("effect-1", "read_effect-1") || LegacyInProcess("effect-1", "read_effect-2") || LegacyInProcess("effect-1", "") {
-		t.Fatal("LegacyInProcess misreads a job")
 	}
 }
 
@@ -229,14 +221,18 @@ func TestAcceptanceIsPositivelyLegacyOrRecorded(t *testing.T) {
 // CheckEffect, each transition once agreeing with its acceptance and source
 // window and once contradicting them.
 func TestCheckEffectProvesEachCompletionFromItsAcceptance(t *testing.T) {
-	state := func(phase core.Phase, payload, job string) core.State {
+	state := func(phase core.Phase, payload, _ string) core.State {
 		return core.State{RunID: "run-1", Step: 2, Attempt: 1, RequestRev: 1, Phase: phase, Limits: core.Limits{MaxSteps: 5, MaxAttempts: 3},
-			Decision: core.Decision{Kind: core.Exec, Payload: payload}, EffectID: "effect-2", JobID: job}
+			Decision: core.Decision{Kind: core.Exec, Payload: payload}, EffectID: "effect-2"}
 	}
 	recorded := func(payload string, requested bool) Accepted {
-		return Accepted{Semantics: core.SemanticsVersion, Provenance: ProvenanceRecorded, Action: NormalizeAction(payload, requested, true)}
+		a := NormalizeAction(payload, requested, true)
+		accepted := Accepted{Semantics: core.SemanticsVersion, Action: a}
+		if a.Recovery == RecoveryExternal {
+			accepted.Execution = &ExecutionIdentity{Spec: ConfigDigest([]byte(payload)), ConfigDigest: ConfigDigest(nil)}
+		}
+		return accepted
 	}
-	legacy := Accepted{Semantics: 3, Provenance: ProvenanceLegacy, Action: Action{Name: ActionLegacy}}
 	requested := &Window{FirstStep: 1, Requested: true}
 	open := &Window{FirstStep: 1}
 	text := "canti:handover Next: report."
@@ -247,11 +243,13 @@ func TestCheckEffectProvesEachCompletionFromItsAcceptance(t *testing.T) {
 	performed := func(payload string, o *Outcome, w *Window) Transition {
 		return Transition{From: state(core.PhaseEffectSaved, payload, ""), Event: core.Performed{EffectID: "effect-2"}, Facts: Facts{Outcome: o, Window: w}}
 	}
-	bound := Transition{From: state(core.PhaseEffectSaved, "make", ""), Event: core.JobBound{EffectID: "effect-2", JobID: "job"}}
-	jobless := Transition{From: state(core.PhaseEffectSaved, "make", ""), Event: core.Observed{EffectID: "effect-2", Execution: core.ExecutionFailedToStart}}
-	cancelled := Transition{From: state(core.PhaseCancelling, "canti:retrieve {}", ""), Event: core.Observed{EffectID: "effect-2", Execution: core.ExecutionCancelled}}
+	cancelled := Transition{From: state(core.PhaseCancelling, "canti:retrieve {}", ""), Event: core.Observed{EffectID: "effect-2", Execution: core.ExecutionCancelled}, Facts: Facts{Observation: &Observation{Execution: core.ExecutionCancelled, Preview: "Context action cancelled."}}}
 	accepting := func(payload string, a Action) Transition {
-		return Transition{To: state(core.PhaseEffectSaved, payload, ""), Event: core.ResponseLoaded{Step: 2, Attempt: 1, Body: []byte("{}")}, Facts: Facts{Action: &a}}
+		f := Facts{Action: &a}
+		if a.Recovery == RecoveryExternal {
+			f.Execution = &ExecutionIdentity{Spec: ConfigDigest([]byte(payload)), ConfigDigest: ConfigDigest(nil)}
+		}
+		return Transition{To: state(core.PhaseEffectSaved, payload, ""), Event: core.ResponseLoaded{Step: 2, Attempt: 1, Body: []byte("{}")}, Facts: f}
 	}
 	for _, tc := range []struct {
 		name     string
@@ -280,23 +278,14 @@ func TestCheckEffectProvesEachCompletionFromItsAcceptance(t *testing.T) {
 		{"unknown action failing", performed("canti:x", &Outcome{Status: OutcomeFailed, Detail: unknownAction}, nil), recorded("canti:x", false), open, true},
 		{"unknown action done", performed("canti:x", read, nil), recorded("canti:x", false), open, false},
 		{"command performed", performed("make", read, nil), recorded("make", false), open, false},
-		{"legacy performed", performed("canti:retrieve {}", read, nil), legacy, open, false},
 		{"performed without outcome", performed("canti:x", nil, nil), recorded("canti:x", false), open, false},
-		{"command bound", bound, recorded("make", false), open, true},
-		{"local action bound", bound, recorded("canti:retrieve {}", false), open, false},
-		{"legacy bound", bound, legacy, open, true},
-		{"command failing jobless", jobless, recorded("make", false), open, false},
-		{"legacy failing jobless", jobless, legacy, open, true},
 		{"local action cancelled", cancelled, recorded("canti:retrieve {}", false), open, true},
-		{"command cancelled jobless", cancelled, recorded("make", false), open, true},
 	} {
-		if err := CheckEffect(tc.t, tc.accepted, tc.source); (err == nil) != tc.ok {
+		if err := CheckEffect(tc.t, tc.accepted, tc.source, nil); (err == nil) != tc.ok {
 			t.Errorf("%s: CheckEffect = %v, want ok %v", tc.name, err, tc.ok)
 		}
 	}
-	if !EffectTransition(bound) || EffectTransition(Transition{Event: core.StopRequested{Reason: core.StopCancelled}, From: bound.From}) {
-		t.Fatal("EffectTransition misclassifies a bind or a stop")
-	}
+
 }
 
 // TestDiscoverySkipsExactlyTheHarnessActions requires, for every payload of
@@ -377,7 +366,7 @@ func TestCheckEffectIsTotalOverValidOutcomes(t *testing.T) {
 		for _, requested := range []bool{false, true} {
 			for _, reader := range []bool{false, true} {
 				a := NormalizeAction(p, requested, reader)
-				accepted := Accepted{Semantics: ActionSemantics, Provenance: ProvenanceRecorded, Action: a}
+				accepted := Accepted{Semantics: core.SemanticsVersion, Action: a}
 				for _, o := range outcomes {
 					if o.Validate() != nil {
 						t.Fatalf("outcome %+v is not valid", o)
@@ -387,7 +376,7 @@ func TestCheckEffectIsTotalOverValidOutcomes(t *testing.T) {
 							o := o
 							tr := Transition{Event: core.Performed{EffectID: "effect-2"}, Facts: Facts{Outcome: &o, Window: w},
 								From: core.State{RunID: "run-1", Step: 2, Phase: core.PhaseEffectSaved, Decision: core.Decision{Kind: core.Exec, Payload: p}, EffectID: "effect-2"}}
-							_ = CheckEffect(tr, accepted, source)
+							_ = CheckEffect(tr, accepted, source, nil)
 						}
 					}
 				}

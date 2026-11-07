@@ -59,7 +59,7 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	if snap.State.Step != 3 || snap.State.Decision.Payload != "There are 3 Go files." {
 		t.Fatalf("final state = %+v, want the return decision at step 3", snap.State)
 	}
-	if got := f.exec.log(); !slices.Equal(got, []string{"bind", "start", "inspect", "bind", "start", "inspect"}) {
+	if got := f.exec.log(); !slices.Equal(got, []string{"drive", "drive"}) {
 		t.Fatalf("executor calls = %v", got)
 	}
 	if n, _ := f.model.calls(); n != 3 {
@@ -104,7 +104,7 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	f := newFixture(t, core.Limits{MaxSteps: n + 1, MaxAttempts: 1}, harness.Budget{}, replies...)
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 1 << 20
-	f.steps(f.loop(), 6*n)
+	f.steps(f.loop(), 4*n)
 	ctx := context.Background()
 	run, err := f.store.Run(ctx, runID)
 	if err != nil {
@@ -147,8 +147,8 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	if _, err := f.loopOn(&failingRecent{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
 		t.Fatalf("Step() with a failing second page = %v, want %v", err, errRecent)
 	}
-	if after, _ := f.model.calls(); after != prompts || len(f.transitions()) != 7*n {
-		t.Fatalf("a failing page froze %d prompts and left %d transitions, want none and %d", after-prompts, len(f.transitions()), 7*n)
+	if after, _ := f.model.calls(); after != prompts || len(f.transitions()) != 5*n {
+		t.Fatalf("a failing page froze %d prompts and left %d transitions, want none and %d", after-prompts, len(f.transitions()), 5*n)
 	}
 }
 

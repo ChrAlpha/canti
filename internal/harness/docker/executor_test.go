@@ -235,8 +235,8 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 	}
 	x := newTestExecutor(t, Config{User: "1234:5678", Memory: "256m", CPUs: "0.5", PidsLimit: 64,
 		Mounts: []Mount{{Source: runs, Target: "/canti/runs"}, {Source: link, Target: "/canti/run"}}})
-	run := x.runArgs("echo hi")
-	r, err := x.request(harness.Effect{ID: "effect_1", Command: "echo hi"}, specHash(run))
+	spec := x.Specification("echo hi")
+	r, err := x.request(harness.Effect{ID: "effect_1", Command: "echo hi"}, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		env = append(env, k+"=", strings.ToLower(k)+"=")
 	}
-	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": specHash(run), "canti.exit": exitFile}
+	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": spec, "canti.exit": exitFile}
 	if r.User != "1234:5678" || r.Image != "alpine:3.23" || r.WorkingDir != WorkDir || !r.AttachStdout || !r.AttachStderr ||
 		!slices.Equal(r.Entrypoint, []string{"/bin/sh"}) || !slices.Equal(r.Cmd, []string{"-c", wrapper, "canti", "exec 2>&1\necho hi"}) ||
 		!slices.Equal(r.Env, env) || !maps.Equal(r.Labels, labels) {
@@ -259,9 +259,7 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 		!maps.Equal(h.LogConfig.Config, map[string]string{"max-size": "1p", "mode": "blocking"}) {
 		t.Errorf("host config = %+v", h)
 	}
-	if tail := run[len(run)-3:]; !slices.Equal(tail, []string{"alpine:3.23", "-c", "exec 2>&1\necho hi"}) {
-		t.Errorf("the hashed spec ends with %q, want the shape of earlier revisions", tail)
-	}
+
 	fields := []string{"AttachStderr", "AttachStdout", "Cmd", "Entrypoint", "Env", "HostConfig", "Image", "Labels", "User", "WorkingDir"}
 	host := []string{"Binds", "CapDrop", "Init", "LogConfig", "NetworkMode", "SecurityOpt"}
 	for cfg, limits := range map[*Config][]string{&x.cfg: {"Memory", "NanoCpus", "PidsLimit"}, &newTestExecutor(t, Config{}).cfg: nil} {
@@ -278,21 +276,9 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 		}
 	}
 	for _, bad := range []Config{{Memory: "1x"}, {CPUs: "0.0000000001"}} {
-		if _, err := (&Executor{cfg: bad}).request(effect, "spec"); err == nil {
+		if _, err := (&Executor{cfg: bad}).request(harness.Effect{ID: "e", Command: "true"}, "spec"); err == nil {
 			t.Errorf("request(%+v) succeeded", bad)
 		}
-	}
-}
-
-func TestSpecHashKeepsTheContainersOfEarlierRevisions(t *testing.T) {
-	x := &Executor{cfg: Config{Image: "alpine:3.23", Workspace: "/ws", State: "/state", User: "1000:1000", Network: "none",
-		Memory: "256m", CPUs: "0.5", PidsLimit: 64, Mounts: []Mount{{Source: "/runs", Target: "/canti/runs"}}}}
-	if got := specHash(x.runArgs("echo hi")); got != "7677d60a4a807af0e8529d20b675eb5c45db01e48db0bc2e06cad7a45d326ec0" {
-		t.Errorf("spec hash = %s; the containers of earlier revisions would no longer bind", got)
-	}
-	x.cfg.Memory, x.cfg.CPUs, x.cfg.PidsLimit, x.cfg.Mounts = "", "", 0, nil
-	if got := specHash(x.runArgs("echo hi")); got != "fa36330dd70ae216bad847ec81d72905b74282ec97fdd1744703de69a2cb7380" {
-		t.Errorf("spec hash without limits = %s; the containers of earlier revisions would no longer bind", got)
 	}
 }
 
@@ -300,7 +286,7 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 	ws, state, records := t.TempDir(), t.TempDir(), t.TempDir()
 	base := Config{Image: "alpine:3.23", Workspace: ws, State: state}
 	hash := func(cfg Config, command string) string {
-		return specHash(newTestExecutor(t, cfg).runArgs(command))
+		return newTestExecutor(t, cfg).Specification(command)
 	}
 	want := hash(base, "echo hi")
 	if again := hash(base, "echo hi"); again != want {
@@ -308,8 +294,8 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 	}
 	policy := base
 	policy.StopGrace, policy.OutputLimit, policy.PreviewLimit, policy.Docker = time.Second, 1, 64, "/usr/bin/docker"
-	if got := hash(policy, "echo hi"); got != want {
-		t.Fatalf("output and stop policy changed the spec hash")
+	if got := hash(policy, "echo hi"); got == want {
+		t.Fatalf("output and stop policy were omitted from specification")
 	}
 	seen := map[string]string{want: "base"}
 	for name, change := range map[string]func(*Config){
@@ -361,5 +347,47 @@ func TestCLIProcessesLeaveTheCallersProcessGroup(t *testing.T) {
 		if pgid := strings.TrimSpace(string(b)); err != nil || pgid == "" || pgid == strconv.Itoa(syscall.Getpgrp()) {
 			t.Errorf("docker %s ran in process group %q, %v; it shares the caller's, so a terminal interrupt can abort a launch", name, pgid, err)
 		}
+	}
+}
+
+func TestPullDeadlineTerminatesItsOwnedProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	pidfile := filepath.Join(dir, "child.pid")
+	cli := filepath.Join(dir, "docker")
+	script := fmt.Sprintf("#!/bin/sh\nsleep 300 &\necho $! > %q\nwait\n", pidfile)
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	x := newTestExecutor(t, Config{Docker: cli})
+	x.timeouts.transfer = 50 * time.Millisecond
+	began := time.Now()
+	if err := x.pull(t.Context()); err == nil || time.Since(began) > 2*time.Second {
+		t.Fatalf("pull deadline: %v after %v", err, time.Since(began))
+	}
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("owned child PID: %q %v", b, err)
+	}
+	cleanup := true
+	t.Cleanup(func() {
+		if cleanup {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	for deadline := time.Now().Add(time.Second); ; {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		fields := strings.Fields(string(stat))
+		if os.IsNotExist(err) || len(fields) > 2 && fields[2] == "Z" {
+			cleanup = false
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("owned pull child %d remained running after deadline", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

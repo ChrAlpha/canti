@@ -65,7 +65,7 @@ func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 			break
 		}
 		code := c.State.ExitCode
-		if !marked && c.Config.Labels[exitLabel] != "" {
+		if !marked {
 			switch {
 			case recorded == nil:
 				job.Output.Detail = unrecorded
@@ -87,6 +87,9 @@ func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 		default:
 			job.Status = harness.JobFailed
 		}
+	}
+	if job.Status == harness.JobUnknown && job.Output.Detail == "" {
+		job.Output.Detail = fmt.Sprintf("container state %q with launch latch %q does not establish an execution outcome", c.State.Status, latch)
 	}
 	return job
 }
@@ -160,22 +163,6 @@ func setLatch(dir, value string) error {
 		return err
 	}
 	return syncDir(filepath.Dir(dir))
-}
-
-func mark(dir string) error {
-	err := publish(filepath.Join(dir, "cancel"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), true)
-	if errors.Is(err, fs.ErrExist) {
-		return nil
-	}
-	return err
-}
-
-func exists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return err == nil, err
 }
 
 func publish(path string, data []byte, exclusive bool) error {

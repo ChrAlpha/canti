@@ -53,8 +53,6 @@ func TestAdmissionStoppedResolutionWithCancellation(t *testing.T) {
 			}
 			d := newDriver(t, s, harness.Snapshot{State: fresh(t, r.ID, limits)})
 			d.decide(execBody("printf ok"), harness.Usage{})
-			d.call(harness.Runner.Bind)
-			d.call(harness.Runner.Start)
 			effectID := d.snap.State.EffectID
 			d.do(core.OutcomeUnknown{EffectID: effectID}, harness.Facts{Failure: "lost job"})
 			d.do(core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})

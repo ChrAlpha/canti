@@ -425,46 +425,25 @@ func compareFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
 	}
 }
 
-// TestEarlierVersionRequestsAreSentAsFrozen requires that a loop of the
-// current context version sends a request that a run froze under an earlier
-// version byte for byte, although the current rules render that request
-// otherwise: a frozen request is never rebuilt. Each retained version is
-// checked by one of its own requests.
-func TestEarlierVersionRequestsAreSentAsFrozen(t *testing.T) {
-	for _, tc := range []struct{ version, name string }{
-		{"13", filepath.Join("handover", "run1-step02-rev1.json")},
-		{"14", filepath.Join("handover-carry", "run1-step03-rev1.json")},
-	} {
-		t.Run("version "+tc.version, func(t *testing.T) {
-			frozen, err := os.ReadFile(filepath.Join("testdata", "frozen-requests-v"+tc.version, tc.name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			current, err := os.ReadFile(filepath.Join("testdata", "frozen-requests", tc.name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if bytes.Equal(frozen, current) {
-				t.Fatal("the retained request equals the current rendering, so sending it proves nothing")
-			}
-			f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
-			ctx := f.bounded()
-			runner, err := harness.NewRunner(f.store, f.exec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			snap, err := f.store.Latest(ctx, runID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			req := harness.Request{Body: frozen, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Window: &harness.Window{FirstStep: 1, Requested: true}}
-			if _, err := runner.Commit(ctx, snap, core.RequestFrozen{}, harness.Facts{Request: &req}); err != nil {
-				t.Fatal(err)
-			}
-			wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-			if prompts, sent := f.model.calls(); prompts != 0 || sent != 1 || !bytes.Equal(f.model.sent[0], frozen) {
-				t.Fatalf("froze %d prompts and sent %d requests; want the version-%s bytes sent unchanged", prompts, sent, tc.version)
-			}
-		})
+// TestCurrentVersionRequestsAreSentAsFrozen proves that reopening a current
+// journal sends its committed request bytes even if a renderer would differ.
+func TestCurrentVersionRequestsAreSentAsFrozen(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
+	frozen := []byte("a previously committed current-version request")
+	runner, err := harness.NewRunner(f.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := f.store.Latest(f.bounded(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := harness.Request{Body: frozen, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Window: &harness.Window{FirstStep: 1}}
+	if _, err = runner.Commit(f.bounded(), snap, core.RequestFrozen{}, harness.Facts{Request: &req}); err != nil {
+		t.Fatal(err)
+	}
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	if prompts, sent := f.model.calls(); prompts != 0 || sent != 1 || !bytes.Equal(f.model.sent[0], frozen) {
+		t.Fatalf("rendered %d prompts, sent %q", prompts, f.model.sent)
 	}
 }

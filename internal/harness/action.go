@@ -29,10 +29,6 @@ const (
 	DiscoveryMarker     = "# canti:discovery"
 )
 
-// ActionSemantics is the first semantics version whose accepting
-// ResponseLoaded carries an Action: the version that added core.Performed.
-const ActionSemantics = 4
-
 // ActionName names what an accepted exec decision asks for.
 type ActionName string
 
@@ -44,9 +40,6 @@ const (
 	// into the window it opens; its arguments are one JSON object.
 	ActionHandoverCarry ActionName = "handover_carry"
 	ActionUnknown       ActionName = "unknown"
-	// ActionLegacy names the action of an acceptance committed before
-	// actions were recorded. It asserts no intent and is never recorded.
-	ActionLegacy ActionName = "legacy"
 )
 
 // handover reports whether n hands over: the actions a required handover
@@ -208,85 +201,56 @@ func (a Action) arguments(payload string) (string, error) {
 	return payload[a.Args:], nil
 }
 
-// Provenance tells whether an acceptance recorded its action.
-type Provenance string
-
-const (
-	ProvenanceRecorded Provenance = "recorded"
-	ProvenanceLegacy   Provenance = "legacy"
-)
-
-// Accepted is the committed acceptance of an exec decision: the semantics
-// version of the accepting transition and its action. A legacy acceptance,
-// committed before ActionSemantics, has the action ActionLegacy and no
-// recovery; InProcess, which ActionOf sets from the effect's job, says only
-// how stopping it proceeds.
+// Accepted is the committed normalized action and, for external work, its
+// execution identity. No effect is interpreted again after acceptance.
 type Accepted struct {
-	Semantics  int
-	Provenance Provenance
-	Action     Action
-	InProcess  bool
+	Semantics int
+	Action    Action
+	Execution *ExecutionIdentity
 }
 
-// Local reports whether the harness carries out or cancels the accepted
-// effect itself.
-func (a Accepted) Local() bool { return a.Action.Recovery.Local() || a.InProcess }
+func (a Accepted) Local() bool { return a.Action.Recovery.Local() }
 
-// Acceptance returns the acceptance that a transition committed under
-// semantics with action a records. It fails unless the transition of a
-// version before ActionSemantics holds no action and one of a later version
-// holds a valid one, so a missing action is never read as legacy.
-func Acceptance(semantics int, a *Action) (Accepted, error) {
+// Acceptance validates a current-format accepted action and execution identity.
+func Acceptance(semantics int, action *Action, execution *ExecutionIdentity) (Accepted, error) {
 	if err := core.KnownSemantics(semantics); err != nil {
 		return Accepted{}, err
 	}
-	if semantics < ActionSemantics {
-		if a != nil {
-			return Accepted{}, fmt.Errorf("harness: an acceptance of semantics version %d holds an action", semantics)
-		}
-		return Accepted{Semantics: semantics, Provenance: ProvenanceLegacy, Action: Action{Name: ActionLegacy}}, nil
+	if action == nil {
+		return Accepted{}, fmt.Errorf("harness: acceptance has no action")
 	}
-	if a == nil {
-		return Accepted{}, fmt.Errorf("harness: an acceptance of semantics version %d holds no action", semantics)
-	}
-	if err := a.Validate(); err != nil {
+	if err := action.Validate(); err != nil {
 		return Accepted{}, err
 	}
-	return Accepted{Semantics: semantics, Provenance: ProvenanceRecorded, Action: *a}, nil
+	if (action.Recovery == RecoveryExternal) != (execution != nil) {
+		return Accepted{}, fmt.Errorf("harness: execution identity does not match action recovery")
+	}
+	if execution != nil {
+		if err := execution.Validate(); err != nil {
+			return Accepted{}, err
+		}
+	}
+	return Accepted{Semantics: semantics, Action: *action, Execution: execution}, nil
 }
 
-// LegacyInProcess reports whether a legacy effect was carried out in
-// process: its job is the virtual job that versions before ActionSemantics
-// bound for harness actions. It is the only reading of that ID.
-func LegacyInProcess(effectID, jobID string) bool { return jobID == "read_"+effectID }
-
-// ActionOf returns the acceptance of the effect of s, or ErrNotFound when s
-// holds none. A recorded action that does not match the decision of s fails
-// with ErrIncompatible, so that no corrupted acceptance routes a reserved
-// payload to the executor.
+// ActionOf reads the committed acceptance and checks that it still describes
+// the current decision. Corrupt local work cannot route to the executor.
 func ActionOf(ctx context.Context, j Journal, s core.State) (Accepted, error) {
 	if s.EffectID == "" {
 		return Accepted{}, ErrNotFound
 	}
 	a, err := j.Accepted(ctx, s.RunID, s.Step, s.Attempt)
-	switch {
-	case err != nil:
+	if err != nil {
 		return Accepted{}, err
-	case a.Provenance == ProvenanceLegacy:
-		a.InProcess = LegacyInProcess(s.EffectID, s.JobID)
-	default:
-		if err := a.Action.Matches(s.Decision.Payload); err != nil {
-			return Accepted{}, fmt.Errorf("%w: step %d of run %q: %v", ErrIncompatible, s.Step, s.RunID, err)
-		}
+	}
+	if _, err := Acceptance(a.Semantics, &a.Action, a.Execution); err != nil {
+		return Accepted{}, fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
+	if err := a.Action.Matches(s.Decision.Payload); err != nil {
+		return Accepted{}, fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	return a, nil
 }
 
-// ErrIncompatible reports a committed record that contradicts the facts it
-// belongs with, such as an action that is no reading of its decision. Like a
-// store's incompatible record, it is refused, never acted on.
-var ErrIncompatible = errors.New("harness: committed record contradicts its facts")
-
-// errLegacyEffect reports an effect accepted before actions were recorded,
-// which this harness only stops.
-var errLegacyEffect = errors.New("harness: the effect was accepted before actions were recorded and can only be stopped")
+// ErrIncompatible identifies corrupt or unsupported committed harness facts.
+var ErrIncompatible = errors.New("harness: incompatible record")

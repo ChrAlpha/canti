@@ -59,11 +59,8 @@ func (o Outcome) Validate() error {
 	return nil
 }
 
-// presented is the observation that context version 12 recorded for the
-// same step, which the prompt and the published step records show for a
-// local outcome: done as an exit code of 0, failed as 1, and refused as a
-// failed start, with the preview that version composed. It is a rendering
-// rule, not a fact.
+// presented renders a local outcome using the current context's execution
+// vocabulary. It is a presentation rule, never a physical execution fact.
 func (r StepRecord) presented() Observation {
 	o := r.Outcome
 	if o == nil {
@@ -93,13 +90,12 @@ func (r StepRecord) presented() Observation {
 	return p
 }
 
-// Validate checks the shape of a completed step that a transition of
-// semantics recorded, performed when performed is set: a performed step has
-// a valid outcome, any window valid for the next step, and no observation;
-// any other step has an observation and no outcome or window, and, from
-// ActionSemantics on, no retrieval or handover in its observation, which only
-// earlier versions recorded there. Reads apply it to every step they return.
+// Validate checks a current-format completion: a performed step has an
+// Outcome and optional next Window; external steps have only an Observation.
 func (r StepRecord) Validate(semantics int, performed bool) error {
+	if err := core.KnownSemantics(semantics); err != nil {
+		return err
+	}
 	if performed {
 		if r.Outcome == nil || r.Observation != (Observation{}) {
 			return errors.New("harness: a performed step needs an outcome and no observation")
@@ -115,19 +111,18 @@ func (r StepRecord) Validate(semantics int, performed bool) error {
 	switch {
 	case r.Outcome != nil || r.Window != nil || r.Observation.Execution == "":
 		return errors.New("harness: an observed or resolved step needs an observation and no outcome or window")
-	case semantics >= ActionSemantics && (r.Observation.Retrieval != nil || r.Observation.Handover != nil):
+	case r.Observation.Retrieval != nil || r.Observation.Handover != nil:
 		return errors.New("harness: an observation of this version holds no retrieval or handover")
 	}
 	return nil
 }
 
-// retrieval returns the read that step r performed, recorded as an outcome
-// or, by earlier versions, in an observation.
+// retrieval returns the read that the local outcome records.
 func (r StepRecord) retrieval() *archive.Retrieval {
 	if r.Outcome != nil {
 		return r.Outcome.Retrieval
 	}
-	return r.Observation.Retrieval
+	return nil
 }
 
 // acceptedHandover returns the handover step r accepted, or nil.
@@ -138,7 +133,7 @@ func (r StepRecord) acceptedHandover() *Handover {
 		}
 		return nil
 	}
-	return r.Observation.acceptedHandover()
+	return nil
 }
 
 // windowAfter returns the window that the step after step renders, when a

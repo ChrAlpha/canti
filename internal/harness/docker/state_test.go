@@ -67,8 +67,12 @@ func TestReadLatchRejectsCorruptRecord(t *testing.T) {
 }
 
 func TestMarkKeepsFirstRequest(t *testing.T) {
-	dir := t.TempDir()
-	if err := mark(dir); err != nil {
+	f := newFake(t)
+	dir := f.x.dir("e")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.x.fence(f.effect()); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(filepath.Join(dir, "cancel"))
@@ -76,7 +80,7 @@ func TestMarkKeepsFirstRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
-	if err := mark(dir); err != nil {
+	if err := f.x.fence(f.effect()); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := os.ReadFile(filepath.Join(dir, "cancel")); err != nil || string(again) != string(first) {

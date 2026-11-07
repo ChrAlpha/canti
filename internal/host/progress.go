@@ -67,16 +67,12 @@ func (h *Host) drivability(v View) (bool, string) {
 		return false, "the outcome of its effect is unknown: resolve it"
 	case s.Intent() == core.IntentHalt:
 		return false, "the run has halted"
-	case s.Phase == core.PhaseCancelling && c.ContextVersion >= ActionsContextVersion:
-		// A stop renders no request and needs no model, so it finishes a run
-		// of any context version that records its actions.
-		return true, ""
 	case c.ContextVersion != ContextVersion:
-		return false, "the run " + Unresumable(v.Run.ID, c)
+		return false, "the run " + Unresumable(c)
 	case s.Phase == core.PhaseCancelling:
 		return true, ""
 	}
-	p := provider(c, Binding{})
+	p := c.Provider
 	if h.opts.Credentials[Pair{c.API, p}].For(c.API) != (Keys{}) {
 		return true, ""
 	}
@@ -121,11 +117,12 @@ func (h *Host) ResumeOpen(ctx context.Context) error {
 type ItemKind string
 
 const (
-	ItemDecided         ItemKind = "decided"          // an exec decision was accepted
-	ItemReturned        ItemKind = "returned"         // a return decision closed the run
-	ItemRetrying        ItemKind = "retrying"         // a response was incomplete or held no valid decision
-	ItemCompleted       ItemKind = "completed"        // a step completed, by the executor, the harness, or a resolution
-	ItemStopRequested   ItemKind = "stop_requested"   // a persistent stop was recorded
+	ItemDecided         ItemKind = "decided"        // an exec decision was accepted
+	ItemReturned        ItemKind = "returned"       // a return decision closed the run
+	ItemRetrying        ItemKind = "retrying"       // a response was incomplete or held no valid decision
+	ItemCompleted       ItemKind = "completed"      // a step completed, by the executor, the harness, or a resolution
+	ItemStopRequested   ItemKind = "stop_requested" // a persistent stop was recorded
+	ItemRecovered       ItemKind = "effect_recovered"
 	ItemNeedsResolution ItemKind = "needs_resolution" // an effect's outcome is unknown
 	ItemStopped         ItemKind = "stopped"          // the run stopped
 )
@@ -140,7 +137,7 @@ type Item struct {
 	Kind ItemKind
 
 	Command, Purpose string // ItemDecided: the decision's payload and purpose
-	Action           string // ItemDecided: the recorded action, "legacy" before actions were recorded
+	Action           string // ItemDecided: the recorded action
 	Result           string // ItemReturned: the returned payload
 
 	Local     bool                // ItemCompleted: the harness performed it or cancelled it in process
@@ -263,9 +260,8 @@ func (it Item) bytes() int {
 	return n
 }
 
-// project returns the item that row r shows, if any. Whether a completed step
-// was local comes from the absence of a job, or from the virtual job of a
-// legacy harness action, never from the kind of the row alone.
+// project maps bounded journal facts into progress. Store validation ensures
+// that a receipt-free Observed is cancellation of an accepted local action.
 func project(r sqlite.ProgressRow) (Item, bool) {
 	it := Item{Seq: r.Seq, Step: r.Step}
 	// shown are the texts of r the item shows, which alone make it Truncated.
@@ -276,9 +272,7 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 		case r.Phase == core.PhaseEffectSaved:
 			it.Kind, it.Command, it.Purpose, it.Action = ItemDecided, r.Decision.Payload, r.Decision.Purpose, r.Action
 			shown |= sqlite.ProgressPayload | sqlite.ProgressPurpose
-			if r.Semantics < harness.ActionSemantics {
-				it.Action = string(harness.ActionLegacy)
-			}
+
 		case r.Phase == core.PhaseReturned:
 			it.Kind, it.Result = ItemReturned, r.Decision.Payload
 			shown |= sqlite.ProgressPayload
@@ -294,10 +288,12 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, Handover: r.Handover}
 		shown |= sqlite.ProgressPayload | sqlite.ProgressOutcomeDetail | sqlite.ProgressRetrievalError
 	case "observed", "resolved":
-		it.Kind, it.Resolved, it.Command = ItemCompleted, r.Kind == "resolved", r.Decision.Payload
-		it.Local = r.JobID == "" && r.Execution == core.ExecutionCancelled || harness.LegacyInProcess(r.EffectID, r.JobID)
+		it.Kind, it.Resolved, it.Command = ItemCompleted, r.ResolutionSource == harness.ResolutionOperator, r.Decision.Payload
+		it.Local = r.Kind == "observed" && !r.External && r.Execution == core.ExecutionCancelled
 		it.Execution, it.ExitCode, it.Preview, it.Detail = r.Execution, r.ExitCode, r.Preview, r.Detail
 		shown |= sqlite.ProgressPayload | sqlite.ProgressPreview | sqlite.ProgressDetail
+	case "effect_recovered":
+		it.Kind = ItemRecovered
 	case "outcome_unknown":
 		it.Kind, it.Failure = ItemNeedsResolution, r.Failure
 		shown |= sqlite.ProgressFailure

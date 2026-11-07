@@ -22,7 +22,7 @@ import (
 	"github.com/ChrAlpha/canti/internal/host"
 )
 
-var stepKinds = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}
+var stepKinds = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "observed"}
 
 // released is a command that waits until the test creates the file release
 // in the workspace.
@@ -36,12 +36,10 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 	}
 	cold, image := recoveryFixture(t, script)
 	intent := map[core.Phase][]string{
-		core.PhaseIdle:                {"request_frozen"},
-		core.PhaseRequestFrozen:       {"attempt_started", "response_saved"},
-		core.PhaseResponseSaved:       {"response_loaded"},
-		core.PhaseEffectSaved:         {"job_bound"},
-		core.PhaseJobBound:            {"job_started"},
-		core.PhaseAwaitingObservation: {"observed"},
+		core.PhaseIdle:          {"request_frozen"},
+		core.PhaseRequestFrozen: {"attempt_started", "response_saved"},
+		core.PhaseResponseSaved: {"response_loaded"},
+		core.PhaseEffectSaved:   {"observed"},
 	}
 	var h []entry
 	phase, processes := core.PhaseIdle, 0
@@ -60,8 +58,8 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 			break
 		}
 	}
-	if processes != 15 {
-		t.Errorf("%d processes drove the run, want one per intent: 15", processes)
+	if processes != 11 {
+		t.Errorf("%d processes drove the run, want one per intent: 11", processes)
 	}
 	checkReplay(t, cold.status().Run.ID, h)
 
@@ -74,7 +72,7 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 		t.Fatalf("uninterrupted history %q\ncold-restart history %q", kinds(w), kinds(h))
 	}
 	anonymous := func(s core.State) core.State {
-		for _, id := range []*string{&s.RunID, &s.EffectID, &s.JobID} {
+		for _, id := range []*string{&s.RunID, &s.EffectID} {
 			if *id != "" {
 				*id = "set"
 			}
@@ -96,7 +94,7 @@ func TestGateColdRestartAfterEveryStep(t *testing.T) {
 			switch e.Kind {
 			case "request_frozen":
 				frozen = append(frozen, string(e.Facts.Request.Body))
-			case "job_bound":
+			case "response_loaded":
 				ids = append(ids, e.State.EffectID, fmt.Sprintf("effect-%d", e.State.Step))
 			}
 		}
@@ -225,7 +223,7 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 			t.Fatalf("the killed resume committed %q", kinds(h[len(pre):]))
 		}
 		checkFile(t, filepath.Join(one, "command"), script[1].Payload)
-		checkFile(t, filepath.Join(one, "preview"), pre[6].Facts.Observation.Preview)
+		checkFile(t, filepath.Join(one, "preview"), pre[4].Facts.Observation.Preview)
 		h := recovered(t, f, pre, slices.Concat(stepKinds, stepKinds, stepKinds[:4]), 1)
 		evidence(t, "crash at commit boundaries", "after:observed, then before:request_frozen of step 2", image, f, h)
 	})
@@ -247,24 +245,24 @@ func TestGateCrashAtCommitBoundaries(t *testing.T) {
 		})
 		cmd, wait := f.start(path, "run", "-goal", "count", "-image", image)
 		pid.Store(int64(cmd.Process.Pid))
-		awaitPhase(t, f, core.PhaseAwaitingObservation)
+		awaitRunningEffect(t, f)
 		writeFile(t, filepath.Join(f.workspace, "release"))
 		if r := wait(); !killed(cmd) {
 			t.Fatalf("run = %d, not killed\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 		}
 		pre := f.history()
 		s := pre[len(pre)-1].State
-		if !slices.Equal(kinds(pre), stepKinds[:6]) {
+		if !slices.Equal(kinds(pre), stepKinds[:4]) {
 			t.Fatalf("history after the crash = %q", kinds(pre))
 		}
-		if rec, ok := readRecord(t, f, s.EffectID); !ok || rec.ID != s.JobID || rec.Status != harness.JobSucceeded || rec.Preview != "one\n" {
-			t.Fatalf("record after the crash = %+v, %v; want job %s succeeded", rec, ok, s.JobID)
+		if rec, ok := readRecord(t, f, s.EffectID); !ok || rec.ID != effectOwner(t, f, s.EffectID) || rec.Status != harness.JobSucceeded || rec.Preview != "one\n" {
+			t.Fatalf("record after the crash = %+v, %v; want job %s succeeded", rec, ok, effectOwner(t, f, s.EffectID))
 		}
-		if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "exited" {
-			t.Fatalf("containers after the crash = %+v, want the recorded job %s exited", cs, s.JobID)
+		if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "exited" {
+			t.Fatalf("containers after the crash = %+v, want the recorded job %s exited", cs, effectOwner(t, f, s.EffectID))
 		}
 		h := recovered(t, f, pre, slices.Concat(stepKinds, stepKinds, stepKinds[:4]), 1)
-		evidence(t, "crash at commit boundaries", "SIGKILL in the removal of the recorded step 1 job "+s.JobID, image, f, h)
+		evidence(t, "crash at commit boundaries", "SIGKILL in the removal of the recorded step 1 job "+effectOwner(t, f, s.EffectID), image, f, h)
 	})
 }
 
@@ -273,14 +271,14 @@ func TestGateInFlightJobRecovery(t *testing.T) {
 		1: {Kind: core.Exec, Payload: released + "echo x >> count-1; echo late-output"},
 		2: {Kind: core.Return, Payload: "done"},
 	})
-	crashRun(t, f, "after:job_started", "run", "-goal", "wait", "-image", image)
+	crashRun(t, f, "executor:running", "run", "-goal", "wait", "-image", image)
 	pre := f.history()
 	s := pre[len(pre)-1].State
-	if !slices.Equal(kinds(pre), stepKinds[:6]) || s.Phase != core.PhaseAwaitingObservation {
+	if !slices.Equal(kinds(pre), stepKinds[:4]) || s.Phase != core.PhaseEffectSaved {
 		t.Fatalf("history after the crash = %q", kinds(pre))
 	}
-	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "running" {
-		t.Fatalf("containers after the controller died = %+v, want job %s running", cs, s.JobID)
+	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "running" {
+		t.Fatalf("containers after the controller died = %+v, want job %s running", cs, effectOwner(t, f, s.EffectID))
 	}
 	_, wait := f.start(nil, "resume")
 	writeFile(t, filepath.Join(f.workspace, "release"))
@@ -296,8 +294,8 @@ func TestGateInFlightJobRecovery(t *testing.T) {
 		!strings.Contains(obs.Preview, "late-output") || obs.Output.Path != s.EffectID+"/output" || !obs.Output.Complete {
 		t.Errorf("step 1 observation = %+v", obs)
 	}
-	if jobs := boundJobs(t, h); len(jobs) != 1 || jobs[s.EffectID] != s.JobID {
-		t.Errorf("bound jobs = %v, want %s=%s", jobs, s.EffectID, s.JobID)
+	if jobs := boundJobs(t, h); len(jobs) != 1 || jobs[s.EffectID] != effectOwner(t, f, s.EffectID) {
+		t.Errorf("bound jobs = %v, want %s=%s", jobs, s.EffectID, effectOwner(t, f, s.EffectID))
 	}
 	if n := len(f.model.prompts(1)); n != 1 || len(f.model.requests()) != 2 {
 		t.Errorf("%d model requests, %d for step 1", len(f.model.requests()), n)
@@ -305,7 +303,7 @@ func TestGateInFlightJobRecovery(t *testing.T) {
 	checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
 	checkReleased(t, f, h)
 	checkReplay(t, s.RunID, h)
-	evidence(t, "in-flight job recovery", "after:job_started while the job runs", image, f, h)
+	evidence(t, "in-flight job recovery", "executor:running while the job runs", image, f, h)
 }
 
 func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
@@ -313,10 +311,10 @@ func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
 		1: {Kind: core.Exec, Payload: "sleep 60"},
 		2: {Kind: core.Return, Payload: "done"},
 	})
-	crashRun(t, f, "after:job_started", "run", "-goal", "lose", "-image", image)
+	crashRun(t, f, "executor:running", "run", "-goal", "lose", "-image", image)
 	pre := f.history()
 	s := pre[len(pre)-1].State
-	if out, err := exec.Command("docker", "rm", "-f", s.JobID).CombinedOutput(); err != nil {
+	if out, err := exec.Command("docker", "rm", "-f", effectOwner(t, f, s.EffectID)).CombinedOutput(); err != nil {
 		t.Fatalf("docker rm: %v: %s", err, out)
 	}
 	if r := f.cli(nil, "resume"); r.code != exitResolution || !strings.Contains(r.stderr, "needs resolution") {
@@ -348,21 +346,31 @@ func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
 		t.Errorf("resolve -job = %d\nstderr: %s", r.code, r.stderr)
 	}
 	unchanged("resolve -job")
-	if r := f.cli(nil, "resolve", "-execution", "exited", "-exit-code", "0", "-note", "verified"); r.code != exitOK {
+
+	for _, args := range [][]string{
+		{"-execution", "exited", "-exit-code", "0", "-note", "verified"},
+		{"-execution", "exited", "-exit-code", "0", "-owner", effectOwner(t, f, s.EffectID)},
+	} {
+		if r := f.cli(nil, "resolve", args...); r.code != exitUsage {
+			t.Fatalf("missing operator provenance %q: %+v", args, r)
+		}
+		unchanged("rejected operator provenance")
+	}
+	if r := f.cli(nil, "resolve", "-execution", "exited", "-exit-code", "0", "-note", "verified", "-owner", effectOwner(t, f, s.EffectID)); r.code != exitOK {
 		t.Fatalf("resolve -execution = %d\nstderr: %s", r.code, r.stderr)
 	}
 	h = f.history()
 	last, zero := h[len(h)-1], 0
 	want := harness.Observation{Execution: core.ExecutionExited, ExitCode: &zero, Preview: "verified", Output: harness.ArtifactRef{Detail: "resolved by operator"}}
 	if last.Kind != "resolved" || last.From != core.PhaseNeedsResolution || last.To != core.PhaseIdle || last.State.Step != 2 ||
-		!reflect.DeepEqual(last.Facts.Observation, &want) {
+		!reflect.DeepEqual(last.Facts.Observation, &want) || last.Facts.Resolution == nil || last.Facts.Resolution.Source != harness.ResolutionOperator || last.Facts.Resolution.OwnerID != effectOwner(t, f, s.EffectID) {
 		t.Fatalf("resolution = %+v", last)
 	}
 	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("resume after the resolution = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	final := f.history()
-	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:6], []string{"outcome_unknown", "resolved"}, stepKinds[:4])) {
+	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:4], []string{"outcome_unknown", "resolved"}, stepKinds[:4])) {
 		t.Errorf("history = %q", kinds(final))
 	}
 	if p := f.model.prompts(2); len(p) != 1 || !strings.Contains(p[0], "set by explicit resolution") || !strings.Contains(p[0], "verified") {
@@ -375,7 +383,7 @@ func TestGateUnknownOutcomeOfALostJob(t *testing.T) {
 		t.Errorf("containers = %+v, records %q", cs, recs)
 	}
 	checkReplay(t, s.RunID, final)
-	evidence(t, "unknown outcomes", "after:job_started, then docker rm -f of job "+s.JobID, image, f, final)
+	evidence(t, "unknown outcomes", "executor:running, then docker rm -f of job "+effectOwner(t, f, s.EffectID), image, f, final)
 }
 
 func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
@@ -387,20 +395,20 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 	path := dockerProxy(t, unavailableInspection(unavailable))
 
 	_, wait := f.start(path, "run", "-goal", "wait", "-image", image)
-	awaitPhase(t, f, core.PhaseAwaitingObservation)
+	awaitRunningEffect(t, f)
 	writeFile(t, unavailable)
 	if r := wait(); r.code != exitResolution {
 		t.Fatalf("run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	h := f.history()
 	last := h[len(h)-1]
-	if !slices.Equal(kinds(h), slices.Concat(stepKinds[:6], []string{"outcome_unknown"})) || last.To != core.PhaseNeedsResolution ||
-		!strings.Contains(last.Facts.Failure, "inspect failed 6 consecutive times") || !strings.Contains(last.Facts.Failure, "job status unavailable") {
+	if !slices.Equal(kinds(h), slices.Concat(stepKinds[:4], []string{"outcome_unknown"})) || last.To != core.PhaseNeedsResolution ||
+		!strings.Contains(last.Facts.Failure, "docker inspect") || !strings.Contains(last.Facts.Failure, "job status unavailable") {
 		t.Fatalf("history = %q, last %+v", kinds(h), last)
 	}
 	s := h[len(h)-2].State
-	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != s.JobID || cs[0].state != "running" {
-		t.Fatalf("containers in needs_resolution = %+v, want job %s running", cs, s.JobID)
+	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != effectOwner(t, f, s.EffectID) || cs[0].state != "running" {
+		t.Fatalf("containers in needs_resolution = %+v, want job %s running", cs, effectOwner(t, f, s.EffectID))
 	}
 	if err := os.Remove(unavailable); err != nil {
 		t.Fatal(err)
@@ -410,8 +418,8 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 	}
 	resolved := f.history()
 	last = resolved[len(resolved)-1]
-	if !extends(resolved, h) || len(resolved) != len(h)+1 || last.Kind != "job_bound" || last.From != core.PhaseNeedsResolution ||
-		last.To != core.PhaseAwaitingObservation || last.State.JobID != s.JobID || !last.State.Started {
+	if !extends(resolved, h) || len(resolved) != len(h)+1 || last.Kind != "effect_recovered" || last.From != core.PhaseNeedsResolution ||
+		last.To != core.PhaseEffectSaved || last.Facts.Receipt == nil || last.Facts.Receipt.ID != effectOwner(t, f, s.EffectID) {
 		t.Fatalf("resolution = %+v", last)
 	}
 	writeFile(t, filepath.Join(f.workspace, "release"))
@@ -419,7 +427,7 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	final := f.history()
-	if !extends(final, resolved) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:6], []string{"outcome_unknown", "job_bound", "observed"}, stepKinds[:4])) {
+	if !extends(final, resolved) || !slices.Equal(kinds(final), slices.Concat(stepKinds[:4], []string{"outcome_unknown", "effect_recovered", "observed"}, stepKinds[:4])) {
 		t.Fatalf("history = %q", kinds(final))
 	}
 	if obs := final[len(resolved)].Facts.Observation; obs == nil || obs.Execution != core.ExecutionExited || obs.Preview != "original\n" {
@@ -431,7 +439,7 @@ func TestGateUnknownOutcomeOfAnUnavailableStatus(t *testing.T) {
 	}
 	checkReleased(t, f, final)
 	checkReplay(t, s.RunID, final)
-	evidence(t, "unknown outcomes", "container inspect unavailable in awaiting_observation", image, f, final)
+	evidence(t, "unknown outcomes", "container inspect unavailable in effect_saved", image, f, final)
 }
 
 func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
@@ -440,7 +448,7 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 		2: {Kind: core.Return, Payload: "done"},
 	})
 	writer, wait := f.start(nil, "run", "-goal", "write", "-image", image)
-	awaitPhase(t, f, core.PhaseAwaitingObservation)
+	awaitRunningEffect(t, f)
 	h := f.history()
 	unchanged := func(what string) {
 		t.Helper()
@@ -475,7 +483,7 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 		t.Fatalf("takeover = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	final := f.history()
-	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds, stepKinds[:4])) || final[len(h)].From != core.PhaseAwaitingObservation {
+	if !extends(final, h) || !slices.Equal(kinds(final), slices.Concat(stepKinds, stepKinds[:4])) || final[len(h)].From != core.PhaseEffectSaved {
 		t.Fatalf("history = %q", kinds(final))
 	}
 	if n := len(f.model.prompts(1)); n != 1 || len(f.model.requests()) != 2 {
@@ -484,7 +492,7 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 	checkFile(t, filepath.Join(f.workspace, "count-1"), "x\n")
 	checkReleased(t, f, final)
 	checkReplay(t, h[0].State.RunID, final)
-	evidence(t, "single workspace writer", "concurrent resume and stop, then SIGKILL of the writer in awaiting_observation", image, f, final)
+	evidence(t, "single workspace writer", "concurrent resume and stop, then SIGKILL of the writer in effect_saved", image, f, final)
 }
 
 // localSteps returns the transitions that perform a local action in h.
@@ -579,8 +587,8 @@ func TestGateColdRestartAcrossLocalActions(t *testing.T) {
 			t.Fatalf("process %d = %d\nstderr: %s", processes, r.code, r.stderr)
 		}
 	}
-	if processes != 17 {
-		t.Errorf("%d processes drove the run, want one per intent: 17", processes)
+	if processes != 15 {
+		t.Errorf("%d processes drove the run, want one per intent: 15", processes)
 	}
 	if r := cold.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("resume of the returned run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)

@@ -252,9 +252,6 @@ func inherited(ctx context.Context, a *app, session string) (string, error) {
 	}
 	defer store.Close()
 	prior, err := store.SessionRuns(ctx, session, 0, 1)
-	if errors.Is(err, sqlite.ErrNoSessions) {
-		return "", nil
-	}
 	if err != nil || len(prior) == 0 {
 		return "", err
 	}

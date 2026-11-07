@@ -10,7 +10,6 @@ import (
 func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 	const run = "3f2c9a1e-7b4d-4c8e-9a6f-0d1b2c3e4f50"
 	const effect = "effect_371edff20886199482d53f7e4a6f74f2a2ddb5d8e74274e53052b1255e139650"
-	const job = "9d4c1f6e2b7a8053c1e4f7a2b9d0c3e6f8a1b4d7c0e3f6a9b2c5d8e1f4a7b0c3"
 	cases := []struct {
 		event         core.Event
 		kind, encoded string
@@ -27,10 +26,8 @@ func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 		{core.ResponseLoaded{Step: 9, Attempt: 2, Body: []byte(`{"kind":"exec","payload":"go test ./..."}`)}, "response_loaded",
 			`{"Step":9,"Attempt":2,"Body":"eyJraW5kIjoiZXhlYyIsInBheWxvYWQiOiJnbyB0ZXN0IC4vLi4uIn0="}`,
 			"event_a4c7088d04e609a41fe7dcc8835db463c6668ddc38661ef65685d350ff7f08fd"},
-		{core.JobBound{EffectID: effect, JobID: job}, "job_bound", `{"EffectID":"` + effect + `","JobID":"` + job + `"}`,
-			"event_ab5d1ebbe311a38860d09cc0028e1585ccbd26c1cb5732aef4d76ae9fba864ba"},
-		{core.JobStarted{EffectID: effect, JobID: job}, "job_started", `{"EffectID":"` + effect + `","JobID":"` + job + `"}`,
-			"event_c98bda96dc1ebf5e6bde08357e4ffe2abce83e291133b64af5c8ff66dc5d6663"},
+		{core.EffectRecovered{EffectID: effect}, "effect_recovered", `{"EffectID":"` + effect + `"}`,
+			"event_05966fd6a096e379939d12ddc1d363d3e8cbc55845bc83c674e07afefac3b1fe"},
 		{core.Observed{EffectID: effect, Execution: core.ExecutionExited}, "observed", `{"EffectID":"` + effect + `","Execution":"exited"}`,
 			"event_ec2b0cf9f514eab5abede9a59cce4655f29e5901346d88158c741df56b5f9e38"},
 		{core.Performed{EffectID: effect}, "performed", `{"EffectID":"` + effect + `"}`,

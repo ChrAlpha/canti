@@ -73,7 +73,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	d, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: command})
 	f.model.answer(1, 1, reply{text: string(d)})
 	_, wait := f.start([]string{"CANTI_TRUST_PROBE=" + probe}, "run", "-goal", "g", "-image", image)
-	c := evInspect(t, evJob(t, evAwait(t, f, "job_started")))
+	c := evInspect(t, evJob(t, f, evAwaitRunning(t, f)))
 	writeFile(t, filepath.Join(f.workspace, "release"))
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" {
@@ -83,7 +83,7 @@ func TestGateTrustBoundaryKeepsCredentialsAndStateOut(t *testing.T) {
 	if !slices.Equal(kinds(h), slices.Concat(evStep, evReturn)) {
 		t.Fatalf("history = %q", kinds(h))
 	}
-	obs := h[6].Facts.Observation
+	obs := h[4].Facts.Observation
 	if obs == nil || obs.Execution != core.ExecutionExited || obs.ExitCode == nil || *obs.ExitCode != 0 || !obs.Output.Complete {
 		t.Fatalf("observation = %+v", obs)
 	}
@@ -233,7 +233,7 @@ func TestGateWorkspaceNotesAreNotAutomaticallyRead(t *testing.T) {
 			t.Errorf("the agent's symlink does not escape on the host: %q, %v", data, err)
 		}
 		h := f.history()
-		if o := h[6].Facts.Observation; o == nil || !strings.Contains(o.Preview, "cat=1") || strings.Contains(o.Preview, "HOSTSECRET") {
+		if o := h[4].Facts.Observation; o == nil || !strings.Contains(o.Preview, "cat=1") || strings.Contains(o.Preview, "HOSTSECRET") {
 			t.Errorf("step 1 observation = %+v", o)
 		}
 		if leaks := evLeaks(t, f.state, "HOSTSECRET"); len(leaks) > 0 {
@@ -271,7 +271,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	if !slices.Equal(kinds(h), evStep) {
 		t.Fatalf("history before the tampering step = %q", kinds(h))
 	}
-	fact := h[6].Facts.Observation
+	fact := h[4].Facts.Observation
 	artifact := filepath.Join(f.state, "artifacts", fact.Output.Path)
 	if data, err := os.ReadFile(artifact); err != nil || string(data) != "fact-one\n" || fact.Output.Bytes != 9 || !fact.Output.Available {
 		t.Fatalf("step 1 artifact = %q, %v; observation %+v", data, err, fact)
@@ -287,7 +287,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) {
 		t.Fatalf("history = %q", kinds(h))
 	}
-	tampered := h[13].Facts.Observation
+	tampered := h[9].Facts.Observation
 	for _, want := range []string{"Read-only file system", "rm=1", "write=1", path.Base(path.Dir(fact.Output.Path))} {
 		if tampered == nil || !strings.Contains(tampered.Preview, want) {
 			t.Errorf("tampering output lacks %q: %+v", want, tampered)
@@ -349,8 +349,8 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) || h[0].State.RunID != id {
 		t.Fatalf("history = %q", kinds(h))
 	}
-	one := h[6].Facts.Observation
-	data, err := os.ReadFile(filepath.Join(f.state, "artifacts", h[13].Facts.Observation.Output.Path))
+	one := h[4].Facts.Observation
+	data, err := os.ReadFile(filepath.Join(f.state, "artifacts", h[9].Facts.Observation.Output.Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 	if !slices.Equal(kinds(h2), slices.Concat(evStep, evReturn)) || h2[0].State.RunID == id {
 		t.Fatalf("second run history = %q", kinds(h2))
 	}
-	if data, err = os.ReadFile(filepath.Join(f.state, "artifacts", h2[6].Facts.Observation.Output.Path)); err != nil {
+	if data, err = os.ReadFile(filepath.Join(f.state, "artifacts", h2[4].Facts.Observation.Output.Path)); err != nil {
 		t.Fatal(err)
 	}
 	s2 := evSections(string(data))

@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"net/http"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,12 +17,22 @@ import (
 )
 
 func TestAHostKeepsDrivingADockerJobAfterItsClientGoesAway(t *testing.T) {
-	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 3; echo kept"}, 2: {Kind: core.Return, Payload: "done"}})
+	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: released + "echo kept"}, 2: {Kind: core.Return, Payload: "done"}})
 	f.autoHost()
 	client, wait := f.start(nil, "run", "-host", "auto", "-goal", "g", "-input", "detached", "-image", image)
-	awaitPhase(t, f, core.PhaseAwaitingObservation)
+	awaitRunningEffect(t, f)
+	before := f.history()
+	inspected := f.cli(nil, "inspect", "-host", "auto")
+	var sample hostrpc.Inspection
+	if inspected.code != exitOK || strict(inspected.stdout, &sample) != nil || sample.Receipt == nil || sample.Receipt.Status != "running" || sample.Receipt.OwnerID != effectOwner(t, f, before[len(before)-1].State.EffectID) || sample.SampledAt == "" {
+		t.Fatalf("running inspection: %+v sample %+v", inspected, sample)
+	}
+	if after := f.history(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("inspection changed journal: %q", kinds(after))
+	}
 	client.Process.Kill()
 	wait()
+	writeFile(t, filepath.Join(f.workspace, "release"))
 	if r := f.cli(nil, "resume", "-host", "auto"); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("resume after the client went away: %+v", r)
 	}
@@ -35,7 +47,7 @@ func TestAHostWithoutCredentialsStopsADockerJob(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 120"}})
 	f.autoHost()
 	client, wait := f.start(nil, "run", "-host", "auto", "-goal", "g", "-input", "stopped", "-image", image)
-	awaitPhase(t, f, core.PhaseAwaitingObservation)
+	awaitRunningEffect(t, f)
 	syscall.Kill(f.hostPIDs()[0], syscall.SIGKILL)
 	client.Process.Kill()
 	wait()
@@ -67,7 +79,7 @@ func TestAHostShutdownLeavesItsDockerJobRunning(t *testing.T) {
 		return err == nil
 	})
 	client, cwait := f.start(nil, "run", "-host", "auto", "-goal", "g", "-input", "survives", "-image", image)
-	awaitPhase(t, f, core.PhaseAwaitingObservation)
+	awaitRunningEffect(t, f)
 	before := kinds(f.history())
 	h.Process.Signal(syscall.SIGTERM)
 	if r := hwait(); r.code != exitOK {
@@ -98,7 +110,7 @@ func TestAHostShutdownLeavesItsDockerJobRunning(t *testing.T) {
 func TestAHostKilledAfterACommitResumesFromTheJournal(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 1; echo once"}, 2: {Kind: core.Return, Payload: "done"}})
 	f.autoHost()
-	r := f.cli([]string{"CANTI_TEST_CRASH=after:job_started"}, "run", "-host", "auto", "-goal", "g", "-input", "crash", "-image", image)
+	r := f.cli([]string{"CANTI_TEST_EXECUTOR_CRASH=running"}, "run", "-host", "auto", "-goal", "g", "-input", "crash", "-image", image)
 	if r.code != exitError || !strings.Contains(r.stderr, "the host went away") {
 		t.Fatalf("a client whose host was killed: %+v", r)
 	}
@@ -108,4 +120,64 @@ func TestAHostKilledAfterACommitResumesFromTheJournal(t *testing.T) {
 	h := f.history()
 	checkReplay(t, f.status().Run.ID, h)
 	checkReleased(t, f, h)
+}
+
+func TestInspectionSamplesAcceptedEffectWithoutLaunchingOrCommitting(t *testing.T) {
+	for _, mode := range []string{"embedded", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo once >> count"}, 2: {Kind: core.Return, Payload: "done"}})
+			if mode == "auto" {
+				f.autoHost()
+			}
+			crashRun(t, f, "after:response_loaded", "run", "-goal", "inspect accepted", "-image", image)
+			before := f.history()
+			effect := before[len(before)-1].State.EffectID
+			r := f.cli(nil, "inspect", "-host", mode)
+			var sample hostrpc.Inspection
+			if r.code != exitOK || strict(r.stdout, &sample) != nil || sample.EffectID != effect || sample.SampledAt == "" || sample.Unavailable != "" || sample.Receipt == nil || sample.Receipt.Status != "absent" || sample.Receipt.OwnerID != "" {
+				t.Fatalf("accepted inspection: %+v, sample %+v", r, sample)
+			}
+			if after := f.history(); !reflect.DeepEqual(after, before) {
+				t.Fatalf("inspection committed %q", kinds(after))
+			}
+			if cs := effectContainers(t, f.state); len(cs) != 0 {
+				t.Fatalf("inspection created containers: %+v", cs)
+			}
+			if r := f.cli(nil, "resume", "-host", mode); r.code != exitOK {
+				t.Fatalf("resume: %+v", r)
+			}
+			checkFile(t, filepath.Join(f.workspace, "count"), "once\n")
+			checkReleased(t, f, f.history())
+		})
+	}
+}
+
+func TestColdAutoInspectionDoesNotDriveADurablePendingStop(t *testing.T) {
+	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 120"}})
+	crashRun(t, f, "executor:running", "run", "-goal", "inspect pending stop", "-image", image)
+	crashRun(t, f, "after:stop_requested", "stop")
+	before := f.history()
+	effect := before[len(before)-1].State.EffectID
+	if before[len(before)-1].To != core.PhaseCancelling {
+		t.Fatalf("pending stop: %q", kinds(before))
+	}
+	f.autoHost()
+	r := f.cli(nil, "inspect", "-host", "auto")
+	var sample hostrpc.Inspection
+	if r.code != exitOK || strict(r.stdout, &sample) != nil || sample.Receipt == nil || sample.Receipt.Status != "running" || sample.Receipt.OwnerID != effectOwner(t, f, effect) {
+		t.Fatalf("cold inspection: %+v, sample %+v", r, sample)
+	}
+	if after := f.history(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("cold inspection drove pending stop: before %q after %q", kinds(before), kinds(after))
+	}
+	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].effect != effect || cs[0].state != "running" {
+		t.Fatalf("cold inspection stopped owner: %+v", cs)
+	}
+	if len(f.model.requests()) != 1 {
+		t.Fatalf("cold inspection sent model requests: %d", len(f.model.requests()))
+	}
+	if stopped := f.cli(nil, "stop", "-host", "embedded"); stopped.code != exitStopped {
+		t.Fatalf("finish pending stop: %+v", stopped)
+	}
+	checkReleased(t, f, f.history())
 }

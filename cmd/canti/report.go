@@ -37,7 +37,7 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 				"session_id": run.SessionID, "session_seq": run.SessionSeq, "input_id": run.InputID,
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
 			"seq": snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
-			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID, "job_id": st.JobID,
+			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID,
 			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps},
 		}
 		return exitOK, a.encoder().Encode(out)
@@ -147,7 +147,7 @@ func (a *app) report(snap harness.Snapshot, err error, active int, c host.RunCon
 		return exitResolution, nil
 	}
 	next := "resume"
-	switch why := host.Unresumable(s.RunID, c); {
+	switch why := host.Unresumable(c); {
 	case why != "":
 		fmt.Fprintf(out, "canti: run %s is %s and %s.\n", s.RunID, s.Phase, why)
 		return active, nil

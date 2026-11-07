@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestRemovedContextStrategiesAreRejected(t *testing.T) {
 	}
 }
 
-func TestDecodeConfigKeepsAnyStoredContextVersion(t *testing.T) {
+func TestDecodeConfigRejectsUnsupportedStoredContextVersions(t *testing.T) {
 	s := runSpec(t)
 	run, _, err := host.NewRun("goal", "", s, time.Now())
 	if err != nil {
@@ -67,10 +68,8 @@ func TestDecodeConfigKeepsAnyStoredContextVersion(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := s.Config
-		want.ContextVersion, _ = version.(int)
-		if c, err := host.DecodeConfig(run, s.Config.Workspace); err != nil || c != want {
-			t.Fatalf("context version %v decodes as %+v, %v\nwant %+v", version, c, err, want)
+		if _, err := host.DecodeConfig(run, s.Config.Workspace); err == nil || !strings.Contains(err.Error(), "unsupported context version") || !strings.Contains(err.Error(), "use fresh state") {
+			t.Fatalf("accepted unsupported version %v: %v", version, err)
 		}
 	}
 	for _, config := range []string{"", `{"context_version":2,"history":8}`} {

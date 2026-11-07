@@ -35,11 +35,15 @@ func (s *Store) LastRun(ctx context.Context) (harness.Run, error) {
 	return s.run(s.stmts[lastRunSQL].QueryRowContext(ctx))
 }
 
-func (s *Store) run(row *sql.Row) (harness.Run, error) {
+func (s *Store) run(row interface{ Scan(...any) error }) (harness.Run, error) {
 	var run harness.Run
 	var data string
-	if err := row.Scan(&data); err != nil {
+	var semantics int
+	if err := row.Scan(&semantics, &data); err != nil {
 		return run, missing(err, "run")
+	}
+	if err := core.KnownSemantics(semantics); err != nil {
+		return run, fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	return run, strict(data, &run)
 }
@@ -207,8 +211,8 @@ func (s *Store) accepted(ctx context.Context, tx *sql.Tx, runID string, step, at
 	}
 	var kind string
 	var semantics int
-	var phase, action sql.NullString
-	if err := s.stmt(ctx, tx, acceptedSQL).QueryRowContext(ctx, runID, seq+1).Scan(&kind, &semantics, &phase, &action); err != nil {
+	var phase, action, execution sql.NullString
+	if err := s.stmt(ctx, tx, acceptedSQL).QueryRowContext(ctx, runID, seq+1).Scan(&kind, &semantics, &phase, &action, &execution); err != nil {
 		return harness.Accepted{}, missing(err, "acceptance")
 	}
 	if err := known(kind, semantics); err != nil {
@@ -224,7 +228,14 @@ func (s *Store) accepted(ctx context.Context, tx *sql.Tx, runID string, step, at
 			return harness.Accepted{}, err
 		}
 	}
-	accepted, err := harness.Acceptance(semantics, a)
+	var identity *harness.ExecutionIdentity
+	if execution.Valid {
+		identity = new(harness.ExecutionIdentity)
+		if err := strict(execution.String, identity); err != nil {
+			return harness.Accepted{}, err
+		}
+	}
+	accepted, err := harness.Acceptance(semantics, a, identity)
 	if err != nil {
 		return harness.Accepted{}, fmt.Errorf("%w: step %d attempt %d of run %q: %v", ErrIncompatible, step, attempt, runID, err)
 	}
@@ -252,37 +263,13 @@ func (s *Store) window(ctx context.Context, tx *sql.Tx, runID string, step, rev 
 	return &w, nil
 }
 
-// Recent returns at most limit of the latest observed, performed, or
-// resolved steps committed below sequence before, or the latest ones when
-// before is not positive, oldest first, in one statement that searches the
-// partial index of each. A read-only store of a journal without
-// performedIndex answers for a run whose latest transition precedes
-// harness.ActionSemantics, which holds no performed step, and fails for any
-// other once a new look finds the index still missing.
+// Recent returns bounded current-format completions, oldest first.
 func (s *Store) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
 	if before <= 0 {
 		before = math.MaxInt64
 	}
-	query := stepsSQL
-	if !s.performed.Load() {
-		latest, err := s.latestSemantics(ctx, runID)
-		if err != nil {
-			return nil, err
-		}
-		if latest >= harness.ActionSemantics {
-			if err := s.probePerformed(ctx); err != nil {
-				return nil, err
-			}
-			if !s.performed.Load() {
-				return nil, fmt.Errorf("%w: run %q has transitions of semantics version %d, and the journal lacks the index of its performed steps",
-					ErrIncompatible, runID, latest)
-			}
-		} else {
-			query = recentSQL
-		}
-	}
 	var out []harness.StepRecord
-	err := s.each(ctx, runID, limit, query, []any{runID, before, limit}, func(rows *sql.Rows) error {
+	err := s.each(ctx, runID, limit, stepsSQL, []any{runID, before, limit}, func(rows *sql.Rows) error {
 		step, err := scanStep(rows)
 		out = append(out, step)
 		return err
@@ -342,7 +329,7 @@ func scanStep(rows *sql.Rows) (harness.StepRecord, error) {
 		return harness.StepRecord{}, fmt.Errorf("%w: a %s transition at seq %d completes no step", ErrIncompatible, kind, seq)
 	}
 	r := harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Purpose: state.Decision.Purpose,
-		Outcome: facts.Outcome, Window: facts.Window, Resolved: kind == "resolved"}
+		Outcome: facts.Outcome, Window: facts.Window, Resolved: facts.Resolution != nil && facts.Resolution.Source == harness.ResolutionOperator}
 	if facts.Observation != nil {
 		r.Observation = *facts.Observation
 	}
@@ -350,19 +337,6 @@ func scanStep(rows *sql.Rows) (harness.StepRecord, error) {
 		return r, fmt.Errorf("%w: %s step %d of seq %d: %v", ErrIncompatible, kind, r.Step, seq, err)
 	}
 	return r, nil
-}
-
-// latestSemantics returns the semantics version of the latest transition of
-// the run, or of its initial state.
-func (s *Store) latestSemantics(ctx context.Context, runID string) (int, error) {
-	var seq int64
-	var kind, state string
-	var semantics int
-	err := s.stmts[latestSQL].QueryRowContext(ctx, runID).Scan(&seq, &kind, &semantics, &state)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = missing(s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
-	}
-	return semantics, err
 }
 
 // each calls fn for every row of a query bounded by limit and reports an
@@ -400,7 +374,7 @@ func known(kind string, semantics int) error {
 	if events[kind] == nil {
 		return fmt.Errorf("%w: record kind %q", ErrIncompatible, kind)
 	}
-	if err := core.CompatibleEvent(semantics, reflect.Zero(events[kind]).Interface().(core.Event)); err != nil {
+	if err := core.KnownSemantics(semantics); err != nil {
 		return fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	return nil
@@ -414,7 +388,7 @@ func decodeState(semantics int, data string, state *core.State) error {
 	if err := strict(data, state); err != nil {
 		return err
 	}
-	if err := core.Compatible(semantics, *state); err != nil {
+	if err := state.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	return nil

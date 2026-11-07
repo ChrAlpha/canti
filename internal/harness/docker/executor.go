@@ -2,7 +2,7 @@
 // Docker Engine API, over connections that the docker CLI opens.
 //
 // A finished job's container, with its Docker log, is removed once its result
-// is recorded, even when its output could not be captured, so host disk holds
+// and output are durably recorded, so host disk holds
 // at most Config.OutputLimit bytes of retained output per job, plus the Docker
 // log of each job still running or awaiting capture, bounded only by its
 // runtime.
@@ -13,8 +13,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,12 +77,12 @@ type Mount struct{ Source, Target string }
 
 // Executor runs each effect as one container named canti-<effect ID>,
 // labelled with the hash of its full execution spec. The start latch, cancel
-// marker, and final record live under Config.State and every operation holds
-// the effect's file lock, so callers in any goroutine or process never
+// marker, and final record live under Config.State. Drive, Inspect and Cancel
+// hold the effect's file lock; advisory Wait holds none. Callers never
 // observe a half-done start. A container that exits without the exit status
 // its shell records, as when it is killed outside canti, reports JobUnknown.
-// Only Inspect reads that record; every operation that finds a job finished
-// without it captures and records the job. Once recorded, a job is reported
+// Every operation that finds a finished job captures and records it.
+// Once recorded, a job is reported
 // from its record alone. Host environment variables never reach a job.
 type Executor struct {
 	cfg      Config
@@ -127,6 +125,11 @@ func New(cfg Config) (*Executor, error) {
 	cfg.PreviewLimit = cmp.Or(cfg.PreviewLimit, 4<<10)
 	if cfg.PreviewLimit < 64 {
 		return nil, errors.New("docker: preview limit must be at least 64 bytes")
+	}
+	// Validate numeric runtime settings before accepting a configuration whose
+	// pure specification must describe a constructible request.
+	if _, err := (&Executor{cfg: cfg}).request(harness.Effect{}, ""); err != nil {
+		return nil, fmt.Errorf("docker: execution configuration: %w", err)
 	}
 	ws, err := resolve(cfg.Workspace)
 	if err != nil {
@@ -217,29 +220,6 @@ func within(dir, path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (x *Executor) runArgs(command string) []string {
-	c := x.cfg
-	args := []string{"--init", "--entrypoint", "/bin/sh", "--workdir", WorkDir, "--user", c.User,
-		"--network", c.Network, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--log-driver", "json-file", "--log-opt", "max-size=1p", "--log-opt", "mode=blocking"}
-	if c.Memory != "" {
-		args = append(args, "--memory", c.Memory)
-	}
-	if c.CPUs != "" {
-		args = append(args, "--cpus", c.CPUs)
-	}
-	if c.PidsLimit > 0 {
-		args = append(args, "--pids-limit", strconv.Itoa(c.PidsLimit))
-	}
-	for _, k := range proxies {
-		args = append(args, "-e", k+"=", "-e", strings.ToLower(k)+"=")
-	}
-	for _, b := range x.binds() {
-		args = append(args, "-v", b)
-	}
-	return append(args, c.Image, "-c", script(command))
-}
-
 // proxies are the variables the docker CLI's configuration could set in a
 // job; every job sets them empty.
 var proxies = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"}
@@ -254,8 +234,8 @@ func (x *Executor) binds() []string {
 
 func script(command string) string { return "exec 2>&1\n" + command }
 
-// wrapper runs the job's script in a child shell exactly as an earlier
-// revision ran it and records the child's exit status in the container's
+// wrapper runs the job's script in a child shell and records the child's
+// exit status in the container's
 // writable layer, which outlives a container killed outside canti. It
 // discards its own diagnostics, survives the stop signals that tini sends the
 // whole process group, and unsets the variables it adds to the environment.
@@ -269,12 +249,27 @@ set -C
 echo $s >` + exitFile + `
 exit $s`
 
-func specHash(run []string) string {
-	h := sha256.New()
-	for _, a := range append([]string{"canti.docker/v1"}, run...) {
-		fmt.Fprintf(h, "%d:%s", len(a), a)
+// Specification hashes the actual create request, exact normalized config and
+// retention rules. Its identity labels are blank to avoid self-reference.
+// Image contents and daemon defaults remain external environment.
+func (x *Executor) Specification(command string) string {
+	request, _ := x.request(harness.Effect{Command: command}, "")
+	canonical, _ := json.Marshal(struct {
+		Protocol string
+		Config   Config
+		Request  createRequest
+	}{"canti.docker/v2", x.cfg, request})
+	return harness.ConfigDigest(canonical)
+}
+
+func (x *Executor) checkEffect(effect harness.Effect) error {
+	if err := checkID(effect.ID); err != nil {
+		return err
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	if effect.Spec != x.Specification(effect.Command) {
+		return fmt.Errorf("docker: effect %s has a different execution specification", effect.ID)
+	}
+	return nil
 }
 
 func (x *Executor) dir(id string) string { return filepath.Join(x.cfg.State, "jobs", id) }
@@ -291,7 +286,9 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 	if err := os.MkdirAll(x.dir(id), 0o700); err != nil {
 		return nil, err
 	}
-	return flock(ctx, filepath.Join(x.dir(id), "lock"))
+	acquisition, cancel := context.WithTimeout(ctx, x.timeouts.call)
+	defer cancel()
+	return flock(acquisition, filepath.Join(x.dir(id), "lock"))
 }
 
 var errMissing = errors.New("no such container")
@@ -362,216 +359,4 @@ func decode(v any) func(*http.Response) error {
 		}
 		return nil
 	}
-}
-
-type observation struct {
-	latch  string
-	marked bool
-	c      container
-}
-
-// observe reads the latch and cancel marker of an effect and inspects its
-// container. The container of a started effect is never reported missing:
-// its removal before a record leaves the outcome unknown.
-func (x *Executor) observe(ctx context.Context, id string) (o observation, found bool, err error) {
-	if o.latch, err = readLatch(x.dir(id)); err != nil {
-		return o, false, err
-	}
-	if o.marked, err = exists(filepath.Join(x.dir(id), "cancel")); err != nil {
-		return o, false, err
-	}
-	if o.c, found, err = x.inspect(ctx, id); err == nil && !found && o.latch == latchStart {
-		err = fmt.Errorf("%w: container of effect %s is gone", harness.ErrJobLost, id)
-	}
-	return o, found, err
-}
-
-func (x *Executor) bound(ctx context.Context, id string) (observation, error) {
-	o, found, err := x.observe(ctx, id)
-	if err == nil && !found {
-		err = fmt.Errorf("docker: no job is bound to effect %s", id)
-	}
-	return o, err
-}
-
-// exitRecord is the file holding the exit record that decides the result of
-// an exited job, or "" when its result needs none.
-func (o observation) exitRecord() string {
-	if o.latch != latchStart || o.marked || o.c.State.Status != "exited" && o.c.State.Status != "dead" {
-		return ""
-	}
-	return o.c.Config.Labels[exitLabel]
-}
-
-// finalize derives the job, reading its exit record when its result needs
-// one, and records it once it is finished.
-func (x *Executor) finalize(ctx context.Context, id string, o observation) (harness.Job, error) {
-	var recorded *int
-	if file := o.exitRecord(); file != "" {
-		var err error
-		if recorded, err = x.exitStatus(ctx, o.c.ID, file); err != nil {
-			return harness.Job{}, err
-		}
-	}
-	job := derive(o.latch, o.c, o.marked, recorded)
-	if terminal(job.Status) {
-		return x.finish(ctx, id, job, o.c.Config.Labels["canti.spec"])
-	}
-	return job, nil
-}
-
-// report is the job as Bind and Start report it: finalized, unless its
-// result needs the exit record, which only Inspect reads, so it is unknown.
-func (x *Executor) report(ctx context.Context, id string, o observation) (harness.Job, error) {
-	if o.exitRecord() == "" {
-		return x.finalize(ctx, id, o)
-	}
-	job := derive(o.latch, o.c, o.marked, nil)
-	job.Output = harness.ArtifactRef{}
-	return job, nil
-}
-
-// Bind creates the effect's container without starting it, or reports the
-// existing job if it was created for the same execution spec, recording it
-// if it is finished, as Start does. An effect fenced before it had a
-// container is recorded cancelled without one.
-func (x *Executor) Bind(ctx context.Context, effect harness.Effect) (harness.Job, error) {
-	unlock, err := x.lock(ctx, effect.ID)
-	if err != nil {
-		return harness.Job{}, err
-	}
-	defer unlock()
-	x.sweep(ctx)
-	run := x.runArgs(effect.Command)
-	rec, done, err := x.recorded(ctx, effect.ID)
-	o, found := observation{}, false
-	if err == nil && !done {
-		if o, found, err = x.observe(ctx, effect.ID); err == nil && !found && o.latch == latchCancel {
-			return x.finish(ctx, effect.ID, harness.Job{ID: fenced(effect.ID), Status: harness.JobCancelled}, specHash(run))
-		}
-	}
-	if err == nil && !done && !found {
-		if err = x.create(ctx, effect, specHash(run)); err == nil {
-			o, err = x.bound(ctx, effect.ID)
-		}
-	}
-	if err != nil {
-		return harness.Job{}, err
-	}
-	spec := rec.Spec
-	if !done {
-		spec = o.c.Config.Labels["canti.spec"]
-	}
-	if spec != specHash(run) {
-		return harness.Job{}, fmt.Errorf("docker: effect %s is bound to a different execution spec", effect.ID)
-	}
-	if done {
-		return rec.Job, nil
-	}
-	return x.report(ctx, effect.ID, o)
-}
-
-// Start sets the effect's latch and starts its never-started container,
-// unless the latch was already set. Once the latch is set the launch
-// finishes even if ctx is done, each of its calls within its own deadline.
-// Start reads no exit record: a job whose result needs one is unknown until
-// Inspect reads it, and any other finished job is recorded. A start the
-// daemon rejected before the job's process began reports the job, failed to
-// start, rather than the error.
-func (x *Executor) Start(ctx context.Context, effectID string) (harness.Job, error) {
-	unlock, err := x.lock(ctx, effectID)
-	if err != nil {
-		return harness.Job{}, err
-	}
-	defer unlock()
-	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
-		return rec.Job, err
-	}
-	o, err := x.bound(ctx, effectID)
-	if err != nil {
-		return harness.Job{}, err
-	}
-	if o.latch == "" {
-		if o.c.State.Status != "created" {
-			return harness.Job{}, fmt.Errorf("docker: container %s of effect %s is %s without a start latch", o.c.ID, effectID, o.c.State.Status)
-		}
-		if err := ctx.Err(); err != nil {
-			return harness.Job{}, err
-		}
-		if err := setLatch(x.dir(effectID), latchStart); err != nil {
-			return harness.Job{}, err
-		}
-		launch := context.WithoutCancel(ctx)
-		started := x.api(launch, "start", http.MethodPost, "/containers/"+o.c.ID+"/start", nil, nil)
-		o, err = x.bound(launch, effectID)
-		if started != nil && (err != nil || !rejected(o.c)) {
-			return harness.Job{}, started
-		}
-		if err != nil {
-			return harness.Job{}, err
-		}
-	}
-	return x.report(ctx, effectID, o)
-}
-
-// Inspect reports the effect's job; found is false only when Docker reports
-// that no container exists for an effect that never started.
-func (x *Executor) Inspect(ctx context.Context, effectID string) (harness.Job, bool, error) {
-	unlock, err := x.lock(ctx, effectID)
-	if err != nil {
-		return harness.Job{}, false, err
-	}
-	defer unlock()
-	if rec, done, err := x.recorded(ctx, effectID); err != nil || done {
-		return rec.Job, done, err
-	}
-	o, found, err := x.observe(ctx, effectID)
-	if err != nil || !found {
-		return harness.Job{}, false, err
-	}
-	job, err := x.finalize(ctx, effectID, o)
-	return job, err == nil, err
-}
-
-// Wait returns once the effect's container is not running, ctx is done, or
-// the daemon cannot tell. It holds no lock and changes nothing, so it never
-// holds up Cancel; the caller inspects the job after it.
-func (x *Executor) Wait(ctx context.Context, effectID string) error {
-	if err := checkID(effectID); err != nil {
-		return err
-	}
-	return x.api(ctx, "wait", http.MethodPost, "/containers/canti-"+effectID+"/wait?condition=not-running", nil, func(r *http.Response) error {
-		_, err := io.Copy(io.Discard, io.LimitReader(r.Body, 4<<10))
-		return err
-	})
-}
-
-// Cancel fences an unstarted effect or stops its running container, waiting
-// at most StopGrace before Docker kills the container's process tree.
-func (x *Executor) Cancel(ctx context.Context, effectID string) error {
-	unlock, err := x.lock(ctx, effectID)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	dir := x.dir(effectID)
-	latch, err := readLatch(dir)
-	if err != nil || latch == latchCancel {
-		return err
-	}
-	if latch == "" {
-		return setLatch(dir, latchCancel)
-	}
-	if done, err := exists(x.record(effectID)); err != nil || done {
-		return err
-	}
-	c, found, err := x.inspect(ctx, effectID)
-	if err != nil || !found || !running(c) {
-		return err
-	}
-	if err := mark(dir); err != nil {
-		return err
-	}
-	grace := (x.cfg.StopGrace + time.Second - 1) / time.Second
-	return x.api(ctx, "stop", http.MethodPost, "/containers/"+c.ID+"/stop?t="+strconv.Itoa(int(grace)), nil, nil)
 }

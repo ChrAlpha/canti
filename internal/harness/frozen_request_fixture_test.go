@@ -83,41 +83,56 @@ type corpusExecutor struct {
 	changes   map[string]func(*os.Root) error
 }
 
-func (x *corpusExecutor) Bind(_ context.Context, e harness.Effect) (harness.Job, error) {
-	if j := x.jobs[e.ID]; j != nil {
-		return *j, nil
+func (x *corpusExecutor) Specification(command string) string {
+	return harness.ConfigDigest([]byte("corpus:" + command))
+}
+func (x *corpusExecutor) Drive(ctx context.Context, e harness.Effect) (harness.Job, error) {
+	if err := ctx.Err(); err != nil {
+		return harness.Job{}, err
 	}
-	x.jobs[e.ID] = &harness.Job{ID: "job-" + strings.TrimPrefix(e.ID, "effect_")[:12], Status: harness.JobPending}
-	x.commands[e.ID] = e.Command
-	return *x.jobs[e.ID], nil
+	if e.Spec != x.Specification(e.Command) {
+		return harness.Job{}, errors.New("changed spec")
+	}
+	if x.jobs[e.ID] == nil {
+		x.jobs[e.ID] = &harness.Job{ID: "job-" + strings.TrimPrefix(e.ID, "effect_")[:12], EffectID: e.ID, Spec: e.Spec, Status: harness.JobRunning, StartedAt: corpusCreated}
+		x.commands[e.ID] = e.Command
+	}
+	return x.Inspect(ctx, e)
 }
 
-func (x *corpusExecutor) Start(_ context.Context, effectID string) (harness.Job, error) {
+func (x *corpusExecutor) Inspect(_ context.Context, e harness.Effect) (harness.Job, error) {
+	effectID := e.ID
 	j := x.jobs[effectID]
 	if j == nil {
-		return harness.Job{}, errors.New("unbound effect")
-	}
-	if j.Status == harness.JobPending {
-		j.Status = harness.JobRunning
-	}
-	return *j, nil
-}
-
-func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Job, bool, error) {
-	j := x.jobs[effectID]
-	if j == nil {
-		return harness.Job{}, false, nil
+		return harness.Job{EffectID: e.ID, Spec: e.Spec, Status: harness.JobAbsent}, nil
 	}
 	if final, scripted := x.finals[x.commands[effectID]]; scripted && j.Status == harness.JobRunning {
 		output := x.outputs[x.commands[effectID]]
 		final.ID, final.Preview = j.ID, cmp.Or(final.Preview, output)
+		final.EffectID, final.Spec = e.ID, e.Spec
+		if final.Status == harness.JobSucceeded || final.Status == harness.JobFailed {
+			final.StartedAt, final.FinishedAt = corpusCreated, corpusCreated
+		}
+		if final.Status == harness.JobCancelled {
+			final.Fenced = true
+			if final.StartedAt.IsZero() {
+				final.StartedAt = corpusCreated
+			}
+			if final.FinishedAt.IsZero() {
+				final.FinishedAt = corpusCreated
+			}
+			if final.ExitCode == nil {
+				code := 143
+				final.ExitCode = &code
+			}
+		}
 		if final.Output.Available {
 			final.Output.Path, final.Output.Bytes = effectID+"/output", int64(len(output))
 			if err := os.MkdirAll(filepath.Join(x.artifacts, effectID), 0o755); err != nil {
-				return harness.Job{}, false, err
+				return harness.Job{}, err
 			}
 			if err := os.WriteFile(filepath.Join(x.artifacts, final.Output.Path), []byte(output), 0o644); err != nil {
-				return harness.Job{}, false, err
+				return harness.Job{}, err
 			}
 		}
 		*j = final
@@ -129,7 +144,7 @@ func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Jo
 			root.Close()
 		}
 		if err != nil {
-			return harness.Job{}, false, err
+			return harness.Job{}, err
 		}
 	}
 	if j.Status == harness.JobRunning {
@@ -139,22 +154,24 @@ func (x *corpusExecutor) Inspect(_ context.Context, effectID string) (harness.Jo
 		}
 		rel := effectID + "/output"
 		if err := os.MkdirAll(filepath.Join(x.artifacts, effectID), 0o755); err != nil {
-			return harness.Job{}, false, err
+			return harness.Job{}, err
 		}
 		if err := os.WriteFile(filepath.Join(x.artifacts, rel), []byte(output), 0o644); err != nil {
-			return harness.Job{}, false, err
+			return harness.Job{}, err
 		}
 		j.Status, j.ExitCode, j.Preview = harness.JobSucceeded, &code, output
+		j.StartedAt, j.FinishedAt = corpusCreated, corpusCreated
 		j.Output = harness.ArtifactRef{Path: rel, Bytes: int64(len(output)), Complete: true, Available: true}
 	}
-	return *j, true, nil
+	j.EffectID, j.Spec = e.ID, e.Spec
+	return *j, nil
 }
 
-func (x *corpusExecutor) Cancel(_ context.Context, effectID string) error {
-	if j := x.jobs[effectID]; j != nil && (j.Status == harness.JobPending || j.Status == harness.JobRunning) {
-		j.Status = harness.JobCancelled
+func (x *corpusExecutor) Cancel(ctx context.Context, e harness.Effect) (harness.Job, error) {
+	if j := x.jobs[e.ID]; j != nil && (j.Status == harness.JobPending || j.Status == harness.JobRunning) {
+		j.Status, j.Fenced = harness.JobCancelled, true
 	}
-	return nil
+	return x.Inspect(ctx, e)
 }
 
 var corpusCreated = time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
@@ -252,7 +269,7 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		r.model.mu.Unlock()
 		snap, err := r.loop.Run(ctx, run.id)
 		if err == nil && run.resolve != nil && snap.State.Phase == core.PhaseNeedsResolution {
-			if _, err = r.loop.Resolve(ctx, run.id, *run.resolve); err == nil {
+			if _, err = r.loop.Resolve(ctx, run.id, *run.resolve, "operator-owner"); err == nil {
 				snap, err = r.loop.Run(ctx, run.id)
 			}
 		}

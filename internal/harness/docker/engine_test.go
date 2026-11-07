@@ -278,3 +278,33 @@ func TestDialStdioEndsItsProcessGroup(t *testing.T) {
 		}
 	}
 }
+
+func TestNegotiationWaitHonorsItsOwnContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		io.WriteString(w, `{"ApiVersion":"1.47","MinAPIVersion":"1.24"}`)
+	}))
+	defer srv.Close()
+	defer close(release)
+	e := dialing(srv)
+	first := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	go func() { _, err := e.negotiate(ctx); first <- err }()
+	<-started
+	short, stop := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer stop()
+	began := time.Now()
+	_, err := e.negotiate(short)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(began) > 300*time.Millisecond {
+		t.Fatalf("queued negotiation: %v after %v", err, time.Since(began))
+	}
+	cancel()
+	<-first
+}

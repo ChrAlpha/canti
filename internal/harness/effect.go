@@ -8,56 +8,139 @@ import (
 	"github.com/ChrAlpha/canti/core"
 )
 
-// EffectTransition reports whether CheckEffect applies to t: the accepting
-// ResponseLoaded of an exec decision and every event that binds, starts,
-// completes, or settles its effect.
+// EffectTransition identifies commits whose accepted recovery and execution
+// evidence must be checked inside the store transaction.
 func EffectTransition(t Transition) bool {
 	switch t.Event.(type) {
 	case core.ResponseLoaded:
 		return t.To.Phase == core.PhaseEffectSaved
-	case core.JobBound, core.JobStarted, core.Observed, core.Performed, core.OutcomeUnknown, core.Resolved:
+	case core.EffectRecovered, core.Observed, core.Performed, core.OutcomeUnknown, core.Resolved:
 		return t.From.EffectID != ""
 	}
 	return false
 }
 
-// CheckEffect reports whether t, a transition EffectTransition accepts,
-// agrees with accepted, the committed acceptance of its effect, which an
-// accepting ResponseLoaded carries itself, and with source, the window of
-// the request the effect was accepted under, nil when it has none. A store
-// applies it inside the transaction that commits t: committed rows never
-// change, so the rule holds for every writer.
-func CheckEffect(t Transition, accepted Accepted, source *Window) error {
+// CheckEffect validates completion/recovery against committed acceptance and
+// immutable configuration bytes, without backend I/O or adapter interpretation.
+func CheckEffect(t Transition, accepted Accepted, source *Window, config []byte) error {
+	if err := t.Facts.check(t.Event, t.To); err != nil {
+		return err
+	}
 	var w Window
 	if source != nil {
 		w = *source
 	}
 	if _, ok := t.Event.(core.ResponseLoaded); ok {
-		a, p := t.Facts.Action, t.To.Decision.Payload
-		if a == nil || *a != NormalizeAction(p, w.Requested, true) && *a != NormalizeAction(p, w.Requested, false) {
-			return fmt.Errorf("harness: action %+v is not the reading of the accepted decision", a)
+		return checkAcceptance(t, w, config)
+	}
+	if _, err := Acceptance(accepted.Semantics, &accepted.Action, accepted.Execution); err != nil {
+		return err
+	}
+	if accepted.Local() {
+		return checkLocalEffect(t, accepted.Action, w)
+	}
+	if accepted.Execution.ConfigDigest != ConfigDigest(config) {
+		return errors.New("harness: committed execution identity names another configuration")
+	}
+	effect := Effect{ID: t.From.EffectID, Command: t.From.Decision.Payload, Spec: accepted.Execution.Spec}
+	if receipt := t.Facts.Receipt; receipt != nil {
+		if err := receipt.Validate(effect); err != nil {
+			return err
+		}
+	}
+	switch t.Event.(type) {
+	case core.OutcomeUnknown:
+		return nil
+	case core.EffectRecovered:
+		if r := t.Facts.Receipt; r == nil || r.Status != JobPending && r.Status != JobRunning {
+			return errors.New("harness: recovery requires pending or running owner evidence")
+		}
+		return nil
+	case core.Observed:
+		return checkReceipt(t.Facts)
+	case core.Resolved:
+		return checkResolution(t.Facts)
+	}
+	return fmt.Errorf("harness: %s cannot perform external work", t.Event.Kind())
+}
+
+func checkAcceptance(t Transition, w Window, config []byte) error {
+	a, p := t.Facts.Action, t.To.Decision.Payload
+	if a == nil || *a != NormalizeAction(p, w.Requested, true) && *a != NormalizeAction(p, w.Requested, false) {
+		return errors.New("harness: action does not match the accepted decision")
+	}
+	if e := t.Facts.Execution; e != nil && e.ConfigDigest != ConfigDigest(config) {
+		return errors.New("harness: accepted execution identity names another configuration")
+	}
+	return nil
+}
+
+func checkLocalEffect(t Transition, a Action, w Window) error {
+	switch t.Event.(type) {
+	case core.Performed:
+		return checkPerformed(t, a, w)
+	case core.Observed:
+		if o := t.Facts.Observation; t.From.Phase == core.PhaseCancelling && t.Facts.Receipt == nil && o.Execution == core.ExecutionCancelled && o.ExitCode == nil && o.Output == (ArtifactRef{}) && o.Preview == "Context action cancelled." {
+			return nil
+		}
+	}
+	return fmt.Errorf("harness: %s cannot complete or recover local work", t.Event.Kind())
+}
+
+func checkReceipt(f Facts) error {
+	r, o := f.Receipt, f.Observation
+	if r == nil || o == nil {
+		return errors.New("harness: external completion requires receipt and observation")
+	}
+	valid := false
+	switch o.Execution {
+	case core.ExecutionExited:
+		valid = r.Status == JobSucceeded || r.Status == JobFailed
+	case core.ExecutionCancelled:
+		valid = r.Status == JobCancelled
+	case core.ExecutionTimedOut:
+		valid = r.Status == JobCancelled && r.ID != "" && !r.StartedAt.IsZero()
+	case core.ExecutionFailedToStart:
+		valid = r.Status == JobFailedToStart
+	}
+	if !valid || !sameCode(r.ExitCode, o.ExitCode) || r.Preview != o.Preview || r.Output != o.Output {
+		return errors.New("harness: observation contradicts its terminal receipt")
+	}
+	return nil
+}
+
+func sameCode(a, b *int) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
+
+func checkResolution(f Facts) error {
+	p, o := f.Resolution, f.Observation
+	if p == nil || o == nil {
+		return errors.New("harness: resolution evidence is required")
+	}
+	switch p.Source {
+	case ResolutionInspection:
+		if f.Receipt == nil || p.OwnerID != f.Receipt.ID {
+			return errors.New("harness: inspected resolution has inconsistent owner provenance")
+		}
+		return checkReceipt(f)
+	case ResolutionOperator:
+		if f.Receipt != nil {
+			return errors.New("harness: operator assertion is not an executor receipt")
+		}
+		if o.Execution != core.ExecutionUnknown && strings.TrimSpace(o.Preview) == "" {
+			return errors.New("harness: known operator resolution requires an evidence note")
+		}
+		if (o.Execution == core.ExecutionExited || o.Execution == core.ExecutionTimedOut) && strings.TrimSpace(p.OwnerID) == "" {
+			return errors.New("harness: exited or timed-out operator resolution requires an explicit owner")
+		}
+		if (o.Execution == core.ExecutionExited) != (o.ExitCode != nil) {
+			return errors.New("harness: only exited operator resolution holds an exit code")
+		}
+		if o.Output != (ArtifactRef{Detail: "resolved by operator"}) {
+			return errors.New("harness: operator assertion cannot fabricate retained output")
 		}
 		return nil
 	}
-	legacy, recovery := accepted.Provenance == ProvenanceLegacy, accepted.Action.Recovery
-	switch e := t.Event.(type) {
-	case core.Performed:
-		if legacy || !recovery.Local() {
-			return fmt.Errorf("harness: effect %s of a %s acceptance with recovery %q cannot be performed", e.EffectID, accepted.Provenance, recovery)
-		}
-		return checkPerformed(t, accepted.Action, w)
-	case core.Observed:
-		switch {
-		case t.From.JobID == "" && t.From.Phase == core.PhaseCancelling:
-			return nil
-		case t.From.JobID == "" && !legacy:
-			return errors.New("harness: only an effect accepted before actions were recorded is observed unstarted without a job")
-		}
-	}
-	if !legacy && recovery != RecoveryExternal {
-		return fmt.Errorf("harness: %s of an effect whose action has recovery %q", t.Event.Kind(), recovery)
-	}
-	return nil
+	return errors.New("harness: unknown resolution source")
 }
 
 // checkPerformed reports whether the outcome and window of t, which performs

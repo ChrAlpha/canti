@@ -16,7 +16,7 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
-var running = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started"}
+var running = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}
 
 func count(calls []string, name string) int {
 	n := 0
@@ -59,7 +59,7 @@ func TestLoopStopsAtWallTime(t *testing.T) {
 		f.exec.hold, f.exec.tick = true, func() { f.clock.Advance(40 * time.Second) }
 		wantState(t, f.run(f.loop()), core.PhaseStopped, core.StopTimedOut)
 		f.wantKinds(running, []string{"stop_requested", "observed"})
-		if got := f.exec.log(); !slices.Equal(got, []string{"bind", "start", "inspect", "inspect", "cancel", "inspect"}) {
+		if got := f.exec.log(); !slices.Equal(got, []string{"drive", "drive", "cancel"}) {
 			t.Fatalf("executor calls = %v", got)
 		}
 		if obs := observation(t, f.last()); obs.Execution != core.ExecutionCancelled || obs.Preview != "ran: sleep 600" {
@@ -73,10 +73,10 @@ func TestLoopTimesOutARunningJob(t *testing.T) {
 	f.exec.hold, f.exec.tick = true, func() { f.clock.Advance(6 * time.Second) }
 	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
 	f.wantKinds(cycle, closing)
-	if got := f.exec.log(); !slices.Equal(got, []string{"bind", "start", "inspect", "inspect", "cancel", "inspect"}) {
+	if got := f.exec.log(); !slices.Equal(got, []string{"drive", "drive", "cancel"}) {
 		t.Fatalf("executor calls = %v", got)
 	}
-	if obs := observation(t, f.transitions()[6]); obs.Execution != core.ExecutionTimedOut {
+	if obs := observation(t, f.transitions()[4]); obs.Execution != core.ExecutionTimedOut {
 		t.Fatalf("observation = %+v, want timed_out", obs)
 	}
 	wantContains(t, f.model.prompts[1].User(), "Execution: timed_out")
@@ -90,7 +90,7 @@ func TestLoopCancelsATimedOutJobOnce(t *testing.T) {
 		f.clock.Advance(6 * time.Second)
 		job := harness.Job{ID: jobID(id), Status: harness.JobRunning, StartedAt: created}
 		if inspections == 4 {
-			job.Status, job.FinishedAt = harness.JobCancelled, created
+			job.Status, job.FinishedAt = harness.JobCancelled, created.Add(24*time.Second)
 		}
 		return job, true, nil
 	}
@@ -98,7 +98,7 @@ func TestLoopCancelsATimedOutJobOnce(t *testing.T) {
 	if n := count(f.exec.log(), "cancel"); n != 1 || inspections != 4 {
 		t.Fatalf("cancelled %d times over %d inspections, want once over 4", n, inspections)
 	}
-	if obs := observation(t, f.transitions()[6]); obs.Execution != core.ExecutionTimedOut {
+	if obs := observation(t, f.transitions()[4]); obs.Execution != core.ExecutionTimedOut {
 		t.Fatalf("observation = %+v, want timed_out without backend timing", obs)
 	}
 }
@@ -111,10 +111,16 @@ func TestLoopClassifiesACancelledJobAfterRestart(t *testing.T) {
 		t.Run(tt.ran.String(), func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{JobTimeout: 10 * time.Second}, execReply("sleep 600"))
 			f.exec.hold = true
-			snap := f.steps(f.loop(), 5)
-			wantState(t, snap, core.PhaseAwaitingObservation, "")
+			snap := f.steps(f.loop(), 3)
+			if _, err := f.exec.Drive(context.Background(), harness.Effect{ID: snap.State.EffectID, Command: "sleep 600", Spec: f.exec.Specification("sleep 600")}); err != nil {
+				t.Fatal(err)
+			}
+			wantState(t, snap, core.PhaseEffectSaved, "")
 			f.exec.set(snap.State.EffectID, func(j *harness.Job) {
 				j.Status, j.StartedAt, j.FinishedAt = harness.JobCancelled, created, created.Add(tt.ran)
+				j.Fenced = true
+				code := 143
+				j.ExitCode = &code
 			})
 			snap, err := f.fresh().Step(context.Background(), runID)
 			if err != nil {
@@ -137,22 +143,23 @@ func TestLoopHaltsOnUnknownOutcomes(t *testing.T) {
 		inspects int
 	}{
 		{"lost job", func(string) (harness.Job, bool, error) { return harness.Job{}, false, lost }, "container removed", 1},
-		{"missing job", func(string) (harness.Job, bool, error) { return harness.Job{}, false, nil }, "no job", 1},
+		{"missing job", func(string) (harness.Job, bool, error) { return harness.Job{}, false, nil }, "absent", 1},
 		{"foreign job", func(string) (harness.Job, bool, error) {
-			return harness.Job{ID: "job-other", Status: harness.JobRunning}, true, nil
-		}, "job-other", 1},
+			return harness.Job{EffectID: "foreign", ID: "job-other", Status: harness.JobRunning}, true, nil
+		}, "accepted effect", 1},
 		{"unknown status", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobUnknown}, true, nil
 		}, "unknown", 1},
 		{"unknown status with a reason", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobUnknown, Output: harness.ArtifactRef{Detail: "exit status not recorded"}}, true, nil
 		}, "reports unknown: exit status not recorded", 1},
-		{"pending status", func(id string) (harness.Job, bool, error) {
-			return harness.Job{ID: jobID(id), Status: harness.JobPending}, true, nil
+		{"pending with exit evidence", func(id string) (harness.Job, bool, error) {
+			code := 0
+			return harness.Job{ID: jobID(id), Status: harness.JobPending, ExitCode: &code}, true, nil
 		}, "pending", 1},
 		{"exit without code", func(id string) (harness.Job, bool, error) {
 			return harness.Job{ID: jobID(id), Status: harness.JobFailed}, true, nil
-		}, "exit code", 1},
+		}, "failed", 1},
 		{"inspect errors", func(string) (harness.Job, bool, error) {
 			return harness.Job{}, false, errors.New("daemon unavailable")
 		}, "daemon unavailable", 3},
@@ -166,7 +173,7 @@ func TestLoopHaltsOnUnknownOutcomes(t *testing.T) {
 			wantState(t, snap, core.PhaseNeedsResolution, "")
 			f.wantKinds(running, []string{"outcome_unknown"})
 			wantContains(t, f.last().Facts.Failure, tt.failure)
-			if n := count(f.exec.log(), "inspect"); n != tt.inspects {
+			if n := count(f.exec.log(), "drive"); n != tt.inspects {
 				t.Fatalf("inspected %d times, want %d", n, tt.inspects)
 			}
 			calls := f.exec.log()
@@ -198,7 +205,7 @@ func TestLoopToleratesTransientInspectErrors(t *testing.T) {
 	}
 	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
 	f.wantKinds(cycle, closing)
-	if obs := observation(t, f.transitions()[6]); inspections != 4 || obs.Execution != core.ExecutionExited || *obs.ExitCode != 1 {
+	if obs := observation(t, f.transitions()[4]); inspections != 4 || obs.Execution != core.ExecutionExited || *obs.ExitCode != 1 {
 		t.Fatalf("observation after %d inspections = %+v, want the failed exit", inspections, obs)
 	}
 }
@@ -217,7 +224,7 @@ func TestLoopObservesAFailedStart(t *testing.T) {
 		f.exec.inspect = failed
 		wantState(t, f.run(f.loop()), core.PhaseReturned, "")
 		f.wantKinds(cycle, closing)
-		observed := f.transitions()[6]
+		observed := f.transitions()[4]
 		if obs := observation(t, observed); !reflect.DeepEqual(obs, want(observed.From.EffectID)) {
 			t.Fatalf("observation = %+v, want %+v", obs, want(observed.From.EffectID))
 		}
@@ -226,7 +233,7 @@ func TestLoopObservesAFailedStart(t *testing.T) {
 	t.Run("cancelling", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{}, execReply("make test"))
 		f.exec.hold = true
-		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		wantState(t, f.runningEffect(), core.PhaseEffectSaved, "")
 		f.exec.inspect = failed
 		snap, err := f.fresh().Stop(f.bounded(), runID, core.StopCancelled)
 		if err != nil {
@@ -258,10 +265,10 @@ func TestLoopResolveJobResumesInspection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveJob() error = %v", err)
 	}
-	wantState(t, snap, core.PhaseAwaitingObservation, "")
+	wantState(t, snap, core.PhaseIdle, "")
 	wantState(t, f.run(l), core.PhaseReturned, "")
-	f.wantKinds(running, []string{"outcome_unknown", "job_bound", "observed"}, closing)
-	if n := count(f.exec.log(), "start"); n != 1 {
+	f.wantKinds(running, []string{"outcome_unknown", "resolved"}, closing)
+	if n := f.exec.jobs[f.transitions()[3].To.EffectID].runs; n != 1 {
 		t.Fatalf("started %d times, want once", n)
 	}
 }
@@ -293,7 +300,7 @@ func TestLoopResolveJobRefusesAJobOfUnknownOutcome(t *testing.T) {
 	if got := f.exec.log(); !slices.Equal(got, append(calls, "inspect")) {
 		t.Fatalf("executor calls = %v, want one more inspection", got[len(calls):])
 	}
-	snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionCancelled})
+	snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionCancelled, Preview: "checked cancelled by operator"}, "operator-owner")
 	if err != nil {
 		t.Fatalf("Resolve() after the refusal: %v", err)
 	}
@@ -306,7 +313,7 @@ func TestLoopResolveRecordsAnExplicitOutcome(t *testing.T) {
 	t.Run("exited continues", func(t *testing.T) {
 		f := unresolved(t, missing, returnReply("done"))
 		code := 0
-		snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionExited, ExitCode: &code, Preview: "checked by hand"})
+		snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionExited, ExitCode: &code, Preview: "checked by hand"}, "operator-owner")
 		if err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
@@ -319,7 +326,7 @@ func TestLoopResolveRecordsAnExplicitOutcome(t *testing.T) {
 	})
 	t.Run("unknown abandons", func(t *testing.T) {
 		f := unresolved(t, missing)
-		snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionUnknown})
+		snap, err := f.fresh().Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionUnknown}, "operator-owner")
 		if err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
@@ -328,7 +335,7 @@ func TestLoopResolveRecordsAnExplicitOutcome(t *testing.T) {
 	t.Run("outside needs_resolution", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{})
 		l := f.loop()
-		if _, err := l.Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionExited}); err == nil {
+		if _, err := l.Resolve(context.Background(), runID, harness.Observation{Execution: core.ExecutionExited}, "operator-owner"); err == nil {
 			t.Error("Resolve() on an idle run succeeded")
 		}
 		if _, err := l.ResolveJob(context.Background(), runID); err == nil {
@@ -346,7 +353,7 @@ func TestLoopStop(t *testing.T) {
 	t.Run("awaiting observation", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{JobTimeout: 10 * time.Second}, execReply("sleep 600"))
 		f.exec.hold = true
-		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 		f.clock.Advance(15 * time.Second)
 		snap, err := f.fresh().Stop(ctx, runID, core.StopCancelled)
 		if err != nil {
@@ -357,13 +364,13 @@ func TestLoopStop(t *testing.T) {
 		if obs := observation(t, f.last()); obs.Execution != core.ExecutionCancelled {
 			t.Fatalf("observation = %+v, want cancelled", obs)
 		}
-		if got := f.exec.log(); !slices.Equal(got, []string{"bind", "start", "cancel", "inspect"}) {
+		if got := f.exec.log(); !slices.Equal(got, []string{"cancel"}) {
 			t.Fatalf("executor calls = %v", got)
 		}
 	})
 	t.Run("a job that exits after the cancel", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{}, execReply("make install"))
-		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 		inspections := 0
 		f.exec.inspect = func(id string) (harness.Job, bool, error) {
 			if inspections++; inspections == 1 {
@@ -390,26 +397,24 @@ func TestLoopStop(t *testing.T) {
 		}
 		wantState(t, snap, core.PhaseStopped, core.StopCancelled)
 		f.wantKinds(closing, []string{"stop_requested", "observed"})
-		if got := f.exec.log(); !slices.Equal(got, []string{"cancel", "inspect"}) {
+		if got := f.exec.log(); !slices.Equal(got, []string{"cancel"}) {
 			t.Fatalf("executor calls = %v, want the fence then a lookup", got)
 		}
-		if obs := observation(t, f.last()); obs.Execution != core.ExecutionCancelled || !strings.Contains(obs.Output.Detail, "no job") {
+		if obs := observation(t, f.last()); obs.Execution != core.ExecutionCancelled || f.last().Facts.Receipt.ID != "" || !f.last().Facts.Receipt.Fenced {
 			t.Fatalf("observation = %+v, want a jobless cancellation", obs)
 		}
 	})
 	t.Run("effect saved with an unrecorded bind", func(t *testing.T) {
 		f := newFixture(t, limits, harness.Budget{}, execReply("sleep 600"))
 		snap := f.steps(f.loop(), 3)
-		if _, err := f.exec.Bind(ctx, harness.Effect{ID: snap.State.EffectID, Command: "sleep 600"}); err != nil {
-			t.Fatal(err)
-		}
+		f.exec.jobs[snap.State.EffectID] = &fakeJob{Job: harness.Job{EffectID: snap.State.EffectID, Spec: f.exec.Specification("sleep 600"), ID: jobID(snap.State.EffectID), Status: harness.JobPending}, command: "sleep 600"}
 		snap, err := f.fresh().Stop(ctx, runID, core.StopCancelled)
 		if err != nil {
 			t.Fatalf("Stop() error = %v", err)
 		}
 		wantState(t, snap, core.PhaseStopped, core.StopCancelled)
-		f.wantKinds(closing, []string{"stop_requested", "job_bound", "observed"})
-		if got := f.exec.log(); !slices.Equal(got, []string{"bind", "cancel", "inspect", "cancel", "inspect"}) || count(got, "start") != 0 {
+		f.wantKinds(closing, []string{"stop_requested", "observed"})
+		if got := f.exec.log(); !slices.Equal(got, []string{"cancel"}) || count(got, "start") != 0 {
 			t.Fatalf("executor calls = %v", got)
 		}
 	})
@@ -447,7 +452,7 @@ func TestLoopStop(t *testing.T) {
 			t.Fatalf("Stop() error = %v", err)
 		}
 		wantState(t, snap, core.PhaseNeedsResolution, core.StopTimedOut)
-		if snap, err = l.Resolve(ctx, runID, harness.Observation{Execution: core.ExecutionCancelled}); err != nil {
+		if snap, err = l.Resolve(ctx, runID, harness.Observation{Execution: core.ExecutionCancelled, Preview: "checked cancelled by operator"}, "operator-owner"); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 		wantState(t, snap, core.PhaseStopped, core.StopTimedOut)
@@ -515,7 +520,7 @@ func TestLoopResumesAfterControllerShutdown(t *testing.T) {
 		defer cancel()
 		f := newFixture(t, limits, harness.Budget{}, execReply("sleep 1"), returnReply("done"))
 		f.exec.hold, f.exec.tick = true, cancel
-		wantState(t, f.steps(f.loop(), 5), core.PhaseAwaitingObservation, "")
+		wantState(t, f.steps(f.loop(), 3), core.PhaseEffectSaved, "")
 		if _, err := f.loop().Step(ctx, runID); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Step() error = %v, want cancellation", err)
 		}
@@ -556,8 +561,8 @@ func TestLoopColdRestartAfterEveryStepMatchesAnUninterruptedRun(t *testing.T) {
 		}
 	}
 	want, got := whole.transitions(), cold.transitions()
-	if len(want) != 24 || len(got) != len(want) {
-		t.Fatalf("committed %d cold and %d uninterrupted transitions, want 24", len(got), len(want))
+	if len(want) != 20 || len(got) != len(want) {
+		t.Fatalf("committed %d cold and %d uninterrupted transitions, want 20", len(got), len(want))
 	}
 	for i := range want {
 		if !reflect.DeepEqual(got[i], want[i]) {
@@ -580,39 +585,20 @@ func (j acceptance) Accepted(context.Context, string, int, int) (harness.Accepte
 	return j.accepted, j.err
 }
 
-// TestLoopActsOnlyOnARecordedAcceptance requires that the loop carries out
-// no effect whose acceptance fails to read, committing nothing, and that it
-// only stops an effect accepted before actions were recorded, through the
-// executor's cancel path unless its job was the in-process one.
 func TestLoopActsOnlyOnARecordedAcceptance(t *testing.T) {
-	legacy := harness.Accepted{Semantics: 3, Provenance: harness.ProvenanceLegacy, Action: harness.Action{Name: harness.ActionLegacy}}
-	for name, j := range map[string]func(harness.Journal) harness.Journal{
-		"corrupt": func(j harness.Journal) harness.Journal {
-			return acceptance{j, harness.Accepted{}, sqlite.ErrIncompatible}
-		},
-		"legacy": func(j harness.Journal) harness.Journal { return acceptance{j, legacy, nil} },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"))
-			ctx := f.bounded()
-			snap := f.stepUntil(ctx, core.PhaseEffectSaved)
-			if _, err := f.loopOn(j(f.store)).Step(ctx, runID); err == nil {
-				t.Fatal("the loop carried out the effect")
-			}
-			if latest, err := f.store.Latest(ctx, runID); err != nil || latest != snap || len(f.exec.calls) != 0 {
-				t.Fatalf("the refused step wrote %+v, %v, or called %v", latest, err, f.exec.calls)
-			}
-			s, err := f.loopOn(j(f.store)).Stop(ctx, runID, core.StopCancelled)
-			if name == "corrupt" {
-				if err == nil || s.State.Phase != core.PhaseCancelling {
-					t.Fatalf("stop of a corrupt acceptance = %+v, %v", s.State, err)
-				}
-				return
-			}
-			if err != nil || s.State.Phase != core.PhaseStopped || !slices.Contains(f.exec.log(), "cancel") {
-				t.Fatalf("legacy stop = %+v, %v, executor %v", s.State, err, f.exec.log())
-			}
-		})
+	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"))
+	ctx := f.bounded()
+	snap := f.stepUntil(ctx, core.PhaseEffectSaved)
+	j := acceptance{f.store, harness.Accepted{}, sqlite.ErrIncompatible}
+	if _, err := f.loopOn(j).Step(ctx, runID); err == nil {
+		t.Fatal("effect carried out without recorded acceptance")
+	}
+	if latest, err := f.store.Latest(ctx, runID); err != nil || latest != snap || len(f.exec.calls) != 0 {
+		t.Fatalf("refusal changed facts or executor: %+v %v %v", latest, err, f.exec.calls)
+	}
+	stopped, err := f.loopOn(j).Stop(ctx, runID, core.StopCancelled)
+	if err == nil || stopped.State.Phase != core.PhaseCancelling || len(f.exec.calls) != 0 {
+		t.Fatalf("corrupt acceptance stop: %+v %v %v", stopped, err, f.exec.calls)
 	}
 }
 

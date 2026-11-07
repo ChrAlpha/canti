@@ -4,26 +4,11 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
 )
-
-type executor struct{}
-
-func (executor) Bind(_ context.Context, effect harness.Effect) (harness.Job, error) {
-	return harness.Job{ID: "job-" + effect.ID, Status: harness.JobPending}, nil
-}
-
-func (executor) Start(_ context.Context, effectID string) (harness.Job, error) {
-	return harness.Job{ID: "job-" + effectID, Status: harness.JobRunning}, nil
-}
-
-func (executor) Inspect(context.Context, string) (harness.Job, bool, error) {
-	return harness.Job{}, false, nil
-}
-
-func (executor) Cancel(context.Context, string) error { return nil }
 
 type storeFunc func(context.Context, harness.Transition) error
 
@@ -31,7 +16,7 @@ func (f storeFunc) Commit(ctx context.Context, t harness.Transition) error { ret
 
 func newRunner(t testing.TB, store harness.Store) harness.Runner {
 	t.Helper()
-	runner, err := harness.NewRunner(store, executor{})
+	runner, err := harness.NewRunner(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,19 +54,26 @@ func (d *driver) try(event core.Event, facts harness.Facts) error {
 }
 
 func (d *driver) do(event core.Event, facts harness.Facts) {
+	if _, ok := event.(core.Resolved); ok {
+		facts.Resolution = &harness.Resolution{Source: harness.ResolutionOperator, OwnerID: "operator-owner"}
+		if facts.Observation.Execution != core.ExecutionUnknown {
+			facts.Observation.Output = harness.ArtifactRef{Detail: "resolved by operator"}
+			if facts.Observation.Preview == "" {
+				facts.Observation.Preview = "checked by operator"
+			}
+			if facts.Observation.Execution != core.ExecutionExited {
+				facts.Observation.ExitCode = nil
+			}
+		}
+		if facts.Observation.Execution == core.ExecutionUnknown {
+			facts.Observation.ExitCode = nil
+			facts.Observation.Output = harness.ArtifactRef{Detail: "resolved by operator"}
+		}
+	}
 	d.t.Helper()
 	if err := d.try(event, facts); err != nil {
 		d.t.Fatalf("Commit(%T) at seq %d error = %v", event, d.snap.Seq+1, err)
 	}
-}
-
-func (d *driver) call(op func(harness.Runner, context.Context, harness.Snapshot) (harness.Snapshot, error)) {
-	d.t.Helper()
-	next, err := op(d.runner, context.Background(), d.snap)
-	if err != nil {
-		d.t.Fatalf("runner call at seq %d error = %v", d.snap.Seq, err)
-	}
-	d.snap = next
 }
 
 func (d *driver) freeze() {
@@ -114,12 +106,18 @@ func acceptance(s core.State, event core.ResponseLoaded) harness.Facts {
 		return harness.Facts{}
 	}
 	a := harness.NormalizeAction(next.Decision.Payload, false, true)
-	return harness.Facts{Action: &a}
+	f := harness.Facts{Action: &a}
+	if a.Recovery == harness.RecoveryExternal {
+		f.Execution = &harness.ExecutionIdentity{Spec: harness.ConfigDigest([]byte(next.Decision.Payload)), ConfigDigest: harness.ConfigDigest(testRun(next.RunID).Config)}
+	}
+	return f
 }
 
 func (d *driver) observe(execution core.ExecutionState, outputBytes int64) {
 	d.t.Helper()
-	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: execution}, harness.Facts{Observation: observation(execution, outputBytes)})
+	obs := observation(execution, outputBytes)
+	j := receipt(d.snap.State, *obs)
+	d.do(core.Observed{EffectID: d.snap.State.EffectID, Execution: execution}, harness.Facts{Observation: obs, Receipt: &j})
 }
 
 // decide drives the current step from idle to a decoded decision.
@@ -131,12 +129,10 @@ func (d *driver) decide(body []byte, usage harness.Usage) {
 	d.load(body)
 }
 
-// step completes one exec step through bind, start, and observation.
+// step completes accepted external work and its atomic observation.
 func (d *driver) step(command string, usage harness.Usage, outputBytes int64) {
 	d.t.Helper()
 	d.decide(execBody(command), usage)
-	d.call(harness.Runner.Bind)
-	d.call(harness.Runner.Start)
 	d.observe(core.ExecutionExited, outputBytes)
 }
 
@@ -186,4 +182,24 @@ func derive(t testing.TB, snap harness.Snapshot, event core.Event, facts harness
 		t.Fatalf("derive %T error = %v", event, err)
 	}
 	return got
+}
+
+func receipt(s core.State, obs harness.Observation) harness.Job {
+	j := harness.Job{EffectID: s.EffectID, Spec: harness.ConfigDigest([]byte(s.Decision.Payload)), ID: "job-" + s.EffectID, StartedAt: time.Unix(1, 0).UTC(), FinishedAt: time.Unix(2, 0).UTC(), ExitCode: obs.ExitCode, Preview: obs.Preview, Output: obs.Output}
+	switch obs.Execution {
+	case core.ExecutionExited:
+		j.Status = harness.JobSucceeded
+		if obs.ExitCode != nil && *obs.ExitCode != 0 {
+			j.Status = harness.JobFailed
+		}
+	case core.ExecutionCancelled, core.ExecutionTimedOut:
+		j.Status, j.Fenced = harness.JobCancelled, true
+	case core.ExecutionFailedToStart:
+		j.Status = harness.JobFailedToStart
+		j.StartedAt = time.Time{}
+		j.ExitCode = nil
+	case core.ExecutionUnknown:
+		j.Status = harness.JobUnknown
+	}
+	return j
 }

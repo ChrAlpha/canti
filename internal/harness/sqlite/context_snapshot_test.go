@@ -48,7 +48,7 @@ func TestContextRecordsKeepsOneSnapshotWhileWriterCommits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !committed.Load() || page.AsOfSeq != before || page.Request.Seq != 1 || page.Next != nil || len(page.Events) != 6 || page.Events[5].Seq != before {
+	if !committed.Load() || page.AsOfSeq != before || page.Request.Seq != 1 || page.Next != nil || len(page.Events) != 4 || page.Events[3].Seq != before {
 		t.Fatalf("mixed snapshot: committed = %v, page = %#v", committed.Load(), page)
 	}
 	page, err = s.ContextRecords(ctx, "run-1", 0, 0, 0, 100)

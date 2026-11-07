@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -44,10 +43,7 @@ type createRequest struct {
 	}
 }
 
-// request is the create request of the job of effect, whose run arguments
-// hash to spec. The spec hash covers the run arguments alone, so a container
-// of an earlier revision, which ran its script directly and has no
-// exitLabel, still binds and is derived from Docker's exit code.
+// request is the canonical container configuration and identity labels.
 func (x *Executor) request(effect harness.Effect, spec string) (createRequest, error) {
 	c := x.cfg
 	r := createRequest{User: c.User, AttachStdout: true, AttachStderr: true, Image: c.Image, WorkingDir: WorkDir, Entrypoint: []string{"/bin/sh"},
@@ -73,21 +69,14 @@ func (x *Executor) request(effect harness.Effect, spec string) (createRequest, e
 	return r, err
 }
 
-// create creates the container of effect for the platform that
-// DOCKER_DEFAULT_PLATFORM names, if any, and when the daemon answers it with
-// not found, pulls the image through the docker CLI and creates once more, as
-// docker create does. A name the daemon reports in use leaves the container
-// that holds it to the caller's lookup: a create sent again after a lost
-// response finds its own.
+// create creates the deterministic owner, pulling the image if necessary.
+// An ambiguous reply is recovered by the caller's identity-checked lookup.
 func (x *Executor) create(ctx context.Context, effect harness.Effect, spec string) error {
 	req, err := x.request(effect, spec)
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)
 	}
 	path := "/containers/create?name=canti-" + effect.ID
-	if p := os.Getenv("DOCKER_DEFAULT_PLATFORM"); p != "" {
-		path += "&platform=" + url.QueryEscape(p)
-	}
 	err = x.api(ctx, "create", http.MethodPost, path, req, nil)
 	if status(err) == http.StatusNotFound {
 		if err = x.pull(ctx); err == nil {
@@ -106,8 +95,23 @@ func (x *Executor) pull(ctx context.Context) error {
 	call, cancel := context.WithTimeout(ctx, x.timeouts.transfer)
 	defer cancel()
 	cmd := exec.CommandContext(call, x.cfg.Docker, "pull", "--quiet", x.cfg.Image)
+	// Platform selection follows the daemon/image defaults, independent of the
+	// ambient CLI override, just as the Engine create request does.
+	cmd.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "DOCKER_DEFAULT_PLATFORM=") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
 	cmd.WaitDelay = time.Second
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err == syscall.ESRCH {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	errOut := &tail{}
 	cmd.Stderr = errOut
 	err := cmd.Run()

@@ -31,7 +31,7 @@ const (
 // engine sends Engine API requests and negotiates the API version once.
 type engine struct {
 	client  *http.Client
-	mu      sync.Mutex
+	gate    chan struct{}
 	version string
 }
 
@@ -48,7 +48,7 @@ func cliEngine(path string) *engine {
 }
 
 func newEngine(dial func(context.Context) (net.Conn, error)) *engine {
-	return &engine{client: &http.Client{Transport: &http.Transport{
+	return &engine{gate: make(chan struct{}, 1), client: &http.Client{Transport: &http.Transport{
 		DialContext:         func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
@@ -159,8 +159,12 @@ func (e *engine) send(ctx context.Context, method, path string, body any, replay
 // negotiate returns the API version the daemon is spoken to in, which it
 // asks for once: apiMax, or the nearest version the daemon supports.
 func (e *engine) negotiate(ctx context.Context) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	select {
+	case e.gate <- struct{}{}:
+		defer func() { <-e.gate }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	if e.version != "" {
 		return e.version, nil
 	}

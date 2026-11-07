@@ -418,7 +418,7 @@ func TestAnActionAcceptedBeforeCarryKeepsItsContract(t *testing.T) {
 		f.stepUntil(f.bounded(), core.PhaseEffectSaved)
 		f.exec1(`UPDATE transitions SET facts = json_set(facts, '$.Action', json(?)) WHERE kind = 'response_loaded'`, v13)
 		a, err := f.store.Accepted(context.Background(), runID, 1, 1)
-		if err != nil || a.Provenance != harness.ProvenanceRecorded || a.Action.Name != harness.ActionUnknown {
+		if err != nil || a.Semantics != core.SemanticsVersion || a.Action.Name != harness.ActionUnknown {
 			t.Fatalf("the version-13 acceptance reads as %+v, %v", a, err)
 		}
 		return f
@@ -525,7 +525,7 @@ func TestCarryWithoutEntriesFailsAsAProposal(t *testing.T) {
 func TestDamageBehindACarriedReferenceStopsTheRun(t *testing.T) {
 	damages := map[string]string{
 		"missing":    `DELETE FROM transitions WHERE run_id = ?1 AND seq = ?2`,
-		"wrong kind": `UPDATE transitions SET kind = 'job_started' WHERE run_id = ?1 AND seq = ?2`,
+		"wrong kind": `UPDATE transitions SET kind = 'attempt_started' WHERE run_id = ?1 AND seq = ?2`,
 		"malformed":  `UPDATE transitions SET facts = json_set(facts, '$.Outcome.Status', 'bogus') WHERE run_id = ?1 AND seq = ?2`,
 		"length":     `UPDATE transitions SET facts = json_set(facts, '$.Outcome.Retrieval.evidence[0]', 'short') WHERE run_id = ?1 AND seq = ?2`,
 		"hash":       `UPDATE transitions SET facts = json_set(facts, '$.Outcome.Retrieval.evidence[0]', upper(json_extract(facts, '$.Outcome.Retrieval.evidence[0]'))) WHERE run_id = ?1 AND seq = ?2`,
@@ -551,18 +551,26 @@ func TestDamageBehindACarriedReferenceStopsTheRun(t *testing.T) {
 					}
 					s := stepCold(t, f, cold, nil)
 					wantState(t, s, core.PhaseStopped, core.StopUnrecoverable)
+					tail, err := f.store.Transitions(context.Background(), runID, s.Seq-2, 2)
+					if err != nil {
+						t.Fatal(err)
+					}
 					var failure string
-					for _, tr := range f.transitions() {
+					for _, tr := range tail {
 						if tr.Event.Kind() == "stop_requested" {
 							failure = tr.Facts.Failure
 						}
 					}
 					if !strings.Contains(failure, "journal integrity") {
-						t.Fatalf("stopped with %q after %v", failure, f.kinds())
+						t.Fatalf("stop cause: %q", failure)
 					}
-					if at == "perform" && f.last().Facts.Observation.Execution != core.ExecutionCancelled {
-						t.Fatalf("the carry ended as %s %+v", f.last().Event.Kind(), f.last().Facts)
+					if at == "perform" {
+						last := tail[len(tail)-1]
+						if last.Facts.Observation == nil || last.Facts.Observation.Execution != core.ExecutionCancelled {
+							t.Fatalf("carry cancellation: %+v", last)
+						}
 					}
+
 				})
 			}
 		}

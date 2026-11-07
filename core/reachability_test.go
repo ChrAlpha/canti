@@ -29,10 +29,6 @@ var recordSemantics = flag.Bool("record-semantics", false, "record the transitio
 // identities s holds, a next attempt, each decision body, execution, and
 // reportable stop reason.
 func candidates(s core.State) []core.Event {
-	job := s.JobID
-	if job == "" {
-		job = "job-1"
-	}
 	out := []core.Event{core.RequestFrozen{}}
 	for _, at := range [][2]int{{s.Step, s.Attempt}, {s.Step, s.Attempt + 1}, {s.Step + 1, s.Attempt}} {
 		out = append(out, core.AttemptStarted{Step: at[0], Attempt: at[1]}, core.ResponseSaved{Step: at[0], Attempt: at[1]},
@@ -42,11 +38,10 @@ func candidates(s core.State) []core.Event {
 		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
 	}
 	for _, effect := range []string{s.EffectID, "other"} {
-		out = append(out, core.JobBound{EffectID: effect, JobID: job}, core.JobStarted{EffectID: effect, JobID: job}, core.OutcomeUnknown{EffectID: effect},
+		out = append(out, core.EffectRecovered{EffectID: effect}, core.OutcomeUnknown{EffectID: effect},
 			core.Performed{EffectID: effect})
 	}
-	out = append(out, core.JobBound{EffectID: s.EffectID, JobID: "other"}, core.JobStarted{EffectID: s.EffectID, JobID: "other"},
-		core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited})
+	out = append(out, core.Observed{EffectID: "other", Execution: core.ExecutionExited}, core.Resolved{EffectID: "other", Execution: core.ExecutionExited})
 	for _, e := range []core.ExecutionState{core.ExecutionExited, core.ExecutionTimedOut, core.ExecutionCancelled, core.ExecutionFailedToStart, core.ExecutionUnknown} {
 		out = append(out, core.Observed{EffectID: s.EffectID, Execution: e}, core.Resolved{EffectID: s.EffectID, Execution: e})
 	}

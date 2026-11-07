@@ -92,7 +92,7 @@ func TestContextCapturePersistsFrozenEvidenceAndRetry(t *testing.T) {
 	if err != nil || len(steps) != 1 || steps[0].Outcome == nil || len(steps[0].Outcome.Retrieval.Evidence) != 1 || steps[0].Outcome.Retrieval.Evidence[0] != "ORIGINAL" {
 		t.Fatalf("committed evidence = %+v, %v", steps, err)
 	}
-	if len(c.Retrievals) != 1 || !c.Retrievals[0].More || c.Retrievals[0].Operation != "read" || c.Retrievals[0].Query != nil || c.Retrievals[0].Step != 1 || steps[0].Outcome.Retrieval.Query.Reason != "verify original" {
+	if len(c.Retrievals) != 1 || !c.Retrievals[0].More || c.Retrievals[0].Operation != "read" || c.Retrievals[0].Step != 1 || steps[0].Outcome.Retrieval.Query.Reason != "verify original" {
 		t.Fatalf("retrieval = %+v", c.Retrievals)
 	}
 	if len(f.model.sent) != 4 || !bytes.Equal(f.model.sent[1], f.model.sent[2]) || !strings.Contains(string(originalReq.Body), "ORIGINAL") {
@@ -253,7 +253,7 @@ func TestContextCaptureKeepsSelectedSessionIdentities(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				r, err := harness.NewRunner(f.store, f.exec)
+				r, err := harness.NewRunner(f.store)
 				if err != nil {
 					t.Fatal(err)
 				}

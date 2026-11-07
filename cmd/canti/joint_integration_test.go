@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -26,11 +27,11 @@ import (
 func TestJointOneExternalEffectAfterAHostCrashWithTwoClients(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 2; echo once >> count"}, 2: {Kind: core.Return, Payload: "done"}})
 	f.autoHost()
-	if r := f.cli([]string{"CANTI_TEST_CRASH=after:job_started"}, "run", "-host", "auto", "-goal", "g", "-image", image); r.code != exitError {
+	if r := f.cli([]string{"CANTI_TEST_EXECUTOR_CRASH=running"}, "run", "-host", "auto", "-goal", "g", "-image", image); r.code != exitError {
 		t.Fatalf("a client whose host was killed: %+v", r)
 	}
 	pre := f.history()
-	job := pre[len(pre)-1].State.JobID
+	job := effectOwner(t, f, pre[len(pre)-1].State.EffectID)
 	if cs := effectContainers(t, f.state); len(cs) != 1 || cs[0].id != job || cs[0].state != "running" {
 		t.Fatalf("after the crash the containers are %+v, want job %s running", cs, job)
 	}
@@ -45,10 +46,8 @@ func TestJointOneExternalEffectAfterAHostCrashWithTwoClients(t *testing.T) {
 		t.Fatalf("hosts %v: want the killed one and one serving both clients", pids)
 	}
 	h := f.history()
-	for _, e := range h[len(pre):] {
-		if e.Kind == "job_bound" || e.Kind == "job_started" {
-			t.Fatalf("%s committed after the crash: %q", e.Kind, kinds(h[len(pre):]))
-		}
+	if !extends(h, pre) || !slices.Equal(kinds(h[len(pre):]), slices.Concat([]string{"observed"}, stepKinds[:4])) {
+		t.Fatalf("recovery must observe the original acceptance once: %q", kinds(h))
 	}
 	checkFile(t, filepath.Join(f.workspace, "count"), "once\n")
 	if recs := checkReleased(t, f, h); len(recs) != 1 || recs[job].ID != job {
@@ -68,11 +67,11 @@ func TestJointOneExternalEffectAfterAHostCrashWithTwoClients(t *testing.T) {
 func TestJointAnUnknownResultSurvivesCredentialedHostStarts(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "sleep 60"}, 2: {Kind: core.Return, Payload: "done"}})
 	f.autoHost()
-	if r := f.cli([]string{"CANTI_TEST_CRASH=after:job_started"}, "run", "-host", "auto", "-goal", "g", "-image", image); r.code != exitError {
+	if r := f.cli([]string{"CANTI_TEST_EXECUTOR_CRASH=running"}, "run", "-host", "auto", "-goal", "g", "-image", image); r.code != exitError {
 		t.Fatalf("a client whose host was killed: %+v", r)
 	}
 	pre := f.history()
-	job := pre[len(pre)-1].State.JobID
+	job := effectOwner(t, f, pre[len(pre)-1].State.EffectID)
 	if out, err := exec.Command("docker", "rm", "-f", job).CombinedOutput(); err != nil {
 		t.Fatalf("docker rm: %v: %s", err, out)
 	}
@@ -123,7 +122,7 @@ func TestJointAnUnknownResultSurvivesCredentialedHostStarts(t *testing.T) {
 	if r := f.cli(nil, "resolve", "-host", "auto", "-job"); r.code != exitError || !strings.Contains(r.stderr, harness.ErrJobLost.Error()) {
 		t.Fatalf("resolve -job of a lost job: %+v", r)
 	}
-	if r := f.cli(nil, "resolve", "-host", "auto", "-execution", "cancelled"); r.code != exitStopped {
+	if r := f.cli(nil, "resolve", "-host", "auto", "-execution", "cancelled", "-note", "verified cancellation"); r.code != exitStopped {
 		t.Fatalf("resolve -execution: %+v", r)
 	}
 	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {

@@ -57,7 +57,7 @@ func TestRetrievalCommitsItsEvidenceWithItsOutcome(t *testing.T) {
 	ctx := context.Background()
 	saved := f.stepUntil(ctx, core.PhaseEffectSaved)
 	accepted, err := f.store.Accepted(ctx, runID, 1, 1)
-	if err != nil || accepted.Provenance != harness.ProvenanceRecorded ||
+	if err != nil || accepted.Semantics != core.SemanticsVersion ||
 		accepted.Action != (harness.Action{Name: harness.ActionRetrieve, Recovery: harness.RecoveryRead, Args: len(harness.RetrievePrefix)}) {
 		t.Fatalf("acceptance %+v, %v", accepted, err)
 	}
@@ -114,7 +114,7 @@ func TestLocalActionStopNeverCallsTheExecutor(t *testing.T) {
 				}
 				last := f.last()
 				if obs := last.Facts.Observation; last.Event.Kind() != "observed" || obs == nil || obs.Execution != core.ExecutionCancelled ||
-					obs.ExitCode != nil || obs.Output.Available || last.From.JobID != "" || last.Facts.Window != nil {
+					obs.ExitCode != nil || obs.Output.Available || last.Facts.Receipt != nil || last.Facts.Window != nil {
 					t.Fatalf("cancellation %+v", last)
 				}
 			})
@@ -215,7 +215,7 @@ type racingStop struct {
 func (j racingStop) Commit(ctx context.Context, tr harness.Transition) error {
 	if _, ok := tr.Event.(core.Performed); ok && !*j.done {
 		*j.done = true
-		r, err := harness.NewRunner(j.Journal, j.exec)
+		r, err := harness.NewRunner(j.Journal)
 		if err != nil {
 			j.t.Fatal(err)
 		}
@@ -255,21 +255,21 @@ func TestStopRacingAPerformanceWins(t *testing.T) {
 	}
 }
 
-// TestALocalActionCannotBindAJob requires that the store refuses to bind an
+// TestALocalActionCannotCompleteWithAnExecutorReceipt requires that the store refuses to bind an
 // executor job to the effect of a recorded local action, writing nothing,
 // and that the loop then still performs it in process.
-func TestALocalActionCannotBindAJob(t *testing.T) {
+func TestALocalActionCannotCompleteWithAnExecutorReceipt(t *testing.T) {
 	for _, payload := range []string{`canti:retrieve {}`, `canti:handover {}`, `canti:unknown`} {
 		t.Run(payload, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, execReply(payload), returnReply("done"))
 			f.cfg.Reader, _ = importing(t, "evidence")
 			ctx := context.Background()
 			snap := f.stepUntil(ctx, core.PhaseEffectSaved)
-			r, err := harness.NewRunner(f.store, f.exec)
+			r, err := harness.NewRunner(f.store)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.Commit(ctx, snap, core.JobBound{EffectID: snap.State.EffectID, JobID: "job-1"}, harness.Facts{}); !errors.Is(err, harness.ErrFacts) {
+			if _, err := r.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart}, harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart}, Receipt: &harness.Job{EffectID: snap.State.EffectID, Spec: f.exec.Specification(payload), ID: "job-1", Status: harness.JobFailedToStart}}); !errors.Is(err, harness.ErrFacts) {
 				t.Fatalf("binding a job to a local action: %v", err)
 			}
 			if latest, err := f.store.Latest(ctx, runID); err != nil || latest != snap {
@@ -290,7 +290,7 @@ func TestAnExternalEffectCannotCompleteAsLocal(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"))
 	ctx := context.Background()
 	snap := f.stepUntil(ctx, core.PhaseEffectSaved)
-	r, err := harness.NewRunner(f.store, f.exec)
+	r, err := harness.NewRunner(f.store)
 	if err != nil {
 		t.Fatal(err)
 	}

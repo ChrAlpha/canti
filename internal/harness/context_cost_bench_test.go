@@ -143,7 +143,7 @@ func newContextCostFixture(b *testing.B, scenario string) contextCostFixture {
 	if scenario == "near_capacity" && !p.frozen.Window.Requested {
 		b.Fatal("fixture did not reach the handover capacity threshold")
 	}
-	runner, err := harness.NewRunner(store, x)
+	runner, err := harness.NewRunner(store)
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -18,15 +18,16 @@ import (
 // rune boundary, with Truncated set when any text was cut, so a row is
 // bounded by its caps whatever the journal holds.
 type ProgressRow struct {
-	Seq       int64
-	Kind      string
-	Semantics int
-	Phase     core.Phase
-	Step      int // of the state the transition leaves
-	Reason    core.StopReason
-	EffectID  string
-	JobID     string // of the state the transition leaves
-	Failure   string
+	Seq              int64
+	Kind             string
+	Semantics        int
+	Phase            core.Phase
+	Step             int // of the state the transition leaves
+	Reason           core.StopReason
+	EffectID         string
+	External         bool // completion carries an executor receipt
+	ResolutionSource string
+	Failure          string
 
 	// The decision of a response_loaded row.
 	Decision core.Decision
@@ -93,7 +94,8 @@ var progressSQL = `SELECT seq, kind, semantics, ` + strings.Join([]string{
 	`json_extract(from_state, '$.Step')`,
 	clipped(`json_extract(to_state, '$.Reason')`, ProgressNameBytes),
 	clipped(`json_extract(from_state, '$.EffectID')`, ProgressNameBytes),
-	clipped(`json_extract(from_state, '$.JobID')`, ProgressNameBytes),
+	`json_type(facts, '$.Receipt')`,
+	clipped(`json_extract(facts, '$.Resolution.Source')`, ProgressNameBytes),
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(to_state, '$.Decision.kind')`, ProgressNameBytes) + ` END`,
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(to_state, '$.Decision.payload')`, ProgressResultBytes) + ` END`,
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(to_state, '$.Decision.purpose')`, ProgressCommandBytes) + ` END`,
@@ -147,11 +149,11 @@ func text(b []byte, limit int, cut *ProgressFields, field ProgressFields) string
 
 func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	var r ProgressRow
-	var phase, reason, effect, job, decision, payload, purpose, command, failure, action, execution, preview, detail []byte
+	var phase, reason, effect, resolution, decision, payload, purpose, command, failure, action, execution, preview, detail []byte
 	var outcome, outcomeDetail, retrievalError []byte
-	var retrieval, handover sql.NullString
+	var retrieval, handover, receipt sql.NullString
 	var step, exitCode, sources, entries, window sql.NullInt64
-	err := rows.Scan(&r.Seq, &r.Kind, &r.Semantics, &phase, &step, &reason, &effect, &job, &decision, &payload, &purpose, &command,
+	err := rows.Scan(&r.Seq, &r.Kind, &r.Semantics, &phase, &step, &reason, &effect, &receipt, &resolution, &decision, &payload, &purpose, &command,
 		&failure, &action, &execution, &exitCode, &preview, &detail, &outcome, &outcomeDetail, &retrievalError, &sources, &entries,
 		&retrieval, &handover, &window)
 	if err != nil {
@@ -186,6 +188,6 @@ func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	r.RetrievalError = text(retrievalError, ProgressTextBytes, cut, ProgressRetrievalError)
 	r.Sources, r.Entries, r.WindowFirstStep = int(sources.Int64), int(entries.Int64), int(window.Int64)
 	r.Retrieval, r.Handover = retrieval.String == "object", handover.String == "object"
-	r.JobID = name(job)
+	r.External, r.ResolutionSource = receipt.String == "object", name(resolution)
 	return r, nil
 }

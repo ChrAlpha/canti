@@ -301,7 +301,7 @@ func handoverSession() *sessionFixture {
 		},
 		recent: map[string]StepRecord{
 			"r6": {Step: 7, Observation: exited(&ok, nil)},
-			"r5": {Step: 4, Observation: exited(&ok, &Handover{RunID: "r5", FirstStep: 1, Text: "h5"})},
+			"r5": {Step: 4, Outcome: &Outcome{Status: OutcomeDone, Handover: &Handover{RunID: "r5", FirstStep: 1, Text: "h5"}}},
 			"r4": {Step: 5, Observation: exited(&failed, nil)},
 			"r3": {Step: 2, Observation: exited(&ok, nil)},
 			"r1": {Step: 9, Observation: exited(&ok, nil)},
