@@ -24,9 +24,11 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 - `internal/harness/` owns durable facts, input construction, model calls,
   persistence, execution, and the interpretation of intents. It must not
   restate transition rules that `core.State.Next` defines. Its concrete
-  adapters are `sqlite`, `docker`, and `anthropic`; storage, execution, and
-  provider guarantees require the integration evidence recorded in
-  `docs/v1-acceptance.md`.
+  adapters are `sqlite`, `docker`, and the model adapters `anthropic`
+  (Messages) and `openai` (Responses), which share `provider`; storage,
+  execution, and provider guarantees require the integration evidence
+  recorded in `docs/v1-acceptance.md`. Model APIs are peers: no default
+  API, provider, or model, and no Chat Completions adapter.
 - `internal/archive/` owns read-only access to the archive that jobs see:
   path safety, the retrieval operations, their continuations, and the
   layout and meta encoding of published step records. It imports only the

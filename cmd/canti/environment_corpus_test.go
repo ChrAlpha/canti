@@ -28,7 +28,7 @@ func TestDefaultEnvironmentMatchesTheRequestCorpus(t *testing.T) {
 	if len(corpus) != 1 {
 		t.Fatalf("%s declares corpusEnvironment %d times", path, len(corpus))
 	}
-	s := parseSpec(t)
+	s := runSpec(t)
 	if got := environment(s.config, s.budget); got != corpus[0] {
 		t.Errorf("default environment\n%s\ndiffers from the corpus environment\n%s", got, corpus[0])
 	}

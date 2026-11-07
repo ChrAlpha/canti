@@ -5,8 +5,9 @@ the right information for each agent step.
 
 canti is a single-machine durable agent: a stateless Go decision core and a
 harness that commits every fact to a SQLite journal before acting on it, runs
-each command in its own Docker container, and asks an Anthropic Messages model
-for one decision per step. Any later process resumes a run from the journal.
+each command in its own Docker container, and asks a model for one decision
+per step through the Anthropic Messages API or the Responses API; the run
+names its model API and model, and canti assumes neither. Any later process resumes a run from the journal.
 It is an architectural experiment for a future Memoh agent runtime.
 
 [Architecture](docs/architecture.md) | [Development](docs/development.md) |
@@ -43,23 +44,29 @@ observable.
 - `internal/harness/docker` runs each effect in one container named from its
   effect ID behind a durable start latch, so a restart never starts a job
   twice, and keeps bounded output artifacts and previews.
-- `internal/harness/anthropic` sends the frozen request bytes of each attempt
-  once over `net/http`.
+- `internal/harness/anthropic` and `internal/harness/openai` are the Messages
+  and Responses adapters; `internal/harness/provider` sends the frozen request
+  bytes of each attempt once over `net/http` for both. The Chat Completions
+  API is not supported.
 - `cmd/canti` is the CLI.
 
 ## Running an agent
 
 Requirements: Go 1.25 or newer, Linux (the only verified platform), a Docker
-daemon the `docker` CLI can reach, and `ANTHROPIC_API_KEY` (or
-`ANTHROPIC_AUTH_TOKEN`). The CLI reads the credential once and removes it from
-its environment before starting any child process; it never enters the
+daemon the `docker` CLI can reach, and the credential of the model API:
+`ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) for `anthropic-messages`,
+`OPENAI_API_KEY` for `openai-responses`. `-model-url`, or else
+`ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, names another provider of the same
+API. The CLI reads every credential variable once and removes them all from
+its environment before starting any child process; no credential enters the
 journal.
 
 ```sh
 go build -o bin/canti ./cmd/canti
-export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY with -api anthropic-messages
 mkdir -p ~/demo
-bin/canti run -workspace ~/demo -goal "Write hello.txt containing hello, then return"
+bin/canti run -workspace ~/demo -api openai-responses -model MODEL \
+  -goal "Write hello.txt containing hello, then return"
 ```
 
 By default each command the agent chooses runs in a new

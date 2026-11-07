@@ -23,19 +23,27 @@ const (
 	fallbackBeta   = "server-side-fallback-2026-07-01"
 	adapter        = "canti-anthropic/2"
 	toolAdapter    = "canti-anthropic/3-tool"
-	decisionFormat = `{"format":{"type":"json_schema","schema":` + harness.DecisionSchema + `}}`
-	decisionTool   = `[{"name":"` + harness.DecisionToolName + `","description":"` + harness.DecisionToolDescription +
-		`","input_schema":` + harness.DecisionSchema + `}]`
-	decisionToolChoice = `{"type":"tool","name":"` + harness.DecisionToolName + `","disable_parallel_tool_use":true}`
+	decisionFormat = `{"type":"json_schema","schema":` + harness.DecisionSchema + `}`
+	// decisionTool is strict, so a tool call always matches the decision
+	// schema. The tool choice is auto: current models reject a forced one,
+	// and a reply without the call is repaired like any other reply that
+	// holds no decision.
+	decisionTool = `[{"name":"` + harness.DecisionToolName + `","description":"` + harness.DecisionToolDescription +
+		`","strict":true,"input_schema":` + harness.DecisionSchema + `}]`
+	decisionToolChoice = `{"type":"auto","disable_parallel_tool_use":true}`
 )
+
+// Efforts lists the output_config effort levels a Config may name.
+var Efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
 // Config configures a Model. Zero values select the documented defaults.
 type Config struct {
 	BaseURL          string        // default "https://api.anthropic.com"
 	APIKey           string        // sent as x-api-key
 	AuthToken        string        // sent as Authorization: Bearer; exactly one of APIKey/AuthToken is required
-	Model            string        // required, e.g. "claude-opus-5"
+	Model            string        // required; the adapter assumes no model
 	MaxTokens        int           // default 16000
+	Effort           string        // output_config effort, one of Efforts; empty leaves the model's default
 	StructuredOutput bool          // constrain text answers to the decision object schema
 	DecisionFormat   string        // "text" (default) or "tool"
 	Fallbacks        bool          // enable server-side refusal fallbacks
@@ -62,6 +70,9 @@ func New(cfg Config) (*Model, error) {
 	}
 	if cfg.MaxTokens < 0 {
 		return nil, errors.New("anthropic: limits must not be negative")
+	}
+	if cfg.Effort != "" && !slices.Contains(Efforts, cfg.Effort) {
+		return nil, fmt.Errorf("anthropic: unsupported effort %q", cfg.Effort)
 	}
 	if cfg.DecisionFormat == "" {
 		cfg.DecisionFormat = "text"
@@ -94,6 +105,11 @@ type textBlock struct {
 	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
 
+type outputConfig struct {
+	Effort string          `json:"effort,omitempty"`
+	Format json.RawMessage `json:"format,omitempty"`
+}
+
 // Freeze builds the deterministic request body for p, one text block per
 // prompt block, with cache breakpoints on the first and the last stable
 // block, so the first block stays reusable after a step is dropped. It never
@@ -118,19 +134,23 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 		MaxTokens    int             `json:"max_tokens"`
 		System       string          `json:"system,omitempty"`
 		Messages     []userMessage   `json:"messages"`
-		OutputConfig json.RawMessage `json:"output_config,omitempty"`
+		OutputConfig *outputConfig   `json:"output_config,omitempty"`
 		Tools        json.RawMessage `json:"tools,omitempty"`
 		ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
 		Fallbacks    string          `json:"fallbacks,omitempty"`
 	}{Model: m.cfg.Model, MaxTokens: m.cfg.MaxTokens, System: p.System, Messages: []userMessage{{"user", content}}}
 	proto := protocol
 	requestAdapter := adapter
+	output := outputConfig{Effort: m.cfg.Effort}
 	if m.cfg.DecisionFormat == "tool" {
 		requestAdapter = toolAdapter
 		body.Tools = json.RawMessage(decisionTool)
 		body.ToolChoice = json.RawMessage(decisionToolChoice)
 	} else if m.cfg.StructuredOutput {
-		body.OutputConfig = json.RawMessage(decisionFormat)
+		output.Format = json.RawMessage(decisionFormat)
+	}
+	if output.Effort != "" || output.Format != nil {
+		body.OutputConfig = &output
 	}
 	if m.cfg.Fallbacks {
 		body.Fallbacks, proto = "default", protocol+"+"+fallbackBeta

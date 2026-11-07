@@ -230,7 +230,7 @@ func TestBlockedStderrSignalCleanup(t *testing.T) {
 			if twice {
 				held = f.model.holdRequests()
 			}
-			cmd, wait, _ := startCLIWithBlockedStderr(t, nil, env, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+			cmd, wait, _ := startCLIWithBlockedStderr(t, nil, env, append([]string{"run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g"}, fixtureModel...)...)
 			if twice {
 				waitFor(t, func() bool { return len(held) > 0 })
 			} else {
@@ -276,7 +276,7 @@ func TestBlockedStderrDeliversTheFinalLinesOnceDrained(t *testing.T) {
 				env = append(env, "CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED="+marker)
 			}
 			held := f.model.holdRequests()
-			cmd, _, stderr := startCLIWithBlockedStderr(t, nil, env, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+			cmd, _, stderr := startCLIWithBlockedStderr(t, nil, env, append([]string{"run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g"}, fixtureModel...)...)
 			waitFor(t, func() bool { return len(held) > 0 })
 			if err := cmd.Process.Signal(os.Interrupt); err != nil {
 				t.Fatal(err)
@@ -319,7 +319,7 @@ func TestBlockedStderrDeliversTheFinalLinesOnceDrained(t *testing.T) {
 func TestBlockedStderrNeverKeepsTheWorkspaceLocked(t *testing.T) {
 	f := newFixture(t, nil)
 	held := f.model.holdRequests()
-	cmd, _, stderr := startCLIWithBlockedStderr(t, nil, []string{"ANTHROPIC_API_KEY=" + f.key}, "run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g")
+	cmd, _, stderr := startCLIWithBlockedStderr(t, nil, []string{"ANTHROPIC_API_KEY=" + f.key}, append([]string{"run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-goal", "g"}, fixtureModel...)...)
 	waitFor(t, func() bool { return len(held) > 0 })
 	ended := make(chan struct{})
 	go func() { cmd.Wait(); close(ended) }()
@@ -410,7 +410,7 @@ func TestChatSetupNoteLeadsAStderrItWaitedOn(t *testing.T) {
 	}
 	defer errR.Close()
 	fillPipe(t, errW)
-	cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
+	cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL}, fixtureModel...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("one\n"), outW, errW
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

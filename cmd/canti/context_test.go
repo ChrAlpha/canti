@@ -10,7 +10,7 @@ import (
 
 func TestContextConfigurationSurvivesResume(t *testing.T) {
 	imported := t.TempDir()
-	s := parseSpec(t, "-history-imports", imported, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
+	s := runSpec(t, "-history-imports", imported, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
 	s.config.Workspace = t.TempDir()
 	run, _, err := newRun("goal", "constraints", s, time.Now())
 	if err != nil {
@@ -27,7 +27,7 @@ func TestContextConfigurationSurvivesResume(t *testing.T) {
 
 func TestContextConfigurationRejectsInvalidLimits(t *testing.T) {
 	for _, args := range [][]string{{"-window-steps", "-1"}, {"-window-bytes", "-1"}, {"-handover-bytes", "0"}, {"-handover-bytes", "8193"}} {
-		if _, _, err := newRun("goal", "", parseSpec(t, args...), time.Now()); err == nil {
+		if _, _, err := newRun("goal", "", runSpec(t, args...), time.Now()); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
 	}
@@ -46,7 +46,7 @@ func TestRemovedContextStrategiesAreRejected(t *testing.T) {
 }
 
 func TestDecodeConfigKeepsAnyStoredContextVersion(t *testing.T) {
-	s := parseSpec(t)
+	s := runSpec(t)
 	run, _, err := newRun("goal", "", s, time.Now())
 	if err != nil {
 		t.Fatal(err)

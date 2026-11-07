@@ -14,21 +14,23 @@ import (
 )
 
 func TestLiveDecision(t *testing.T) {
-	key := os.Getenv("ANTHROPIC_API_KEY")
-	if key == "" {
-		t.Skip("ANTHROPIC_API_KEY is not set")
+	key, model := os.Getenv("ANTHROPIC_API_KEY"), os.Getenv("ANTHROPIC_MODEL")
+	if key == "" || model == "" {
+		t.Skip("ANTHROPIC_API_KEY and ANTHROPIC_MODEL name the credential and model")
 	}
-	model := os.Getenv("ANTHROPIC_MODEL")
-	if model == "" {
-		model = "claude-opus-5"
+	effort := os.Getenv("CANTI_LIVE_EFFORT")
+	format := os.Getenv("CANTI_LIVE_DECISION_FORMAT")
+	system := `Reply with one JSON object {"kind":"exec"|"return","payload":string}.`
+	if format == "tool" {
+		system = "Call the canti_decision tool exactly once; never reply with text."
 	}
 	m, err := anthropic.New(anthropic.Config{BaseURL: os.Getenv("ANTHROPIC_BASE_URL"), APIKey: key, Model: model, MaxTokens: 1024,
-		StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", Timeout: 2 * time.Minute})
+		Effort: effort, DecisionFormat: format, StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", Timeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
 	req, err := m.Freeze(harness.Prompt{
-		System: `Reply with one JSON object {"kind":"exec"|"return","payload":string}.`,
+		System: system,
 		Blocks: []string{"Hand control back to the caller ", `with the payload "ok".`},
 		Stable: 1,
 	})

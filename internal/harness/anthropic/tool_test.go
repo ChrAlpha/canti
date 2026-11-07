@@ -120,12 +120,13 @@ func TestFreezeToolRequest(t *testing.T) {
 	}
 	var tools []struct {
 		Name, Description string
+		Strict            bool
 		InputSchema       map[string]any `json:"input_schema"`
 	}
 	if err := json.Unmarshal(body["tools"], &tools); err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 1 || tools[0].Name != "canti_decision" || !strings.Contains(tools[0].Description, "tool input") {
+	if len(tools) != 1 || tools[0].Name != "canti_decision" || !strings.Contains(tools[0].Description, "tool input") || !tools[0].Strict {
 		t.Fatalf("tools = %+v", tools)
 	}
 	schema := tools[0].InputSchema
@@ -144,8 +145,21 @@ func TestFreezeToolRequest(t *testing.T) {
 	if err := json.Unmarshal(body["tool_choice"], &choice); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(choice, map[string]any{"type": "tool", "name": "canti_decision", "disable_parallel_tool_use": true}) {
+	if !reflect.DeepEqual(choice, map[string]any{"type": "auto", "disable_parallel_tool_use": true}) {
 		t.Fatalf("choice = %+v", choice)
+	}
+}
+
+func TestFreezeToolRequestSendsEffortWithoutAFormat(t *testing.T) {
+	m := newModel(t, "https://unused.test", func(c *anthropic.Config) {
+		c.DecisionFormat, c.StructuredOutput, c.Effort = "tool", true, "max"
+	})
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(freeze(t, m).Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body["output_config"]); got != `{"effort":"max"}` {
+		t.Fatalf("output_config = %s", got)
 	}
 }
 

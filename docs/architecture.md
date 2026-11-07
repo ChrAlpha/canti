@@ -10,8 +10,8 @@ packages.
 
 V1 is one machine, one workspace writer, serial decisions, bounded model
 input, and recovery from committed facts. It is implemented: a SQLite journal,
-a Docker executor, an Anthropic Messages adapter, and a CLI drive runs through
-the core. [V1 acceptance](v1-acceptance.md) records what is verified and what
+a Docker executor, Anthropic Messages and Responses adapters, and a CLI drive
+runs through the core. [V1 acceptance](v1-acceptance.md) records what is verified and what
 is not.
 
 ## Ownership
@@ -21,7 +21,7 @@ is not.
 | `core/decode.go` | Decision protocol and decoding | Offline tests |
 | `core/state.go`, `core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
 | `internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
-| `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` |
+| `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
 | `internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Recording-store tests; used by the loop |
 | `internal/harness/loop.go` | Driving committed intents to a halt, measured budgets, persistent stop, explicit resolution | Tests with a fake model and executor over SQLite; end to end through the CLI |
@@ -32,7 +32,9 @@ is not.
 | `internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations, their continuations, and the evidence each returns | Offline tests on real directories |
 | `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
-| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter over `net/http` | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
+| `internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
+| `internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
+| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and three recorded live samples with one model through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-samples-2026-09-23)) |
 | `cmd/canti` | CLI: commands, state directory, workspace lock, signals, credential | Subprocess tests; Docker-backed gate tests |
 
 The core imports only the standard library and holds no per-run state between
@@ -612,37 +614,64 @@ remain accessible through explicit retrieval, including imported history
 when configured. Retrieved evidence and handover text are not authoritative
 instructions or proof that a side effect completed.
 
-`anthropic.Model` implements `Model` for the non-streaming Messages API at
-API version `2023-06-01`, as adapter `canti-anthropic/2`. `Freeze` builds a
-deterministic body — model, `max_tokens` (16,000 by default), the system
-prompt as a string, one user message with a text block per prompt block, and
-optionally a JSON-schema output format for the decision object and
-server-side fallbacks — that never contains credentials. The first and the
-last stable block carry `ephemeral` `cache_control` breakpoints, so that a
-provider that caches prompt prefixes can reuse the stable blocks of the
-previous request, within the current window; actual cache reuse depends on the provider. The body
-and the model, protocol, and adapter identifiers are committed with
-`RequestFrozen` before any send. The base URL must use `https` unless it is a
-loopback address. `Complete` sends exactly the frozen body once over
-`net/http`, with no SDK, no hidden retries, and no followed redirects, under a
-per-attempt timeout (10 min by default) and an 8 MiB response limit, and
-replaces the credential with `[redacted]` wherever a response body echoes it.
-A 2xx response is complete only with `stop_reason` `end_turn`,
-`stop_sequence`, or `refusal`. Another stop reason, a malformed, truncated, or
-oversized body, and statuses 408, 409, 429, and 5xx are incomplete and
-retryable; 402, or 400 with a credit-balance message, is
-`StopError{budget_exhausted}`; any other status or an unsupported protocol or
-adapter is `StopError{unrecoverable}`. Usage is the provider-reported input
-tokens, including cache creation and reads, plus output tokens. `Decision`
-concatenates the text blocks.
+A run names its model API, `anthropic-messages` or `openai-responses`, and
+its model; canti has no default for either and refuses the Chat Completions
+API by name. The provider is the API's base URL, from `-model-url` or the
+API's base URL variable, and is not stored with the run. Both adapters build a
+deterministic body that never contains credentials from the system prompt and
+one user message with a text part per prompt block, describe the decision
+with `harness.DecisionSchema`, and send the run's effort only when the run
+names one, since each API's effort levels and default differ by model. The
+body and the model, protocol, and adapter identifiers are committed with
+`RequestFrozen` before any send.
 
-With `-decision-format tool` the adapter is `canti-anthropic/3-tool`: the body
-forces one `canti_decision` tool call whose input schema is the decision
-object, instead of the output format; `tool_use` also completes a response,
-and `Decision` returns the input of its single `canti_decision` call. Both
-schemas require `kind`, `payload`, and `purpose`; a decision without a
-purpose still decodes. The adapter identifiers name how a frozen request is
-sent and its decision extracted, which the purpose did not change.
+`provider.Endpoint` sends exactly the frozen body once over `net/http`, with
+no SDK, no hidden retries, and no followed redirects, under a per-attempt
+timeout (10 min by default) and an 8 MiB response limit, and replaces the
+credential with `[redacted]` wherever a response body echoes it. The base URL
+must use `https` unless it is a loopback address. A malformed, truncated, or
+oversized body and statuses 408, 409, 429, and 5xx are incomplete and
+retryable; 402, or the API's exhausted-credit signal, is
+`StopError{budget_exhausted}`; any other status or an unsupported protocol or
+adapter is `StopError{unrecoverable}`.
+
+`anthropic.Model` implements `Model` for the non-streaming Messages API at
+API version `2023-06-01`, as adapter `canti-anthropic/2`: model, `max_tokens`
+(16,000 by default), the system prompt as a string, text blocks, optionally an
+`output_config` with the effort and a JSON-schema format for the decision
+object, and, with `-fallbacks`, server-side refusal fallbacks. The first and
+the last stable block carry `ephemeral` `cache_control` breakpoints, so that
+a provider that caches prompt prefixes can reuse the stable blocks of the
+previous request, within the current window; actual cache reuse depends on
+the provider. A 2xx response is complete only with `stop_reason` `end_turn`,
+`stop_sequence`, or `refusal`; 400 with a credit-balance message exhausts the
+budget. Usage is the provider-reported input tokens, including cache creation
+and reads, plus output tokens. `Decision` concatenates the text blocks.
+
+`openai.Model` implements `Model` for the non-streaming Responses API as
+adapter `canti-openai-responses/1`, protocol `openai-responses/v1`, posting to
+the base URL plus `/responses`: model, the system prompt as `instructions`,
+`input_text` parts, `max_output_tokens` (16,000 by default), optionally
+`reasoning.effort` and a strict `json_schema` text format, and `store: false`,
+since the journal keeps the response. The provider caches prompt prefixes
+without breakpoints. A 2xx response is complete only with status `completed`;
+`incomplete`, with its reason, and `failed` are retryable;
+`insufficient_quota` exhausts the budget. Usage is `input_tokens`, which
+include cached ones, plus `output_tokens`. `Decision` concatenates the
+`output_text` parts of the message items, so a refusal holds no decision.
+
+With `-decision-format tool` the adapters are `canti-anthropic/3-tool` and
+`canti-openai-responses/1-tool`: the body offers one strict `canti_decision`
+tool whose input schema is the decision object, instead of the output format,
+with tool choice `auto` and no parallel calls. A response that calls the tool
+is complete, and `Decision` returns the input of its single `canti_decision`
+call; reasoning and narration may accompany it. The tool choice is `auto`
+because current models reject a forced one; the system prompt asks for the
+call, and a reply without it is repaired like any reply that holds no
+decision. Both schemas require `kind`, `payload`, and `purpose`; a decision
+without a purpose still decodes. The adapter identifiers name how a frozen
+request is sent and its decision extracted, which neither the purpose nor the
+tool choice changed.
 
 A resend reuses the frozen bytes; changing the input requires a new revision. Response records keep the raw body,
 completeness, usage, and provenance, and an incomplete response keeps its

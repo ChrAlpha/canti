@@ -63,8 +63,12 @@ Usage:
   canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
   canti version                                     print the version
 
-Run "canti COMMAND -h" for the flags of a command. run, chat, and resume read the
-model credential from ANTHROPIC_API_KEY or else ANTHROPIC_AUTH_TOKEN.
+Run "canti COMMAND -h" for the flags of a command. A run names its model API
+(-api anthropic-messages or openai-responses) and model (-model); canti has no
+default for either. run, chat, and resume read the credential of the run's API:
+ANTHROPIC_API_KEY or else ANTHROPIC_AUTH_TOKEN for anthropic-messages,
+OPENAI_API_KEY for openai-responses. No process canti starts inherits any of
+them.
 
 Exit status: 0 returned or succeeded, 1 error, 2 usage, 3 stopped,
 4 needs resolution, 5 still active after -once, 6 workspace locked.
@@ -228,7 +232,8 @@ func runFlag(fs *flag.FlagSet, a *app) {
 }
 
 func modelURL(fs *flag.FlagSet) *string {
-	return fs.String("model-url", "", "Anthropic API base `URL` (default $ANTHROPIC_BASE_URL, else https://api.anthropic.com); not saved with the run")
+	return fs.String("model-url", "", "model API base `URL`: default $ANTHROPIC_BASE_URL, else https://api.anthropic.com, for anthropic-messages; "+
+		"$OPENAI_BASE_URL, else https://api.openai.com/v1, for openai-responses; not saved with the run")
 }
 
 func runCommand(fs *flag.FlagSet, a *app) action {
