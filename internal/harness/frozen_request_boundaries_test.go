@@ -33,7 +33,7 @@ func boundaryScenarios() []frozenScenario {
 				"I will hand over now.",
 				handover(" \n\t "),
 				handover(note + strings.Repeat(" ", 2049-len(note))),
-			}, steps: []string{"1 failed_to_start output unavailable", "2 exited 1 action failed", "3 exited 1 action failed"}, stop: core.StopUnrecoverable}},
+			}, steps: []string{"1 failed_to_start output unavailable", "2 failed", "3 failed"}, stop: core.StopUnrecoverable}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
 				"run1-step02-rev2.json": {"## Rejected response\n", "## Handover required\n"},
@@ -48,7 +48,7 @@ func boundaryScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "ls /workspace"),
 				handover(`{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`),
 				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 done handover"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", `{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`},
 			},
@@ -127,7 +127,7 @@ func boundaryScenarios() []frozenScenario {
 				corpusPurpose(core.Exec, "Read the module file\r\nthen name it. "+strings.Repeat("é", 300), "cat go.mod"),
 				corpusPurpose(core.Exec, "Check the listing again.", `canti:retrieve {"operation":"read","path":"`+corpusSteps+`/00000001/preview","reason":"Recheck."}`),
 				corpusPurpose(core.Return, "The module is named.", "The module is example."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 exited 0 retrieval 1 sources 0 entries"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 done retrieval 1 sources 0 entries"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then read go.mod.\nCommand:\n"},
 				"run1-step03-rev1.json": {"### Step 2\nPurpose: Read the module file  then name it. " + strings.Repeat("é", 238) + "…[truncated 124 bytes]\nCommand:\n"},
@@ -147,7 +147,7 @@ func boundaryScenarios() []frozenScenario {
 				corpusRetrieve("read", "/canti/imports/sub/note", "", "Read the note."),
 				corpusDecision(core.Exec, "relink"),
 				corpusDecision(core.Return, "The note was moved behind a symlink."),
-			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 output complete"}}},
+			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"same original evidence\n"},
 				"run1-step03-rev1.json": {"same original evidence\n"},
@@ -158,7 +158,7 @@ func boundaryScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Read the imported notes twice.", replies: []string{
 				capped(imported, 2048), capped(imported, 2049),
 				corpusDecision(core.Return, "The notes say notes."),
-			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 retrieval 1 sources 0 entries"}}},
+			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done retrieval 1 sources 0 entries"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {"### Step 1\n", "Retrieval: 1 original ranges, 0 directory entries\nRetrieval continuation: ",
 					"Retrieval: 1 original ranges, 0 directory entries\nPreview:\n"},
@@ -185,7 +185,7 @@ func boundaryScenarios() []frozenScenario {
 				corpusRetrieve("search", "/canti/imports/"+imported, `,"query":"func parse","limit":64`, "Find every mention of parse."),
 				corpusDecision(core.Exec, "sleep 1"),
 				corpusDecision(core.Return, "The notes say the parser was rewritten in v2."),
-			}, steps: []string{"1 exited 0 retrieval 1 sources 0 entries", "2 exited 0 retrieval 2 sources 0 entries", "3 exited 0 output complete"}}},
+			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done retrieval 2 sources 0 entries", "3 exited 0 output complete"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"…[truncated ", "Preview:\n```\n", "Retrieved original evidence:\n````\n", "```go\nfunc parse() {}\n```\n"},
 			},
@@ -260,7 +260,7 @@ func handoverThresholds() []frozenScenario {
 				corpusDecision(core.Exec, "go test ./..."),
 				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":4096`, "Check the first result."),
 				corpusDecision(core.Return, "Every package passes."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 retrieval 1 sources 0 entries more"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries more"}}},
 		}
 		off := -1
 		if reached {
@@ -269,7 +269,7 @@ func handoverThresholds() []frozenScenario {
 			r := &sc.runs[0]
 			text := "The tests ran; every package passed. Next: report it."
 			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec, harness.HandoverPrefix+text+strings.Repeat(" ", 2048-len(text))))
-			r.steps = append(r.steps, "3 exited 0 handover")
+			r.steps = append(r.steps, "3 done handover")
 		}
 		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
 			h := requests["run1-step03-rev1.json"].Context.Handover

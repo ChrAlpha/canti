@@ -499,12 +499,61 @@ func TestCommitHonoursCancellationBeforeWriting(t *testing.T) {
 	}
 }
 
+var commandAction = Action{Name: ActionCommand, Recovery: RecoveryExternal}
+
+// TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong requires
+// that an accepting ResponseLoaded carries exactly a valid action, that a
+// Performed carries exactly a valid outcome and at most a window valid for
+// the next step, and that no other event carries any of them.
+func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T) {
+	ctx := context.Background()
+	saved := snapAt(t, core.PhaseResponseSaved)
+	accept := core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}
+	reject := core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(`{"kind":"wait","payload":"x"}`)}
+	effect, err := saved.State.Next(accept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	performed := Snapshot{Seq: 4, State: effect}
+	done := &Outcome{Status: OutcomeDone, Handover: &Handover{RunID: "run-1", FirstStep: 1, Text: "next"}}
+	bad := []struct {
+		name  string
+		snap  Snapshot
+		event core.Event
+		facts Facts
+	}{
+		{"acceptance without action", saved, accept, Facts{}},
+		{"invalid action", saved, accept, Facts{Action: &Action{Name: ActionCommand, Recovery: RecoveryRead}}},
+		{"action on a rejected decision", saved, reject, Facts{Action: &commandAction}},
+		{"outcome on an acceptance", saved, accept, Facts{Action: &commandAction, Outcome: done}},
+		{"performed without outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{}},
+		{"invalid outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: &Outcome{Status: OutcomeDone}}},
+		{"window outside the next step", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: done, Window: &Window{FirstStep: 3, SourceStep: 2, Handover: "next"}}},
+		{"observation on a performance", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: done, Observation: &Observation{Execution: core.ExecutionExited}}},
+		{"window on an observation", performed, core.Observed{EffectID: effect.EffectID, Execution: core.ExecutionFailedToStart},
+			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart}, Window: &Window{FirstStep: 2, SourceStep: 1, Handover: "next"}}},
+		{"handover in an observation", performed, core.Observed{EffectID: effect.EffectID, Execution: core.ExecutionFailedToStart},
+			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart, Handover: done.Handover}}},
+	}
+	for _, tc := range bad {
+		rec := &recorder{}
+		if _, err := newRunner(t, rec).Commit(ctx, tc.snap, tc.event, tc.facts); !errors.Is(err, ErrFacts) || len(rec.log) != 0 {
+			t.Errorf("%s: error %v, wrote %v", tc.name, err, rec.log)
+		}
+	}
+	rec := &recorder{}
+	if _, err := newRunner(t, rec).Commit(ctx, performed, core.Performed{EffectID: effect.EffectID},
+		Facts{Outcome: done, Window: &Window{FirstStep: 2, SourceStep: 1, Handover: "next"}}); err != nil {
+		t.Fatalf("a performed handover: %v", err)
+	}
+}
+
 func TestBindCommitsEffectBeforeBindingJob(t *testing.T) {
 	rec := &recorder{job: Job{ID: "job-1", Status: JobPending}}
 	runner := newRunner(t, rec)
 	ctx := context.Background()
 
-	saved, err := runner.Commit(ctx, snapAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, Facts{})
+	saved, err := runner.Commit(ctx, snapAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, Facts{Action: &commandAction})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
@@ -800,7 +849,7 @@ func TestOfflineRunReachesReturn(t *testing.T) {
 		commit(frozen, Facts{Request: &request}),
 		commit(attempt, Facts{}),
 		commit(saved, Facts{Response: &Response{Body: execBody, Complete: true}}),
-		commit(loaded(execBody), Facts{}),
+		commit(loaded(execBody), Facts{Action: &commandAction}),
 		func(s Snapshot) (Snapshot, error) { return runner.Bind(ctx, s) },
 		func(s Snapshot) (Snapshot, error) { return runner.Start(ctx, s) },
 		commit(observed, Facts{Observation: &observation}),

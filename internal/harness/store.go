@@ -31,7 +31,11 @@ var ErrBrokenChain = errors.New("harness: transition does not extend the committ
 // ID and content must succeed
 // without recording again — this is how a caller resolves a commit whose
 // acknowledgement was lost — while conflicting content must fail and never
-// overwrite. A concrete store also owns crash safety and workspace ownership,
+// overwrite. In the same transaction it must apply CheckEffect to every
+// transition EffectTransition accepts, with the committed acceptance of its
+// effect and the window of the request at its From's step and revision,
+// failing with ErrFacts and recording nothing when it fails. A concrete store
+// also owns crash safety and workspace ownership,
 // and must provide recovery reads for the latest Snapshot, the frozen request
 // of the current revision, and the saved response of the current attempt.
 type Store interface {
@@ -46,11 +50,16 @@ var ErrNotFound = errors.New("harness: record not found")
 //
 // Request returns the frozen request of the named step and revision and
 // Response the saved complete response of the named step and attempt, or
-// ErrNotFound. Recent returns at most limit of the latest observed or
-// resolved steps committed at a sequence below before, or the latest ones
-// when before is not positive, oldest first; paging backward passes the Seq
-// of the oldest record read. Totals are maintained in the same transaction
-// as each commit.
+// ErrNotFound. Accepted returns the acceptance of the exec decision of the
+// named step and attempt, the transition right after its saved response,
+// with the semantics version it was committed under, or ErrNotFound when
+// that response accepted none; through Acceptance it fails for an
+// acceptance whose action contradicts its semantics version. Recent returns
+// at most limit of the latest observed, performed, or resolved steps
+// committed at a sequence below before, or the latest ones when before is
+// not positive, oldest first; paging backward passes the Seq of the oldest
+// record read. Totals are maintained in the same transaction as each
+// commit.
 type Journal interface {
 	Store
 	Run(ctx context.Context, runID string) (Run, error)
@@ -58,6 +67,7 @@ type Journal interface {
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
+	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
 	// SessionRuns returns at most limit runs of the session, newest first,
@@ -89,19 +99,23 @@ type Budget struct {
 }
 
 // StepRecord is one completed step as the input builder sees it. Seq is the
-// sequence of the observed or resolved transition that completed it.
+// sequence of the observed, performed, or resolved transition that completed
+// it. A performed step has an Outcome and the Window it committed, if any,
+// and a zero Observation; any other step has an Observation.
 type StepRecord struct {
 	Seq         int64
 	Step        int
 	Command     string
 	Purpose     string
 	Observation Observation
+	Outcome     *Outcome `json:",omitempty"`
+	Window      *Window  `json:",omitempty"`
 	Resolved    bool
 }
 
 // Totals are the run-wide sums the budgets are checked against: usage of
 // every saved or incomplete response, output bytes of every observation, and
-// the number of observed or resolved steps.
+// the number of observed, performed, or resolved steps.
 type Totals struct {
 	Usage       Usage
 	OutputBytes int64
@@ -125,22 +139,30 @@ func (s Snapshot) Validate() error {
 
 // Transition is the durable unit of run progress. Seq is the sequence this
 // commit writes; EventID identifies the logical event occurrence, so an
-// identical retry can be recognized after a lost acknowledgement.
+// identical retry can be recognized after a lost acknowledgement. Semantics
+// is the version the transition is committed under: core.SemanticsVersion
+// for every commit, and for a read one the version recorded with it.
 type Transition struct {
-	Seq     int64
-	EventID string
-	From    core.State
-	Event   core.Event
-	To      core.State
-	Facts   Facts
+	Seq       int64
+	EventID   string
+	From      core.State
+	Event     core.Event
+	To        core.State
+	Facts     Facts
+	Semantics int `json:"-"`
 }
 
 // Facts are the records attached to a transition. Identity comes from the
 // surrounding states, so records carry only content and provenance. Each
-// event permits a fixed subset; Runner.Commit rejects anything else.
+// event permits a fixed subset; Runner.Commit rejects anything else. Action
+// belongs to the ResponseLoaded that accepts an exec decision; Outcome and
+// Window, the window the next step renders when it changes, to Performed.
 type Facts struct {
 	Request     *Request
 	Response    *Response
 	Observation *Observation
+	Action      *Action  `json:",omitempty"`
+	Outcome     *Outcome `json:",omitempty"`
+	Window      *Window  `json:",omitempty"`
 	Failure     string
 }

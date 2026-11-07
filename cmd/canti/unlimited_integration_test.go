@@ -56,7 +56,11 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				if time.Now().After(deadline) {
 					t.Fatal("restart sequence exceeded wall-time budget")
 				}
-				crashRun(t, f, "after:observed", "resume")
+				completion := "after:performed"
+				if step == 1 || step == 22 {
+					completion = "after:observed"
+				}
+				crashRun(t, f, completion, "resume")
 				s := f.status()
 				if s.Step != step+1 || s.Phase != core.PhaseIdle || s.Totals.Steps != step {
 					t.Fatalf("restart did not advance step %d: %+v", step, s)
@@ -100,13 +104,11 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 						t.Fatal("frozen request lost unlimited progress")
 					}
 				}
-				if o := e.Facts.Observation; o != nil {
+				if o := e.Facts.Outcome; o != nil {
 					if o.Handover != nil {
 						handovers++
 					}
-					if o.Handover != nil || o.Retrieval != nil {
-						builtin[evEvent[core.Observed](t, e).EffectID] = true
-					}
+					builtin[evEvent[core.Performed](t, e).EffectID] = true
 				}
 			}
 			wantStarted := 1

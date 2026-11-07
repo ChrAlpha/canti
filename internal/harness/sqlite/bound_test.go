@@ -13,9 +13,10 @@ import (
 )
 
 // shortcut returns the next event and facts on the shortest path through an
-// exec step whose job fails to start: five transitions per observed step.
+// exec step, an unknown harness action that the harness performs as a
+// failure: five transitions per completed step.
 func shortcut(s core.State) (core.Event, harness.Facts) {
-	body := execBody(fmt.Sprintf("step %d", s.Step))
+	body := execBody(fmt.Sprintf("canti:step %d", s.Step))
 	switch s.Phase {
 	case core.PhaseIdle:
 		return core.RequestFrozen{}, harness.Facts{Request: requestFor(s)}
@@ -24,9 +25,11 @@ func shortcut(s core.State) (core.Event, harness.Facts) {
 	case core.PhaseRequestSent:
 		return core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: responseFor(s, body, harness.Usage{InputTokens: 2, OutputTokens: 1})}
 	case core.PhaseResponseSaved:
-		return core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}, harness.Facts{}
+		event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}
+		return event, acceptance(s, event)
 	case core.PhaseEffectSaved:
-		return core.Observed{EffectID: s.EffectID, Execution: core.ExecutionFailedToStart}, harness.Facts{Observation: observation(core.ExecutionFailedToStart, 3)}
+		a := harness.NormalizeAction(s.Decision.Payload, false, true)
+		return core.Performed{EffectID: s.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: a.Problem()}}
 	}
 	return nil, harness.Facts{}
 }
@@ -39,6 +42,8 @@ func sums(transitions []harness.Transition) harness.Totals {
 		case core.ResponseSaved, core.ResponseIncomplete:
 			t.Usage.InputTokens += tr.Facts.Response.Usage.InputTokens
 			t.Usage.OutputTokens += tr.Facts.Response.Usage.OutputTokens
+		case core.Performed:
+			t.Steps++
 		case core.Observed, core.Resolved:
 			t.Steps++
 			t.OutputBytes += tr.Facts.Observation.Output.Bytes
@@ -109,7 +114,7 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 			t.Fatalf("Recent(%d, 64) returned %d records, want %d", before, len(page), min(64, next))
 		}
 		for i, record := range page {
-			if step := next - len(page) + 1 + i; record.Step != step || record.Seq != 5*int64(step) || record.Command != fmt.Sprintf("step %d", step) {
+			if step := next - len(page) + 1 + i; record.Step != step || record.Seq != 5*int64(step) || record.Command != fmt.Sprintf("canti:step %d", step) || record.Outcome == nil {
 				t.Fatalf("Recent(%d, 64)[%d] = %#v, want step %d at seq %d", before, i, record, step, 5*step)
 			}
 		}
@@ -123,12 +128,25 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 		query, index string
 		args         []any
 	}{
-		"Latest":      {latestSQL, "sqlite_autoindex_transitions_1", []any{"long"}},
-		"Transitions": {transitionsSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
-		"Request":     {requestSQL, "transitions_request", []any{"long", 7, 1}},
-		"Response":    {responseSQL, "transitions_response", []any{"long", 7, 1}},
-		"Recent":      {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", int64(math.MaxInt64), 5}},
-		"Recent page": {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", 5000, 5}},
+		"Latest":                {latestSQL, "sqlite_autoindex_transitions_1", []any{"long"}},
+		"Transitions":           {transitionsSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
+		"Request":               {requestSQL, "transitions_request", []any{"long", 7, 1}},
+		"Response":              {responseSQL, "transitions_response", []any{"long", 7, 1}},
+		"Recent before actions": {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", int64(math.MaxInt64), 5}},
+		"Recent page":           {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", 5000, 5}},
+	}
+	// stepsSQL searches each partial index for at most limit rows and merges
+	// those, so its sort is bounded by twice the limit, not by the history.
+	for _, before := range []int64{math.MaxInt64, 5000} {
+		detail := plan(t, s, stepsSQL, "long", before, 5)
+		for _, index := range []string{"transitions_steps (run_id=? AND seq<?)", "transitions_performed (run_id=? AND seq<?)"} {
+			if !strings.Contains(detail, "SEARCH transitions USING INDEX "+index) {
+				t.Errorf("Recent plan %q does not search %s", detail, index)
+			}
+		}
+		if strings.Contains(detail, "SCAN transitions") {
+			t.Errorf("Recent plan %q scans the transitions", detail)
+		}
 	}
 	for name, q := range queries {
 		detail := plan(t, s, q.query, q.args...)

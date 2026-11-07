@@ -76,6 +76,10 @@ func created(t *testing.T, name string) []byte {
 	}
 	config, host := c[0]["Config"].(map[string]any), c[0]["HostConfig"].(map[string]any)
 	delete(config, "Hostname")
+	// Docker versions encode an empty port-binding map as null or {}.
+	if ports, ok := host["PortBindings"].(map[string]any); ok && len(ports) == 0 {
+		host["PortBindings"] = nil
+	}
 	for _, list := range []any{config["Env"], host["Binds"], c[0]["Mounts"]} {
 		l, _ := list.([]any)
 		slices.SortFunc(l, func(a, b any) int { return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)) })

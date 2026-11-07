@@ -188,7 +188,7 @@ func writeStep(path string, r StepRecord) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PurposeFile, r.Purpose}, {archive.PreviewFile, r.Observation.Preview}} {
+	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PurposeFile, r.Purpose}, {archive.PreviewFile, r.presented().Preview}} {
 		f, err := os.Create(filepath.Join(path, file.name))
 		if err == nil {
 			err = fill(f, file.data)
@@ -238,7 +238,7 @@ func install(tmp, target string) error {
 }
 
 func meta(r StepRecord) string {
-	o := r.Observation
+	o := r.presented()
 	m := archive.StepMeta{Step: r.Step, Execution: string(o.Execution), ExitCode: o.ExitCode, Resolved: r.Resolved,
 		OutputBytes: o.Output.Bytes, OutputComplete: o.Output.Complete, OutputDetail: o.Output.Detail}
 	if o.Output.Available {

@@ -78,7 +78,7 @@ func historyCommand(fs *flag.FlagSet, a *app) action {
 				return exitError, err
 			}
 			for _, t := range page {
-				line := map[string]any{"seq": t.Seq, "event_id": t.EventID, "kind": t.Event.Kind(), "event": t.Event,
+				line := map[string]any{"seq": t.Seq, "event_id": t.EventID, "kind": t.Event.Kind(), "semantics": t.Semantics, "event": t.Event,
 					"from": t.From.Phase, "to": t.To.Phase, "state": t.To, "facts": t.Facts}
 				if err := enc.Encode(line); err != nil {
 					return exitError, err

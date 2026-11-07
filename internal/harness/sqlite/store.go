@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -65,6 +66,7 @@ CREATE TABLE transitions (
 CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
 CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
 CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
+` + performedIndex + `
 CREATE TABLE session_runs (
 	session_id TEXT NOT NULL,
 	seq INTEGER NOT NULL CHECK (seq > 0),
@@ -74,6 +76,12 @@ CREATE TABLE session_runs (
 	UNIQUE (session_id, input_id)
 );
 `
+
+// performedIndex serves Recent for performed steps. It is the one schema
+// object that this version adds, without a schema version: a writable open
+// creates it in a journal that lacks it, and an older binary still opens
+// the journal, ignoring the index, until the journal holds a performed row.
+const performedIndex = `CREATE INDEX IF NOT EXISTS transitions_performed ON transitions (run_id, seq) WHERE kind = 'performed';`
 
 const sessionSchema = `CREATE TABLE session_runs (
 	session_id TEXT NOT NULL,
@@ -94,7 +102,7 @@ const (
 	addSQL       = `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
 		output_bytes = output_bytes + ?, steps = steps + ? WHERE id = ?`
 	latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
-	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
+	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
 		FROM transitions WHERE run_id = ? AND seq = ?`
 	insertSQL = `INSERT INTO transitions
 		(run_id, seq, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)
@@ -105,20 +113,34 @@ const (
 	responseSQL = `SELECT semantics, from_state, to_state, facts FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	recentSQL   = `SELECT seq, kind, semantics, from_state, facts FROM transitions
 		WHERE run_id = ? AND kind IN ('observed', 'resolved') AND seq < ? ORDER BY seq DESC LIMIT ?`
+	// stepsSQL is recentSQL and its performed counterpart in one statement,
+	// so one snapshot answers both, each searching its partial index.
+	stepsSQL = `SELECT * FROM (SELECT seq, kind, semantics, from_state, facts FROM transitions
+		WHERE run_id = ?1 AND kind IN ('observed', 'resolved') AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
+		UNION ALL SELECT * FROM (SELECT seq, kind, semantics, from_state, facts FROM transitions
+		WHERE run_id = ?1 AND kind = 'performed' AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
+		ORDER BY seq DESC LIMIT ?3`
+	savedSQL    = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
+	acceptedSQL = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action')
+		FROM transitions WHERE run_id = ? AND seq = ?`
+	windowSQL = `SELECT semantics, json_extract(facts, '$.Request.Window') FROM transitions
+		WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
+	stepsSQL, savedSQL, acceptedSQL, windowSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
 // for concurrent use, including by several Stores on the same file.
 type Store struct {
-	db       *sql.DB
-	stmts    map[string]*sql.Stmt
-	readOnly bool
-	sessions bool
+	db        *sql.DB
+	stmts     map[string]*sql.Stmt
+	readOnly  bool
+	sessions  bool
+	performed atomic.Bool // the journal holds performedIndex
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -135,6 +157,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), sessions: true}
+	s.performed.Store(true)
 	err = s.write(ctx, s.migrate)
 	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)
@@ -177,12 +200,13 @@ func (s *Store) migrate(ctx context.Context, tx *sql.Tx) error {
 	}
 	switch {
 	case version == schemaVersion:
-		return nil
+		_, err := tx.ExecContext(ctx, performedIndex)
+		return err
 	case version == 0 && objects == 0:
 		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
 		return err
 	case version == 1:
-		_, err := tx.ExecContext(ctx, sessionSchema+"PRAGMA user_version = 2;")
+		_, err := tx.ExecContext(ctx, sessionSchema+performedIndex+"PRAGMA user_version = 2;")
 		return err
 	}
 	return fmt.Errorf("%w: schema version %d with %d objects, want %d", ErrIncompatible, version, objects, schemaVersion)
@@ -301,7 +325,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 		var same bool
 		var semantics int
 		var from, to string
-		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind,
+		if err := s.stmt(ctx, tx, sameSQL).QueryRowContext(ctx, t.EventID, r.kind, r.semantics,
 			r.event, r.from, r.to, r.facts, r.run, t.Seq).Scan(&semantics, &from, &to, &same); err != nil {
 			return err
 		}
@@ -321,6 +345,12 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	}
 	if t.From != last.State {
 		return fmt.Errorf("%w: seq %d of run %q", harness.ErrBrokenChain, t.Seq, r.run)
+	}
+	if r.semantics != core.SemanticsVersion {
+		return fmt.Errorf("sqlite: a new transition of semantics version %d, want %d", r.semantics, core.SemanticsVersion)
+	}
+	if err := s.checkEffect(ctx, tx, t); err != nil {
+		return err
 	}
 	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
@@ -347,7 +377,7 @@ func encode(t harness.Transition) (record, error) {
 	if t.Event == nil {
 		return record{}, errors.New("sqlite: transition has no event")
 	}
-	r := record{run: t.From.RunID, kind: t.Event.Kind(), semantics: core.SemanticsVersion}
+	r := record{run: t.From.RunID, kind: t.Event.Kind(), semantics: t.Semantics}
 	if t.To.RunID != r.run {
 		return r, fmt.Errorf("sqlite: transition moves run %q to run %q", r.run, t.To.RunID)
 	}
@@ -375,6 +405,8 @@ func delta(t harness.Transition) harness.Totals {
 		if t.Facts.Response != nil {
 			d.Usage = t.Facts.Response.Usage
 		}
+	case core.Performed:
+		d.Steps = 1
 	case core.Observed, core.Resolved:
 		d.Steps = 1
 		if t.Facts.Observation != nil {
@@ -382,4 +414,33 @@ func delta(t harness.Transition) harness.Totals {
 		}
 	}
 	return d
+}
+
+// checkEffect applies harness.CheckEffect to t inside the transaction tx
+// that commits it: with the acceptance of its effect, read by the response
+// index and the primary key, and, for the acceptance itself and a
+// performance, the only transitions whose rule needs it, the window of the
+// request at its From's step and revision, extracted without decoding the
+// request body.
+func (s *Store) checkEffect(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
+	if !harness.EffectTransition(t) {
+		return nil
+	}
+	var accepted harness.Accepted
+	var window *harness.Window
+	var err error
+	_, accepting := t.Event.(core.ResponseLoaded)
+	if !accepting {
+		accepted, err = s.accepted(ctx, tx, t.From.RunID, t.From.Step, t.From.Attempt)
+	}
+	if _, performed := t.Event.(core.Performed); err == nil && (accepting || performed) {
+		window, err = s.window(ctx, tx, t.From.RunID, t.From.Step, t.From.RequestRev)
+	}
+	if err == nil {
+		err = harness.CheckEffect(t, accepted, window)
+		if err != nil {
+			err = fmt.Errorf("%w: %v", harness.ErrFacts, err)
+		}
+	}
+	return err
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -82,8 +83,11 @@ func TestHandoverTakesTheTextAfterItsPrefixVerbatim(t *testing.T) {
 	if err != nil || len(steps) != 1 {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
-	if h := steps[0].Observation.Handover; h == nil || *h != (harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
-		t.Fatalf("recorded handover %+v", h)
+	if o := steps[0].Outcome; o == nil || o.Status != harness.OutcomeDone || o.Handover == nil || *o.Handover != (harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
+		t.Fatalf("recorded outcome %+v", o)
+	}
+	if w := steps[0].Window; w == nil || *w != (harness.Window{FirstStep: 3, SourceStep: 2, Handover: text}) {
+		t.Fatalf("the handover committed the window %+v", w)
 	}
 	if !strings.Contains(f.model.prompts[2].User(), text) {
 		t.Fatal("the next window does not quote the handover text")
@@ -119,8 +123,8 @@ func TestALongerActionNameIsNotAHandover(t *testing.T) {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	for _, step := range steps {
-		if o := step.Observation; o.Execution != core.ExecutionFailedToStart || o.Handover != nil {
-			t.Fatalf("step %d observation %+v; want refused work", step.Step, o)
+		if o := step.Outcome; o == nil || o.Status != harness.OutcomeRefused || o.Handover != nil {
+			t.Fatalf("step %d outcome %+v; want refused work", step.Step, o)
 		}
 	}
 }
@@ -139,14 +143,15 @@ func TestUnrequestedHandoverNeverRunsAsACommand(t *testing.T) {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	for _, s := range steps {
-		if o := s.Observation; o.Handover != nil || !strings.Contains(o.Preview, "handover was not requested for this step") {
-			t.Fatalf("step %d observation %+v", s.Step, o)
+		if o := s.Outcome; o == nil || o.Status != harness.OutcomeFailed || o.Handover != nil || s.Window != nil ||
+			!strings.Contains(o.Detail, "handover was not requested for this step") {
+			t.Fatalf("step %d outcome %+v, window %+v", s.Step, o, s.Window)
 		}
 	}
 }
 
 func TestDiscoverySkipsAHandoverAfterAnyWhitespace(t *testing.T) {
-	for _, separator := range harness.HandoverSpace {
+	for _, separator := range harness.ActionSpace {
 		t.Run(fmt.Sprintf("%q", separator), func(t *testing.T) { discoverPastHandover(t, string(separator)) })
 	}
 }
@@ -164,11 +169,11 @@ func TestDiscoverySkipsABareHandoverName(t *testing.T) {
 		t.Fatalf("run=%+v err=%v", s.State, err)
 	}
 	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
-	if err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
+	if err != nil || len(steps) != 1 || steps[0].Outcome == nil || steps[0].Outcome.Retrieval == nil {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	var found []string
-	for _, source := range steps[0].Observation.Retrieval.Sources {
+	for _, source := range steps[0].Outcome.Retrieval.Sources {
 		found = append(found, source.Path)
 	}
 	if !slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000001/") }) ||
@@ -208,15 +213,15 @@ func discoverPastHandover(t *testing.T, separator string) {
 		t.Fatalf("run=%+v err=%v", s.State, err)
 	}
 	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
-	if err != nil || len(steps) != 1 || steps[0].Observation.Retrieval == nil {
+	if err != nil || len(steps) != 1 || steps[0].Outcome == nil || steps[0].Outcome.Retrieval == nil {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	var found []string
-	for _, source := range steps[0].Observation.Retrieval.Sources {
+	for _, source := range steps[0].Outcome.Retrieval.Sources {
 		found = append(found, source.Path)
 	}
 	if len(found) == 0 || slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") }) {
-		t.Fatalf("discovery found %v; want step 1 and not the handover of step 2: %s", found, steps[0].Observation.Preview)
+		t.Fatalf("discovery found %v; want step 1 and not the handover of step 2", found)
 	}
 }
 
@@ -241,8 +246,11 @@ func TestWindowRefusesRepeatedInvalidHandover(t *testing.T) {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	for i, want := range []string{"handover text must not be empty", "2049 UTF-8 bytes; maximum 2048"} {
-		if o := steps[i].Observation; o.Handover != nil || !strings.Contains(o.Preview, want) {
-			t.Fatalf("step %d observation %+v, want %q", steps[i].Step, o, want)
+		if o := steps[i].Outcome; o == nil || o.Handover != nil || !strings.Contains(o.Detail, want) {
+			t.Fatalf("step %d outcome %+v, want %q", steps[i].Step, o, want)
+		}
+		if w := steps[i].Window; w == nil || w.FirstStep != 1 || !w.Requested || w.Failures != i+1 {
+			t.Fatalf("step %d committed the window %+v, want the active window with %d failures", steps[i].Step, w, i+1)
 		}
 	}
 }
@@ -318,7 +326,7 @@ func TestDirectorySearchCursorAndEvidenceReachFrozenRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := steps[0].Observation.Retrieval
+	r := steps[0].Outcome.Retrieval
 	if r == nil || !r.More || r.NextCursor == "" {
 		t.Fatalf("missing cursor %#v", r)
 	}
@@ -587,5 +595,107 @@ func TestWindowProtocolRepairRejectsMissingInitialFrozenRequest(t *testing.T) {
 	s, err := f.loopOn(missingLatestWindowRequest{f.open()}).Step(ctx, runID)
 	if err != nil || s.State.Phase != core.PhaseStopped || s.State.Reason != core.StopUnrecoverable || len(f.model.prompts) != before {
 		t.Fatalf("protocol repair recreated missing initial request: state=%+v new_prompts=%d err=%v", s.State, len(f.model.prompts)-before, err)
+	}
+}
+
+// capturing records the first transition of kind handed to its journal.
+type capturing struct {
+	harness.Journal
+	kind string
+	got  *harness.Transition
+}
+
+func (j capturing) Commit(ctx context.Context, tr harness.Transition) error {
+	if tr.Event.Kind() == j.kind && j.got.Event == nil {
+		*j.got = tr
+	}
+	return j.Journal.Commit(ctx, tr)
+}
+
+// TestHandoverAcknowledgementLossCommitsOneIdenticalTransition requires that
+// when the performed commit of a handover lands without its acknowledgement
+// the next step keeps it, and that when it never landed the handover is
+// performed again into the identical transition: its outcome, window, and
+// progress, as a local change computed from committed facts.
+func TestHandoverAcknowledgementLossCommitsOneIdenticalTransition(t *testing.T) {
+	for _, landed := range []bool{true, false} {
+		t.Run(map[bool]string{true: "landed", false: "lost"}[landed], func(t *testing.T) {
+			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
+				execReply("true"), execReply(harness.HandoverPrefix+"Next: report."), returnReply("done"))
+			f.cfg.WindowSteps = 1
+			ctx := f.bounded()
+			f.stepUntil(ctx, core.PhaseIdle)
+			f.stepUntil(ctx, core.PhaseEffectSaved)
+			var first, committed harness.Transition
+			var failed bool
+			if _, err := f.loopOn(capturing{failingCommit{f.store, "performed", landed, &failed}, "performed", &first}).Step(ctx, runID); err == nil {
+				t.Fatal("the lost acknowledgement was not surfaced")
+			}
+			wantState(t, f.run(f.loopOn(capturing{f.open(), "performed", &committed})), core.PhaseReturned, "")
+			performed := slices.DeleteFunc(f.transitions(), func(tr harness.Transition) bool { return tr.Event.Kind() != "performed" })
+			if len(performed) != 1 || !reflect.DeepEqual(performed[0].Facts, first.Facts) || performed[0].To != first.To {
+				t.Fatalf("committed %+v, first attempted %+v", performed, first)
+			}
+			if !landed && !reflect.DeepEqual(committed.Facts, first.Facts) {
+				t.Fatalf("the handover performed again into %+v, not %+v", committed.Facts, first.Facts)
+			}
+			if w := performed[0].Facts.Window; w == nil || *w != (harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Next: report."}) {
+				t.Fatalf("window %+v", w)
+			}
+		})
+	}
+}
+
+// tamperedWindow reports the window of the latest completed step as want.
+type tamperedWindow struct {
+	harness.Journal
+	want *harness.Window
+}
+
+func (j tamperedWindow) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+	steps, err := j.Journal.Recent(ctx, runID, before, limit)
+	if err == nil && len(steps) > 0 {
+		steps[len(steps)-1].Window = j.want
+	}
+	return steps, err
+}
+
+// TestPreparationRefusesAWindowItsRequestDoesNotExplain requires that a
+// preparation that reads a completion whose committed window does not follow
+// from the window of its request, or that lacks the window a request
+// requiring a handover implies, stops the run unrecoverably without a
+// request.
+func TestPreparationRefusesAWindowItsRequestDoesNotExplain(t *testing.T) {
+	for name, tc := range map[string]struct {
+		requested bool
+		window    *harness.Window
+	}{
+		"window without a handover":    {false, &harness.Window{FirstStep: 2, SourceStep: 1, Handover: "forged"}},
+		"failure without a request":    {false, &harness.Window{FirstStep: 1, Requested: true, Failures: 1}},
+		"requested without its window": {true, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			second := execReply("echo next")
+			if tc.requested {
+				second = execReply("echo refused")
+			}
+			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), second, returnReply("done"))
+			if tc.requested {
+				f.cfg.WindowSteps = 1
+			}
+			ctx := f.bounded()
+			f.stepUntil(ctx, core.PhaseIdle)
+			if tc.requested {
+				f.stepUntil(ctx, core.PhaseIdle)
+			}
+			s, err := f.loopOn(tamperedWindow{f.store, tc.window}).Step(ctx, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantState(t, s, core.PhaseStopped, core.StopUnrecoverable)
+			if last := f.last(); !strings.Contains(last.Facts.Failure, "does not follow from its request") {
+				t.Fatalf("stop failure %q", last.Facts.Failure)
+			}
+		})
 	}
 }

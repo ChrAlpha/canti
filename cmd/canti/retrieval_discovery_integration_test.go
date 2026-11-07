@@ -85,7 +85,7 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 		}
 		body, _ := json.Marshal(q)
 		act(core.Decision{Kind: core.Exec, Payload: "canti:retrieve " + string(body)})
-		o := observe()
+		o := latestOutcome(t, f.history())
 		if o.Retrieval == nil || o.Retrieval.Error != "" || len(o.Retrieval.Sources) == 0 {
 			t.Fatalf("missing evidence: %+v", o)
 		}

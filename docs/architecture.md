@@ -24,6 +24,7 @@ is not.
 | `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
 | `internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `internal/harness/runner.go` | Intent interpretation: commit, bind, start | Recording-store tests; used by the loop |
+| `internal/harness/action.go`, `outcome.go`, `effect.go`, `perform.go` | The normalized action of an accepted exec decision and its recovery contract, the local outcome and its presentation, the provenance check of every effect transition, and the harness's own actions | Offline tests over SQLite; Docker-backed gate tests |
 | `internal/harness/loop.go` | Driving committed intents to a halt, measured budgets, persistent stop, explicit resolution | Tests with a fake model and executor over SQLite; end to end through the CLI |
 | `internal/harness/executor.go` | Executor contract: jobs keyed by effect ID, bind/start split, start latch, `ErrJobLost` | Implemented by `docker` |
 | `internal/harness/executortest` | Executable start latch contract | Passed by an offline reference and the Docker executor; rejects single-clause mutants |
@@ -153,7 +154,7 @@ phases halt rather than act.
 | `request_frozen` | `send_request` | `AttemptStarted`, `StopRequested` |
 | `request_sent` | `send_request` | `AttemptStarted`, `ResponseSaved`, `ResponseIncomplete`, `StopRequested` |
 | `response_saved` | `decode` | `ResponseLoaded`, `StopRequested` |
-| `effect_saved` | `bind` | `JobBound`, `Observed`, `OutcomeUnknown`, `StopRequested` |
+| `effect_saved` | `bind` | `JobBound`, `Observed`, `Performed`, `OutcomeUnknown`, `StopRequested` |
 | `job_bound` | `start` | `JobStarted`, `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `awaiting_observation` | `inspect` | `Observed`, `OutcomeUnknown`, `StopRequested` |
 | `cancelling` | `cancel` | `JobBound`, `Observed`, `OutcomeUnknown`, `StopRequested` |
@@ -193,6 +194,10 @@ Rules the table enforces:
   whose start was issued but whose commit was lost — can record an
   already-finished result; the current runner instead always re-issues the
   idempotent start.
+- `Performed` reports that the harness carried out the effect itself,
+  without any job, and completes the step as `Observed` does; only
+  `effect_saved`, where no job is bound, accepts it, so a local completion
+  never displaces a job.
 - Outside `cancelling`, `Observed` completes the step: the run continues in
   `idle` at the next step with identities cleared, or stops with
   `steps_exhausted`. That stop is deliberate: the final observation is
@@ -221,7 +226,8 @@ Rules the table enforces:
   cannot be claimed from outside.
 - `JobBound` requires effect and job IDs and must match a job already known;
   `JobStarted` must name the bound job.
-- Adding a capability must not add an event kind; capabilities are payloads.
+- Adding a capability must not add an event kind: an event names a recovery
+  semantic, and a capability chooses one of the harness's recovery contracts.
 
 ## Interpreter and loop
 
@@ -279,12 +285,12 @@ the intent is `halt` or a step fails, and at a halt publishes the run's
 
 | Intent | Loop action |
 | --- | --- |
-| `prepare_request` | Build the [frame](#input) from the run record, the complete active window and its handover, and in a repair the rejected response, returning the error of a failed journal read and committing nothing; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the recorded window, the run's session fields, or earlier session runs fail their checks, the goal or constraints exceed their limit, no prompt fits, or freezing fails |
+| `prepare_request` | Build the [frame](#input) from the run record, the complete active window and its handover, and in a repair the rejected response, returning the error of a failed journal read and committing nothing; at a step's first revision, take the window from the previous step's completion, or else from that step's latest request, and stop `unrecoverable` when it does not follow from that request; publish the run's [step records](#step-records), returning the error and committing nothing when that fails; render the prompt; `Model.Freeze`; commit `RequestFrozen` with the request, or `StopRequested{unrecoverable}` when the recorded window, the run's session fields, or earlier session runs fail their checks, the goal or constraints exceed their limit, no prompt fits, or freezing fails |
 | `send_request` | Load the frozen request of the current revision; commit `AttemptStarted`, naming the next attempt when the phase is `request_sent`; send once, bounded by the remaining wall time; commit `ResponseSaved`, a `StopRequested` for a `*StopError` or for a wall time spent during the request, or `ResponseIncomplete` with any partial body and then wait 1 s, doubling per consumed attempt up to 30 s |
-| `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none; never call the model |
-| `bind`, `start` | Route the effect: when the frozen request of the step requires a handover and the decision is not one, commit `Observed{failed_to_start}` with the refusal as its preview, binding and running nothing; a `canti:retrieve` or `canti:handover` action binds the in-process job `read_<effect ID>` and runs in the harness; otherwise `Runner.Bind`, `Runner.Start`. A bound job's ID decides the route of the later intents |
+| `decode` | Load the saved response and commit `ResponseLoaded` with the decision the adapter extracts, or the raw body when it extracts none, and, when it accepts an exec decision, the normalized action the harness reads it as under the frozen request; never call the model |
+| `bind`, `start` | Read the acceptance of the effect. Perform a local action, a retrieval, a handover, an unknown harness action, or one the request refuses, in process and commit `Performed` with its outcome and any window it changes; bind and start an external one with `Runner.Bind`, `Runner.Start`. An effect accepted before actions were recorded is only stopped, and one whose acceptance does not read is refused |
 | `inspect` | `Inspect` the job; while it runs, wait until it stops when the executor is a `Waiter`, as the Docker executor is, for at most 30 s and never past the job timeout or the wall time, and otherwise poll every 500 ms. Commit `Observed` for a finished job; cancel a running job past `Budget.JobTimeout` and observe it as `timed_out`; commit a `timed_out` stop when the wall time runs out while waiting; commit `OutcomeUnknown` for a lost, missing, or foreign job, a result without an exit code, an unexpected status, or a sixth consecutive `Inspect` error |
-| `cancel` | `Cancel` by effect ID; then watch a recorded job to its result, record a found job with `JobBound`, or observe a positively missing job as `cancelled` |
+| `cancel` | For a local action, observe it `cancelled` without the executor. Otherwise `Cancel` by effect ID; then watch a recorded job to its result, record a found job with `JobBound`, or observe a positively missing job as `cancelled` |
 
 `Loop.Stop` commits `StopRequested` with the given reason unless the run is
 closed or already records a reason, then runs it to a halt; its context
@@ -311,19 +317,29 @@ for the run and rejects the transition with `ErrStaleSnapshot` otherwise. The
 sequence, not the state value, is the compare-and-set: a legal event can
 leave the state unchanged and is still recorded, so equality of states cannot
 detect a competing commit. If a record already exists at `Seq`, an identical
-retry (same event ID and content) succeeds without recording again, and
-conflicting content fails and never overwrites. `SemanticsVersion` and the
+retry (same event ID, semantics version, and content) succeeds without
+recording again, and conflicting content fails and never overwrites. In the
+same transaction the store checks every transition of an effect against the
+committed acceptance of that effect and the window of the request it
+answers (`harness.CheckEffect`), so that no writer can complete an external
+effect as local, bind a job to a local action, or change a window that its
+request and action do not explain. `SemanticsVersion` and the
 event `Kind` belong in each record; events are encoded by their stable kind,
 never by Go type names, and a record with an unknown kind or version is
 refused, not reinterpreted.
 
 The store persists the facts attached to the event: request bytes and
 provenance at `RequestFrozen` (keyed by step and revision), the response at
-`ResponseSaved` (keyed by step and attempt), the observation at `Observed` or
-`Resolved`, failure text and any partial response at `ResponseIncomplete`,
-and failure text at `OutcomeUnknown` or `StopRequested`. It provides recovery
-reads for the latest `Snapshot`, the frozen request of the current revision,
-and the saved response of the current attempt. `returned` and `stopped`
+`ResponseSaved` (keyed by step and attempt), the action at the
+`ResponseLoaded` that accepts an exec decision, the observation at
+`Observed` or `Resolved`, the outcome and any changed window at `Performed`,
+failure text and any partial response at `ResponseIncomplete`, and failure
+text at `OutcomeUnknown` or `StopRequested`. It provides recovery reads for
+the latest `Snapshot`, the frozen request of the current revision, the
+saved response of the current attempt, and the acceptance of its decision
+with the semantics version it was committed under: an acceptance of a
+version before 4 is legacy and holds no action, and one of 4 or later
+without a valid action fails with `ErrIncompatible`. `returned` and `stopped`
 accept no events, and nothing is recorded after a run closes: the usage of a
 model request abandoned by a stop, for example, is never learned. No archive
 outside run transitions exists; the [step records](#step-records) are a
@@ -335,8 +351,11 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
 `synchronous=FULL`, `fullfsync=1` (which SQLite applies only on macOS),
 `foreign_keys=1`, a 5 s busy timeout, and immediate write transactions.
 
-- The schema version is `user_version` 2. Opening a version-1 database adds
-  the session table; another version or a foreign schema is refused with
+- The schema version is `user_version` 2. A writable open of a version-1
+  database adds the session table and makes it version 2, a refused resume
+  included; every writable open adds the index of performed steps if it is
+  missing, which leaves the database one that earlier binaries of version 2
+  open. Another version or a foreign schema is refused with
   `ErrIncompatible`.
 - `runs` holds one row per run: the immutable `harness.Run` record (goal,
   constraints, budget, creation time, opaque host config), its initial state,
@@ -351,19 +370,27 @@ the CLI's state directory. It bundles SQLite 3.53.4 through
   there, or a non-consecutive sequence, with `ErrStaleSnapshot`; rejects a
   `From` other than the last committed state with `ErrBrokenChain`; and adds
   the usage of saved and incomplete responses and the output bytes and count
-  of observed or resolved steps to the run's totals in the same transaction.
+  of observed, performed, or resolved steps to the run's totals in the same
+  transaction.
   It writes nothing once its context is done.
 - Every read decodes strictly: an unknown field, trailing data, an unknown
-  kind, or a semantics version other than 1, 2, and the current 3 fails with
-  `ErrIncompatible`, as does a version 1 state without positive max steps or
-  a state before version 3 with a decision purpose (`core.KnownSemantics`,
-  `core.Compatible`). New records are written
+  kind, or a semantics version other than 1, 2, 3, and the current 4 fails
+  with `ErrIncompatible`, as does a version 1 state without positive max
+  steps, a state before version 3 with a decision purpose, or a `performed`
+  record before version 4 (`core.KnownSemantics`, `core.Compatible`,
+  `core.CompatibleEvent`), and a completed step of a shape its version never
+  records (`harness.StepRecord.Validate`). New records are written
   with the current version, so a resumed run may mix versions.
 - Each recovery read is an index search bounded by its limit, never a scan
   of the history. `Latest` and `Transitions` search the primary key; `Request`, `Response`, and `Recent`
   search partial indexes over `request_frozen` rows (run, step, revision),
   `response_saved` rows (run, step, attempt), and observed or resolved rows
-  (run, sequence); `Totals` reads the run row. `Recent` pages backward by
+  and performed rows (run, sequence), `Recent` merging the two in one
+  statement; `Accepted`
+  finds the saved response and then the row after it by primary key;
+  `Totals` reads the run row. A read-only store of a database without the
+  performed index refuses `Recent` for a run whose latest transition is of
+  version 4 or later. `Recent` pages backward by
   commit sequence: it returns the latest steps completed below a given
   sequence, each with the sequence of the transition that completed it.
 - `CreateRun` and `Submit` record a new run in the same transaction that
@@ -404,10 +431,10 @@ bytes — building different input requires a new revision via `RequestFrozen`.
 | `request_frozen` | `send_request` | Commit `AttemptStarted`, then send the frozen bytes |
 | `request_sent` | `send_request` | The in-flight attempt is lost: commit `AttemptStarted` to count it, then resend or stop. In-process, this phase also covers an attempt that is still in flight; only a restart interprets it as lost |
 | `response_saved` | `decode` | Load the saved bytes; never call the model again for this attempt |
-| `effect_saved` | `bind` | `Bind` by effect ID; find the existing job before creating one; binding never executes anything |
+| `effect_saved` | `bind` | For an external action, `Bind` by effect ID; find the existing job before creating one; binding never executes anything. A local action is performed again: a read from its sources as they are then, a local change identically, since nothing of it was committed |
 | `job_bound` | `start` | `Start` the bound job. A crashed controller may have issued an uncommitted start, so `Start` is a no-op for a job that ever started, even a finished one |
 | `awaiting_observation` | `inspect` | `Inspect` by effect ID; collect the original result and commit one observation. A recorded job that cannot be found is `OutcomeUnknown` |
-| `cancelling` | `cancel` | With no job recorded, call the fencing `Cancel` by effect ID first, then `Inspect`: a positively missing job is observed as `cancelled` — sound because an unstarted bind can never execute and the fence stops a bind that lands late. An indeterminate lookup is an executor error, never a missing job. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
+| `cancelling` | `cancel` | A local action is observed `cancelled` without the executor, as is a legacy effect whose job is `read_<effect ID>`. With no job recorded, call the fencing `Cancel` by effect ID first, then `Inspect`: a positively missing job is observed as `cancelled` — sound because an unstarted bind can never execute and the fence stops a bind that lands late. An indeterminate lookup is an executor error, never a missing job. Record a found job with `JobBound`. With a job recorded, a missing or different job is `OutcomeUnknown`. Cancel the recorded job and commit its true result within a cleanup deadline |
 | `needs_resolution` | `halt` | Wait for an explicitly recorded `JobBound` (resuming at `job_bound`, or at `awaiting_observation` after a committed start) or `Resolved`; never redispatch |
 | `returned` | `halt` | `canti resume`, which still requires the credential, prints the saved handoff without calling the model; `canti status` shows it without one |
 | `stopped` | `halt` | `canti resume` reports the stop reason, and `status` and `history` show it and the partial results |
@@ -437,7 +464,11 @@ preview verbatim, so the command and purpose are whole where the prompt cuts
 them, and the preview holds the output's head and true tail even when its
 artifact kept only a prefix. `purpose` is empty when the decision had none; a
 step directory published before canti recorded purposes has no `purpose`,
-and no publication adds one. A record holding NUL or invalid UTF-8 stays verbatim, so
+and no publication adds one. A step the harness performed itself ran no
+process; its `meta` and `preview` present its outcome as context version 12
+presented the same action, `exited` with exit code 0 when done or 1 when
+failed and `failed_to_start` when refused, a rendering rule of the context
+version rather than a fact. A record holding NUL or invalid UTF-8 stays verbatim, so
 native retrieval refuses to read it and fails a directory search over it.
 `result` is `phase: returned`, a blank line, and the payload, or
 `phase: stopped` and `reason: <stop reason>`. The content is a pure function
@@ -583,21 +614,30 @@ The loop reserves space before the window reaches its prompt capacity and
 requests a bounded `canti:handover` action, whose payload is that name and
 one space, tab, or line break followed by the handover as plain text, kept
 verbatim; the harness, not the model, names the run and the window it closes.
+Every payload whose first word, after leading whitespace, begins with
+`canti:` is a harness action, never a command: an unknown name, such as a
+misspelling, fails as an action.
 The request asks the handover to carry the objective, the restrictions the
 environment has stated and where, the next action, risks, and evidence
 references.
 A proposal fails for empty, invalid UTF-8, or oversized text, when no
 handover was requested, or when the window it opens would leave no work
 capacity; at a requested handover, any other exec is refused unrun and
-counts as a failed proposal, and discovery skips every step whose command
-begins with that name.
+counts as a failed proposal, and discovery skips every step whose command,
+after leading whitespace, begins with `canti:` or the discovery marker,
+skipping and reporting as unclassified one whose leading whitespace it
+cannot see past within its bound.
 Optional step and byte thresholds
 can request this sooner; both zero still enables the capacity trigger. A
-valid proposal becomes the next window's handover and lower history bound
-when the next request is frozen. These window facts are committed with the
-request bytes, so recovery reuses the same boundary and actual handover.
-Invalid proposals keep the current page, and the retry request says that its
-step is the last chance to hand over; a second failure stops the run.
+valid proposal opens the next window in the transition that records it: one
+`Performed` commits the outcome, the window that begins at the next step
+with the proposal as its handover, and the move to that step. A failed or
+refused proposal commits, in the same way, the current window with one more
+failure, keeping the current page; the next request says that its step is
+the last chance to hand over, and a second failure stops the run. The next
+request takes the window committed with the previous step, or else the
+window of that step's request, and commits it with its bytes, so recovery
+reuses the same boundary and actual handover.
 Run identity, effect identity, step numbering, and execution recovery do not
 change when a window advances. `return` still ends the run.
 

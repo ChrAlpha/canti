@@ -122,9 +122,10 @@ func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {
 			if err != nil || len(steps) != 3 {
 				t.Fatalf("steps=%v err=%v", steps, err)
 			}
-			obs := steps[1].Observation
-			if obs.Retrieval != nil || !strings.Contains(obs.Preview, "handover is required") || obs.Execution != core.ExecutionFailedToStart || obs.ExitCode != nil || obs.Output.Available {
-				t.Fatalf("work was not refused as failed to start: %+v", obs)
+			o := steps[1].Outcome
+			if o == nil || o.Status != harness.OutcomeRefused || o.Retrieval != nil || !strings.Contains(o.Detail, "handover is required") ||
+				steps[1].Observation != (harness.Observation{}) || steps[1].Window == nil || steps[1].Window.Failures != 1 {
+				t.Fatalf("work was not refused unrun: %+v", steps[1])
 			}
 			history, err := f.store.Transitions(ctx, runID, 0, 100)
 			if err != nil {

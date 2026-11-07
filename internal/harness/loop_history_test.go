@@ -96,6 +96,7 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 			event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
 		case core.PhaseResponseSaved:
 			event = core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: historyResponse(s.Step).Body}
+			facts = harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}}
 		case core.PhaseEffectSaved:
 			event = core.JobBound{EffectID: s.EffectID, JobID: jobID(s.EffectID)}
 		case core.PhaseJobBound:
@@ -234,7 +235,9 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	budget := limits.Total + requestSlack
 	// Every shown step renders its whole command and preview.
 	fit := seedPageSteps
-	maxRecords, maxPages := fit+historyPage, fit/historyPage+1
+	// Preparation also reads the previous step's completion, which selects
+	// the window: one record in one page.
+	maxRecords, maxPages := fit+historyPage+1, fit/historyPage+2
 	maxReads := 4 + maxPages
 
 	var samples []historySample

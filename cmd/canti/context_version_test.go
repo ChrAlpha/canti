@@ -68,7 +68,8 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 func contextRules(t *testing.T) string {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "context version %d\nactions %q %q, or its name and one of %q\nprompt limits %+v\n", contextVersion, harness.RetrievePrefix, harness.HandoverPrefix, harness.HandoverSpace, harness.DefaultPromptLimits())
+	fmt.Fprintf(&b, "context version %d\nactions: a payload beginning, after any of %q, with %q, read as %q or %q, then the end or one of those bytes\nprompt limits %+v\n",
+		contextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix), harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}

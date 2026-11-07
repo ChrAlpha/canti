@@ -33,6 +33,8 @@ func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 			"event_c98bda96dc1ebf5e6bde08357e4ffe2abce83e291133b64af5c8ff66dc5d6663"},
 		{core.Observed{EffectID: effect, Execution: core.ExecutionExited}, "observed", `{"EffectID":"` + effect + `","Execution":"exited"}`,
 			"event_ec2b0cf9f514eab5abede9a59cce4655f29e5901346d88158c741df56b5f9e38"},
+		{core.Performed{EffectID: effect}, "performed", `{"EffectID":"` + effect + `"}`,
+			"event_8647d1c75cac75032731b4b73b85a37284524ef93fb103f43f575e7f0735351f"},
 		{core.OutcomeUnknown{EffectID: effect}, "outcome_unknown", `{"EffectID":"` + effect + `"}`,
 			"event_dc3c7c0ac451ca5762b369b9a017fd10640f4a4e1103e11cb1e3c5d15a3d74b7"},
 		{core.StopRequested{Reason: core.StopBudgetExhausted}, "stop_requested", `{"Reason":"budget_exhausted"}`,

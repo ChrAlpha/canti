@@ -78,7 +78,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 	for page := 0; page < 2; page++ {
 		discoveryStep := step
 		act("canti:retrieve " + string(q))
-		o := observe()
+		o := latestOutcome(t, f.history())
 		if o.Retrieval == nil || o.Retrieval.Error != "" || o.Retrieval.More {
 			t.Fatalf("discovery did not finish: %+v", o)
 		}

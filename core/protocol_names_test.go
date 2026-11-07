@@ -36,6 +36,7 @@ func TestPersistedNamesMatchCommittedLiterals(t *testing.T) {
 		{JobBound{}.Kind(), "job_bound"},
 		{JobStarted{}.Kind(), "job_started"},
 		{Observed{}.Kind(), "observed"},
+		{Performed{}.Kind(), "performed"},
 		{OutcomeUnknown{}.Kind(), "outcome_unknown"},
 		{StopRequested{}.Kind(), "stop_requested"},
 		{Resolved{}.Kind(), "resolved"},

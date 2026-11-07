@@ -23,7 +23,7 @@ func failureScenarios() []frozenScenario {
 				corpusDecision(core.Exec, harness.HandoverPrefix),
 				handover,
 				corpusDecision(core.Return, "I could not read go.mod yet."),
-			}, steps: []string{"1 exited 1 action failed", "2 exited 1 action failed", "3 exited 0 handover"}}},
+			}, steps: []string{"1 failed", "2 failed", "3 done handover"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"Preview:\n```\nContext action failed: json: unknown field \"bogus\"\n```\n", "## Handover required\n"},
 				"run1-step03-rev1.json": {"Preview:\n```\nContext action failed: harness: handover text must not be empty\n```\n", "## Handover required\n"},
@@ -35,7 +35,7 @@ func failureScenarios() []frozenScenario {
 			runs: []frozenRun{{id: corpusRun, goal: "Report the module path of /workspace.", replies: []string{
 				corpusDecision(core.Exec, `canti:retrieve {"operation":1,"path":"/canti/runs/`+corpusRun+`/goal","reason":"Reread the goal."}`),
 				corpusDecision(core.Return, "The action was refused."),
-			}, steps: []string{"1 exited 1 action failed"}}},
+			}, steps: []string{"1 failed"}}},
 			marks: map[string][]string{
 				"run1-step02-rev1.json": {"Context action failed: json: cannot unmarshal number into Go struct field RetrievalQuery.operation of type string"},
 			},
@@ -49,7 +49,7 @@ func failureScenarios() []frozenScenario {
 				corpusDecision(core.Exec, "cat go.mod"),
 				handover,
 				corpusDecision(core.Return, "I have not read go.mod yet."),
-			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 refused", "3 done handover"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {"### Step 2\nCommand:\n```\ncat go.mod\n```\nExecution: failed_to_start\n",
 					"Preview:\n```\nContext action failed: handover is required before any more work; use canti:handover\n```\n", "## Handover required\n"},
@@ -63,7 +63,7 @@ func failureScenarios() []frozenScenario {
 				corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Reread the listing."),
 				handover,
 				corpusDecision(core.Return, "I have not read go.mod yet."),
-			}, steps: []string{"1 exited 0 output complete", "2 failed_to_start action failed", "3 exited 0 handover"}}},
+			}, steps: []string{"1 exited 0 output complete", "2 refused", "3 done handover"}}},
 			marks: map[string][]string{
 				"run1-step03-rev1.json": {"Execution: failed_to_start\n", "Context action failed: handover is required before any more work; use canti:handover"},
 			},

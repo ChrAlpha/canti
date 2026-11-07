@@ -147,7 +147,7 @@ func TestFailedHandoverReserveCoversItsFailures(t *testing.T) {
 		w    *Window
 		text string
 	}{{requested, " \n\t"}, {requested, "\xff" + wide}, {requested, strings.Repeat("`", f.HandoverBytes+1)}, {&Window{FirstStep: 1}, wide}} {
-		_, err := proposedHandover(f.RunID, c.w, HandoverPrefix+c.text, f.HandoverBytes)
+		_, err := proposedHandover(f.RunID, c.w, c.text, f.HandoverBytes)
 		if err == nil {
 			t.Fatalf("handover %q in %+v was accepted", c.text, c.w)
 		}
@@ -195,7 +195,7 @@ func TestProducibleWindowRendersAFailedHandover(t *testing.T) {
 		read.Evidence = []string{strings.Repeat("x", archive.MaxBytes)}
 		next.Step++
 		payload := HandoverPrefix + strings.Repeat("`", f.HandoverBytes+1)
-		_, refused := proposedHandover(f.RunID, &Window{FirstStep: 2, SourceStep: 1, Handover: "x", Requested: true}, payload, f.HandoverBytes)
+		_, refused := proposedHandover(f.RunID, &Window{FirstStep: 2, SourceStep: 1, Handover: "x", Requested: true}, strings.TrimPrefix(payload, HandoverPrefix), f.HandoverBytes)
 		if refused == nil {
 			t.Fatal("an oversized handover was accepted")
 		}

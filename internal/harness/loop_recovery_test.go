@@ -568,3 +568,63 @@ func TestLoopColdRestartAfterEveryStepMatchesAnUninterruptedRun(t *testing.T) {
 		t.Fatalf("executor calls differ: %v vs %v", cold.exec.log(), whole.exec.log())
 	}
 }
+
+// acceptance replaces the acceptance its journal reports.
+type acceptance struct {
+	harness.Journal
+	accepted harness.Accepted
+	err      error
+}
+
+func (j acceptance) Accepted(context.Context, string, int, int) (harness.Accepted, error) {
+	return j.accepted, j.err
+}
+
+// TestLoopActsOnlyOnARecordedAcceptance requires that the loop carries out
+// no effect whose acceptance fails to read, committing nothing, and that it
+// only stops an effect accepted before actions were recorded, through the
+// executor's cancel path unless its job was the in-process one.
+func TestLoopActsOnlyOnARecordedAcceptance(t *testing.T) {
+	legacy := harness.Accepted{Semantics: 3, Provenance: harness.ProvenanceLegacy, Action: harness.Action{Name: harness.ActionLegacy}}
+	for name, j := range map[string]func(harness.Journal) harness.Journal{
+		"corrupt": func(j harness.Journal) harness.Journal {
+			return acceptance{j, harness.Accepted{}, sqlite.ErrIncompatible}
+		},
+		"legacy": func(j harness.Journal) harness.Journal { return acceptance{j, legacy, nil} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"))
+			ctx := f.bounded()
+			snap := f.stepUntil(ctx, core.PhaseEffectSaved)
+			if _, err := f.loopOn(j(f.store)).Step(ctx, runID); err == nil {
+				t.Fatal("the loop carried out the effect")
+			}
+			if latest, err := f.store.Latest(ctx, runID); err != nil || latest != snap || len(f.exec.calls) != 0 {
+				t.Fatalf("the refused step wrote %+v, %v, or called %v", latest, err, f.exec.calls)
+			}
+			s, err := f.loopOn(j(f.store)).Stop(ctx, runID, core.StopCancelled)
+			if name == "corrupt" {
+				if err == nil || s.State.Phase != core.PhaseCancelling {
+					t.Fatalf("stop of a corrupt acceptance = %+v, %v", s.State, err)
+				}
+				return
+			}
+			if err != nil || s.State.Phase != core.PhaseStopped || !slices.Contains(f.exec.log(), "cancel") {
+				t.Fatalf("legacy stop = %+v, %v, executor %v", s.State, err, f.exec.log())
+			}
+		})
+	}
+}
+
+// TestStopNeverDecodesASavedResponse pins that a stop of a run with a saved
+// response stops at once, so that a loop built without the run's context
+// settings, as stop builds it, never normalizes a decision.
+func TestStopNeverDecodesASavedResponse(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve {}"))
+	ctx := f.bounded()
+	f.stepUntil(ctx, core.PhaseResponseSaved)
+	s, err := f.fresh().Stop(ctx, runID, core.StopCancelled)
+	if err != nil || s.State.Phase != core.PhaseStopped || f.last().Event.Kind() != "stop_requested" || slices.Contains(f.kinds(), "response_loaded") {
+		t.Fatalf("stop = %+v, %v after %v", s.State, err, f.kinds())
+	}
+}
