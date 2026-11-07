@@ -24,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.x'
       - name: Check formatting and vet
         run: make fmt vet
       - name: Check test names
@@ -49,7 +49,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.x'
       - name: Build and vet every commit
         env:
           BASE: origin/${{ github.base_ref }}
@@ -66,7 +66,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.x'
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run Docker-backed integration tests
@@ -86,7 +86,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.x'
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run long acceptance tests
@@ -106,7 +106,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.x'
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run pseudo-terminal tests serially
