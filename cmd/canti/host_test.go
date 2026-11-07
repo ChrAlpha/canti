@@ -39,12 +39,47 @@ func (f *fixture) hostPIDs() []int {
 	return pids
 }
 
+// hostProcesses finds this test binary's host processes for the fixture,
+// including startup contenders that have not logged a listening socket yet.
+// Every client has finished spawning them before fixture cleanup begins.
+func (f *fixture) hostProcesses() []int {
+	f.t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		process := filepath.Join("/proc", entry.Name())
+		if target, err := os.Readlink(filepath.Join(process, "exe")); err != nil || target != exe {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(process, "cmdline"))
+		args := strings.Split(string(data), "\x00")
+		if err == nil && len(args) > 1 && args[1] == "host" && slicesContain(args, f.state) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 // autoHost makes the fixture's state directory served by host processes that
 // its commands start, and ends every one of them when the test ends.
 func (f *fixture) autoHost() {
 	f.t.Cleanup(func() {
-		for _, pid := range f.hostPIDs() {
+		pids := f.hostProcesses()
+		for _, pid := range pids {
 			syscall.Kill(pid, syscall.SIGTERM)
+		}
+		for _, pid := range pids {
 			for deadline := time.Now().Add(20 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(10 * time.Millisecond) {
 				if time.Now().After(deadline) {
 					syscall.Kill(pid, syscall.SIGKILL)
