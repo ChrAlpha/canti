@@ -27,9 +27,10 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness"
 )
 
-// scriptedModel is an Anthropic Messages server that answers every request
-// with the decision scripted for the step named in the prompt's progress
-// line, unless answer set a reply for it, and records every request body.
+// scriptedModel serves the Anthropic Messages API at /v1/messages and the
+// Responses API at /responses. It answers every request with the decision
+// scripted for the step named in the prompt's progress line, unless answer
+// set a reply for it, and records every request body.
 type scriptedModel struct {
 	*httptest.Server
 	key     string
@@ -73,21 +74,34 @@ func newScriptedModel(t *testing.T, key string, script map[int]core.Decision) *s
 	return m
 }
 
+// fixtureModel names the model API and model of a fixture's run and chat,
+// which a test can override with later flags; canti has neither default.
+var fixtureModel = []string{"-api", "anthropic-messages", "-model", "fixture-model"}
+
 var progressLine = regexp.MustCompile(`(?m)^Step (\d+)(?: of at most \d+| \(unlimited steps\)), attempt \d+ of \d+\.$`)
 
+// promptOf reads the user message of a Messages or a Responses request.
 func promptOf(body []byte) (step int, prompt string, err error) {
 	var req struct {
 		Messages []struct{ Content json.RawMessage } `json:"messages"`
+		Input    []struct{ Content json.RawMessage } `json:"input"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 {
+	if err := json.Unmarshal(body, &req); err != nil {
+		return 0, "", errors.New("request is not JSON")
+	}
+	blockType, messages := "text", req.Messages
+	if req.Messages == nil {
+		blockType, messages = "input_text", req.Input
+	}
+	if len(messages) != 1 {
 		return 0, "", errors.New("request is not one user message")
 	}
 	var blocks []struct{ Type, Text string }
-	if err := json.Unmarshal(req.Messages[0].Content, &blocks); err != nil {
+	if err := json.Unmarshal(messages[0].Content, &blocks); err != nil {
 		return 0, "", errors.New("user message content is not content blocks")
 	}
 	for _, b := range blocks {
-		if b.Type != "text" || b.Text == "" {
+		if b.Type != blockType || b.Text == "" {
 			return 0, "", errors.New("user message has an empty or non-text block")
 		}
 		prompt += b.Text
@@ -115,9 +129,11 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("content-type", "application/json")
-	if r.Header.Get("x-api-key") != m.key || r.Header.Get("authorization") != "" {
+	responses := r.URL.Path == "/responses"
+	key, bearer := r.Header.Get("x-api-key"), r.Header.Get("authorization")
+	if responses && (key != "" || bearer != "Bearer "+m.key) || !responses && (r.URL.Path != "/v1/messages" || key != m.key || bearer != "") {
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"unexpected credentials"}}`)
+		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"unexpected path or credentials"}}`)
 		return
 	}
 	step, prompt, err := promptOf(body)
@@ -155,6 +171,9 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"id": "msg_test", "type": "message", "role": "assistant", "model": "claude-test", "stop_reason": cmp.Or(re.stopReason, "end_turn"),
 		"content": []map[string]string{{"type": "text", "text": text}},
 		"usage":   map[string]int{"input_tokens": 100, "output_tokens": 10},
+	}
+	if responses {
+		msg = responsesReply(text, re.stopReason)
 	}
 	if re.cut {
 		cutConnection(w, msg)
@@ -323,6 +342,9 @@ func (f *fixture) startIO(stdin io.Reader, stdout io.Writer, env []string, comma
 	if command == "run" || command == "resume" || command == "chat" {
 		all = append(all, "-model-url", f.model.URL)
 	}
+	if command == "run" || command == "chat" {
+		all = append(all, fixtureModel...)
+	}
 	cmd, wait := startCLIWith(f.t, stdin, stdout, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 	return cmd, func() result {
 		r := wait()
@@ -448,6 +470,31 @@ func fillPipe(t *testing.T, w *os.File) {
 
 // toolReply is a Messages response that narrates in text and calls
 // canti_decision once per decision.
+// responsesReply is a Responses API response whose message holds text,
+// incomplete for reason when it is set.
+func responsesReply(text, reason string) map[string]any {
+	msg := map[string]any{
+		"id": "resp_test", "object": "response", "model": "responses-test", "status": "completed",
+		"output": []any{map[string]any{"type": "message", "id": "msg_test", "role": "assistant", "status": "completed",
+			"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}}}},
+		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+	}
+	if reason != "" {
+		msg["status"], msg["incomplete_details"] = "incomplete", map[string]string{"reason": reason}
+	}
+	return msg
+}
+
+// responsesToolReply is a Responses API response that calls the decision
+// tool once with d.
+func responsesToolReply(d core.Decision) string {
+	args, _ := json.Marshal(d)
+	data, _ := json.Marshal(map[string]any{"id": "resp_test", "object": "response", "model": "responses-test", "status": "completed",
+		"output": []any{map[string]any{"type": "function_call", "id": "fc_test", "call_id": "call_test", "name": "canti_decision", "arguments": string(args), "status": "completed"}},
+		"usage":  map[string]int{"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}})
+	return string(data)
+}
+
 func toolReply(decisions ...core.Decision) string {
 	blocks := []any{map[string]any{"type": "text", "text": "Narration is not a decision."}}
 	for _, d := range decisions {

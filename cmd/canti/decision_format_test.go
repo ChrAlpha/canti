@@ -21,7 +21,7 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 		{"tool", []string{"-decision-format", "tool"}, "tool"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := parseSpec(t, tc.args...)
+			s := runSpec(t, tc.args...)
 			s.config.Workspace = "/work"
 			run, _, err := newRun("goal", "", s, time.Time{})
 			if err != nil {
@@ -31,12 +31,12 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 			if err != nil || stored.DecisionFormat != tc.stored {
 				t.Fatalf("decodeConfig = %+v, %v", stored, err)
 			}
-			if got := modelConfig(stored, "http://localhost", credential{apiKey: "test"}).DecisionFormat; got != tc.stored {
+			if got := anthropicConfig(stored, "http://localhost", credential{anthropicKey: "test"}).DecisionFormat; got != tc.stored {
 				t.Fatalf("model format = %q", got)
 			}
 		})
 	}
-	old := parseSpec(t)
+	old := runSpec(t)
 	old.config.Workspace = "/work"
 	raw, err := json.Marshal(old.config)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestDecisionFormatPersistsAndDefaults(t *testing.T) {
 }
 
 func TestDecisionFormatRejectsUnknownValue(t *testing.T) {
-	s := parseSpec(t, "-decision-format", "other")
+	s := runSpec(t, "-decision-format", "other")
 	if _, _, err := newRun("goal", "", s, time.Time{}); err == nil {
 		t.Fatal("unknown decision format accepted")
 	}
@@ -94,7 +94,7 @@ func TestDecisionFormatSelectsTheFrozenSystemPrompt(t *testing.T) {
 func TestDecisionFormatAdmitsContextByItsSystem(t *testing.T) {
 	smallest := func(format string) int {
 		admits := func(n int) bool {
-			s := parseSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(n))
+			s := runSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(n))
 			s.config.Workspace = "/work"
 			_, _, err := newRun("goal", "", s, time.Time{})
 			return err == nil

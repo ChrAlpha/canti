@@ -19,7 +19,6 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
-	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
@@ -78,7 +77,12 @@ func contextRules(t *testing.T) string {
 		t.Fatal(err)
 	}
 	fmt.Fprintf(&b, "loop defaults: handover %d, total %d\n", fit.Handover, fit.Limit)
-	transports := []anthropic.Config{{DecisionFormat: "text", StructuredOutput: true, Fallbacks: true}, {DecisionFormat: "text"}, {DecisionFormat: "tool", Fallbacks: true}}
+	transports := []config{
+		{API: apiMessages, DecisionFormat: "text", Effort: "high", Structured: true, Fallbacks: true}, {API: apiMessages, DecisionFormat: "text"},
+		{API: apiMessages, DecisionFormat: "tool", Effort: "high", Fallbacks: true},
+		{API: apiResponses, DecisionFormat: "text", Effort: "high", Structured: true}, {API: apiResponses, DecisionFormat: "text"},
+		{API: apiResponses, DecisionFormat: "tool", Effort: "high"},
+	}
 	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
 		for _, c := range transports {
 			f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
@@ -88,8 +92,8 @@ func contextRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.APIKey, c.Model, c.MaxTokens = "key", "claude-opus-5", 16000
-			m, err := anthropic.New(c)
+			c.Model, c.MaxTokens = "test-model", 16000
+			m, err := newModel(c, "https://model.test", credential{anthropicKey: "key", openaiKey: "key"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,7 +101,7 @@ func contextRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fmt.Fprintf(&b, "request, %s, structured %v, fallbacks %v, retrieval %v, imports %v: system %s, %s %s %s\n", c.DecisionFormat, c.StructuredOutput, c.Fallbacks,
+			fmt.Fprintf(&b, "request, %s %s, effort %q, structured %v, fallbacks %v, retrieval %v, imports %v: system %s, %s %s %s\n", c.API, c.DecisionFormat, c.Effort, c.Structured, c.Fallbacks,
 				flags[0], flags[1], digest(p.System), req.Protocol, req.Adapter, digest(string(req.Body)))
 		}
 	}
@@ -111,7 +115,8 @@ func contextRules(t *testing.T) string {
 	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
 		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
 		{"-image", "\xff" + strings.Repeat("x", 2047)}, {"-image", "debian\xff"},
-		{"-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false", "-decision-format", "tool", "-fallbacks=false", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
+		{"-api", "anthropic-messages", "-model", "test-model", "-effort", "max", "-fallbacks"},
+		{"-api", "openai-responses", "-model", "test-model", "-max-tokens", "4096", "-effort", "none", "-structured=false", "-decision-format", "tool", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
 		s := parseSpec(t, flags...)
 		loop := contextConfig(s.config, s.budget)
 		fit, err := harness.ContextFit(loop, run, s.limits)
@@ -129,9 +134,9 @@ func contextRules(t *testing.T) string {
 			fmt.Fprintf(&b, "  environment %s\n", digest(env))
 			previous = env
 		}
-		mc := modelConfig(s.config, "", credential{})
-		if m := fmt.Sprintf("model %s, max tokens %d, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
-			mc.Model, mc.MaxTokens, mc.StructuredOutput, mc.DecisionFormat, mc.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
+		c := s.config
+		if m := fmt.Sprintf("api %q, model %q, max tokens %d, effort %q, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
+			c.API, c.Model, c.MaxTokens, c.Effort, c.Structured, c.DecisionFormat, c.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
 			fmt.Fprintf(&b, "  %s\n", m)
 			mapped = m
 		}
@@ -148,8 +153,9 @@ func contextRules(t *testing.T) string {
 // its stored config, after the run read an imported file and its window
 // asked for a handover; the repairs of a run of the tool decision format,
 // which a resume process freezes when text answers it; a run of the text
-// decision format named explicitly, which a resume process returns; and a
-// run whose window outgrows a page of the journal, after 65 reads.
+// decision format named explicitly, which a resume process returns; a
+// Responses run of each decision format, which a resume process returns;
+// and a run whose window outgrows a page of the journal, after 65 reads.
 func storedRules(t *testing.T) string {
 	t.Helper()
 	read := core.Decision{Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`}
@@ -158,8 +164,8 @@ func storedRules(t *testing.T) string {
 		t.Fatal(err)
 	}
 	f := newFixture(t, map[int]core.Decision{1: read, 2: {Kind: core.Return, Payload: "done"}})
-	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-structured=false",
-		"-fallbacks=false", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
+	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-effort", "low", "-structured=false",
+		"-fallbacks", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
 		"-history-imports", imports, "-memory", "1g"); r.code != exitActive {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
@@ -195,6 +201,20 @@ func storedRules(t *testing.T) string {
 		t.Fatalf("resume of the text run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
 	b += frozenRequests(t, f, "stored text run")
+	for _, format := range []string{"text", "tool"} {
+		f = newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+		openaiKey := []string{"OPENAI_API_KEY=" + f.key}
+		if format == "tool" {
+			f.model.answer(1, 1, reply{status: http.StatusOK, body: responsesToolReply(core.Decision{Kind: core.Return, Purpose: "Report.", Payload: "done"})})
+		}
+		if r := f.cli(openaiKey, "run", "-once", "-goal", "Report done.", "-api", "openai-responses", "-effort", "high", "-decision-format", format); r.code != exitActive {
+			t.Fatalf("run -once of the %s Responses run = %d\nstderr: %s", format, r.code, r.stderr)
+		}
+		if r := f.cli(openaiKey, "resume"); r.code != exitOK || r.stdout != "done\n" {
+			t.Fatalf("resume of the %s Responses run = %d\nstdout: %s\nstderr: %s", format, r.code, r.stdout, r.stderr)
+		}
+		b += frozenRequests(t, f, "stored "+format+" Responses run")
+	}
 	long := map[int]core.Decision{66: {Kind: core.Return, Payload: "done"}}
 	for step := 1; step <= 65; step++ {
 		long[step] = read

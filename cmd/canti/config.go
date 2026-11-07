@@ -14,12 +14,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
-	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 )
 
@@ -33,8 +33,10 @@ type config struct {
 	CPUs           string `json:"cpus"`
 	Pids           int    `json:"pids"`
 	OutputLimit    int64  `json:"output_limit"`
+	API            string `json:"api"`
 	Model          string `json:"model"`
 	MaxTokens      int    `json:"max_tokens"`
+	Effort         string `json:"effort,omitempty"`
 	Structured     bool   `json:"structured"`
 	DecisionFormat string `json:"decision_format,omitempty"`
 	Fallbacks      bool   `json:"fallbacks"`
@@ -48,7 +50,7 @@ type config struct {
 
 // contextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const contextVersion = 11
+const contextVersion = 12
 
 type spec struct {
 	config config
@@ -65,11 +67,13 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.CPUs, "cpus", "", "CPU `limit` of every job; unlimited if empty")
 	fs.IntVar(&c.Pids, "pids", 512, "process `limit` of every job; 0 is unlimited")
 	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "output `bytes` retained per job")
-	fs.StringVar(&c.Model, "model", "claude-opus-5", "Anthropic `model`")
+	fs.StringVar(&c.API, "api", "", "model `API` of the run: "+strings.Join(apiNames, " or ")+"; required")
+	fs.StringVar(&c.Model, "model", "", "`model` of the run; required")
 	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
+	fs.StringVar(&c.Effort, "effort", "", "model `effort`, a level of the model API; empty sends none, leaving the model's default")
 	fs.BoolVar(&c.Structured, "structured", true, "constrain text responses to the decision schema")
 	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
-	fs.BoolVar(&c.Fallbacks, "fallbacks", true, "enable server-side refusal fallbacks")
+	fs.BoolVar(&c.Fallbacks, "fallbacks", false, "enable server-side refusal fallbacks of "+apiMessages)
 	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window and the reserves its next step and handover need")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under "+archive.ImportsRoot)
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
@@ -92,10 +96,13 @@ func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
 		return harness.Run{}, core.State{}, errors.New("-decision-format must be text or tool")
-	case c.Image == "" || c.Network == "" || c.Model == "":
-		return harness.Run{}, core.State{}, errors.New("-image, -network, and -model must not be empty")
+	case c.Image == "" || c.Network == "":
+		return harness.Run{}, core.State{}, errors.New("-image and -network must not be empty")
 	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
+	}
+	if err := checkModel(c); err != nil {
+		return harness.Run{}, core.State{}, err
 	}
 	if c.HistoryImports != "" {
 		var err error
@@ -196,34 +203,6 @@ func newExecutor(c config, state string) (*docker.Executor, error) {
 		return nil, err
 	}
 	return docker.New(executorConfig(c, state))
-}
-
-type credential struct{ apiKey, authToken string }
-
-// credentials reads the model credential and removes it from the
-// environment, so that no child process inherits it.
-func credentials() (credential, error) {
-	c := credential{apiKey: os.Getenv("ANTHROPIC_API_KEY"), authToken: os.Getenv("ANTHROPIC_AUTH_TOKEN")}
-	os.Unsetenv("ANTHROPIC_API_KEY")
-	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
-	switch {
-	case c.apiKey != "":
-		return credential{apiKey: c.apiKey}, nil
-	case c.authToken != "":
-		return c, nil
-	}
-	return c, errors.New("set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call the model")
-}
-
-func newModel(c config, url string, cred credential) (harness.Model, error) {
-	return anthropic.New(modelConfig(c, cmp.Or(url, os.Getenv("ANTHROPIC_BASE_URL")), cred))
-}
-
-func modelConfig(c config, url string, cred credential) anthropic.Config {
-	return anthropic.Config{
-		BaseURL: url, APIKey: cred.apiKey, AuthToken: cred.authToken, Model: c.Model,
-		MaxTokens: c.MaxTokens, StructuredOutput: c.Structured, DecisionFormat: c.DecisionFormat, Fallbacks: c.Fallbacks,
-	}
 }
 
 func environment(c config, b harness.Budget) string {

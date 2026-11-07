@@ -57,20 +57,21 @@ failure. Do not run a repository-wide rewrite as part of an unrelated change.
 
 Build tags keep slow and paid tests out of the default run. `integration`
 marks tests that need Docker or take tens of seconds; CI runs them in
-separate jobs. `live` marks
-`internal/harness/anthropic/live_test.go`, which sends one real request and is
-never part of `make check`, `make integration`, or CI:
+separate jobs. `live` marks the `live_test.go` of each model adapter, which
+sends one real request and is never part of `make check`, `make integration`,
+or CI:
 
 ```sh
-ANTHROPIC_API_KEY=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
+ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
+OPENAI_API_KEY=... OPENAI_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/openai
 ```
 
-`ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` select another Messages endpoint
-and model, and `CANTI_LIVE_STRUCTURED=0` omits the decision schema.
-
-It skips without `ANTHROPIC_API_KEY`, uses `ANTHROPIC_MODEL` or
-`claude-opus-5`, caps the response at 1,024 output tokens, and may be billed.
-It checks one decision, not a loop.
+Each skips without its credential and model, as canti has no default model.
+`ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` selects another provider of the
+API, `CANTI_LIVE_EFFORT` an effort level, `CANTI_LIVE_DECISION_FORMAT=tool`
+the tool transport, and `CANTI_LIVE_STRUCTURED=0` omits the decision schema.
+A request is capped at 1,024 output tokens and may be billed. It checks one
+decision, not a loop.
 
 ## CLI
 
@@ -103,18 +104,25 @@ counted in a later notice, while a flag error with its usage, a command's
 outcome and recovery advice, and its final error line are written with the
 workspace unlocked, each write waiting at most 1 s.
 
-`run`, `chat`, and `resume` read the credential from `ANTHROPIC_API_KEY`, or else
-`ANTHROPIC_AUTH_TOKEN`, and the API base URL from `-model-url`, or else
-`ANTHROPIC_BASE_URL`; neither is saved with the run, and the URL must use
-`https` unless it is a loopback address. Every command removes both
-credential variables from its environment before it starts a process. The
-goal, constraints, and the image, limit, model, prompt, and budget flags of
+A run names its model API with `-api`, `anthropic-messages` or
+`openai-responses`, and its model with `-model`; neither has a default, and
+`-api openai-completions` is refused. `run`, `chat`, and `resume` read the
+credential of the run's API, `ANTHROPIC_API_KEY` or else
+`ANTHROPIC_AUTH_TOKEN` for `anthropic-messages` and `OPENAI_API_KEY` for
+`openai-responses`, and the API base URL from `-model-url`, or else
+`ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, or else the API's public endpoint;
+neither is saved with the run, and the URL must use `https` unless it is a
+loopback address. Every command removes all three credential variables from
+its environment before it starts a process. `-effort` takes a level of the
+run's API and is sent only when set; `-fallbacks` requires
+`anthropic-messages`. The goal, constraints, and the image, limit, model,
+prompt, and budget flags of
 `run` are stored with the run and reused by every later command; `-once`,
 `-model-url`, `-state`, and `-log-level` apply to one invocation, and
 `-workspace` must name the run's workspace. Defaults: image
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
-processes, 8 MiB retained output per job, model `claude-opus-5` with 16,000
-output tokens per response, structured output and fallbacks on, 256 KiB per
+processes, 8 MiB retained output per job, 16,000 output tokens per
+response, no effort, structured output on, fallbacks off, 256 KiB per
 prompt (`-context-bytes`, including handover reserve; it must hold the goal,
 constraints, and the reserves for one more step and a failed handover, about
 68 KiB with a short goal and the default handover; `run` refuses a smaller
@@ -230,9 +238,9 @@ gate. Keep tests beside the package they verify: `core/*_test.go`,
 `internal/harness/*_test.go` (the loop tests use a fake model and executor
 over a real SQLite journal), `internal/harness/sqlite`, `internal/harness/docker`
 (a fake daemon for unit tests, the daemon for `integration_test.go`),
-`internal/harness/anthropic` (a local HTTP server), and `cmd/canti`, whose
-tests run the test binary as the CLI in subprocesses against a scripted
-Anthropic-format server. The gate tests are `cmd/canti/gate_*_test.go`.
+`internal/harness/anthropic` and `internal/harness/openai` (a local HTTP
+server), and `cmd/canti`, whose tests run the test binary as the CLI in
+subprocesses against a scripted server of both model APIs. The gate tests are `cmd/canti/gate_*_test.go`.
 
 Protocol and transition tests should stay deterministic and require no
 credentials. A new run rule belongs in `core.State.Next` with a row in the

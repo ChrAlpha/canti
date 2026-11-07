@@ -1,0 +1,103 @@
+context version 12
+actions "canti:retrieve " "canti:handover ", or its name and one of " \t\n\r"
+prompt limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:131072 Purpose:512}
+loop defaults: handover 2048, total 131072
+request, anthropic-messages text, effort "high", structured true, fallbacks true, retrieval false, imports false: system 2627 bytes, sha256 6fc1b2539006ecc1895f445a2c0746f0652168cc30697454a7eb7c3ab85bb96d, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 4093 bytes, sha256 663dcf71a2cd476fc07012fa6474642a013e029007ef2993a77f376246777e11
+request, anthropic-messages text, effort "", structured false, fallbacks false, retrieval false, imports false: system 2627 bytes, sha256 6fc1b2539006ecc1895f445a2c0746f0652168cc30697454a7eb7c3ab85bb96d, anthropic-messages/2023-06-01 canti-anthropic/2 3691 bytes, sha256 2393bfc9ff425a930b9af1b2eda04957eab1c721549aebf8a89312dc59fe84f6
+request, anthropic-messages tool, effort "high", structured false, fallbacks true, retrieval false, imports false: system 2504 bytes, sha256 fe012dc917bf0548d38fbfee74b48cc14ea0c8f73d718671502735c0846bf2e8, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 4152 bytes, sha256 8b7c0dff20040e86e4be3036dc568182e31c4ae5440c22c47b5362cb6a37d76b
+request, openai-responses text, effort "high", structured true, fallbacks false, retrieval false, imports false: system 2627 bytes, sha256 6fc1b2539006ecc1895f445a2c0746f0652168cc30697454a7eb7c3ab85bb96d, openai-responses/v1 canti-openai-responses/1 4113 bytes, sha256 45a5c97a850cc1e60d4177f6984d9f1b0ca5fd4db33336551fc53fd1c17d1478
+request, openai-responses text, effort "", structured false, fallbacks false, retrieval false, imports false: system 2627 bytes, sha256 6fc1b2539006ecc1895f445a2c0746f0652168cc30697454a7eb7c3ab85bb96d, openai-responses/v1 canti-openai-responses/1 3690 bytes, sha256 428fcad43a84590fd16f058a3724877a022b1f388da18987945ee65d733fdf8f
+request, openai-responses tool, effort "high", structured false, fallbacks false, retrieval false, imports false: system 2504 bytes, sha256 fe012dc917bf0548d38fbfee74b48cc14ea0c8f73d718671502735c0846bf2e8, openai-responses/v1 canti-openai-responses/1-tool 4127 bytes, sha256 a0a47be2dc2db2c14b87eab0ad25760a1f3cdc1ff7060dc92d9a484f5c65edb4
+request, anthropic-messages text, effort "high", structured true, fallbacks true, retrieval true, imports false: system 4636 bytes, sha256 ff55b5dbc8e0eba79aa0374c04e68158de0b66e2f70f3558be543522c13a9bb6, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 6131 bytes, sha256 eee0f019e4d3870b56160eb8d1cefa7bcbbf4ed0ec4ad2f88129ff2364c4f4d4
+request, anthropic-messages text, effort "", structured false, fallbacks false, retrieval true, imports false: system 4636 bytes, sha256 ff55b5dbc8e0eba79aa0374c04e68158de0b66e2f70f3558be543522c13a9bb6, anthropic-messages/2023-06-01 canti-anthropic/2 5729 bytes, sha256 6d1c3140c5596d34c6e70a78f4cd41eb93dee05502fa50559bb36e4ea51e8f40
+request, anthropic-messages tool, effort "high", structured false, fallbacks true, retrieval true, imports false: system 4513 bytes, sha256 4a2439b74f58df7b4eadf92eefa386708c2877c45b6ab8788173493a0e79d65d, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 6190 bytes, sha256 9f41168cf4d2f96e951c48b43a7ab79d56fe3bab856acd31a36a44abbccf9dda
+request, openai-responses text, effort "high", structured true, fallbacks false, retrieval true, imports false: system 4636 bytes, sha256 ff55b5dbc8e0eba79aa0374c04e68158de0b66e2f70f3558be543522c13a9bb6, openai-responses/v1 canti-openai-responses/1 6151 bytes, sha256 1ad85fd0254f564529386f9652f19d635cb4ae5ffa2ffa3f70190c0c86481841
+request, openai-responses text, effort "", structured false, fallbacks false, retrieval true, imports false: system 4636 bytes, sha256 ff55b5dbc8e0eba79aa0374c04e68158de0b66e2f70f3558be543522c13a9bb6, openai-responses/v1 canti-openai-responses/1 5728 bytes, sha256 e9d6f6c4f4b9f2c898aaad5f684604a2cb207f4bec2ead95477b5ad34cafc7a0
+request, openai-responses tool, effort "high", structured false, fallbacks false, retrieval true, imports false: system 4513 bytes, sha256 4a2439b74f58df7b4eadf92eefa386708c2877c45b6ab8788173493a0e79d65d, openai-responses/v1 canti-openai-responses/1-tool 6165 bytes, sha256 652da2a331b5e38fdabf6c6fff1fed386c620d8035e140acd17ecd79856503e5
+request, anthropic-messages text, effort "high", structured true, fallbacks true, retrieval true, imports true: system 4817 bytes, sha256 b5812b3356e4185b6f388fd852b180ae78ce63262f6461f8449ae74dbb9748eb, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/2 6313 bytes, sha256 4265b5f11eaa041b092edf185aa51c42a09567199312aaf95fc22977426d59fb
+request, anthropic-messages text, effort "", structured false, fallbacks false, retrieval true, imports true: system 4817 bytes, sha256 b5812b3356e4185b6f388fd852b180ae78ce63262f6461f8449ae74dbb9748eb, anthropic-messages/2023-06-01 canti-anthropic/2 5911 bytes, sha256 1776de857444573f9a626e50d19cf32fd63e05d80fe330c7e25761824e9a4106
+request, anthropic-messages tool, effort "high", structured false, fallbacks true, retrieval true, imports true: system 4694 bytes, sha256 de01fd7b9ccb1770502d634c45719029d7c0ef59a8ce74079d59a467d91f10b5, anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/3-tool 6372 bytes, sha256 d6479d3fbaf3c146ff0a9530b1e5f572087007f2c2b0d3d40eea77a5470506e6
+request, openai-responses text, effort "high", structured true, fallbacks false, retrieval true, imports true: system 4817 bytes, sha256 b5812b3356e4185b6f388fd852b180ae78ce63262f6461f8449ae74dbb9748eb, openai-responses/v1 canti-openai-responses/1 6333 bytes, sha256 126ae8360cf012173d3ea9a6dc01197f014b9eefca33939ef5b24d33a24767d9
+request, openai-responses text, effort "", structured false, fallbacks false, retrieval true, imports true: system 4817 bytes, sha256 b5812b3356e4185b6f388fd852b180ae78ce63262f6461f8449ae74dbb9748eb, openai-responses/v1 canti-openai-responses/1 5910 bytes, sha256 1d61fca2327630a71319ddf4b0053d23da978fdd13d93c23e9832e656a5ab7b8
+request, openai-responses tool, effort "high", structured false, fallbacks false, retrieval true, imports true: system 4694 bytes, sha256 de01fd7b9ccb1770502d634c45719029d7c0ef59a8ce74079d59a467d91f10b5, openai-responses/v1 canti-openai-responses/1-tool 6347 bytes, sha256 4b7f85d8eb6edc6b29e520bbb14a00927702dcb884c697ab1db436f1ff6f98eb
+page of every block kind: 8512 bytes, sha256 1371a7b651b8a1eab44c2bc8f7a6f9862303009ffcd5084d8b4ea080d45158d4
+run []: {Limit:262144 Handover:2048 Page:5634 System:4636 Head:7224 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68803
+  environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
+  api "", model "", max tokens 16000, effort "", structured true, decision format "", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144 Purpose:512}, window steps 0, window bytes 0, imports false
+run ["-handover-bytes" "1"]: {Limit:262144 Handover:1 Page:5634 System:4636 Head:1085 Step:11398 Evidence:33313 Failed:6924 Tail:5301}, required 62658
+run ["-handover-bytes" "8192"]: {Limit:262144 Handover:8192 Page:5634 System:4636 Head:25656 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 87235
+run ["-history-imports" "DIR"]: {Limit:262144 Handover:2048 Page:5815 System:4817 Head:7224 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68984
+  api "", model "", max tokens 16000, effort "", structured true, decision format "", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144 Purpose:512}, window steps 0, window bytes 0, imports true
+run ["-max-steps" "0" "-max-attempts" "1"]: {Limit:262144 Handover:2048 Page:5638 System:4636 Head:7224 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68803
+  api "", model "", max tokens 16000, effort "", structured true, decision format "", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144 Purpose:512}, window steps 0, window bytes 0, imports false
+run ["-pids" "0" "-job-timeout" "0" "-memory" "" "-cpus" "4" "-network" "bridge"]: {Limit:262144 Handover:2048 Page:5645 System:4636 Head:7235 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68814
+  environment 261 bytes, sha256 4ff1dea32fd62532c7691977024668a3d289e364aea5f02fe11e193f6bf0e454
+run ["-image" "2048 bytes, \"\\xffxxxxxx\" first"]: {Limit:262144 Handover:2048 Page:7456 System:4636 Head:9046 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 70625
+  environment 2278 bytes, sha256 7d9367f38b0520af44b08e7b7dc2503825d68588d9afb543a428b2151cc120b3
+run ["-image" "7 bytes, \"debian\\xff\" first"]: {Limit:262144 Handover:2048 Page:5623 System:4636 Head:7213 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68792
+  environment 237 bytes, sha256 76d38b814ac8f5b72ca4743c77af97593d63809fb0a2571a9cccf8c9bb7268c9
+run ["-api" "anthropic-messages" "-model" "test-model" "-effort" "max" "-fallbacks"]: {Limit:262144 Handover:2048 Page:5634 System:4636 Head:7224 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68803
+  environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773
+  api "anthropic-messages", model "test-model", max tokens 16000, effort "max", structured true, decision format "", fallbacks true, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:262144 Purpose:512}, window steps 0, window bytes 0, imports false
+run ["-api" "openai-responses" "-model" "test-model" "-max-tokens" "4096" "-effort" "none" "-structured=false" "-decision-format" "tool" "-context-bytes" "131072" "-window-steps" "6" "-window-bytes" "9000"]: {Limit:131072 Handover:2048 Page:5511 System:4513 Head:7224 Step:11398 Evidence:33313 Failed:6924 Tail:5307}, required 68680
+  api "openai-responses", model "test-model", max tokens 4096, effort "none", structured false, decision format "tool", fallbacks false, limits {Goal:32768 Constraints:16384 Environment:2048 Command:2048 Preview:4096 Rejected:2048 Total:131072 Purpose:512}, window steps 6, window bytes 9000, imports false
+session run 12 of 12: request 8357 bytes, sha256 1839094996a5f5766fe31037bcab94a27109b5767841ffc46aea26f2c626ecef, navigation RUN11
+  earlier RUN4, sequence 4, returned, goal true, handover step 0
+  earlier RUN5, sequence 5, stopped, goal true, handover step 0
+  earlier RUN6, sequence 6, returned, goal true, handover step 0
+  earlier RUN7, sequence 7, returned, goal true, handover step 0
+  earlier RUN8, sequence 8, returned, goal true, handover step 0
+  earlier RUN9, sequence 9, returned, goal true, handover step 0
+  earlier RUN10, sequence 10, returned, goal true, handover step 2
+  earlier RUN11, sequence 11, stopped, goal true, handover step 2
+stored run step 1 revision 1: 8765 bytes, sha256 1c5e1c82e23f5e2c0655d9bc8ea5e677e647a28a2b18dc7d82c4d0b1ccd61c1c
+stored run step 2 revision 1: 10461 bytes, sha256 5ee2ed46ee3d0a31a74c1eaba521029c4bafa3490006ba8366e5ddfd8e53cc2e
+stored tool run step 1 revision 1: 8938 bytes, sha256 75cc3e36eef07e0dd33976c6967b89652e65a55ac1ddf79abc3dddea6903c654
+stored tool run step 1 revision 2: 9662 bytes, sha256 18e6b398b8075f3a194c12a5276080508378513c168328913178b17272af45d5
+stored tool run step 1 revision 3: 9662 bytes, sha256 d0ac68e7c47e381cd80d8e9cc5fb9d71441636b37c90f7f1ececd13f71d1f584
+stored stepping tool run step 1 revision 1: 9198 bytes, sha256 2d1825058be58d08ad0404e2eec48b66426aafddb512e2984455f03590435995
+stored stepping tool run step 1 revision 2: 10230 bytes, sha256 a9b8139bdd79616da380f6f412709f84ba3803b561e497f13aef118966563ca8
+stored stepping tool run step 2 revision 1: 10086 bytes, sha256 209df6efe986e24db13cf7c6b62ff1e52f2d61708f10b7665a769f62e801475d
+stored text run step 1 revision 1: 8877 bytes, sha256 0b8096f06d75d17e4b3903fcb654fae294575f18cd508ac2523a32eb5cf50338
+stored text Responses run step 1 revision 1: 8950 bytes, sha256 d47537c231648ae01df52d3f89206b9a0a343c4a70104d8cc2704cf14acf1051
+stored tool Responses run step 1 revision 1: 8975 bytes, sha256 041f66acde974e42ea9d66d420a950a29af3553abd492a238e0034f22704bbf2
+long window: 66 requests, sha256 e0a540a067a8eddaefc336a9963b57b84b08c826b3d555171127a2264254c686
+corpus action-type-errors: sha256 a4d0348c4bf88f6cb05758967098965b3e37dcff625b00e0bbeb3c5459e172dd
+corpus caps-and-encoding: sha256 009d7410828ef8a95fd6b2dfc9569942d0bbbfbe7060fcde6be8226235061a17
+corpus decision-purpose: sha256 54006385cac6b166e5230ea7c5573ae7eaef6aa1c58afe23fdc76a7cd0e8d7c8
+corpus decode-diagnostics: sha256 3538e97a617eb54bf8b5db51821e65837ca17133fe3ef63b08f4d1eca55459d5
+corpus directory-search-pages: sha256 1f765d96761726a2d1976218a90c42feeadc3669aba06d223bde184e5905715a
+corpus discovery-pages: sha256 61f455f5ed01547da6b744174edf84df6908a7970181dc8a5401baa35f28a4d3
+corpus execution-failures: sha256 b144dc6c76f1b8be104be8634b5709046fec906a099a39ccb29fd27d237ee693
+corpus failed-context-actions: sha256 9d66a793ce355cb1c4efc74172124ce0b278b61c8c5f0205de8ecb6d032e2d09
+corpus goal-and-constraints-at-caps: sha256 b06e684ef6a107918ba43d4c6a301442c69c3cc168770c50eb9406ec8e6d1538
+corpus handover: sha256 9950125dcda263c62b52a43aec7ca76ca17838252d4931072a0eb893df88bd85
+corpus handover-failed-twice: sha256 6a2e6c69d03f03ad17ec2ba24dd1fbaba41ac07bb4c31016289431c0f89a9c39
+corpus handover-gate: sha256 1ee1954b849fadb95ea41650daa5e0d8ce36d23a9b01551a92e80671eae6c797
+corpus handover-gate-retrieval: sha256 946e1fc3b40609e53ad0c0427d732d1b3f872adf13b746e88037ae23f5cbd174
+corpus handover-json-text: sha256 33b923d79e7a33b1dacd91098d88e9be876fbe74feaa461bf29068f0d4d213f9
+corpus handover-thresholds-reached: sha256 0a5ba5a7872165e68945d733382837fd4b0ddf87a03ec2f4e87ad61c793426f2
+corpus handover-thresholds-short: sha256 6995cdf970972d4fc1546dc31d66a31fa5eb5465ca03be38fa37730414769c7a
+corpus history-imports: sha256 8ca0e17962890483592efb86f6da61d3cb2342390753cf81114624137f008eb8
+corpus operator-resolution: sha256 d00701d769d106b4c52f2156704c22721f2888edee762572ae017e4c2959d27a
+corpus protocol-repair: sha256 7ba7b3cfe3d68fb5ddeab68e8a61d7a48679c387ec1e84bbf9af612c536f076b
+corpus purpose-across-windows: sha256 f7606439cc1a9730346a7a8009ca74badd7ff22190d5d181fdbc65c1b7b9e0bb
+corpus removed-evidence: sha256 b9e93507f5ecada801907b22346cb7abe9a44f573b32751e4638536ff84f7cf1
+corpus retrieval-command-at-cap: sha256 86b2ca8a46d5b58cdc331a496717c011f7bc72f51067124721496bc2acfb4e62
+corpus retrieval-failure-guidance: sha256 27e188160ccf9bc78a1b4afb338b885fee6939d95e66a4fbebe74be5657eb4b9
+corpus session-dialogue: sha256 ca7f266584b54936b258af8ff254c3c29292d8e27e953680d40c6620428c9976
+corpus session-handover-paths: sha256 eea856359a2b3c6aa87e300a5617bf0830eebec172eec91c89a9d82db659fb74
+corpus session-history-files: sha256 7212171dd34e198db240efaded55cfaaabdea276f2f4348bc8ea008694ce5622
+corpus session-navigation: sha256 555947d581a6f52056826cdf48fa4ab154226c98b9ddcad961b12a3fc7959f43
+corpus session-navigation-only: sha256 21cf1f31d28455d8a8d21fa4f7404281b61bf0d9fa4dd0a85e66ee51bd00c13f
+corpus session-status-only: sha256 8cec1d41fa69afe98bae342b54aaf61064f1c6e86086116e3f431efbc0cc7f90
+corpus session-stopped-goal: sha256 115ecb00ff7a5d7bea8b30ddb9091d9a6eccda8553e263238c370c5e36aedb45
+corpus session-stopped-status: sha256 305e1c989be15ef80534052eb82181014559b4a3825540ecfa18257b9de596ae
+corpus session-without-dialogue: sha256 61af31aff86d40e2c397d125b3837476fb516a06fc8600631713dd52cf70e343
+corpus shell-and-retrieval: sha256 d70c3a15bfe21ebe73aee32529020c80bde7c357e5c6f915520d72b463a4792b
+corpus stopped-session-run: sha256 db51acbc8db8b75f61580549976c7da92988cd78e2698814929547cb3bbb2813
+corpus symlinked-evidence: sha256 5e160b52dbc937da66a399efa81ce13f58d4d3dfd4c30c8cabad13155157d07d
+corpus text-envelopes: sha256 94c5b04360702ee3c068cb53177f4776ca345661f7614c7e4fc6cce18b549ccb
+corpus tool-envelopes: sha256 2172f9a7667d404d3e9ce840490f73429cb2438700daaa9bc63634d54c1ff0b8
+corpus tool-transport: sha256 bb15618744fe50e076d3653767e1e1c646d15bb6bbc2c13b6a691c43196b3fcc
+corpus unlimited-steps: sha256 eed4f34a55a1da2f741d003f333813d9f5cc7f4005eb9571522974cbafcc9970

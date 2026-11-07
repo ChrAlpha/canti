@@ -10,7 +10,7 @@ import (
 )
 
 func TestRunUnlimitedSteps(t *testing.T) {
-	s := parseSpec(t, "-max-steps", "0")
+	s := runSpec(t, "-max-steps", "0")
 	run, initial, err := newRun("goal", "", s, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestRunUnlimitedSteps(t *testing.T) {
 	if err := initial.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if s := parseSpec(t); s.limits.MaxSteps != 20 {
+	if s := runSpec(t); s.limits.MaxSteps != 20 {
 		t.Fatalf("default steps = %d, want 20", s.limits.MaxSteps)
 	}
 }
@@ -33,6 +33,7 @@ func TestUnlimitedStepsFlagHelp(t *testing.T) {
 	if !strings.Contains(fs.Lookup("max-steps").Usage, "0 is unlimited") {
 		t.Fatal("missing unlimited steps help")
 	}
+	s = runSpec(t)
 	s.limits.MaxSteps = -1
 	_, _, err := newRun("goal", "", s, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "-max-steps must be nonnegative") {

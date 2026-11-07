@@ -106,6 +106,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		"negative tokens":  {APIKey: apiKey, Model: "m", MaxTokens: -1},
 		"negative timeout": {APIKey: apiKey, Model: "m", Timeout: -time.Second},
 		"negative limit":   {APIKey: apiKey, Model: "m", MaxResponseBytes: -1},
+		"unknown effort":   {APIKey: apiKey, Model: "m", Effort: "extreme"},
 	} {
 		if _, err := anthropic.New(cfg); err == nil {
 			t.Errorf("%s: New succeeded", name)
@@ -128,6 +129,8 @@ func TestFreeze(t *testing.T) {
 		{"structured output", func(c *anthropic.Config) { c.StructuredOutput = true }, base + `,"output_config":` + schema + `}`, protocol},
 		{"fallbacks", func(c *anthropic.Config) { c.Fallbacks = true }, base + `,"fallbacks":"default"}`, protocol + "+" + fallbackBeta},
 		{"both", func(c *anthropic.Config) { c.StructuredOutput, c.Fallbacks = true, true }, base + `,"output_config":` + schema + `,"fallbacks":"default"}`, protocol + "+" + fallbackBeta},
+		{"effort", func(c *anthropic.Config) { c.Effort = "high" }, base + `,"output_config":{"effort":"high"}}`, protocol},
+		{"effort and structured output", func(c *anthropic.Config) { c.Effort, c.StructuredOutput = "xhigh", true }, base + `,"output_config":{"effort":"xhigh",` + schema[1:] + `}`, protocol},
 		{"auth token and max tokens", func(c *anthropic.Config) { c.APIKey, c.AuthToken, c.MaxTokens = "", authToken, 512 }, strings.Replace(base, "16000", "512", 1) + `}`, protocol},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

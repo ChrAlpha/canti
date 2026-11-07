@@ -91,7 +91,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
-	argv := append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, args...)
+	argv := append(append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, fixtureModel...), args...)
 	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
@@ -447,7 +447,7 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 		}
 		defer r.Close()
 		fillPipe(t, w)
-		cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, "chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)
+		cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL}, fixtureModel...)...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("never\n"), out, w
 		start := time.Now()
 		if err := cmd.Start(); err != nil {

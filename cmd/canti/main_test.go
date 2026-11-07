@@ -130,7 +130,10 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
 		{[]string{"run", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
 		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
-		{[]string{"run", "-goal", "g", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and handover reserve: it needs a total of at least "},
+		{[]string{"run", "-goal", "g"}, exitUsage, "", "-api must be anthropic-messages or openai-responses"},
+		{[]string{"run", "-goal", "g", "-api", "openai-completions", "-model", "m"}, exitUsage, "", "-api openai-completions is not supported"},
+		{[]string{"run", "-goal", "g", "-api", "anthropic-messages"}, exitUsage, "", "-model is required"},
+		{[]string{"run", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and handover reserve: it needs a total of at least "},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -153,7 +156,7 @@ func TestUsageAndVersion(t *testing.T) {
 
 func TestCommandsWithoutACredentialTouchNothing(t *testing.T) {
 	f := newFixture(t, nil)
-	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}, {"resume"}} {
+	for _, args := range [][]string{append([]string{"run", "-goal", "g"}, fixtureModel...), append([]string{"run", "-session", "s", "-input", "i", "-goal", "g"}, fixtureModel...), {"resume"}} {
 		r := runCLI(t, nil, append(args, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)...)
 		if r.code != exitError || !strings.Contains(r.stderr, "ANTHROPIC_API_KEY") {
 			t.Errorf("canti %q = %d\nstderr: %s", args, r.code, r.stderr)
@@ -1168,11 +1171,18 @@ func parseSpec(t *testing.T, args ...string) spec {
 	return s
 }
 
+// runSpec is parseSpec with the model API and model of a fixture, which
+// every run names.
+func runSpec(t *testing.T, args ...string) spec {
+	t.Helper()
+	return parseSpec(t, append(slices.Clone(fixtureModel), args...)...)
+}
+
 func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
 	want := spec{
 		config: config{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			Model: "claude-opus-5", MaxTokens: 16000, Structured: true, Fallbacks: true, ContextBytes: 256 << 10, ContextVersion: contextVersion, HandoverBytes: 2048},
+			MaxTokens: 16000, Structured: true, ContextBytes: 256 << 10, ContextVersion: contextVersion, HandoverBytes: 2048},
 		budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}
@@ -1188,7 +1198,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
-		"-output-limit", "4096", "-model", "claude-test", "-max-tokens", "900", "-structured=false", "-fallbacks=false",
+		"-output-limit", "4096", "-api", "anthropic-messages", "-model", "claude-test", "-max-tokens", "900", "-effort", "medium", "-structured=false", "-fallbacks=false",
 		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.config.Workspace = "/work"
@@ -1219,8 +1229,8 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if l := promptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {
 		t.Errorf("prompt limits = %+v", l)
 	}
-	m := modelConfig(c, "http://model.test", credential{authToken: "token"})
-	if m != (anthropic.Config{BaseURL: "http://model.test", AuthToken: "token", Model: "claude-test", MaxTokens: 900}) {
+	m := anthropicConfig(c, "http://model.test", credential{anthropicToken: "token"})
+	if m != (anthropic.Config{BaseURL: "http://model.test", AuthToken: "token", Model: "claude-test", MaxTokens: 900, Effort: "medium"}) {
 		t.Errorf("model config = %+v", m)
 	}
 	env := environment(c, run.Budget)
@@ -1232,7 +1242,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if strings.Contains(env, archive.ArtifactsRoot) {
 		t.Errorf("environment %q names the artifact directory, which the prompt states", env)
 	}
-	if _, _, err := newRun("goal", "", parseSpec(t, "-job-timeout", "-1s"), now); err == nil {
+	if _, _, err := newRun("goal", "", runSpec(t, "-job-timeout", "-1s"), now); err == nil {
 		t.Error("a negative budget was accepted")
 	}
 	if _, err := decodeConfig(run, "/elsewhere"); err == nil {
@@ -1241,20 +1251,5 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	run.Config = []byte(`{"workspace":"/work","unknown":1}`)
 	if _, err := decodeConfig(run, "/work"); err == nil {
 		t.Error("an unknown config field was accepted")
-	}
-}
-
-func TestCredentialsPreferTheAPIKeyAndLeaveTheEnvironment(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "key")
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
-	if c, err := credentials(); err != nil || c != (credential{apiKey: "key"}) {
-		t.Errorf("credentials = %+v, %v", c, err)
-	}
-	if _, err := credentials(); err == nil {
-		t.Error("the credential stayed in the environment")
-	}
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
-	if c, err := credentials(); err != nil || c != (credential{authToken: "token"}) {
-		t.Errorf("credentials = %+v, %v", c, err)
 	}
 }

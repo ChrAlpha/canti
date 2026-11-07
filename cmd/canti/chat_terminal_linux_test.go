@@ -103,6 +103,9 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	later := make(chan struct{})
+	var laterOnce sync.Once
+	unblockLater := func() { laterOnce.Do(func() { close(later) }) }
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,12 +115,20 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 		select {
 		case <-release:
+			if len(f.model.requests()) > 0 {
+				select {
+				case <-later:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			f.model.ServeHTTP(w, r)
 		case <-r.Context().Done():
 		}
 	}))
 	defer server.Close()
 	defer unblock()
+	defer unblockLater()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +281,12 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("busy input survived output recovery: %+v, requests=%d, output tail=%q", s, len(f.model.requests()), p.text()[max(0, len(p.text())-500):])
 	}
+	// A committed return precedes chatDone. Observe the second running/ready
+	// cycle before sending the idle quit key, rather than racing that delivery.
+	pos := len(ansi.Strip(p.text()))
 	p.send(t, "fresh\r")
+	pos = p.await(t, "running", pos)
+	unblockLater()
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		if s := f.status(); s.Run.SessionSeq == 2 && s.Phase == core.PhaseReturned {
@@ -285,6 +301,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	p.await(t, "ready", pos)
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
 	w.Close()
