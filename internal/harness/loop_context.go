@@ -185,13 +185,16 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 	if err := l.sessionContext(ctx, run, &f); err != nil {
 		return l.refuse(ctx, snap, err)
 	}
+	if f.Carried, err = l.carriedEvidence(ctx, s.RunID, f.Window.Carry, nil); err != nil {
+		return l.refuse(ctx, snap, err)
+	}
 	if s.Step == 1 && s.RequestRev == 0 {
 		if err := f.ValidateContext(l.cfg.Limits); err != nil {
 			return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 		}
 	}
 	f.capture = &ContextCapture{Session: f.sessionSources, SessionNavigation: f.sessionNavigation,
-		Handover: HandoverCheck{Status: "request_revision"}}
+		Carried: f.Window.Carry, Handover: HandoverCheck{Status: "request_revision"}}
 	if f.Steps, err = l.windowSteps(ctx, s.RunID, f, snap.Seq); err != nil {
 		return snap, err
 	}

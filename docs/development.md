@@ -268,10 +268,12 @@ at `/canti/runs/<run ID>/`.
 Each run is bound to the workspace it was created in. Handover windows are
 always enabled; `-window-steps` and `-window-bytes` optionally request an
 earlier handover, while zero leaves the automatic capacity trigger active.
-Each handover drops what the window read, and the next window rereads it: in
-one live coding task with one model, `-window-steps 12` runs used 11 to 34
-windows, and with failing cases fed back they took three to six times the steps
-of capacity-triggered runs, so keep zero for long work.
+A `canti:handover` drops what the window read, and the next window rereads
+what it needs; a `canti:handover-carry` keeps the committed evidence it names
+in the next window (see [Input](architecture.md#input)). In one live coding
+task with one model, measured before the carry existed, `-window-steps 12`
+runs used 11 to 34 windows, and with failing cases fed back they took three
+to six times the steps of capacity-triggered runs, so keep zero for long work.
 `-handover-bytes` bounds the continuation text (2048 bytes by default).
 History retrieval is always available; `-history-imports` adds a read-only
 archive, a directory named relative to the command's working directory and
@@ -292,10 +294,12 @@ configuration this canti cannot decode is refused by every command and
 requires a fresh state directory.
 
 A state directory written by the canti before the runtime host (the C1
-action contracts) keeps schema version 2. Reading it, resuming a run that has
-halted, and stopping or resolving one change nothing that canti cannot read,
-and it keeps reading and writing the directory; resuming one of its open
-runs writes rows it still reads. Its upgrade point is the
+action contracts) keeps schema version 2. Its runs are of context version
+13, so `resume` refuses an open one, with status 1 and no write, and reports
+a halted one as it is. Reading the directory, and stopping or resolving one
+of its runs (a host also finishes a stop that the earlier canti left
+pending), change nothing that canti cannot read, and it keeps reading and
+writing the directory. Its upgrade point is the
 first run this canti creates, which stores its provider: from then on the
 earlier canti refuses every command on the directory, as an unreadable config,
 and writes nothing, so it can never admit a run beside a keyed input.
@@ -340,6 +344,11 @@ into the rules of the current context version, which
 goldens of a scenario, or adding one, which may observe a changed rule,
 requires a new context version, recorded with
 `go test ./cmd/canti -run TestContextVersionPinsItsRules -record-context`.
+A scenario whose request bodies the new version changes keeps the earlier
+version's files under `internal/harness/testdata/frozen-requests-v<version>`,
+copied from the commit that recorded them: `TestEarlierVersionsKeepTheirCorpus`
+checks them against that version's record, and
+`TestEarlierVersionRequestsAreSentAsFrozen` sends them unchanged.
 
 `TestLegacyJournals` reads every journal under
 `internal/harness/testdata/legacy-journals/<producer SHA>/<case>`, which an

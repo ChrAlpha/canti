@@ -114,7 +114,7 @@ func (s *sessionStressState) observe(round int, runID, block string) error {
 		if err := require("Retrieved original evidence:\n"); err != nil {
 			return err
 		}
-		return require("\nSource " + path + ":\n")
+		return require("\nPath " + path + ":\n")
 	}
 	root := "/canti/runs/" + runID
 	switch s.Phase {

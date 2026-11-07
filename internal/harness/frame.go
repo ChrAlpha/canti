@@ -23,6 +23,7 @@ type Frame struct {
 	ImportsEnabled                       bool
 	HandoverBytes                        int
 	SessionContext                       string
+	Carried                              []CarriedEvidence // the evidence Window.Carry names, in its order
 	capture                              *ContextCapture
 	sessionSources                       []ContextSessionSource
 	sessionNavigation                    string

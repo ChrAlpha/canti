@@ -294,6 +294,34 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 	return out, nil
 }
 
+// Completion returns the step that the transition at seq of the run
+// completed: one read by primary key, which needs no index. It fails with
+// harness.ErrNotFound when the run holds no transition at seq, and with both
+// ErrIncompatible and harness.ErrIncompatible when the transition there
+// completes no step or does not decode as a step its version records; a
+// done context and a failed read are returned as they are.
+func (s *Store) Completion(ctx context.Context, runID string, seq int64) (harness.StepRecord, error) {
+	rows, err := s.stmts[completionSQL].QueryContext(ctx, runID, seq)
+	if err != nil {
+		return harness.StepRecord{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return harness.StepRecord{}, err
+		}
+		return harness.StepRecord{}, fmt.Errorf("sqlite: transition %d of run %q: %w", seq, runID, harness.ErrNotFound)
+	}
+	step, err := scanStep(rows)
+	if err != nil && ctx.Err() == nil {
+		return harness.StepRecord{}, fmt.Errorf("%w: %w", harness.ErrIncompatible, err)
+	}
+	if err != nil {
+		return harness.StepRecord{}, err
+	}
+	return step, rows.Close()
+}
+
 // scanStep decodes a row of seq, kind, semantics, from state, and facts of a
 // completed step and checks the shape harness.StepRecord.Validate requires
 // of a record of its semantics version.
@@ -309,6 +337,9 @@ func scanStep(rows *sql.Rows) (harness.StepRecord, error) {
 	}
 	if err := cmp.Or(known(kind, semantics), decodeState(semantics, from, &state), strict(data, &facts)); err != nil {
 		return harness.StepRecord{}, err
+	}
+	if kind != "observed" && kind != "performed" && kind != "resolved" {
+		return harness.StepRecord{}, fmt.Errorf("%w: a %s transition at seq %d completes no step", ErrIncompatible, kind, seq)
 	}
 	r := harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Purpose: state.Decision.Purpose,
 		Outcome: facts.Outcome, Window: facts.Window, Resolved: kind == "resolved"}

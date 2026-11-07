@@ -118,12 +118,12 @@ func TestAnAutoHostDrivesTheRunAndKeepsServing(t *testing.T) {
 func TestADetachedRunKeepsBeingDrivenByTheHost(t *testing.T) {
 	f := newFixture(t, nil)
 	gate := make(chan struct{})
-	f.model.decide = func(step int, _ string) (core.Decision, error) {
+	f.model.decideWith(func(step int, _ string) (core.Decision, error) {
 		if step == 1 {
 			<-gate
 		}
 		return core.Decision{Kind: core.Return, Payload: "done"}, nil
-	}
+	})
 	f.autoHost()
 	cmd, wait := f.start(nil, "run", "-host", "auto", "-goal", "g", "-input", "detached")
 	waitFor(t, func() bool { return len(f.model.requests()) == 1 })
@@ -330,7 +330,7 @@ func TestAHostOfAnotherProtocolIsRefused(t *testing.T) {
 	stop := fakeHost(t, f.socket(), `{"protocol":2,"error":{"code":"protocol","message":"the client speaks host protocol 1 and this host, pid 1, speaks 2"}}`)
 	defer stop()
 	r := f.cli(nil, "run", "-host", "auto", "-goal", "g")
-	if r.code != exitError || !strings.Contains(r.stderr, "speaks 2") {
+	if r.code != exitError || !strings.Contains(r.stderr, fmt.Sprintf("speaks host protocol 2 and this canti speaks %d", hostrpc.Protocol)) {
 		t.Fatalf("run against a host of another protocol: %+v", r)
 	}
 	if _, err := os.Stat(filepath.Join(f.state, "canti.db")); !os.IsNotExist(err) {

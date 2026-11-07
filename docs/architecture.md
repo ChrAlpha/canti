@@ -37,7 +37,7 @@ is not.
 | `internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 2; version 1's record kept), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 3, which adds the carry action's word; the records of versions 1 and 2 kept), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `cmd/canti` | CLI: commands, flags, signals, terminal, environment and credential | Subprocess tests; Docker-backed gate tests |
 
 The core imports only the standard library and holds no per-run state between
@@ -701,6 +701,41 @@ request bodies still retain the actual bytes sent for exact retry. Old pages
 remain accessible through explicit retrieval, including imported history
 when configured. Retrieved evidence and handover text are not authoritative
 instructions or proof that a side effect completed.
+
+With retrieval enabled, a required handover may instead be
+`canti:handover-carry` followed by one JSON object of `text` and `carry`,
+which keeps committed retrieval evidence in the next window; it is its own
+action, `handover_carry`, decided by its word, and the plain handover and
+its text are unchanged. Each entry names a retrieval step of the window, or
+a step the window carries, and optionally one of its sources, by the
+number that the evidence of each retrieval shows before every range. Entries
+expand, before any evidence is read, into at
+most 32 references to committed source ranges: the sequence of the
+transition that performed the retrieval, the step, the source index, and
+the length and SHA-256 of the bytes. A range carried again keeps its
+original identity. An exact repeat fails the proposal, but two ranges of one
+path, overlapping or of an older and a newer snapshot, are both kept and
+both charged. The window's first block renders the carried ranges under
+"Carried evidence", ordered by sequence and source, each with its step,
+source, path, range, and hash, as read at its step, and with whether its
+read continues, whether it is a search or discovery candidate, and whether
+its scan was partial. Nothing reads their sources again: every request
+resolves each reference by one primary-key read of the committed transition
+(`Journal.Completion`) and checks its length and hash. A carry is admitted
+only when the window it opens, rendered as its first request renders it,
+earlier session dialogue included, keeps positive work capacity beyond the
+step that the reserve always fits; otherwise, like a selection the window
+cannot satisfy, it fails as a proposal, with the bytes in its detail, which
+counts as a failed handover. Committed evidence that no longer matches its
+reference is a journal integrity failure that stops the run `unrecoverable`,
+at the carry and in any request of a window that carries it, and never makes
+the agent choose again. An unrequested carry fails without changing the
+window. Context version 14 adds the carry, with a handover instruction
+that teaches it and grows the reserve by 608 bytes. Version 15 numbers each
+range: a retrieval's evidence names each path on a `Path` line and each
+range as `Source I: bytes [a,b), sha256 …`; its shorter instruction leaves
+the reserve 465 bytes above version 13's. Steps otherwise render as in
+version 13.
 
 A run names its model API, `anthropic-messages` or `openai-responses`, and
 its model; canti has no default for either and refuses the Chat Completions

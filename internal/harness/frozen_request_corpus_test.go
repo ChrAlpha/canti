@@ -94,8 +94,8 @@ func frozenScenarios() []frozenScenario {
 				"run1-step03-rev1.json": {"### Step 2\n", "Retrieved original evidence:\n"},
 				"run1-step04-rev1.json": {"### Step 3\n", "Entries: [\"" + corpusSteps + "/00000001\",\"" + corpusSteps + "/00000002\"]"},
 				"run1-step05-rev1.json": {"### Step 4\n", `"operation":"search"`, "Retrieved original evidence:\n"},
-				"run1-step06-rev1.json": {"### Step 5\n", "Source " + corpusSteps + "/00000001/command:\n"},
-				"run1-step07-rev1.json": {"### Step 6\n", "Retrieval: 3 candidate ranges", "Source /canti/artifacts/effect_"},
+				"run1-step06-rev1.json": {"### Step 5\n", "Path " + corpusSteps + "/00000001/command:\n"},
+				"run1-step07-rev1.json": {"### Step 6\n", "Retrieval: 3 candidate ranges", "Path /canti/artifacts/effect_"},
 			},
 		},
 		{
@@ -165,7 +165,7 @@ func frozenScenarios() []frozenScenario {
 				"run1-step02-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n{\"id\":\"msg_03\"", `"input":null`},
 			},
 		},
-	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
+	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), carryScenarios(), boundaryScenarios())
 }
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
@@ -422,5 +422,49 @@ func compareFrozenRequests(t *testing.T, dir string, got map[string][]byte) {
 			t.Errorf("%s differs at byte %d of %d (golden %d bytes):\ngot  …%s…\nwant …%s…", name, at, len(body), len(want),
 				body[from:min(len(body), at+120)], want[from:min(len(want), at+120)])
 		}
+	}
+}
+
+// TestEarlierVersionRequestsAreSentAsFrozen requires that a loop of the
+// current context version sends a request that a run froze under an earlier
+// version byte for byte, although the current rules render that request
+// otherwise: a frozen request is never rebuilt. Each retained version is
+// checked by one of its own requests.
+func TestEarlierVersionRequestsAreSentAsFrozen(t *testing.T) {
+	for _, tc := range []struct{ version, name string }{
+		{"13", filepath.Join("handover", "run1-step02-rev1.json")},
+		{"14", filepath.Join("handover-carry", "run1-step03-rev1.json")},
+	} {
+		t.Run("version "+tc.version, func(t *testing.T) {
+			frozen, err := os.ReadFile(filepath.Join("testdata", "frozen-requests-v"+tc.version, tc.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := os.ReadFile(filepath.Join("testdata", "frozen-requests", tc.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(frozen, current) {
+				t.Fatal("the retained request equals the current rendering, so sending it proves nothing")
+			}
+			f := newFixture(t, limits, harness.Budget{}, returnReply("done"))
+			ctx := f.bounded()
+			runner, err := harness.NewRunner(f.store, f.exec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap, err := f.store.Latest(ctx, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := harness.Request{Body: frozen, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Window: &harness.Window{FirstStep: 1, Requested: true}}
+			if _, err := runner.Commit(ctx, snap, core.RequestFrozen{}, harness.Facts{Request: &req}); err != nil {
+				t.Fatal(err)
+			}
+			wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+			if prompts, sent := f.model.calls(); prompts != 0 || sent != 1 || !bytes.Equal(f.model.sent[0], frozen) {
+				t.Fatalf("froze %d prompts and sent %d requests; want the version-%s bytes sent unchanged", prompts, sent, tc.version)
+			}
+		})
 	}
 }

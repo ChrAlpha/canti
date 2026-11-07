@@ -83,10 +83,10 @@ func TestHandoverTakesTheTextAfterItsPrefixVerbatim(t *testing.T) {
 	if err != nil || len(steps) != 1 {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
-	if o := steps[0].Outcome; o == nil || o.Status != harness.OutcomeDone || o.Handover == nil || *o.Handover != (harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
+	if o := steps[0].Outcome; o == nil || o.Status != harness.OutcomeDone || o.Handover == nil || !reflect.DeepEqual(*o.Handover, harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
 		t.Fatalf("recorded outcome %+v", o)
 	}
-	if w := steps[0].Window; w == nil || *w != (harness.Window{FirstStep: 3, SourceStep: 2, Handover: text}) {
+	if w := steps[0].Window; w == nil || !w.Equal(harness.Window{FirstStep: 3, SourceStep: 2, Handover: text}) {
 		t.Fatalf("the handover committed the window %+v", w)
 	}
 	if !strings.Contains(f.model.prompts[2].User(), text) {
@@ -332,7 +332,7 @@ func TestDirectorySearchCursorAndEvidenceReachFrozenRequest(t *testing.T) {
 	}
 	quoted, _ := json.Marshal(r.NextCursor)
 	body := string(f.model.sent[1])
-	if !strings.Contains(body, `"next_cursor":`+string(quoted)) || !strings.Contains(body, "needle") || !strings.Contains(body, "Source /canti/imports/a.txt") {
+	if !strings.Contains(body, `"next_cursor":`+string(quoted)) || !strings.Contains(body, "needle") || !strings.Contains(body, "Path /canti/imports/a.txt") {
 		t.Fatalf("cursor/evidence absent in actual request: %s", body)
 	}
 }
@@ -639,7 +639,7 @@ func TestHandoverAcknowledgementLossCommitsOneIdenticalTransition(t *testing.T) 
 			if !landed && !reflect.DeepEqual(committed.Facts, first.Facts) {
 				t.Fatalf("the handover performed again into %+v, not %+v", committed.Facts, first.Facts)
 			}
-			if w := performed[0].Facts.Window; w == nil || *w != (harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Next: report."}) {
+			if w := performed[0].Facts.Window; w == nil || !w.Equal(harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Next: report."}) {
 				t.Fatalf("window %+v", w)
 			}
 		})

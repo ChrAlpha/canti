@@ -69,6 +69,11 @@ type Journal interface {
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
 	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
+	// Completion returns the step that the transition at seq completed, by a
+	// point read that needs no history scan: ErrNotFound when the run holds
+	// no transition at seq, and ErrIncompatible when the transition there
+	// completes no step or does not decode as one.
+	Completion(ctx context.Context, runID string, seq int64) (StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
 	// SessionRuns returns at most limit runs of the session, newest first,
 	// before session sequence before when positive.

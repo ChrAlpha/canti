@@ -115,11 +115,18 @@ func promptOf(body []byte) (step int, prompt string, err error) {
 	return step, prompt, err
 }
 
+// decideWith makes decide answer each request in place of the script.
+func (m *scriptedModel) decideWith(decide func(step int, prompt string) (core.Decision, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.decide = decide
+}
+
 func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	m.mu.Lock()
 	m.bodies = append(m.bodies, body)
-	hold := m.hold
+	hold, decide := m.hold, m.decide
 	m.mu.Unlock()
 	if hold != nil {
 		select {
@@ -154,8 +161,8 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, ok := m.script[step]
-	if err == nil && m.decide != nil {
-		d, err = m.decide(step, prompt)
+	if err == nil && decide != nil {
+		d, err = decide(step, prompt)
 		ok = err == nil
 	}
 	if err != nil || !ok && re.text == "" {

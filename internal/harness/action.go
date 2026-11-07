@@ -13,18 +13,20 @@ import (
 // ActionNamespace begins every harness action: an exec payload whose first
 // word, after leading ActionSpace, begins with it is never a command.
 // ActionSpace holds the bytes that may precede that word and the one byte
-// that may follow an action's name. RetrievePrefix and HandoverPrefix are
-// the forms the system prompt teaches. DiscoveryMarker begins a shell
+// that may follow an action's name. RetrievePrefix, HandoverPrefix, and
+// HandoverCarryPrefix are the forms the prompt teaches. DiscoveryMarker begins a shell
 // command that searches the step records; discovery skips its steps and
 // those of every harness action.
 const (
-	ActionNamespace = "canti:"
-	ActionSpace     = " \t\n\r"
-	retrieveName    = ActionNamespace + "retrieve"
-	handoverName    = ActionNamespace + "handover"
-	RetrievePrefix  = retrieveName + " "
-	HandoverPrefix  = handoverName + " "
-	DiscoveryMarker = "# canti:discovery"
+	ActionNamespace     = "canti:"
+	ActionSpace         = " \t\n\r"
+	retrieveName        = ActionNamespace + "retrieve"
+	handoverName        = ActionNamespace + "handover"
+	handoverCarryName   = ActionNamespace + "handover-carry"
+	RetrievePrefix      = retrieveName + " "
+	HandoverPrefix      = handoverName + " "
+	HandoverCarryPrefix = handoverCarryName + " "
+	DiscoveryMarker     = "# canti:discovery"
 )
 
 // ActionSemantics is the first semantics version whose accepting
@@ -38,11 +40,18 @@ const (
 	ActionCommand  ActionName = "command"
 	ActionRetrieve ActionName = "retrieve"
 	ActionHandover ActionName = "handover"
-	ActionUnknown  ActionName = "unknown"
+	// ActionHandoverCarry is a handover that carries committed evidence
+	// into the window it opens; its arguments are one JSON object.
+	ActionHandoverCarry ActionName = "handover_carry"
+	ActionUnknown       ActionName = "unknown"
 	// ActionLegacy names the action of an acceptance committed before
 	// actions were recorded. It asserts no intent and is never recorded.
 	ActionLegacy ActionName = "legacy"
 )
+
+// handover reports whether n hands over: the actions a required handover
+// does not refuse.
+func (n ActionName) handover() bool { return n == ActionHandover || n == ActionHandoverCarry }
 
 // Recovery is the recovery contract that the trusted implementation of an
 // action guarantees.
@@ -73,7 +82,7 @@ const (
 	codeHandoverRequired  = "handover_required"
 
 	retrievalDisabled = "retrieval is disabled for this run"
-	unknownAction     = "unknown harness action; the actions are " + retrieveName + " and " + handoverName
+	unknownAction     = "unknown harness action; the actions are " + retrieveName + ", " + handoverName + ", and " + handoverCarryName
 	handoverRequired  = "handover is required before any more work; use " + handoverName
 )
 
@@ -121,11 +130,13 @@ func NormalizeAction(payload string, requested, reader bool) Action {
 			}
 		case handoverName:
 			a.Name, a.Recovery = ActionHandover, RecoveryLocal
+		case handoverCarryName:
+			a.Name, a.Recovery = ActionHandoverCarry, RecoveryLocal
 		default:
 			a.Name, a.Recovery, a.Invalid = ActionUnknown, RecoveryLocal, codeUnknownAction
 		}
 	}
-	if requested && a.Name != ActionHandover {
+	if requested && !a.Name.handover() {
 		a.Recovery, a.Refused = RecoveryLocal, codeHandoverRequired
 	}
 	return a
@@ -156,7 +167,8 @@ func (a Action) Matches(payload string) error {
 		return fmt.Errorf("harness: a %s action records a payload %s the reserved namespace", a.Name, map[bool]string{true: "in", false: "outside"}[reserved])
 	case a.Name != ActionCommand && a.Args != args:
 		return fmt.Errorf("harness: the %s action records arguments at %d, not at %d", a.Name, a.Args, args)
-	case a.Name == ActionRetrieve && word != retrieveName, a.Name == ActionHandover && word != handoverName:
+	case a.Name == ActionRetrieve && word != retrieveName, a.Name == ActionHandover && word != handoverName,
+		a.Name == ActionHandoverCarry && word != handoverCarryName:
 		return fmt.Errorf("harness: the %s action records the word %q", a.Name, word)
 	}
 	return nil
@@ -165,12 +177,13 @@ func (a Action) Matches(payload string) error {
 // Validate checks that a recorded action is one that normalization yields
 // for some payload.
 func (a Action) Validate() error {
-	want := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionHandover: RecoveryLocal, ActionUnknown: RecoveryLocal}
+	want := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionHandover: RecoveryLocal,
+		ActionHandoverCarry: RecoveryLocal, ActionUnknown: RecoveryLocal}
 	recovery, ok := want[a.Name]
 	switch {
 	case !ok:
 		return fmt.Errorf("harness: unknown action %q", a.Name)
-	case a.Refused != "" && (a.Refused != codeHandoverRequired || a.Name == ActionHandover):
+	case a.Refused != "" && (a.Refused != codeHandoverRequired || a.Name.handover()):
 		return fmt.Errorf("harness: %s action cannot be refused with %q", a.Name, a.Refused)
 	case a.Refused != "":
 		recovery = RecoveryLocal

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/sqlite"
 )
 
 func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
@@ -98,6 +101,163 @@ func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 	if last := f.model.prompts[2].User(); strings.Count(last, evidence) != 2 || strings.Contains(last, "Evidence unavailable") {
 		t.Fatalf("the request after removing the source does not show both frozen evidence blocks:\n%s", last)
 	}
+}
+
+// TestFrozenEvidenceLivesExactlyAsLongAsItsWindow requires that every request
+// shows, whole, the evidence of exactly the retrievals committed earlier in
+// its window: frozen evidence stays in each later request of its window, and
+// a handover drops all of it, so the next window that needs a joint working
+// set reads it again before any work. A run whose controller is rebuilt on a
+// newly opened journal before every Loop.Step, sharing the fake executor and
+// clock, commits the same transitions and facts as one that is not, and
+// leaves no descriptor open once its journal is closed.
+func TestFrozenEvidenceLivesExactlyAsLongAsItsWindow(t *testing.T) {
+	sc := workingSetScenario{name: "joint-window", ranges: 7, units: 5, pad: 1024, total: 128 << 10, maxSteps: 40}
+	steady, _ := runWorkingSet(t, sc, false)
+	want := workingSetTrace(t, steady)
+	// The steady run has already opened every descriptor the runtime keeps,
+	// so the restarted run, its last journal closed, must leave none.
+	descriptors := openDescriptors(t)
+	restarted, snap := runWorkingSet(t, sc, true)
+	got := workingSetTrace(t, restarted)
+	ts, err := restarted.Transitions(context.Background(), runID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if grown := openDescriptors(t) - descriptors; grown != 0 {
+		t.Fatalf("a run restarted before every step left %d descriptors open", grown)
+	}
+	if !slices.Equal(want, got) {
+		for k := range min(len(want), len(got)) {
+			if want[k] != got[k] {
+				t.Fatalf("restarted run differs at transition %d:\n%s\nwant\n%s", k+1, got[k], want[k])
+			}
+		}
+		t.Fatalf("restarted run committed %d transitions, want %d", len(got), len(want))
+	}
+	first, windows, shown, reads := 0, 0, map[int]bool{}, 0
+	for _, tr := range ts {
+		switch r := tr.Facts.Request; {
+		case r != nil:
+			if r.Window.FirstStep != first {
+				first, windows, shown, reads = r.Window.FirstStep, windows+1, map[int]bool{}, 0
+			}
+			for i := range sc.ranges {
+				whole, begun := strings.Contains(string(r.Body), workingSetContent(i)), strings.Contains(string(r.Body), workingSetMarker(i))
+				if whole != shown[i] || begun != whole {
+					t.Fatalf("request at step %d shows range %d whole: %t, in part: %t; retrieved earlier in its window: %t", tr.To.Step, i, whole, begun && !whole, shown[i])
+				}
+			}
+		case tr.Facts.Outcome != nil && tr.Facts.Outcome.Retrieval != nil:
+			reads++
+			for _, s := range tr.Facts.Outcome.Retrieval.Sources {
+				i, err := strconv.Atoi(strings.TrimPrefix(s.Path, archive.ImportsRoot+"/range-"))
+				if err != nil {
+					t.Fatalf("unexpected source %q", s.Path)
+				}
+				shown[i] = true
+			}
+		case strings.HasPrefix(tr.From.Decision.Payload, workingSetUnit) && tr.Event.Kind() == "observed":
+			if reads != sc.ranges {
+				t.Fatalf("work at step %d after %d reads of its window, want the joint set of %d", tr.From.Step, reads, sc.ranges)
+			}
+		}
+	}
+	if windows < 2 {
+		t.Fatalf("%d windows, want a handover", windows)
+	}
+	wantState(t, snap, core.PhaseReturned, "")
+}
+
+// TestJointSetOverWorkCapacityNeverAllowsWork records the counterexample of
+// evidence that lives as long as its window: a joint working set whose
+// evidence exceeds the window's work capacity, though the prompt would hold
+// it, requires a handover before any work in every window, so the run spends
+// every step it is allowed rereading the set.
+func TestJointSetOverWorkCapacityNeverAllowsWork(t *testing.T) {
+	sc := workingSetScenario{name: "joint-over-capacity", ranges: 8, units: 1, pad: 1024, total: 128 << 10, maxSteps: 20, oversized: true}
+	store, snap := runWorkingSet(t, sc, false)
+	wantState(t, snap, core.PhaseStopped, core.StopStepsExhausted)
+	r, err := measureWorkingSet(context.Background(), store, runID, workingSetProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Total.Steps != sc.maxSteps || r.Total.Work != 0 || r.Total.FailedHandovers != 0 || len(r.Windows) < 2 {
+		t.Fatalf("%d steps, %d units of work, %d failed handovers in %d windows; want %d steps, none, none, and handovers",
+			r.Total.Steps, r.Total.Work, r.Total.FailedHandovers, len(r.Windows), sc.maxSteps)
+	}
+	for _, w := range r.Windows {
+		if w.Handovers > 0 && (w.Reads != sc.ranges || w.PeakPromptBytes >= sc.total) {
+			t.Fatalf("window at step %d handed over after %d reads at a peak of %d bytes; want the whole set of %d below the %d-byte total",
+				w.FirstStep, w.Reads, w.PeakPromptBytes, sc.ranges, sc.total)
+		}
+	}
+	if d := windowLifetimeDeviations(sc, snap, r); len(d) != 0 {
+		t.Fatalf("deviations from evidence that lives as long as its window: %q", d)
+	}
+}
+
+// workingSetTrace renders every transition of the run, its event and facts
+// included, for comparison.
+func workingSetTrace(t testing.TB, store *sqlite.Store) []string {
+	t.Helper()
+	ts, err := store.Transitions(context.Background(), runID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, len(ts))
+	for i, tr := range ts {
+		b, err := json.Marshal(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[i] = tr.Event.Kind() + " " + string(b)
+	}
+	return out
+}
+
+// TestCarryKeepsAJointSetAcrossWindows requires that an agent that carries
+// the joint working set its next unit needs reads every range once: later
+// windows begin their work without reading, reconstructing nothing, where
+// the same agent without a carry reads the whole set again in each.
+func TestCarryKeepsAJointSetAcrossWindows(t *testing.T) {
+	sc := workingSetScenario{name: "joint-window", ranges: 7, units: 9, pad: 1024, total: 128 << 10, maxSteps: 60}
+	reports := map[bool]workingSetReport{}
+	for _, carry := range []bool{false, true} {
+		sc.carry = carry
+		store, snap := runWorkingSet(t, sc, false)
+		wantState(t, snap, core.PhaseReturned, "")
+		r, err := measureWorkingSet(context.Background(), store, runID, workingSetProgress)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Windows) < 2 || r.Total.Work != sc.units || r.Total.FailedHandovers != 0 {
+			t.Fatalf("carry %t: %d windows, %d units of work, %d failed handovers", carry, len(r.Windows), r.Total.Work, r.Total.FailedHandovers)
+		}
+		reports[carry] = r
+	}
+	for _, w := range reports[true].Windows[1:] {
+		if w.Reads != 0 || w.ReconstructedBytes != 0 || w.Work > 0 && w.ReadsBeforeWork != 0 || w.CarryBytes == 0 {
+			t.Errorf("a window carrying the set at step %d read %d ranges, reconstructing %d bytes, with %d carried bytes", w.FirstStep, w.Reads, w.ReconstructedBytes, w.CarryBytes)
+		}
+	}
+	if with, without := reports[true].Total, reports[false].Total; with.Reads != sc.ranges || without.ReconstructedBytes == 0 || with.Requests >= without.Requests {
+		t.Errorf("with a carry %d reads in %d requests, without one %d reads reconstructing %d bytes in %d requests",
+			with.Reads, with.Requests, without.Reads, without.ReconstructedBytes, without.Requests)
+	}
+}
+
+// openDescriptors counts the descriptors this process holds open.
+func openDescriptors(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot count open descriptors: %v", err)
+	}
+	return len(entries)
 }
 
 func TestRequestedHandoverRefusesWorkWithoutAJob(t *testing.T) {

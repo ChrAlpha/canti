@@ -23,6 +23,7 @@ import (
 func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 	retrieve := func(args int) Action { return Action{Name: ActionRetrieve, Recovery: RecoveryRead, Args: args} }
 	handover := func(args int) Action { return Action{Name: ActionHandover, Recovery: RecoveryLocal, Args: args} }
+	carry := func(args int) Action { return Action{Name: ActionHandoverCarry, Recovery: RecoveryLocal, Args: args} }
 	unknown := func(args int) Action {
 		return Action{Name: ActionUnknown, Recovery: RecoveryLocal, Args: args, Invalid: codeUnknownAction}
 	}
@@ -43,6 +44,11 @@ func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 		{"canti:handover Next: report.", handover(15)},
 		{"canti:handover\tNext", handover(15)},
 		{"\rcanti:handover Next", handover(16)},
+		{`canti:handover-carry {"text":"Next","carry":[{"step":1}]}`, carry(21)},
+		{"canti:handover-carry\n{}", carry(21)},
+		{" canti:handover-carry", carry(21)},
+		{"canti:handover-carry{}", unknown(22)},
+		{"canti:handover-carries {}", unknown(23)},
 		{"canti:", unknown(6)},
 		{"canti:retrieve{}", unknown(16)},
 		{"canti:retreive {}", unknown(15)},
@@ -67,7 +73,7 @@ func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 			t.Errorf("NormalizeAction(%q) places its arguments at %d", tc.payload, got.Args)
 		}
 		refused := NormalizeAction(tc.payload, true, true)
-		if want := (got.Name != ActionHandover); (refused.Refused == codeHandoverRequired) != want || want && refused.Recovery != RecoveryLocal {
+		if want := !got.Name.handover(); (refused.Refused == codeHandoverRequired) != want || want && refused.Recovery != RecoveryLocal {
 			t.Errorf("NormalizeAction(%q) under a required handover = %+v", tc.payload, refused)
 		}
 	}
@@ -302,6 +308,7 @@ func TestDiscoverySkipsExactlyTheHarnessActions(t *testing.T) {
 		`canti:retrieve {"operation":"read"}`, "canti:retrieve\t{}", "canti:retrieve\n{}", "canti:retrieve\r\n{}", "canti:retrieve",
 		" \t\ncanti:retrieve {}", strings.Repeat(" ", 100) + "canti:retrieve {}",
 		"canti:handover", "canti:handover text", "canti:handover\ttext", "\rcanti:handover text",
+		`canti:handover-carry {"text":"x","carry":[{"step":1}]}`, "canti:handover-carry\n{}",
 		"canti:", "canti:retrieve{}", "canti:retreive {}", "canti:Retrieve {}", "canti:handover2 x",
 		"# canti:discovery\nfind /canti/runs", "  # canti:discovery\nfind /canti/runs",
 		"CANTI:retrieve {}", "xcanti:retrieve", "echo canti:retrieve", "#canti:discovery", "\vcanti:retrieve", "\u00a0canti:retrieve",

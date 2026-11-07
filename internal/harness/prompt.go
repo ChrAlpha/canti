@@ -139,6 +139,9 @@ func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
 		if f.Window.Handover != "" {
 			capture.Handover = section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+fullBlock(f.Window.Handover))
 		}
+		if len(f.Carried) > 0 {
+			capture.Carry = section(&b, "Carried evidence", f.carriedText())
+		}
 	}
 	capture.StepHeader = section(&b, "Current window steps", "")
 	return b.String()
@@ -153,7 +156,11 @@ func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextByte
 	var b strings.Builder
 	capture.Progress = section(&b, "Progress", progress)
 	if f.Window != nil && f.Window.Requested {
-		capture.HandoverRequired = section(&b, "Handover required", fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover, one space, and then the handover text of at most %d UTF-8 bytes, written as plain text. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, restrictions the environment has stated and where, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.HandoverBytes, max(1, f.HandoverBytes*3/4)))
+		required := fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover, one space, and then the handover text of at most %d UTF-8 bytes, written as plain text. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, restrictions the environment has stated and where, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.HandoverBytes, max(1, f.HandoverBytes*3/4))
+		if f.RetrievalEnabled {
+			required += carryInstruction
+		}
+		capture.HandoverRequired = section(&b, "Handover required", required)
 		if f.Window.Failures > 0 {
 			capture.HandoverRequired += len(lastHandover)
 			b.WriteString(lastHandover)
@@ -166,6 +173,11 @@ func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextByte
 	}
 	return b.String()
 }
+
+// carryInstruction teaches a handover that carries retrieved evidence into
+// the next window.
+var carryInstruction = fmt.Sprintf("To keep retrieved evidence that the next window still needs, use %[1]s instead, then one space and one JSON object: {\"text\":\"<the handover text>\",\"carry\":[{\"step\":N},{\"step\":N,\"source\":I}]}. An entry keeps every source of a retrieval step of this window, or of a step this window carries, or only its source I; at most %[2]d sources in all. Carried sources are shown as read, take room in the next window, and are refused when they would leave it none.\n",
+	handoverCarryName, MaxCarry)
 
 const lastHandover = "The previous step recorded no handover. This step is the last chance to hand over: if it records none either, the run stops.\n"
 
@@ -259,8 +271,9 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 	return b.String()
 }
 
-// evidence renders the evidence r froze for each of its sources, with the
-// path of each new source and the range and hash of every one.
+// evidence renders the evidence r froze for each of its sources: the path of
+// each new one, and the index, range, and hash of every one, by which a
+// carry names it.
 func evidence(r *archive.Retrieval) string {
 	if r == nil || len(r.Evidence) != len(r.Sources) {
 		return ""
@@ -269,9 +282,9 @@ func evidence(r *archive.Retrieval) string {
 	previous := ""
 	for i, source := range r.Sources {
 		if source.Path != previous {
-			fmt.Fprintf(&b, "Source %s:\n", source.Path)
+			fmt.Fprintf(&b, "Path %s:\n", source.Path)
 		}
-		fmt.Fprintf(&b, "Bytes [%d,%d), sha256 %s:\n%s\n", source.Offset, source.Offset+int64(source.Length), source.SHA256, r.Evidence[i])
+		fmt.Fprintf(&b, "Source %d: bytes [%d,%d), sha256 %s:\n%s\n", i, source.Offset, source.Offset+int64(source.Length), source.SHA256, r.Evidence[i])
 		previous = source.Path
 	}
 	return b.String()

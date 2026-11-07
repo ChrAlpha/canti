@@ -1,0 +1,59 @@
+{
+  "protocol": 3,
+  "op": "submit",
+  "run_id": "run_1",
+  "session_id": "s",
+  "cursor": "run_1:5",
+  "submit": {
+    "session_id": "s",
+    "input_id": "in_1",
+    "goal": "g",
+    "constraints": "c",
+    "explicit_constraints": true,
+    "spec": {
+      "workspace": "/w",
+      "image": "debian:bookworm-slim",
+      "network": "none",
+      "memory": "2g",
+      "cpus": "1",
+      "pids": 512,
+      "output_limit": 8388608,
+      "api": "anthropic-messages",
+      "model": "m",
+      "max_tokens": 1000,
+      "effort": "low",
+      "structured": true,
+      "decision_format": "tool",
+      "fallbacks": true,
+      "context_bytes": 262144,
+      "context_version": 13,
+      "history_imports": "/i",
+      "window_steps": 2,
+      "window_bytes": 3,
+      "handover_bytes": 2048,
+      "max_steps": 20,
+      "max_attempts": 3,
+      "wall_time": "30m0s",
+      "token_budget": 7,
+      "output_budget": 8,
+      "job_timeout": "10m0s"
+    }
+  },
+  "binding": {
+    "provider": "https://p.test",
+    "fallback": "https://f.test",
+    "anthropic_key": "test-key-1",
+    "anthropic_token": "test-key-2",
+    "openai_key": "test-key-3"
+  },
+  "once": true,
+  "limit": 6,
+  "timeout_ms": 7,
+  "cleanup_ms": 8,
+  "resolve": {
+    "job": true,
+    "execution": "exited",
+    "exit_code": 3,
+    "note": "n"
+  }
+}

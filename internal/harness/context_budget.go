@@ -118,8 +118,12 @@ func (f Frame) reserve(l PromptLimits) Fit {
 	return fit
 }
 
+// capacity is the work capacity of f under l: what the total leaves of the
+// fixed context and its reserves, zero or less when they fill it.
+func (f Frame) capacity(l PromptLimits) int { return l.Total - f.reserve(l).fixed() }
+
 func (f Frame) workCapacity(l PromptLimits) (int, error) {
-	capacity := l.Total - f.reserve(l).fixed()
+	capacity := f.capacity(l)
 	if capacity <= 0 {
 		return 0, errors.New("harness: fixed context leaves no room for work and handover reserve")
 	}

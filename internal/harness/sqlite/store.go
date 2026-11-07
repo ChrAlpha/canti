@@ -120,8 +120,10 @@ const (
 		UNION ALL SELECT * FROM (SELECT seq, kind, semantics, from_state, facts FROM transitions
 		WHERE run_id = ?1 AND kind = 'performed' AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
 		ORDER BY seq DESC LIMIT ?3`
-	savedSQL    = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
-	acceptedSQL = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action')
+	// completionSQL reads one transition by primary key for Completion.
+	completionSQL = `SELECT seq, kind, semantics, from_state, facts FROM transitions WHERE run_id = ? AND seq = ?`
+	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
+	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action')
 		FROM transitions WHERE run_id = ? AND seq = ?`
 	windowSQL = `SELECT semantics, json_extract(facts, '$.Request.Window') FROM transitions
 		WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
@@ -130,7 +132,7 @@ const (
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
-	stepsSQL, savedSQL, acceptedSQL, windowSQL, progressSQL,
+	stepsSQL, completionSQL, savedSQL, acceptedSQL, windowSQL, progressSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
