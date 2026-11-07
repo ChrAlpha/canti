@@ -61,7 +61,7 @@ Work continues across bounded context windows. The handover is the only automati
 	system = systemRole + `Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no text before or after it. The object has three string fields, "kind", "purpose", and "payload",` + systemForms + `
 
 The purpose and payload are JSON strings, so escape quotes, backslashes, and newlines.` + systemEvidence + systemContext
-	toolSystem = systemRole + `Call the canti_decision tool exactly once per reply; never reply with text. Its input has three string fields, "kind", "purpose", and "payload",` + systemForms + systemEvidence + systemContext
+	toolSystem = systemRole + `Call the ` + DecisionToolName + ` tool exactly once per reply; never reply with text. Its input has three string fields, "kind", "purpose", and "payload",` + systemForms + systemEvidence + systemContext
 )
 
 // Prompt renders the frame within l. System depends only on the decision

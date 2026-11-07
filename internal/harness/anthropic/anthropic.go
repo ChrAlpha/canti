@@ -1,27 +1,20 @@
 // Package anthropic implements harness.Model for the non-streaming Anthropic
 // Messages API.
-//
-// It uses net/http instead of the official SDK so that every attempt sends
-// exactly the frozen request bytes, is counted by the harness without hidden
-// retries, and keeps the raw response body.
 package anthropic
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/harness/provider"
 )
 
 const (
@@ -30,10 +23,10 @@ const (
 	fallbackBeta   = "server-side-fallback-2026-07-01"
 	adapter        = "canti-anthropic/2"
 	toolAdapter    = "canti-anthropic/3-tool"
-	purposeSchema  = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
-	decisionFormat = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{` +
-		`"kind":{"type":"string","enum":["exec","return"]},` + purposeSchema + `,"payload":{"type":"string"}},` +
-		`"required":["kind","payload","purpose"],"additionalProperties":false}}}`
+	decisionFormat = `{"format":{"type":"json_schema","schema":` + harness.DecisionSchema + `}}`
+	decisionTool   = `[{"name":"` + harness.DecisionToolName + `","description":"` + harness.DecisionToolDescription +
+		`","input_schema":` + harness.DecisionSchema + `}]`
+	decisionToolChoice = `{"type":"tool","name":"` + harness.DecisionToolName + `","disable_parallel_tool_use":true}`
 )
 
 // Config configures a Model. Zero values select the documented defaults.
@@ -54,8 +47,7 @@ type Config struct {
 // Model is a harness.Model backed by the Anthropic Messages API.
 type Model struct {
 	cfg      Config
-	client   *http.Client
-	endpoint string
+	endpoint *provider.Endpoint
 }
 
 var _ harness.Model = (*Model)(nil)
@@ -68,7 +60,7 @@ func New(cfg Config) (*Model, error) {
 	if cfg.Model == "" {
 		return nil, errors.New("anthropic: Model is required")
 	}
-	if cfg.MaxTokens < 0 || cfg.Timeout < 0 || cfg.MaxResponseBytes < 0 {
+	if cfg.MaxTokens < 0 {
 		return nil, errors.New("anthropic: limits must not be negative")
 	}
 	if cfg.DecisionFormat == "" {
@@ -80,28 +72,15 @@ func New(cfg Config) (*Model, error) {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.anthropic.com"
 	}
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return nil, errors.New("anthropic: BaseURL must be an absolute http(s) URL")
-	}
-	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return nil, errors.New("anthropic: BaseURL must use https unless it is a loopback address")
-	}
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = 16000
 	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 10 * time.Minute
+	endpoint, err := provider.New(provider.Config{Name: "anthropic", URL: provider.TrimBase(cfg.BaseURL, "/v1/messages"),
+		Secret: cfg.APIKey + cfg.AuthToken, Timeout: cfg.Timeout, MaxResponseBytes: cfg.MaxResponseBytes, Client: cfg.Client})
+	if err != nil {
+		return nil, err
 	}
-	if cfg.MaxResponseBytes == 0 {
-		cfg.MaxResponseBytes = 8 << 20
-	}
-	client := http.Client{}
-	if cfg.Client != nil {
-		client = *cfg.Client
-	}
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Model{cfg: cfg, client: &client, endpoint: strings.TrimRight(cfg.BaseURL, "/") + "/v1/messages"}, nil
+	return &Model{cfg: cfg, endpoint: endpoint}, nil
 }
 
 type userMessage struct {
@@ -185,49 +164,28 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if err := ctx.Err(); err != nil {
 		return harness.Response{}, err
 	}
-	var beta string
+	header := provider.Header("anthropic-version", version)
 	switch {
 	case req.Adapter != adapter && req.Adapter != toolAdapter:
-		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
+		return harness.Response{}, provider.Unrecoverable(fmt.Errorf("anthropic: unsupported adapter %q", req.Adapter))
 	case req.Protocol == protocol+"+"+fallbackBeta:
-		beta = fallbackBeta
+		header.Set("anthropic-beta", fallbackBeta)
 	case req.Protocol != protocol:
-		return harness.Response{}, unrecoverable(fmt.Errorf("anthropic: unsupported protocol %q", req.Protocol))
+		return harness.Response{}, provider.Unrecoverable(fmt.Errorf("anthropic: unsupported protocol %q", req.Protocol))
+	}
+	if m.cfg.APIKey != "" {
+		header.Set("x-api-key", m.cfg.APIKey)
+	} else {
+		header.Set("authorization", "Bearer "+m.cfg.AuthToken)
 	}
 	resp := harness.Response{Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter}
-
-	attempt, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
-	defer cancel()
-	hr, err := http.NewRequestWithContext(attempt, http.MethodPost, m.endpoint, bytes.NewReader(req.Body))
+	reply, err := m.endpoint.Post(ctx, req.Body, header)
+	resp.Body = reply.Body
 	if err != nil {
-		return resp, unrecoverable(fmt.Errorf("anthropic: %w", err))
+		return resp, err
 	}
-	hr.Header.Set("content-type", "application/json")
-	hr.Header.Set("anthropic-version", version)
-	if m.cfg.APIKey != "" {
-		hr.Header.Set("x-api-key", m.cfg.APIKey)
-	} else {
-		hr.Header.Set("authorization", "Bearer "+m.cfg.AuthToken)
-	}
-	if beta != "" {
-		hr.Header.Set("anthropic-beta", beta)
-	}
-	res, err := m.client.Do(hr)
-	if err != nil {
-		return resp, m.failure(ctx, attempt, err)
-	}
-	defer res.Body.Close()
-	resp.Body, err = io.ReadAll(io.LimitReader(res.Body, m.cfg.MaxResponseBytes+1))
-	resp.Body = bytes.ReplaceAll(resp.Body, []byte(m.cfg.APIKey+m.cfg.AuthToken), []byte("[redacted]"))
-	if err != nil || ctx.Err() != nil {
-		return resp, m.failure(ctx, attempt, err)
-	}
-	if int64(len(resp.Body)) > m.cfg.MaxResponseBytes {
-		resp.Body = resp.Body[:m.cfg.MaxResponseBytes]
-		return resp, fmt.Errorf("anthropic: response exceeds %d bytes", m.cfg.MaxResponseBytes)
-	}
-	if res.StatusCode/100 != 2 {
-		return resp, statusError(res, resp.Body)
+	if reply.Status/100 != 2 {
+		return resp, statusError(reply)
 	}
 
 	var msg message
@@ -240,11 +198,11 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	u := msg.Usage
 	resp.Usage = harness.Usage{InputTokens: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, OutputTokens: u.OutputTokens}
 	if req.Adapter == toolAdapter {
-		fields, ok := exactObject(resp.Body)
+		fields, ok := provider.ExactObject(resp.Body)
 		if !ok {
 			return resp, errors.New("anthropic: malformed tool response")
 		}
-		msg.StopReason = exactString(fields, "stop_reason")
+		msg.StopReason = provider.ExactString(fields, "stop_reason")
 	}
 	switch msg.StopReason {
 	case "end_turn", "stop_sequence", "refusal":
@@ -284,17 +242,7 @@ func (m *Model) Decision(resp harness.Response) []byte {
 	return text
 }
 
-func (m *Model) failure(ctx, attempt context.Context, err error) error {
-	switch {
-	case ctx.Err() != nil:
-		return fmt.Errorf("anthropic: %w", ctx.Err())
-	case attempt.Err() != nil:
-		return fmt.Errorf("anthropic: attempt timed out after %v", m.cfg.Timeout)
-	}
-	return fmt.Errorf("anthropic: %w", err)
-}
-
-func statusError(res *http.Response, body []byte) error {
+func statusError(r provider.Reply) error {
 	var e struct {
 		Error struct {
 			Type    string `json:"type"`
@@ -302,32 +250,9 @@ func statusError(res *http.Response, body []byte) error {
 		} `json:"error"`
 		RequestID string `json:"request_id"`
 	}
-	_ = json.Unmarshal(body, &e)
-	text := fmt.Sprintf("anthropic: status %d", res.StatusCode)
-	if e.Error.Type != "" {
-		text += " " + e.Error.Type
-	}
-	if e.Error.Message != "" {
-		text += ": " + e.Error.Message
-	}
-	if e.RequestID == "" {
-		e.RequestID = res.Header.Get("request-id")
-	}
-	if e.RequestID != "" {
-		text += " (request_id " + e.RequestID + ")"
-	}
-	err := errors.New(text)
-	code := res.StatusCode
-	switch {
-	case code == http.StatusPaymentRequired ||
-		code == http.StatusBadRequest && strings.Contains(strings.ToLower(e.Error.Message), "credit balance"):
-		return &harness.StopError{Reason: core.StopBudgetExhausted, Err: err}
-	case code == http.StatusRequestTimeout || code == http.StatusConflict || code == http.StatusTooManyRequests || code >= 500:
-		return err
-	}
-	return unrecoverable(err)
-}
-
-func unrecoverable(err error) error {
-	return &harness.StopError{Reason: core.StopUnrecoverable, Err: err}
+	_ = json.Unmarshal(r.Body, &e)
+	return provider.StatusError("anthropic", r.Status, provider.Failure{
+		Type: e.Error.Type, Message: e.Error.Message, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id")),
+		Exhausted: r.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(e.Error.Message), "credit balance"),
+	})
 }
