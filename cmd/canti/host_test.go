@@ -216,6 +216,9 @@ func TestAClientWaitsForAHostThatIsStartingAndRefusesAnEmbeddedOwner(t *testing.
 	if r := f.cli(nil, "run", "-host", "auto", "-host-wait", "300ms", "-goal", "g2"); r.code != exitLocked || !strings.Contains(r.stderr, "no host serves it") {
 		t.Fatalf("auto beside an embedded owner: %+v", r)
 	}
+	if _, err := os.Stat(filepath.Join(f.state, "host.log")); !os.IsNotExist(err) {
+		t.Fatalf("a refused auto request started a host contender: %v", err)
+	}
 	embedded.Process.Signal(syscall.SIGTERM)
 	if r := wait(); r.code != exitStopped {
 		t.Fatalf("embedded run: %+v", r)
@@ -412,11 +415,11 @@ func TestAClientArrivingWhileTheHostExitsStartsTheNextOne(t *testing.T) {
 	if _, err := os.Stat(f.socket()); !os.IsNotExist(err) {
 		t.Fatalf("the closing host still has its socket: %v", err)
 	}
-	_, wait := f.start(nil, "run", "-host", "auto", "-goal", "second")
-	waitFor(t, func() bool {
-		return len(f.hostPIDs()) >= 1 && strings.Count(readFile(t, filepath.Join(f.state, "host.log")), "locked by another canti process") >= 1
-	})
+	waiting := filepath.Join(t.TempDir(), "waiting")
+	_, wait := f.start([]string{"CANTI_TEST_SETUP=point:host.waiting", "CANTI_TEST_BLOCKED=" + waiting}, "run", "-host", "auto", "-goal", "second")
+	waitFor(t, func() bool { _, err := os.Stat(waiting); return err == nil })
 	os.Remove(marker)
+	os.Remove(waiting)
 	if r := wait(); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("the client that arrived while the host exited: %+v\nhost log:\n%s", r, readFile(t, filepath.Join(f.state, "host.log")))
 	}

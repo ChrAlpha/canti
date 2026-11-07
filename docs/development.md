@@ -173,7 +173,8 @@ run through the host process that serves the state directory (`-host auto`,
 the default), which keeps driving it when the command ends; `-host embedded`
 drives it in the command's own process instead, which the signal rules of
 the run then end with the command. The tests pin `-host embedded` for every
-command that names no `-host`. A client that finds no host starts `canti host` in a session of
+command that names no `-host`. A client that finds no host and an unlocked
+state directory starts `canti host` in a session of
 its own, with no credential in its environment and logging to `host.log` in
 the state directory, and waits up to `-host-wait` (10 s) for it to serve; it
 refuses a host of another protocol version, naming its process and how to

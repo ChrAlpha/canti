@@ -19,8 +19,9 @@ import (
 
 // The points the host command reports to checkpoint.
 const (
-	pointLocked    = "host.locked"    // the host holds the lock, before it listens
-	pointListening = "host.listening" // the host listens, before it serves
+	pointHostWaiting = "host.waiting"   // the first Hello failed, before waiting for a host
+	pointLocked      = "host.locked"    // the host holds the lock, before it listens
+	pointListening   = "host.listening" // the host listens, before it serves
 )
 
 func hostCommand(fs *flag.FlagSet, a *app) action {

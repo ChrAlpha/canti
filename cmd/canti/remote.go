@@ -106,18 +106,11 @@ func (a *app) connect(ctx context.Context) (*hostrpc.Client, error) {
 	}
 	c := &hostrpc.Client{Path: path}
 	_, err = c.Hello(ctx)
-	starts := 0
-	switch {
-	case err == nil:
-		return c, nil
-	case hostrpc.Unavailable(err):
-		if err := a.startHost(); err != nil {
-			return nil, err
-		}
-		starts++
-	case !leaving(err):
+	if err == nil || !hostrpc.Unavailable(err) && !leaving(err) {
 		return c, err
 	}
+	checkpoint(pointHostWaiting)
+	starts := 0
 	deadline := time.Now().Add(a.hostWait)
 	for {
 		_, err := c.Hello(ctx)
