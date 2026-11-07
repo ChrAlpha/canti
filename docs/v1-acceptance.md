@@ -17,7 +17,9 @@ decision schema enforced by a proxy of the evaluation runner. The
 adds nine sessions with the tool transport `canti-anthropic/3-tool` through
 another gateway, without a proxy, and the
 [retrieval prompt comparison](#live-comparison-of-the-retrieval-system-prompt-2026-10-08)
-twelve runs of context versions 7 and 8 through a gateway.
+twelve runs of context versions 7 and 8 through a gateway. The
+[Responses samples](#live-responses-samples-through-a-relay-2026-11-07) check
+the Responses adapter of context version 12 through a relay.
 
 ## Offline evidence
 
@@ -90,17 +92,15 @@ Limits column names it. Results apply only to that revision and environment.
 | Finite runs | Partial | `TestGateFiniteRuns` (4 cases), `TestGateLargeOutput/disk_budget` | Step, attempt, wall-time, token, and output-byte budgets each stop a run with `steps_exhausted`, `attempts_exhausted`, `timed_out`, or `budget_exhausted`, with failure text on the stop for the measured budgets and on each failed attempt, keep earlier observations, and dispatch nothing after the budget is spent; a wall-time stop cancels the running job and records its result | Cost is not measured; tokens are provider-reported usage, so a run can exceed its token budget by one response; the wall-time stop during a model request is tested only with a fake model |
 | Trust boundary | Passed | `TestGateTrustBoundaryKeepsCredentialsAndStateOut`, `TestGateTrustBoundaryProtectsFacts`, `TestGateTrustBoundaryProtectsStepRecords`, `docker.TestTrustBoundary` | A job sees no host environment variable, credential, or injected proxy; runs as the host uid with no capabilities and only a loopback interface, and its running container has network `none`, `CapDrop` `ALL`, and the host uid and gid; cannot reach the model URL; sees the artifacts, and the step records at `/canti/runs`, read-only, and neither the state directory nor the journal; cannot delete or forge committed artifacts or history, and forgeries stay in the workspace. The credential appears in no request body, CLI output, or state file. Notes written by a job reach the next prompt marked unverified; a notes symlink out of the workspace is reported unreadable and its target never enters a request. A job reads its run's step records — a `meta` matching the committed observation, the whole command that the prompt cut, and the preview — and a later run's job reads the earlier run's goal, result, and a step's command; creating a file, a step directory, or a run directory, overwriting the goal or a preview, or removing a step's records under `/canti/runs` fails read-only and leaves the records as published. A configured extra mount is readable and not writable | Docker is the isolation boundary: a shared kernel and the daemon's own security. The test credential is fake. The workspace is writable by the agent by design. A non-default network lets jobs reach the network. Every job can read the step records of every run of its state directory |
 | Complete loop | Passed | `TestRunDrivesExecAndReturn`, `TestRunOnceStepsAcrossProcesses`, and every gate above | The concrete adapter, core, SQLite journal, and Docker executor drive exec, observation, a second exec that reads the first one's file, and return in one isolated workspace, in one process or one process per step | Scripted provider |
-| Live provider | Partial | `anthropic.TestLiveDecision` (`live` tag) and two manual `canti run` sessions ([samples](#live-provider-samples-2026-09-23)); 50 runs of the [live evaluation](#live-evaluation-of-the-context-changes-2026-09-24); nine sessions of the [feedback-round evaluation](#live-evaluation-of-feedback-rounds-2026-10-03); twelve runs of the [retrieval prompt comparison](#live-comparison-of-the-retrieval-system-prompt-2026-10-08) | With `canti-anthropic/1`: one real request with structured output decodes to one decision; two CLI runs drive real model decisions through the SQLite journal and Docker executor to `return`, one with structured output and one without, in which the first command failed with exit status 1 and the next decision corrected it. With `canti-anthropic/2`: block prompts with cache breakpoints are accepted and answered through runs of up to 197 steps and 4.5 M input tokens; 502 responses and timeouts of an outage are recorded as incomplete attempts and retried with the frozen bytes; two runs killed with SIGKILL mid-run resume to completion with every effect started once | One model per evaluation, each through a gateway, not Anthropic's API; the 2026-09-24 evaluation's decisions pass a proxy that enforces the decision schema, because its gateway ignores structured output, and its usage fields do not report caching; the 2026-10-03 gateway reports cache reads, not checked against billing; refusals, fallbacks, and rate limits are not exercised (two 429 responses in a run set aside during an outage were retried as incomplete attempts) |
+| Live provider | Partial | `anthropic.TestLiveDecision` (`live` tag) and two manual `canti run` sessions ([samples](#live-provider-samples-2026-09-23)); 50 runs of the [live evaluation](#live-evaluation-of-the-context-changes-2026-09-24); nine sessions of the [feedback-round evaluation](#live-evaluation-of-feedback-rounds-2026-10-03); twelve runs of the [retrieval prompt comparison](#live-comparison-of-the-retrieval-system-prompt-2026-10-08) | With `canti-anthropic/1`: one real request with structured output decodes to one decision; two CLI runs drive real model decisions through the SQLite journal and Docker executor to `return`, one with structured output and one without, in which the first command failed with exit status 1 and the next decision corrected it. With `canti-anthropic/2`: block prompts with cache breakpoints are accepted and answered through runs of up to 197 steps and 4.5 M input tokens; 502 responses and timeouts of an outage are recorded as incomplete attempts and retried with the frozen bytes; two runs killed with SIGKILL mid-run resume to completion with every effect started once ; with `canti-openai-responses/1` and `/1-tool` ([Responses samples](#live-responses-samples-through-a-relay-2026-11-07)): three of four live decisions decode, and a text and a tool CLI run each write and verify a file in two Docker steps across a resume | One model per evaluation, each through a gateway or relay, not the original platform; the 2026-09-24 evaluation's decisions pass a proxy that enforces the decision schema, because its gateway ignores structured output, and its usage fields do not report caching; the 2026-10-03 gateway reports cache reads, not checked against billing; refusals, fallbacks, and rate limits are not exercised (two 429 responses in a run set aside during an outage were retried as incomplete attempts) |
 
-The live test is opt-in and may be billed:
+The live tests are opt-in, name their model, and may be billed; see
+[Development](development.md) for their variables:
 
 ```sh
-ANTHROPIC_API_KEY=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
+ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
+OPENAI_API_KEY=... OPENAI_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/openai
 ```
-
-`ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` select another Messages endpoint
-and model; `CANTI_LIVE_STRUCTURED=0` sends the request without the decision
-schema.
 
 Neither a successful command nor a `return` decision proves the user's task
 succeeded. Do not claim exactly-once arbitrary shell effects: job identity
@@ -535,6 +535,34 @@ it cannot substitute for checking a concrete model adapter's transport behavior.
 Choose numeric budgets before each boundedness experiment and compare measured
 peaks as history grows. Do not declare bounded behavior from a single small
 sample or hide failed samples from the result set.
+
+### Live Responses samples through a relay, 2026-11-07
+
+Code: `8e31ef6`, context version 12. Environment: Linux amd64, Go 1.26.10,
+Docker 29.9.1-1 with an empty task-owned `DOCKER_CONFIG`, image
+`debian:bookworm-slim`. Provider: a Responses-compatible relay, not OpenAI's
+API, with its base URL ending in `/v1` so that requests reached
+`/v1/responses`; model `mimo-v2.6-pro`, as the relay reported it. The
+credential came from the environment and was found in no file of either state
+directory or workspace. Budget: at most eight live decisions of 1,024 output
+tokens, and two CLI runs of at most eight steps, 200,000 tokens, and 10
+minutes each.
+
+| Check | Result |
+| --- | --- |
+| `openai.TestLiveDecision`, text without schema | Decodes `return ok`; 40 input, 39 output tokens |
+| Same, tool transport | Decodes `return ok` with a purpose from one strict `canti_decision` call under tool choice `auto`; 190 input, 71 output tokens |
+| Same, tool transport, effort `high` | Decodes; 190 input, 59 output tokens |
+| Same, text with the `json_schema` format | Not accepted: one 502, then twice 400 `responses_feature_not_supported` (the relay allows only `text` and `json_object`), classified as an unrecoverable stop |
+| `canti run -once` then `canti resume`, `-structured=false` | Two exec steps and a `return`; `hello.txt` holds `hello` and a newline; 4,192 input and 252 output tokens |
+| Same, `-decision-format tool` | Two exec steps and a `return`; the same file; 4,577 input and 366 output tokens; each request one complete attempt, each effect bound and started once, every frozen request `openai-responses/v1` `canti-openai-responses/1-tool` with `store: false`, `parallel_tool_calls: false`, and a strict tool |
+
+Limits: one model through one relay, so neither the original platform's
+acceptance of the strict tool and `json_schema` format nor its usage, caching,
+reasoning effort, or error behavior is established; the relay's usage is not
+checked against billing, and its cache counts are not read. A run of this
+relay needs `-structured=false` or the tool transport. The Messages adapter
+was not run live in this round.
 
 ## Implementation order
 
