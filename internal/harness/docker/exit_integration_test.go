@@ -133,8 +133,18 @@ func TestAnOutOfMemoryKillIsFinalOnlyWhenRecorded(t *testing.T) {
 	cfg, id := setup(t, docker.Config{Memory: "32m", PidsLimit: 128})
 	ctx := testContext(t, 2*time.Minute)
 	x := open(t, cfg)
-	const hog = `awk 'BEGIN { s = "x"; while (1) s = s s }'`
-	job := run(ctx, t, x, harness.Effect{ID: id("oom"), Command: "echo start; " + hog})
+	// Make the allocator the OOM victim, rather than the shell that must record its exit.
+	const hog = `sh -c 'echo 1000 > /proc/self/oom_score_adj || exit; exec awk "BEGIN { s = \"x\"; while (1) s = s s }"'`
+	effect := harness.Effect{ID: id("oom"), Command: "echo start; " + hog}
+	if _, err := x.Drive(ctx, accepted(x, effect)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.Drive(ctx, accepted(x, effect)); err != nil {
+		t.Fatal(err)
+	}
+	job := await(ctx, t, x, effect, func(job harness.Job) bool {
+		return finished(job) || job.Status == harness.JobUnknown
+	})
 	if job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != 137 || job.Preview != "start\n" {
 		t.Fatalf("job killed out of memory = %+v, want failed with the recorded exit status 137", job)
 	}
