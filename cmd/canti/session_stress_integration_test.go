@@ -37,13 +37,13 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		DBBytes, RuntimeMS                                                     int64
 	}{Runs: runs}
 	f, image := recoveryFixture(t, nil)
-	f.model.decide = func(step int, prompt string) (core.Decision, error) {
+	f.model.decideWith(func(step int, prompt string) (core.Decision, error) {
 		d, err := sessionStressDecision(step, prompt)
 		if err != nil {
 			t.Errorf("scripted policy: %v", err)
 		}
 		return d, err
-	}
+	})
 	t.Cleanup(func() {
 		metrics.Requests = len(f.model.requests())
 		metrics.RuntimeMS = time.Since(started).Milliseconds()

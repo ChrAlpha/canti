@@ -132,6 +132,7 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 		"Latest":                {latestSQL, "sqlite_autoindex_transitions_1", []any{"long"}},
 		"Transitions":           {transitionsSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
 		"Progress":              {progressSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
+		"Completion":            {completionSQL, "sqlite_autoindex_transitions_1", []any{"long", 100}},
 		"Request":               {requestSQL, "transitions_request", []any{"long", 7, 1}},
 		"Response":              {responseSQL, "transitions_response", []any{"long", 7, 1}},
 		"Recent before actions": {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", int64(math.MaxInt64), 5}},

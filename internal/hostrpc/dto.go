@@ -24,8 +24,9 @@ import (
 // Protocol is the version of the messages of this package. A change to any
 // of them needs the next version and a new testdata/v<N> record, which is
 // recorded once and never rewritten; a host and a client of different
-// versions refuse each other. Version 1 is recorded in testdata/v1.
-const Protocol = 2
+// versions refuse each other. Versions 1 and 2 are recorded in testdata/v1
+// and testdata/v2; version 3 adds the word of the carry action.
+const Protocol = 3
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -331,7 +332,7 @@ var (
 	}
 	actionWords = map[harness.ActionName]string{
 		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionHandover: "handover",
-		harness.ActionUnknown: "unknown", harness.ActionLegacy: "legacy",
+		harness.ActionHandoverCarry: "handover_carry", harness.ActionUnknown: "unknown", harness.ActionLegacy: "legacy",
 	}
 )
 

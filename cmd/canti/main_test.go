@@ -35,7 +35,10 @@ import (
 // CANTI_TEST_CRASH=before:KIND or after:KIND kills the process with SIGKILL
 // right before, or right after, it commits the first transition of KIND;
 // block:KIND holds that commit until its context is done, after creating the
-// file CANTI_TEST_BLOCKED names. CANTI_TEST_SETUP=signal holds the setup of
+// file CANTI_TEST_BLOCKED names, and commits nothing; lose:KIND commits it,
+// creates that file, and then holds until the context is done and returns
+// its error, as a commit whose acknowledgement was lost. KIND@STEP narrows
+// any of them to a transition of KIND that leaves step STEP. CANTI_TEST_SETUP=signal holds the setup of
 // the loop, and CANTI_TEST_SETUP=checked a session input after its checks,
 // after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
@@ -49,11 +52,15 @@ func TestMain(m *testing.M) {
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
 			when, kind, _ := strings.Cut(spec, ":")
-			if when != "before" && when != "after" && when != "block" {
-				panic("CANTI_TEST_CRASH must be before:KIND, after:KIND, or block:KIND")
+			if when != "before" && when != "after" && when != "block" && when != "lose" {
+				panic("CANTI_TEST_CRASH must be before:KIND, after:KIND, block:KIND, or lose:KIND")
+			}
+			step := 0
+			if k, s, ok := strings.Cut(kind, "@"); ok {
+				kind, step = k, atoi(s)
 			}
 			wrapJournal = func(j harness.Journal) harness.Journal {
-				return crashing{j, when, kind, os.Getenv("CANTI_TEST_BLOCKED")}
+				return crashing{j, when, kind, step, os.Getenv("CANTI_TEST_BLOCKED")}
 			}
 		}
 		if os.Getenv("CANTI_TEST_SETUP") == "signal" {
@@ -80,7 +87,17 @@ func TestMain(m *testing.M) {
 
 type crashing struct {
 	harness.Journal
-	when, kind, marker string
+	when, kind string
+	step       int // when positive, only a transition leaving this step
+	marker     string
+}
+
+func atoi(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		panic(err)
+	}
+	return n
 }
 
 func (c crashing) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
@@ -91,8 +108,15 @@ func (c crashing) SessionRuns(ctx context.Context, sessionID string, before int6
 
 func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
 	switch {
-	case t.Event.Kind() != c.kind:
+	case t.Event.Kind() != c.kind || c.step > 0 && t.From.Step != c.step:
 		return c.Journal.Commit(ctx, t)
+	case c.when == "lose":
+		if err := c.Journal.Commit(ctx, t); err != nil {
+			return err
+		}
+		os.WriteFile(c.marker, nil, 0o600)
+		<-ctx.Done()
+		return ctx.Err()
 	case c.when == "block":
 		os.WriteFile(c.marker, nil, 0o600)
 		<-ctx.Done()

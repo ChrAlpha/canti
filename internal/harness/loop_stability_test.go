@@ -256,7 +256,7 @@ func TestLoopLongStability(t *testing.T) {
 				if tr.To.RequestRev > 1 {
 					repairs++
 					previous, err := f.store.Request(ctx, runID, tr.To.Step, tr.To.RequestRev-1)
-					if err != nil || previous.Window == nil || tr.Facts.Request == nil || tr.Facts.Request.Window == nil || *previous.Window != *tr.Facts.Request.Window || !strings.Contains(string(tr.Facts.Request.Body), "Rejected response") {
+					if err != nil || previous.Window == nil || tr.Facts.Request == nil || tr.Facts.Request.Window == nil || !previous.Window.Equal(*tr.Facts.Request.Window) || !strings.Contains(string(tr.Facts.Request.Body), "Rejected response") {
 						t.Fatal("protocol repair did not preserve the frozen context window")
 					}
 				}
@@ -329,7 +329,7 @@ func TestLoopLongStability(t *testing.T) {
 					}
 					for i, source := range o.Retrieval.Sources {
 						text := o.Retrieval.Evidence[i]
-						evidence := fmt.Sprintf("Source %s:\nBytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
+						evidence := fmt.Sprintf("Path %s:\nSource 0: bytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
 						evidenceCounts[evidence]++
 						unique[source.Path] = true
 						retrievedBytes += source.Length
@@ -339,7 +339,7 @@ func TestLoopLongStability(t *testing.T) {
 					handovers++
 					pendingHandover = o.Handover
 					pendingStep = tr.From.Step
-					if w := tr.Facts.Window; w == nil || *w != (harness.Window{FirstStep: pendingStep + 1, SourceStep: pendingStep, Handover: o.Handover.Text}) {
+					if w := tr.Facts.Window; w == nil || !w.Equal(harness.Window{FirstStep: pendingStep + 1, SourceStep: pendingStep, Handover: o.Handover.Text}) {
 						t.Fatalf("the handover committed the window %+v", w)
 					}
 				}

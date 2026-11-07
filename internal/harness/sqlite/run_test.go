@@ -153,6 +153,56 @@ func completed(commits []harness.Transition) []harness.StepRecord {
 	return out
 }
 
+// TestCompletionReadsOneStepBySequence requires that Completion returns the
+// step a transition completed, by its sequence alone, also from a read-only
+// store without the index of performed steps, and refuses a sequence that
+// holds no transition, one that completes no step, and a step of a shape
+// its version never records, the last two also as harness.ErrIncompatible.
+func TestCompletionReadsOneStepBySequence(t *testing.T) {
+	ctx := context.Background()
+	path := tempPath(t)
+	s := open(t, path)
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.step("make", harness.Usage{}, 1)
+	d.decide(execBody("canti:lint"), harness.Usage{})
+	d.perform()
+	seqs := map[string]int64{}
+	for _, tr := range d.commits {
+		seqs[tr.Event.Kind()] = tr.Seq
+	}
+	if r, err := s.Completion(ctx, "run-1", seqs["observed"]); err != nil || r.Step != 1 || r.Command != "make" || r.Observation.Execution != core.ExecutionExited || r.Outcome != nil {
+		t.Fatalf("Completion of the observed step = %+v, %v", r, err)
+	}
+	if r, err := s.Completion(ctx, "run-1", seqs["performed"]); err != nil || r.Step != 2 || r.Outcome == nil || r.Outcome.Status != harness.OutcomeFailed || r.Seq != seqs["performed"] {
+		t.Fatalf("Completion of the performed step = %+v, %v", r, err)
+	}
+	for _, tc := range []struct {
+		run  string
+		seq  int64
+		want error
+	}{
+		{"run-1", seqs["request_frozen"], ErrIncompatible},
+		{"run-1", seqs["performed"] + 1, harness.ErrNotFound},
+		{"run-2", seqs["performed"], harness.ErrNotFound},
+	} {
+		if _, err := s.Completion(ctx, tc.run, tc.seq); !errors.Is(err, tc.want) || tc.want == ErrIncompatible && !errors.Is(err, harness.ErrIncompatible) {
+			t.Errorf("Completion(%s, %d) = %v, want %v", tc.run, tc.seq, err, tc.want)
+		}
+	}
+	if _, err := s.db.Exec(`DROP INDEX transitions_performed`); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := readOnly(t, path).Completion(ctx, "run-1", seqs["performed"]); err != nil || r.Outcome == nil {
+		t.Fatalf("read-only Completion without the index = %+v, %v", r, err)
+	}
+	if _, err := s.db.Exec(`UPDATE transitions SET facts = json_set(facts, '$.Outcome.Status', 'bogus') WHERE kind = 'performed'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Completion(ctx, "run-1", seqs["performed"]); !errors.Is(err, ErrIncompatible) || !errors.Is(err, harness.ErrIncompatible) {
+		t.Fatalf("Completion of a corrupt step = %v, want ErrIncompatible of both packages", err)
+	}
+}
+
 func TestRecentPagesBackwardBySequence(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, tempPath(t))

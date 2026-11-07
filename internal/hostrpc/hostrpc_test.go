@@ -53,7 +53,8 @@ func wireMessages() map[string]any {
 		"response": Response{Protocol: Protocol, Error: &Error{Code: CodeFailed, Message: "m"},
 			Hello: &Hello{Protocol: Protocol, Version: "dev", ContextVersion: 13, SemanticsVersion: 4, PID: 1, Bindings: []Pair{{API: "anthropic-messages", Provider: "https://p.test"}}},
 			Ack:   &Ack{Replayed: true, Differs: []string{"model", "limits.max_steps"}, Run: run}, Run: &run,
-			Page: &Page{Next: "run_1:9", More: true, Halted: true, Items: []Item{{Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
+			Page: &Page{Next: "run_1:9", More: true, Halted: true, Items: []Item{{Seq: 2, Step: 1, Kind: "decided",
+				Command: `canti:handover-carry {"text":"t","carry":[{"step":1}]}`, Purpose: "p", Action: "handover_carry"}, {Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
 				Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
 				Outcome: &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Handover: true},
 				Window:  5, StopReason: "cancelled", Failure: "f", Truncated: true}}},
@@ -66,6 +67,8 @@ func wireMessages() map[string]any {
 var earlierRecords = map[string]string{
 	"v1/request.json":  "6935e54e3438d5e48bd05f316a41342079ccff8b6e72fd450552b64af47b1731",
 	"v1/response.json": "b1aa8ac298869cabfab8b5a146fe77049cc17b47e4f62646fc65a41bbd256f82",
+	"v2/request.json":  "80155d48c7eb40b81d4f6eb23ea95041645b7a862831ac633fb84cae19801662",
+	"v2/response.json": "233776096192839e2d9dd65e6a5395daf950bd3ea3dede87a7e68495e3c214ff",
 }
 
 // TestWireMessagesKeepTheirEncoding requires that every message encodes as
@@ -339,73 +342,84 @@ func TestAServerRefusesAnotherProtocolAndUnknownFields(t *testing.T) {
 	}
 }
 
-// TestARequestOfProtocolOneIsRefusedBeforeItActs requires that the recorded
-// version-1 submission, keys included, sent to this host is refused naming
-// both versions, the host's process, and a remedy that works, and that it
-// admits no run and shows no key in the answer or the host's log.
-func TestARequestOfProtocolOneIsRefusedBeforeItActs(t *testing.T) {
-	var log syncBuffer
-	h, _, c, _ := servingWith(t, slog.New(slog.NewTextHandler(&log, nil)))
-	v1, err := os.ReadFile(filepath.Join("testdata", "v1", "request.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, err := net.Dial("unix", c.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	conn.Write(v1)
-	answer, _ := io.ReadAll(conn)
-	var r Response
-	if err := json.Unmarshal(answer, &r); err != nil || r.Error == nil || r.Error.Code != CodeProtocol || r.Ack != nil ||
-		!strings.Contains(r.Error.Message, fmt.Sprintf("the client speaks host protocol 1 and this host, pid %d, speaks %d", os.Getpid(), Protocol)) ||
-		!strings.Contains(r.Error.Message, fmt.Sprintf("kill -TERM %d", os.Getpid())) {
-		t.Fatalf("a version-1 submission was answered %s, %v", answer, err)
-	}
-	if strings.Contains(string(answer)+log.String(), "test-key") {
-		t.Fatal("a key shows in the answer or the log")
-	}
-	if v, err := h.View(context.Background(), ""); err == nil {
-		t.Fatalf("a run was admitted: %+v", v.Run)
+// TestARequestOfAnEarlierProtocolIsRefusedBeforeItActs requires that the
+// recorded submission of every earlier version, keys included, sent to this
+// host is refused naming both versions, the host's process, and a remedy that
+// works, and that it admits no run and shows no key in the answer or the
+// host's log.
+func TestARequestOfAnEarlierProtocolIsRefusedBeforeItActs(t *testing.T) {
+	for v := 1; v < Protocol; v++ {
+		t.Run(fmt.Sprintf("v%d", v), func(t *testing.T) {
+			var log syncBuffer
+			h, _, c, _ := servingWith(t, slog.New(slog.NewTextHandler(&log, nil)))
+			request, err := os.ReadFile(filepath.Join("testdata", fmt.Sprintf("v%d", v), "request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := net.Dial("unix", c.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			conn.Write(request)
+			answer, _ := io.ReadAll(conn)
+			var r Response
+			if err := json.Unmarshal(answer, &r); err != nil || r.Error == nil || r.Error.Code != CodeProtocol || r.Ack != nil ||
+				!strings.Contains(r.Error.Message, fmt.Sprintf("the client speaks host protocol %d and this host, pid %d, speaks %d", v, os.Getpid(), Protocol)) ||
+				!strings.Contains(r.Error.Message, fmt.Sprintf("kill -TERM %d", os.Getpid())) {
+				t.Fatalf("a version-%d submission was answered %s, %v", v, answer, err)
+			}
+			if strings.Contains(string(answer)+log.String(), "test-key") {
+				t.Fatal("a key shows in the answer or the log")
+			}
+			if v, err := h.View(context.Background(), ""); err == nil {
+				t.Fatalf("a run was admitted: %+v", v.Run)
+			}
+		})
 	}
 }
 
-// TestAClientRefusesAHostOfProtocolOne requires that a client facing a host
-// that answers in protocol 1 reports both versions, the host's process, and
-// a remedy that works, before it sends anything that carries a key.
-func TestAClientRefusesAHostOfProtocolOne(t *testing.T) {
-	dir, err := os.MkdirTemp("", "hostrpc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, SocketName)
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	requests := make(chan string, 8)
-	go func() {
-		for {
-			conn, err := ln.Accept()
+// TestAClientRefusesAHostOfAnEarlierProtocol requires that a client facing a
+// host that answers in any earlier protocol reports both versions, the host's
+// process, and a remedy that works, before it sends anything that carries a
+// key.
+func TestAClientRefusesAHostOfAnEarlierProtocol(t *testing.T) {
+	for v := 1; v < Protocol; v++ {
+		t.Run(fmt.Sprintf("v%d", v), func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "hostrpc")
 			if err != nil {
-				return
+				t.Fatal(err)
 			}
-			line, _ := bufio.NewReader(conn).ReadString('\n')
-			requests <- line
-			io.WriteString(conn, `{"protocol":1,"error":{"code":"protocol","message":"the client speaks host protocol 2 and this host, pid 4242, speaks 1; stop it with \"canti host -stop\" once it drives nothing, or use the canti that started it"}}`+"\n")
-			conn.Close()
-		}
-	}()
-	_, err = (&Client{Path: path}).Hello(context.Background())
-	if !errors.Is(err, ErrProtocol) || !strings.Contains(err.Error(), "process 4242, speaks host protocol 1 and this canti speaks 2") ||
-		!strings.Contains(err.Error(), `"kill -TERM 4242"`) || !strings.Contains(err.Error(), "never replaced") {
-		t.Fatalf("hello to a version-1 host = %v", err)
-	}
-	if got := <-requests; strings.Contains(got, "key") || !strings.Contains(got, `"op":"hello"`) {
-		t.Fatalf("the client sent %s", got)
+			defer os.RemoveAll(dir)
+			path := filepath.Join(dir, SocketName)
+			ln, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			requests := make(chan string, 8)
+			answer := fmt.Sprintf(`{"protocol":%d,"error":{"code":"protocol","message":"the client speaks host protocol %d and this host, pid 4242, speaks %d; stop it with \"canti host -stop\" once it drives nothing, or use the canti that started it"}}`+"\n", v, Protocol, v)
+			go func() {
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					line, _ := bufio.NewReader(conn).ReadString('\n')
+					requests <- line
+					io.WriteString(conn, answer)
+					conn.Close()
+				}
+			}()
+			_, err = (&Client{Path: path}).Hello(context.Background())
+			if !errors.Is(err, ErrProtocol) || !strings.Contains(err.Error(), fmt.Sprintf("process 4242, speaks host protocol %d and this canti speaks %d", v, Protocol)) ||
+				!strings.Contains(err.Error(), `"kill -TERM 4242"`) || !strings.Contains(err.Error(), "never replaced") {
+				t.Fatalf("hello to a version-%d host = %v", v, err)
+			}
+			if got := <-requests; strings.Contains(got, "key") || !strings.Contains(got, `"op":"hello"`) {
+				t.Fatalf("the client sent %s", got)
+			}
+		})
 	}
 }
 

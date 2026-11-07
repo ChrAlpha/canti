@@ -3,6 +3,7 @@ package harness
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ChrAlpha/canti/core"
 )
@@ -77,11 +78,10 @@ func checkPerformed(t Transition, a Action, w Window) error {
 		ok = o.Status == OutcomeFailed && o.Detail == problemText(a.Invalid) && o.Retrieval == nil
 	case a.Name == ActionRetrieve:
 		ok = o.Status != OutcomeRefused && o.Handover == nil
-	case a.Name == ActionHandover:
+	case a.Name.handover():
 		ok = o.Status != OutcomeRefused && o.Retrieval == nil
 		if ok && o.Status == OutcomeDone {
-			text, err := a.arguments(t.From.Decision.Payload)
-			ok = err == nil && w.Requested && o.Handover != nil && *o.Handover == Handover{RunID: t.From.RunID, FirstStep: w.FirstStep, Text: text}
+			ok = w.Requested && acceptedHandover(t, a, w.FirstStep)
 		}
 	default:
 		ok = false
@@ -93,4 +93,24 @@ func checkPerformed(t Transition, a Action, w Window) error {
 		return fmt.Errorf("harness: the committed window %+v does not follow from the window %+v of its request", t.Facts.Window, w)
 	}
 	return nil
+}
+
+// acceptedHandover reports whether the handover of t's done outcome is one
+// that performing a, under a window whose first step is first, accepts: for
+// the run and window of t, with the verbatim text of a plain handover and no
+// carry, or, for a carry, whose arguments only performance decodes, a text
+// and a carry valid for the next step whose transitions precede t.
+func acceptedHandover(t Transition, a Action, first int) bool {
+	h := t.Facts.Outcome.Handover
+	if h == nil || h.RunID != t.From.RunID || h.FirstStep != first {
+		return false
+	}
+	if a.Name == ActionHandover {
+		text, err := a.arguments(t.From.Decision.Payload)
+		return err == nil && h.Text == text && len(h.Carry) == 0
+	}
+	if strings.TrimSpace(h.Text) == "" || len(h.Carry) == 0 || validateCarry(h.Carry, t.From.Step+1) != nil {
+		return false
+	}
+	return h.Carry[len(h.Carry)-1].SourceSeq < t.Seq
 }

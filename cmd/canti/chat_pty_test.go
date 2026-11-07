@@ -734,10 +734,10 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 	f := newFixture(t, nil)
 	gate := make(chan struct{})
-	f.model.decide = func(int, string) (core.Decision, error) {
+	f.model.decideWith(func(int, string) (core.Decision, error) {
 		<-gate
 		return core.Decision{Kind: core.Return, Payload: "answered after the hangup"}, nil
-	}
+	})
 	f.autoHost()
 	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-host", "auto")
 	p.await(t, "ready", 0)

@@ -8,6 +8,7 @@ type ContextCapture struct {
 	SessionNavigation string                 `json:",omitempty"`
 	Retrievals        []ContextRetrieval     `json:",omitempty"`
 	Sources           []ContextSource        `json:",omitempty"`
+	Carried           []EvidenceRef          `json:",omitempty"`
 	Handover          HandoverCheck
 }
 
@@ -15,6 +16,7 @@ type ContextBytes struct {
 	Total, Limit, System, Goal, Constraints, Environment int
 	Session, Window, Handover, StepHeader, EmptySteps    int
 	Progress, HandoverRequired, Repair                   int
+	Carry                                                int                `json:",omitempty"`
 	Steps                                                []ContextStepBytes `json:",omitempty"`
 }
 

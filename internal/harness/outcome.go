@@ -143,12 +143,13 @@ func (r StepRecord) acceptedHandover() *Handover {
 
 // windowAfter returns the window that the step after step renders, when a
 // local action performed at step, under the window source of its request,
-// ended with outcome o: the window an accepted handover opens; otherwise,
+// ended with outcome o: the window an accepted handover opens, with the
+// evidence it carries; otherwise,
 // when source requires a handover, source with one more failure; and nil
 // when the window carries on unchanged.
 func windowAfter(step int, source Window, o Outcome) *Window {
 	if o.Status == OutcomeDone && o.Handover != nil {
-		return &Window{FirstStep: step + 1, SourceStep: step, Handover: o.Handover.Text}
+		return &Window{FirstStep: step + 1, SourceStep: step, Handover: o.Handover.Text, Carry: o.Handover.Carry}
 	}
 	if source.Requested {
 		source.Failures++
@@ -158,4 +159,6 @@ func windowAfter(step int, source Window, o Outcome) *Window {
 }
 
 // sameWindow reports whether a and b are both absent or equal.
-func sameWindow(a, b *Window) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
+func sameWindow(a, b *Window) bool {
+	return a == nil && b == nil || a != nil && b != nil && a.Equal(*b)
+}

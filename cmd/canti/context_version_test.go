@@ -69,8 +69,9 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 func contextRules(t *testing.T) string {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "context version %d\nactions: a payload beginning, after any of %q, with %q, read as %q or %q, then the end or one of those bytes\nprompt limits %+v\n",
-		host.ContextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix), harness.DefaultPromptLimits())
+	fmt.Fprintf(&b, "context version %d\nactions: a payload beginning, after any of %q, with %q, read as %q, %q, or %q, then the end or one of those bytes\nprompt limits %+v\n",
+		host.ContextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix),
+		strings.TrimSpace(harness.HandoverCarryPrefix), harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
@@ -276,21 +277,58 @@ func corpusRules(t *testing.T) string {
 	}
 	var b strings.Builder
 	for _, sc := range scenarios {
-		files, err := os.ReadDir(filepath.Join(root, sc.Name()))
+		fmt.Fprintf(&b, "corpus %s: sha256 %s\n", sc.Name(), corpusDigest(t, filepath.Join(root, sc.Name())))
+	}
+	return b.String()
+}
+
+// corpusDigest digests the files of the scenario directory dir as the
+// recorded context rules do.
+func corpusDigest(t *testing.T, dir string) string {
+	t.Helper()
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	for _, f := range files {
+		data, err := os.ReadFile(filepath.Join(dir, f.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		h := sha256.New()
-		for _, f := range files {
-			data, err := os.ReadFile(filepath.Join(root, sc.Name(), f.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
-		}
-		fmt.Fprintf(&b, "corpus %s: sha256 %x\n", sc.Name(), h.Sum(nil))
+		fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
 	}
-	return b.String()
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// TestEarlierVersionsKeepTheirCorpus requires that every scenario a later
+// context version renders anew keeps, under frozen-requests-v<version>, the
+// requests and journal that its earlier version froze: the files whose
+// digest that version's recorded rules hold, never rewritten.
+func TestEarlierVersionsKeepTheirCorpus(t *testing.T) {
+	root := filepath.Join("..", "..", "internal", "harness", "testdata")
+	dirs, err := filepath.Glob(filepath.Join(root, "frozen-requests-v*"))
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no retained corpus of an earlier version: %v", err)
+	}
+	for _, dir := range dirs {
+		version := strings.TrimPrefix(filepath.Base(dir), "frozen-requests-v")
+		rules, err := os.ReadFile(filepath.Join("testdata", "context-v"+version+".txt"))
+		if err != nil {
+			t.Fatalf("retained corpus %s has no recorded context version: %v", dir, err)
+		}
+		scenarios, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sc := range scenarios {
+			current := corpusDigest(t, filepath.Join(root, "frozen-requests", sc.Name()))
+			retained := corpusDigest(t, filepath.Join(dir, sc.Name()))
+			if !strings.Contains(string(rules), fmt.Sprintf("corpus %s: sha256 %s\n", sc.Name(), retained)) || retained == current {
+				t.Errorf("version %s retains %s as sha256 %s, which its rules do not record or the current corpus still holds", version, sc.Name(), retained)
+			}
+		}
+	}
 }
 
 // sessionRules records the first request that a run of a session freezes
@@ -372,6 +410,10 @@ func everyBlock(run harness.Run) harness.Frame {
 	list := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "list", Path: "/canti/runs"}, Entries: []string{"r/"}, NextOffset: 1}
 	discover := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/r/steps", Reason: "find", Query: "FAIL"},
 		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000003/preview", Length: 4, SHA256: strings.Repeat("b", 64)}}, Evidence: []string{"FAIL"}, More: true, NextCursor: "c"}
+	carriedRead := harness.CarriedEvidence{Ref: harness.EvidenceRef{SourceSeq: 5, Step: 1, Length: 5, SHA256: strings.Repeat("a", 64)},
+		Operation: "read", Path: "/canti/runs/r/steps/00000001/preview", More: true, NextOffset: 5, Bytes: "hello"}
+	carriedCandidate := harness.CarriedEvidence{Ref: harness.EvidenceRef{SourceSeq: 9, Step: 2, Source: 1, Length: 7, SHA256: strings.Repeat("b", 64)},
+		Operation: "discover", Path: "/canti/runs/r/steps/00000002/command", Offset: 12, Incomplete: true, Bytes: "``` FAIL"[:7]}
 	steps := []harness.StepRecord{
 		{Step: 3, Command: "go test ./...", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "FAIL ```",
 			Output: harness.ArtifactRef{Path: "effect_x/output", Bytes: 8, Complete: true, Available: true}}},
@@ -385,8 +427,10 @@ func everyBlock(run harness.Run) harness.Frame {
 	}
 	return harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 10, MaxSteps: 0, Attempt: 2, MaxAttempts: 3,
 		Earlier: 2, Steps: steps, RunID: run.ID,
-		Rejected:         &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
-		Window:           &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1},
+		Rejected: &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
+		Window: &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1,
+			Carry: []harness.EvidenceRef{carriedRead.Ref, carriedCandidate.Ref}},
+		Carried:          []harness.CarriedEvidence{carriedRead, carriedCandidate},
 		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096,
 		SessionContext: "Run run_0 (session sequence 1; source /canti/runs/run_0/goal and result; returned):\n"}
 }

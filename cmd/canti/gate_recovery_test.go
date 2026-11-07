@@ -540,7 +540,7 @@ func TestGateCrashAtLocalActionCommits(t *testing.T) {
 						if w := performed[0].Facts.Window; w == nil || w.FirstStep != 3 || w.SourceStep != 2 {
 							t.Fatalf("the handover committed the window %+v", w)
 						}
-						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.Window == nil || *last.Facts.Request.Window != *performed[0].Facts.Window {
+						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.Window == nil || !last.Facts.Request.Window.Equal(*performed[0].Facts.Window) {
 							t.Fatalf("the next request renders %+v, not the committed window", last.Facts.Request)
 						}
 					}

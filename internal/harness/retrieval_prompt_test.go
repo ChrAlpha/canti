@@ -72,7 +72,7 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			if strings.Contains(p, "Preview:") || !strings.Contains(p, `"next_offset":321`) || !strings.Contains(p, `"more":true`) {
 				t.Fatalf("redundant preview or missing continuation: %s", p)
 			}
-			want := "Source " + r.Query.Path + ":\nBytes [123,153), sha256 " + strings.Repeat("a", 64) + ":\nUse 47 seconds.\n```\nExact tail.\n"
+			want := "Path " + r.Query.Path + ":\nSource 0: bytes [123,153), sha256 " + strings.Repeat("a", 64) + ":\nUse 47 seconds.\n```\nExact tail.\n"
 			if operation != "list" && (!strings.Contains(p, want) || strings.Count(p, strings.Repeat("a", 64)) != 1) {
 				t.Fatalf("original evidence was changed or repeated: %s", p)
 			}

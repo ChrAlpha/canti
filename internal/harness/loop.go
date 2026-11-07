@@ -34,6 +34,13 @@ type LoopConfig struct {
 	WindowSteps    int
 	WindowBytes    int
 	HandoverBytes  int
+	// carryMarginStep is a private test seam, set only through
+	// SetCarryMarginStep in tests: a carry must also leave one maximal step
+	// of work capacity, beyond the step the reserve fits. It is the arm of
+	// the admission comparison in BenchmarkWorkingSet that was measured and
+	// not adopted; production never sets it, so the shipped rule is that a
+	// carry leaves positive work capacity.
+	carryMarginStep bool
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.
