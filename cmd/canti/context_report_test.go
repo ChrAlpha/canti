@@ -14,6 +14,7 @@ import (
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
@@ -241,8 +242,8 @@ func TestContextNamesTheDecoderOfTheRunsOwnRulesOnly(t *testing.T) {
 	if e := rejection(); e.Outcome != "protocol_rejected" || e.Failure != "core: invalid decision: purpose must be a string" {
 		t.Fatalf("current run: %+v", e)
 	}
-	setContextVersion(t, f.state, id, strconv.Itoa(contextVersion-1))
+	setContextVersion(t, f.state, id, strconv.Itoa(host.ContextVersion-1))
 	if e := rejection(); e.Outcome != "protocol_rejected" || e.Failure != "" {
-		t.Fatalf("run of version %d: %+v", contextVersion-1, e)
+		t.Fatalf("run of version %d: %+v", host.ContextVersion-1, e)
 	}
 }

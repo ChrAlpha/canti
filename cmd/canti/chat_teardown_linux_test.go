@@ -105,7 +105,7 @@ func TestChatTUITeardownCancellation(t *testing.T) {
 			finished := make(chan struct{})
 			var result chatDone
 			go func() {
-				result.code, result.err = runChatTUI("teardown", nil, submit, interrupt, nil, new(chatDisplay), nil, slave, terminal)
+				result.code, result.err = runChatTUI("teardown", nil, submit, interrupt, nil, nil, new(chatDisplay), nil, slave, terminal)
 				close(finished)
 			}()
 			t.Cleanup(func() {

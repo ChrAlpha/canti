@@ -20,12 +20,13 @@ import (
 	"github.com/ChrAlpha/canti/internal/archive"
 	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 var recordContext = flag.Bool("record-context", false, "record the context rules of a context version that has none")
 
 // TestContextVersionPinsItsRules requires that the rules a stored context
-// version stands for are those recorded for contextVersion: the rendering of
+// version stands for are those recorded for host.ContextVersion: the rendering of
 // every system prompt variant in every request transport and of every block
 // kind, the prompt limits, the defaults the loop applies, every term of the
 // context accounting at the default flags and at their extremes, what the
@@ -34,7 +35,7 @@ var recordContext = flag.Bool("record-context", false, "record the context rules
 // scenario, which may observe a changed rule, requires a new context version,
 // whose rules -record-context records once; it never rewrites a version.
 func TestContextVersionPinsItsRules(t *testing.T) {
-	file := filepath.Join("testdata", fmt.Sprintf("context-v%d.txt", contextVersion))
+	file := filepath.Join("testdata", fmt.Sprintf("context-v%d.txt", host.ContextVersion))
 	got := contextRules(t)
 	want, err := os.ReadFile(file)
 	switch {
@@ -44,7 +45,7 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 		}
 		return
 	case err != nil:
-		t.Fatalf("context version %d has no recorded rules: %v", contextVersion, err)
+		t.Fatalf("context version %d has no recorded rules: %v", host.ContextVersion, err)
 	}
 	if got == string(want) {
 		return
@@ -61,15 +62,15 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 			changed = append(changed, "+ "+line)
 		}
 	}
-	t.Fatalf("the context rules are not those of context version %d, which runs of it store; bump contextVersion and record the rules of the new version with -record-context. Changed:\n%s",
-		contextVersion, strings.Join(changed, "\n"))
+	t.Fatalf("the context rules are not those of context version %d, which runs of it store; bump host.ContextVersion and record the rules of the new version with -record-context. Changed:\n%s",
+		host.ContextVersion, strings.Join(changed, "\n"))
 }
 
 func contextRules(t *testing.T) string {
 	t.Helper()
 	var b strings.Builder
 	fmt.Fprintf(&b, "context version %d\nactions: a payload beginning, after any of %q, with %q, read as %q or %q, then the end or one of those bytes\nprompt limits %+v\n",
-		contextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix), harness.DefaultPromptLimits())
+		host.ContextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix), harness.DefaultPromptLimits())
 	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
 	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
@@ -78,11 +79,11 @@ func contextRules(t *testing.T) string {
 		t.Fatal(err)
 	}
 	fmt.Fprintf(&b, "loop defaults: handover %d, total %d\n", fit.Handover, fit.Limit)
-	transports := []config{
-		{API: apiMessages, DecisionFormat: "text", Effort: "high", Structured: true, Fallbacks: true}, {API: apiMessages, DecisionFormat: "text"},
-		{API: apiMessages, DecisionFormat: "tool", Effort: "high", Fallbacks: true},
-		{API: apiResponses, DecisionFormat: "text", Effort: "high", Structured: true}, {API: apiResponses, DecisionFormat: "text"},
-		{API: apiResponses, DecisionFormat: "tool", Effort: "high"},
+	transports := []host.RunConfig{
+		{API: host.APIMessages, DecisionFormat: "text", Effort: "high", Structured: true, Fallbacks: true}, {API: host.APIMessages, DecisionFormat: "text"},
+		{API: host.APIMessages, DecisionFormat: "tool", Effort: "high", Fallbacks: true},
+		{API: host.APIResponses, DecisionFormat: "text", Effort: "high", Structured: true}, {API: host.APIResponses, DecisionFormat: "text"},
+		{API: host.APIResponses, DecisionFormat: "tool", Effort: "high"},
 	}
 	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
 		for _, c := range transports {
@@ -94,7 +95,7 @@ func contextRules(t *testing.T) string {
 				t.Fatal(err)
 			}
 			c.Model, c.MaxTokens = "test-model", 16000
-			m, err := newModel(c, "https://model.test", credential{anthropicKey: "key", openaiKey: "key"})
+			m, err := newModel(c, "https://model.test", host.Keys{AnthropicKey: "key", OpenAIKey: "key"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -119,8 +120,8 @@ func contextRules(t *testing.T) string {
 		{"-api", "anthropic-messages", "-model", "test-model", "-effort", "max", "-fallbacks"},
 		{"-api", "openai-responses", "-model", "test-model", "-max-tokens", "4096", "-effort", "none", "-structured=false", "-decision-format", "tool", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
 		s := parseSpec(t, flags...)
-		loop := contextConfig(s.config, s.budget)
-		fit, err := harness.ContextFit(loop, run, s.limits)
+		loop := host.ContextConfig(s.Config, s.Budget)
+		fit, err := harness.ContextFit(loop, run, s.Limits)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,11 +132,11 @@ func contextRules(t *testing.T) string {
 			flags = []string{"-image", fmt.Sprintf("%d bytes, %q first", len(flags[1]), flags[1][:min(len(flags[1]), 7)])}
 		}
 		fmt.Fprintf(&b, "run %q: %+v, required %d\n", flags, fit, fit.Required())
-		if env := environment(s.config, s.budget); env != previous {
+		if env := host.Environment(s.Config, s.Budget); env != previous {
 			fmt.Fprintf(&b, "  environment %s\n", digest(env))
 			previous = env
 		}
-		c := s.config
+		c := s.Config
 		if m := fmt.Sprintf("api %q, model %q, max tokens %d, effort %q, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
 			c.API, c.Model, c.MaxTokens, c.Effort, c.Structured, c.DecisionFormat, c.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
 			fmt.Fprintf(&b, "  %s\n", m)

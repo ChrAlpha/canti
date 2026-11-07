@@ -28,6 +28,7 @@ import (
 	"github.com/ChrAlpha/canti/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 // TestMain runs the binary as the CLI when CANTI_TEST_MAIN=1. There
@@ -38,6 +39,13 @@ import (
 // the loop, and CANTI_TEST_SETUP=checked a session input after its checks,
 // after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
+	if os.Getenv("CANTI_TEST_MAIN") != "1" && len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		// A process started as a canti command without CANTI_TEST_MAIN,
+		// as a host started from inside a test process would be, would run
+		// the tests again; refuse instead.
+		fmt.Fprintf(os.Stderr, "canti.test: started as canti %s without CANTI_TEST_MAIN=1\n", os.Args[1])
+		os.Exit(2)
+	}
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
 			when, kind, _ := strings.Cut(spec, ":")
@@ -57,6 +65,13 @@ func TestMain(m *testing.M) {
 		}
 		if os.Getenv("CANTI_TEST_SETUP") == "checked" {
 			inputChecked = func() { awaitSignal(os.Getenv("CANTI_TEST_BLOCKED")) }
+		}
+		if point, ok := strings.CutPrefix(os.Getenv("CANTI_TEST_SETUP"), "point:"); ok {
+			checkpoint = func(p string) {
+				if p == point {
+					awaitRemoval(os.Getenv("CANTI_TEST_BLOCKED"))
+				}
+			}
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 	}
@@ -100,6 +115,18 @@ func awaitSignal(marker string) {
 	os.WriteFile(marker, nil, 0o600)
 	<-sig
 	signal.Stop(sig)
+}
+
+// awaitRemoval creates marker and returns once it has been removed: a pause
+// that, unlike awaitSignal, leaves the process's own signal handling alone.
+func awaitRemoval(marker string) {
+	os.WriteFile(marker, nil, 0o600)
+	for {
+		if _, err := os.Stat(marker); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func kill() {
@@ -269,7 +296,7 @@ func TestRunsOfAnEarlierRevisionAreRefused(t *testing.T) {
 // in a session, is admitted after it.
 func TestRunsOfAnotherContextVersionStayReadableAndClosable(t *testing.T) {
 	for _, tc := range []struct{ name, version string }{{"missing", ""}, {"zero", "0"},
-		{"earlier", strconv.Itoa(contextVersion - 1)}, {"later", strconv.Itoa(contextVersion + 1)}} {
+		{"earlier", strconv.Itoa(host.ContextVersion - 1)}, {"later", strconv.Itoa(host.ContextVersion + 1)}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
@@ -491,7 +518,7 @@ func refusesResume(stderr, id, version string) bool {
 		version = "none"
 	}
 	return strings.Contains(stderr, fmt.Sprintf("run %s is ", id)) &&
-		strings.Contains(stderr, fmt.Sprintf(" and uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", version, contextVersion, id))
+		strings.Contains(stderr, fmt.Sprintf(" and uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", version, host.ContextVersion, id))
 }
 
 // setContextVersion rewrites the stored config of run id to record context
@@ -1160,11 +1187,11 @@ func TestDefaultStateDirectory(t *testing.T) {
 	}
 }
 
-func parseSpec(t *testing.T, args ...string) spec {
+func parseSpec(t *testing.T, args ...string) host.Spec {
 	t.Helper()
-	var s spec
+	var s host.Spec
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	s.register(fs)
+	registerSpec(fs, &s)
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
@@ -1173,25 +1200,25 @@ func parseSpec(t *testing.T, args ...string) spec {
 
 // runSpec is parseSpec with the model API and model of a fixture, which
 // every run names.
-func runSpec(t *testing.T, args ...string) spec {
+func runSpec(t *testing.T, args ...string) host.Spec {
 	t.Helper()
 	return parseSpec(t, append(slices.Clone(fixtureModel), args...)...)
 }
 
 func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
-	want := spec{
-		config: config{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			MaxTokens: 16000, Structured: true, ContextBytes: 256 << 10, ContextVersion: contextVersion, HandoverBytes: 2048},
-		budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
-		limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
+	want := host.Spec{
+		Config: host.RunConfig{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
+			MaxTokens: 16000, Structured: true, ContextBytes: 256 << 10, ContextVersion: host.ContextVersion, HandoverBytes: 2048},
+		Budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
+		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}
 	if s != want {
 		t.Errorf("defaults = %+v\nwant %+v", s, want)
 	}
 	l := harness.DefaultPromptLimits()
 	l.Total = 256 << 10
-	if got := promptLimits(s.config); got != l {
+	if got := host.PromptLimits(s.Config); got != l {
 		t.Errorf("prompt limits = %+v\nwant %+v", got, l)
 	}
 }
@@ -1201,9 +1228,9 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		"-output-limit", "4096", "-api", "anthropic-messages", "-model", "claude-test", "-max-tokens", "900", "-effort", "medium", "-structured=false", "-fallbacks=false",
 		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
-	s.config.Workspace = "/work"
+	s.Config.Workspace = "/work"
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
-	run, initial, err := newRun("goal", "constraints", s, now)
+	run, initial, err := host.NewRun("goal", "constraints", s, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1217,23 +1244,23 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if run.Goal != "goal" || run.Constraints != "constraints" || run.Budget != budget || !run.Created.Equal(now) {
 		t.Errorf("run = %+v", run)
 	}
-	c, err := decodeConfig(run, "/work")
-	if err != nil || c != s.config {
-		t.Fatalf("stored config = %+v, %v\nwant %+v", c, err, s.config)
+	c, err := host.DecodeConfig(run, "/work")
+	if err != nil || c != s.Config {
+		t.Fatalf("stored config = %+v, %v\nwant %+v", c, err, s.Config)
 	}
-	x := executorConfig(c, "/state")
+	x := host.ExecutorConfig(c, "/state")
 	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
 		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, PreviewLimit: harness.DefaultPromptLimits().Preview, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
-	if l := promptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {
+	if l := host.PromptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {
 		t.Errorf("prompt limits = %+v", l)
 	}
-	m := anthropicConfig(c, "http://model.test", credential{anthropicToken: "token"})
+	m := host.AnthropicConfig(c, "http://model.test", host.Keys{AnthropicToken: "token"})
 	if m != (anthropic.Config{BaseURL: "http://model.test", AuthToken: "token", Model: "claude-test", MaxTokens: 900, Effort: "medium"}) {
 		t.Errorf("model config = %+v", m)
 	}
-	env := environment(c, run.Budget)
+	env := host.Environment(c, run.Budget)
 	for _, want := range []string{"alpine:3.23", docker.WorkDir, "bridge", "512m", "1.5", "64", "1m30s"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("environment %q lacks %q", env, want)
@@ -1242,14 +1269,39 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if strings.Contains(env, archive.ArtifactsRoot) {
 		t.Errorf("environment %q names the artifact directory, which the prompt states", env)
 	}
-	if _, _, err := newRun("goal", "", runSpec(t, "-job-timeout", "-1s"), now); err == nil {
+	if _, _, err := host.NewRun("goal", "", runSpec(t, "-job-timeout", "-1s"), now); err == nil {
 		t.Error("a negative budget was accepted")
 	}
-	if _, err := decodeConfig(run, "/elsewhere"); err == nil {
+	if _, err := host.DecodeConfig(run, "/elsewhere"); err == nil {
 		t.Error("a config of another workspace was accepted")
 	}
 	run.Config = []byte(`{"workspace":"/work","unknown":1}`)
-	if _, err := decodeConfig(run, "/work"); err == nil {
+	if _, err := host.DecodeConfig(run, "/work"); err == nil {
 		t.Error("an unknown config field was accepted")
+	}
+}
+
+func TestAResumedRunCallsTheProviderItStores(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if r := f.cli(nil, "run", "-goal", "g", "-once"); r.code != exitActive {
+		t.Fatalf("run: %+v", r)
+	}
+	other := newScriptedModel(t, f.key, map[int]core.Decision{1: {Kind: core.Return, Payload: "elsewhere"}})
+	if r := f.cli(nil, "resume", "-model-url", other.URL); r.code != exitError || !strings.Contains(r.stderr, "calls the model at "+f.model.URL) {
+		t.Fatalf("resume against another provider: %+v", r)
+	}
+	for _, env := range [][]string{{"ANTHROPIC_BASE_URL=" + other.URL}, nil} {
+		r := runCLI(t, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), "resume", "-workspace", f.workspace, "-state", f.state)
+		if r.code != exitError || !strings.Contains(r.stderr, "calls the model at "+f.model.URL+", but the credential given is for anthropic-messages at ") ||
+			strings.Contains(r.stderr, f.key) {
+			t.Fatalf("resume from a terminal whose key is bound to another provider (%q): %+v", env, r)
+		}
+	}
+	if len(other.requests()) != 0 || len(f.model.requests()) != 0 {
+		t.Fatalf("a refused resume sent %d and %d requests", len(f.model.requests()), len(other.requests()))
+	}
+	r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key, "ANTHROPIC_BASE_URL=" + f.model.URL}, "resume", "-workspace", f.workspace, "-state", f.state)
+	if r.code != exitOK || r.stdout != "done\n" || len(other.requests()) != 0 || len(f.model.requests()) != 1 {
+		t.Fatalf("resume from a terminal bound to the run's provider: %+v, calls %d and %d", r, len(f.model.requests()), len(other.requests()))
 	}
 }

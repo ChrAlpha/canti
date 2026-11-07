@@ -42,8 +42,25 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   layout and meta encoding of published step records. It imports only the
   standard library and knows no action protocol; the harness supplies what
   discovery skips.
-- `cmd/canti/` owns flags, exit codes, process signals, the terminal, and the
-  composition of the packages. Run rules, admission, and context fit belong
+- `internal/host/` owns the runtime host of one state directory: its lock
+  and journal for the host's lifetime, admission and input identity, the
+  drives of runs, stop, resolution, shutdown, and the progress projection
+  that readers page and wait on. It holds no run fact of its own, and what it
+  keeps in memory ends with each drive. It owns the configuration a run is
+  created and rebuilt with: its stored config and provider, the context
+  version, and the construction of its loop, model adapter, and executor. It
+  reads no environment: a credential is given to each drive, or to a
+  foreground host for an exact model API and provider, and never stored.
+- `internal/hostrpc/` owns the host protocol: the Unix socket, the wire
+  messages, which embed no journal, core, or host type and are pinned per
+  protocol version in `testdata/v<N>`, and the bounds of a connection. A
+  change to a message needs the next `Protocol` and its own record, which
+  `-record-wire` writes once and never rewrites; the records of earlier
+  versions stay as recorded. The protocol's words for host enumerations are
+  its own tables, and its sample messages use fixed version values, so a
+  context or semantics version change moves no wire record.
+- `cmd/canti/` owns flags, exit codes, process signals, the terminal, the
+  environment, and the composition of the packages. Run rules, admission, and context fit belong
   to `core` and `internal/harness`. A command checks its flags, the layout of
   the workspace and state directories, and the credential before it creates
   the state directory.
@@ -71,7 +88,7 @@ change of harness state it causes, such as the context window, in one
 commits are sequenced: changing either identity scheme is a semantics change
 and must bump `core.SemanticsVersion`.
 
-The context version (`contextVersion` in `cmd/canti/config.go`) names the
+The context version (`ContextVersion` in `internal/host/config.go`) names the
 rules that render and account for a request. Give the next one when, for the
 same committed facts, a rendered byte, a reserve, a cap, an admission floor,
 the window or session selection, or the evidence a request shows changes;

@@ -1,79 +1,36 @@
 package main
 
 import (
-	"bytes"
-	"cmp"
-	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/archive"
-	"github.com/ChrAlpha/canti/internal/harness"
-	"github.com/ChrAlpha/canti/internal/harness/docker"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
-// config is the host wiring stored with a run; every later command rebuilds
-// the executor and model from it.
-type config struct {
-	Workspace      string `json:"workspace"`
-	Image          string `json:"image"`
-	Network        string `json:"network"`
-	Memory         string `json:"memory"`
-	CPUs           string `json:"cpus"`
-	Pids           int    `json:"pids"`
-	OutputLimit    int64  `json:"output_limit"`
-	API            string `json:"api"`
-	Model          string `json:"model"`
-	MaxTokens      int    `json:"max_tokens"`
-	Effort         string `json:"effort,omitempty"`
-	Structured     bool   `json:"structured"`
-	DecisionFormat string `json:"decision_format,omitempty"`
-	Fallbacks      bool   `json:"fallbacks"`
-	ContextBytes   int    `json:"context_bytes"`
-	ContextVersion int    `json:"context_version"`
-	HistoryImports string `json:"history_imports,omitempty"`
-	WindowSteps    int    `json:"window_steps,omitempty"`
-	WindowBytes    int    `json:"window_bytes,omitempty"`
-	HandoverBytes  int    `json:"handover_bytes,omitempty"`
-}
-
-// contextVersion names the rules that decide the context of a run, which
-// testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const contextVersion = 13
-
-type spec struct {
-	config config
-	budget harness.Budget
-	limits core.Limits
-}
-
-func (s *spec) register(fs *flag.FlagSet) {
-	c, b, l := &s.config, &s.budget, &s.limits
-	c.ContextVersion = contextVersion
+// registerSpec registers the flags of a new run on fs, which fill s.
+func registerSpec(fs *flag.FlagSet, s *host.Spec) {
+	c, b, l := &s.Config, &s.Budget, &s.Limits
+	c.ContextVersion = host.ContextVersion
 	fs.StringVar(&c.Image, "image", "debian:bookworm-slim", "container `image` of every job")
 	fs.StringVar(&c.Network, "network", "none", "container `network` of every job")
 	fs.StringVar(&c.Memory, "memory", "2g", "memory `limit` of every job; unlimited if empty")
 	fs.StringVar(&c.CPUs, "cpus", "", "CPU `limit` of every job; unlimited if empty")
 	fs.IntVar(&c.Pids, "pids", 512, "process `limit` of every job; 0 is unlimited")
 	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "output `bytes` retained per job")
-	fs.StringVar(&c.API, "api", "", "model `API` of the run: "+strings.Join(apiNames, " or ")+"; required")
+	fs.StringVar(&c.API, "api", "", "model `API` of the run: "+strings.Join(host.APINames, " or ")+"; required")
 	fs.StringVar(&c.Model, "model", "", "`model` of the run; required")
 	fs.IntVar(&c.MaxTokens, "max-tokens", 16000, "output `tokens` per model response")
 	fs.StringVar(&c.Effort, "effort", "", "model `effort`, a level of the model API; empty sends none, leaving the model's default")
 	fs.BoolVar(&c.Structured, "structured", true, "constrain text responses to the decision schema")
 	fs.StringVar(&c.DecisionFormat, "decision-format", "", "decision transport: text (default) or tool")
-	fs.BoolVar(&c.Fallbacks, "fallbacks", false, "enable server-side refusal fallbacks of "+apiMessages)
+	fs.BoolVar(&c.Fallbacks, "fallbacks", false, "enable server-side refusal fallbacks of "+host.APIMessages)
 	fs.IntVar(&c.ContextBytes, "context-bytes", 256<<10, "prompt `bytes` per model request, including the active handover window and the reserves its next step and handover need")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under "+archive.ImportsRoot)
 	fs.IntVar(&c.WindowSteps, "window-steps", 0, "request handover after this many completed steps per window; 0 disables step trigger")
@@ -87,139 +44,7 @@ func (s *spec) register(fs *flag.FlagSet) {
 	fs.DurationVar(&b.JobTimeout, "job-timeout", 10*time.Minute, "run `time` of one job; 0 is unlimited")
 }
 
-func newRun(goal, constraints string, s spec, now time.Time) (harness.Run, core.State, error) {
-	c, b := s.config, s.budget
-	switch {
-	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
-		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
-	case c.MaxTokens < 1 || c.OutputLimit < 1:
-		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
-	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
-		return harness.Run{}, core.State{}, errors.New("-decision-format must be text or tool")
-	case c.Image == "" || c.Network == "":
-		return harness.Run{}, core.State{}, errors.New("-image and -network must not be empty")
-	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
-		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
-	}
-	if err := checkModel(c); err != nil {
-		return harness.Run{}, core.State{}, err
-	}
-	if c.HistoryImports != "" {
-		var err error
-		c.HistoryImports, err = filepath.Abs(c.HistoryImports)
-		if err == nil {
-			c.HistoryImports, err = filepath.EvalSymlinks(c.HistoryImports)
-		}
-		if err != nil {
-			return harness.Run{}, core.State{}, fmt.Errorf("history imports: %w", err)
-		}
-		info, err := os.Stat(c.HistoryImports)
-		if err != nil {
-			return harness.Run{}, core.State{}, err
-		}
-		if !info.IsDir() {
-			return harness.Run{}, core.State{}, errors.New("history imports must be a directory")
-		}
-	}
-	var id [16]byte
-	rand.Read(id[:])
-	run := harness.Run{ID: "run_" + hex.EncodeToString(id[:]), Goal: goal, Constraints: constraints, Budget: b, Created: now}
-	initial, err := core.NewState(run.ID, s.limits)
-	if err != nil {
-		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
-	}
-	fit, err := harness.ContextFit(contextConfig(c, b), run, s.limits)
-	if err == nil {
-		err = fit.Check()
-	}
-	if err != nil {
-		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes: %w", err)
-	}
-	run.Config, err = json.Marshal(c)
-	return run, initial, err
-}
-
-// contextConfig is the loop configuration that decides the context of a run
-// of c with budget b; a loop adds the paths of its state directory.
-func contextConfig(c config, b harness.Budget) harness.LoopConfig {
-	return harness.LoopConfig{
-		Environment: environment(c, b), Limits: promptLimits(c),
-		Reader: &archive.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
-		DecisionTool: c.DecisionFormat == "tool",
-	}
-}
-
-// decodeConfig returns the stored config of run, which must belong to
-// workspace.
-func decodeConfig(run harness.Run, workspace string) (config, error) {
-	var c config
-	d := json.NewDecoder(bytes.NewReader(run.Config))
-	d.DisallowUnknownFields()
-	if err := d.Decode(&c); err != nil {
-		return c, fmt.Errorf("run %s has an unreadable config: %w; runs of an earlier revision are not supported, so use a fresh -state", run.ID, err)
-	}
-	if c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool" {
-		return c, fmt.Errorf("run %s has an unsupported decision format %q", run.ID, c.DecisionFormat)
-	}
-	if c.Workspace != workspace {
-		return c, fmt.Errorf("run %s belongs to workspace %s, not %s", run.ID, c.Workspace, workspace)
-	}
-	return c, nil
-}
-
-// unresumable names, for run id of config c, why this binary does not
-// resume it and how to close it, unless c records contextVersion.
-func unresumable(id string, c config) string {
-	if c.ContextVersion == contextVersion {
-		return ""
-	}
-	stored := "none"
-	if c.ContextVersion != 0 {
-		stored = strconv.Itoa(c.ContextVersion)
-	}
-	return fmt.Sprintf("uses context version %s, which this canti, of context version %d, does not resume; stop it with \"canti stop -run %s\"", stored, contextVersion, id)
-}
-
-func promptLimits(c config) harness.PromptLimits {
-	l := harness.DefaultPromptLimits()
-	l.Total = c.ContextBytes
-	return l
-}
-
-func historyRoot(state string) string { return filepath.Join(state, "history") }
-
-func executorConfig(c config, state string) docker.Config {
-	return docker.Config{
-		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
-		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit, PreviewLimit: promptLimits(c).Preview,
-		Mounts: []docker.Mount{{Source: historyRoot(state), Target: archive.RunsRoot}},
-	}
-}
-
-// newExecutor creates the step record root that jobs mount and builds the
-// executor.
-func newExecutor(c config, state string) (*docker.Executor, error) {
-	if err := os.MkdirAll(historyRoot(state), 0o755); err != nil {
-		return nil, err
-	}
-	return docker.New(executorConfig(c, state))
-}
-
-func environment(c config, b harness.Budget) string {
-	pids, timeout := "unlimited", "unlimited"
-	if c.Pids > 0 {
-		pids = strconv.Itoa(c.Pids)
-	}
-	if b.JobTimeout > 0 {
-		timeout = b.JobTimeout.String()
-	}
-	return fmt.Sprintf("Each command runs in a new Linux container from image %s with working directory %s, "+
-		"which is read-write and persists between steps. "+
-		"Network: %s. Per-command limits: memory %s, CPUs %s, processes %s, run time %s.",
-		c.Image, docker.WorkDir, c.Network,
-		cmp.Or(c.Memory, "unlimited"), cmp.Or(c.CPUs, "unlimited"), pids, timeout)
-}
-
+// defaultState is the state directory of workspace unless one is named.
 func defaultState(workspace string) (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if !filepath.IsAbs(base) {
@@ -233,14 +58,30 @@ func defaultState(workspace string) (string, error) {
 	return filepath.Join(base, "canti", hex.EncodeToString(sum[:8])), nil
 }
 
-var errNoModel = errors.New("this command does not call the model")
-
-func withoutModel(config) (harness.Model, error) { return noModel{}, nil }
-
-type noModel struct{}
-
-func (noModel) Freeze(harness.Prompt) (harness.Request, error) { return harness.Request{}, errNoModel }
-func (noModel) Decision(harness.Response) []byte               { return nil }
-func (noModel) Complete(context.Context, harness.Request) (harness.Response, error) {
-	return harness.Response{}, errNoModel
+// canonicalImports makes the history imports directory of c, which a flag
+// names relative to this process's working directory, absolute, before
+// anything sends it to a host, which never resolves a relative directory
+// against its own, and canonical, as the workspace is, when it exists. A
+// submission that is surely new, as one without -input is, needs the
+// directory to exist; one with -input may retry an admitted run, whose
+// directory may since be gone, so the host decides it: it answers a retry
+// first, and refuses only a new run whose directory is missing.
+func canonicalImports(c *host.RunConfig, mayRetry bool) error {
+	if c.HistoryImports == "" {
+		return nil
+	}
+	dir, err := filepath.Abs(c.HistoryImports)
+	if err != nil {
+		return fmt.Errorf("-history-imports: %w", err)
+	}
+	canonical, err := host.CanonicalImports(dir)
+	switch {
+	case err == nil:
+		c.HistoryImports = canonical
+	case mayRetry:
+		c.HistoryImports = dir
+	default:
+		return fmt.Errorf("-history-imports: %w", err)
+	}
+	return nil
 }

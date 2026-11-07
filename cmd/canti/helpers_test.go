@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,6 +236,26 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 	return wait()
 }
 
+// hostCommands are the commands that take -host.
+var hostCommands = map[string]bool{"run": true, "chat": true, "resume": true, "stop": true, "resolve": true}
+
+// pinHost returns the arguments of a CLI process with -host embedded after
+// a command that takes -host and names none, so that every test runs the
+// command in its own process unless it names -host auto, or unpinned names
+// the default.
+func pinHost(args []string) []string {
+	if len(args) == 0 || !hostCommands[args[0]] || slices.ContainsFunc(args, func(a string) bool {
+		return a == "-host" || strings.HasPrefix(a, "-host=") || a == unpinned
+	}) {
+		return slices.DeleteFunc(slices.Clone(args), func(a string) bool { return a == unpinned })
+	}
+	return append([]string{args[0], "-host", "embedded"}, args[1:]...)
+}
+
+// unpinned, among the arguments of a CLI process, makes pinHost leave its
+// command on the default -host, and is removed.
+const unpinned = "\x00default-host"
+
 // startCLI starts the CLI process of runCLI and returns it with the wait
 // for its result.
 func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() result) {
@@ -246,12 +267,20 @@ func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() res
 // and, unless it is nil, stdout as its standard output.
 func startCLIWith(t *testing.T, stdin io.Reader, stdout io.Writer, env []string, args ...string) (*exec.Cmd, func() result) {
 	t.Helper()
+	return startCLIIn(t, "", stdin, stdout, env, args...)
+}
+
+// startCLIIn is startCLIWith in working directory dir, or the test's when
+// dir is empty.
+func startCLIIn(t *testing.T, dir string, stdin io.Reader, stdout io.Writer, env []string, args ...string) (*exec.Cmd, func() result) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := exec.CommandContext(ctx, exe, pinHost(args)...)
+	cmd.Dir = dir
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)
@@ -288,6 +317,7 @@ type fixture struct {
 	workspace, state string
 	key              string
 	model            *scriptedModel
+	mu               sync.Mutex // guards output for commands run concurrently
 	output           strings.Builder
 }
 
@@ -348,7 +378,9 @@ func (f *fixture) startIO(stdin io.Reader, stdout io.Writer, env []string, comma
 	cmd, wait := startCLIWith(f.t, stdin, stdout, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 	return cmd, func() result {
 		r := wait()
+		f.mu.Lock()
 		f.output.WriteString(r.stdout + r.stderr)
+		f.mu.Unlock()
 		return r
 	}
 }

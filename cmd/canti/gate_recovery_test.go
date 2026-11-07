@@ -19,6 +19,7 @@ import (
 
 	"github.com/ChrAlpha/canti/core"
 	"github.com/ChrAlpha/canti/internal/harness"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 var stepKinds = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "job_bound", "job_started", "observed"}
@@ -456,7 +457,7 @@ func TestGateSingleWorkspaceWriterAndTakeover(t *testing.T) {
 	_, waitResume := f.start(nil, "resume")
 	_, waitStop := f.start(nil, "stop")
 	for c, r := range map[string]result{"resume": waitResume(), "stop": waitStop()} {
-		if r.code != exitLocked || !strings.Contains(r.stderr, errLocked.Error()) {
+		if r.code != exitLocked || !strings.Contains(r.stderr, host.ErrLocked.Error()) {
 			t.Errorf("concurrent %s = %d\nstderr: %s", c, r.code, r.stderr)
 		}
 	}

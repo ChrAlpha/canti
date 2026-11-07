@@ -47,6 +47,10 @@ type Reply struct {
 	Body   []byte
 }
 
+// DefaultMaxResponseBytes is the response limit of an Endpoint whose Config
+// names none: a longer body is incomplete.
+const DefaultMaxResponseBytes = 8 << 20
+
 // New validates cfg and returns an Endpoint.
 func New(cfg Config) (*Endpoint, error) {
 	if cfg.Timeout < 0 || cfg.MaxResponseBytes < 0 {
@@ -63,7 +67,7 @@ func New(cfg Config) (*Endpoint, error) {
 		cfg.Timeout = 10 * time.Minute
 	}
 	if cfg.MaxResponseBytes == 0 {
-		cfg.MaxResponseBytes = 8 << 20
+		cfg.MaxResponseBytes = DefaultMaxResponseBytes
 	}
 	client := http.Client{}
 	if cfg.Client != nil {

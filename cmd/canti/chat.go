@@ -22,25 +22,28 @@ import (
 
 	"github.com/mattn/go-isatty"
 
-	"github.com/ChrAlpha/canti/core"
-	"github.com/ChrAlpha/canti/internal/harness"
 	"github.com/ChrAlpha/canti/internal/harness/docker"
 	"github.com/ChrAlpha/canti/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/internal/host"
 )
 
 func chatCommand(fs *flag.FlagSet, a *app) action {
 	session := fs.String("session", "", "conversation `ID` to continue (default a new one)")
 	constraints := fs.String("constraints", "", "rules the agent must follow")
 	url := modelURL(fs)
-	var s spec
-	s.register(fs)
+	var s host.Spec
+	registerSpec(fs, &s)
+	hostFlags(fs, a)
 	level := fs.Lookup("log-level")
 	level.DefValue = "warn"
 	level.Value.Set(level.DefValue)
 	return func(ctx context.Context) (int, error) {
+		if err := canonicalImports(&s.Config, false); err != nil {
+			return exitUsage, err
+		}
 		c := &chatSession{a: a, s: s, url: *url, constraints: *constraints}
 		fs.Visit(func(f *flag.Flag) { c.explicit = c.explicit || f.Name == "constraints" })
-		c.s.config.Workspace = a.workspace
+		c.s.Config.Workspace = a.workspace
 		c.id = cmp.Or(*session, strings.ToLower(rand.Text()))
 		if code, err := c.setUp(ctx); err != nil {
 			return code, err
@@ -57,7 +60,7 @@ func chatCommand(fs *flag.FlagSet, a *app) action {
 type chatSession struct {
 	a           *app
 	id          string
-	s           spec
+	s           host.Spec
 	url         string
 	constraints string
 	explicit    bool
@@ -70,6 +73,9 @@ func (c *chatSession) setUp(ctx context.Context) (int, error) {
 	a := c.a
 	if !sqlite.ValidKey(c.id) {
 		return exitUsage, errors.New("-session must be 1 to 128 ASCII letters, digits, underscores, or hyphens")
+	}
+	if err := a.checkHostMode(); err != nil {
+		return exitUsage, err
 	}
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
 		return exitError, err
@@ -84,19 +90,16 @@ func (c *chatSession) setUp(ctx context.Context) (int, error) {
 	if err := checkTask("input", "chat", c.fixed); err != nil {
 		return exitUsage, err
 	}
-	if _, _, err := newRun("chat", c.fixed, c.s, time.Now()); err != nil {
+	if _, _, err := host.NewRun("chat", c.fixed, c.s, time.Now()); err != nil {
 		return exitUsage, err
 	}
-	if a.credErr != nil {
-		return exitError, a.credErr
-	}
-	if _, err := newModel(c.s.config, c.url, a.cred); err != nil {
+	if err := a.checkCredential(ctx, c.s.Config, c.url); err != nil {
 		return exitError, err
 	}
 	if err := os.MkdirAll(a.state, 0o700); err != nil {
 		return exitError, err
 	}
-	if _, err := newExecutor(c.s.config, a.state); err != nil {
+	if _, err := host.NewExecutor(c.s.Config, a.state); err != nil {
 		return exitError, err
 	}
 	return exitOK, nil
@@ -115,7 +118,7 @@ func (c *chatSession) fits(ctx context.Context) (noFit, err error) {
 			return nil, err
 		}
 	}
-	_, _, noFit = newRun("chat", c.fixed, c.s, time.Now())
+	_, _, noFit = host.NewRun("chat", c.fixed, c.s, time.Now())
 	return noFit, nil
 }
 
@@ -155,8 +158,17 @@ func (c *chatSession) tui(ctx context.Context, level string) (int, error) {
 		default:
 		}
 	}
-	prepare := func() { a.stopSignals = make(chan os.Signal, 2) }
-	code, err := runChatTUI(c.id, prepare, submit, interrupt, signals, display, a.displayFailure, os.Stdin, terminalOutput)
+	prepare := func() { a.stopSignals, a.detach = make(chan os.Signal, 2), make(chan struct{}, 1) }
+	var abandon func()
+	if a.remoteMode() {
+		abandon = func() {
+			select {
+			case a.detach <- struct{}{}:
+			default:
+			}
+		}
+	}
+	code, err := runChatTUI(c.id, prepare, submit, interrupt, abandon, signals, display, a.displayFailure, os.Stdin, terminalOutput)
 	fmt.Fprintf(terminalOutput, "canti: continue session with \"canti chat -session %s\"; new runs use the current launch flags.\n", c.id)
 	return code, err
 }
@@ -290,58 +302,6 @@ func readInput(in *bufio.Reader, prompt io.Writer) (string, error) {
 		err = fmt.Errorf("input ended inside <<%s; it was not submitted", word)
 	}
 	return "", err
-}
-
-// rendering prints each committed command and observation of the journal's
-// runs to w.
-type rendering struct {
-	harness.Journal
-	w io.Writer
-}
-
-func (r rendering) Commit(ctx context.Context, t harness.Transition) error {
-	if err := r.Journal.Commit(ctx, t); err != nil {
-		return err
-	}
-	if _, ok := t.Event.(core.ResponseLoaded); ok && t.To.Decision.Kind == core.Exec {
-		fmt.Fprintf(r.w, "$ %s\n", strings.Join(excerpt(t.To.Decision.Payload, false), "\n  "))
-	}
-	if o := t.Facts.Observation; o != nil {
-		status := string(o.Execution)
-		if o.Execution == core.ExecutionExited && o.ExitCode != nil {
-			status = fmt.Sprintf("exit %d", *o.ExitCode)
-		}
-		if d := excerpt(o.Output.Detail, false); len(d) > 0 {
-			status += " (" + strings.Join(d, " ") + ")"
-		}
-		for _, line := range excerpt(o.Preview, true) {
-			fmt.Fprintf(r.w, "│ %s\n", line)
-		}
-		fmt.Fprintf(r.w, "└ %s\n", status)
-	}
-	if o := t.Facts.Outcome; o != nil {
-		for _, line := range excerpt(outcomeSummary(*o), true) {
-			fmt.Fprintf(r.w, "│ %s\n", line)
-		}
-		fmt.Fprintf(r.w, "└ %s\n", o.Status)
-	}
-	return nil
-}
-
-// outcomeSummary describes the outcome of an action the harness performed,
-// which ran no process.
-func outcomeSummary(o harness.Outcome) string {
-	switch {
-	case o.Detail != "":
-		return o.Detail
-	case o.Retrieval != nil && o.Retrieval.Error != "":
-		return "retrieval error: " + o.Retrieval.Error
-	case o.Retrieval != nil:
-		return fmt.Sprintf("retrieved %d sources and %d directory entries", len(o.Retrieval.Sources), len(o.Retrieval.Entries))
-	case o.Handover != nil:
-		return "handover recorded"
-	}
-	return ""
 }
 
 // cleaned writes what clean keeps of each write.

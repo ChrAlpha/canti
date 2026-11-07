@@ -272,3 +272,40 @@ func TestSessionInputInitializesAnEmptyJournal(t *testing.T) {
 		}
 	}
 }
+
+func TestAStandaloneInputRetryNamesTheSameRun(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	args := []string{"-input", "lost-answer", "-goal", "Write the summary", "-constraints", "Be brief"}
+	if r := f.cli(nil, "run", append(args, "-once")...); r.code != exitActive {
+		t.Fatalf("first: %+v", r)
+	}
+	first := f.status()
+	if first.Run.InputID != "lost-answer" || first.Run.SessionID != "" || first.Run.SessionSeq != 0 {
+		t.Fatalf("standalone input run = %+v", first.Run)
+	}
+	if r := f.cli(nil, "run", append(args, "-once")...); r.code != exitActive || f.status().Seq != first.Seq || len(f.model.requests()) != 0 {
+		t.Fatalf("a retry of the open run advanced it: %+v", r)
+	}
+	if r := f.cli(nil, "run", "-goal", "something new"); r.code != exitError || !strings.Contains(r.stderr, "resume or stop it first") {
+		t.Fatalf("new work beside the open run: %+v", r)
+	}
+	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("resume: %+v", r)
+	}
+	for _, retry := range [][]string{args, append(slices.Clone(args), "-max-steps", "3")} {
+		if r := f.cli(nil, "run", retry...); r.code != exitOK || r.stdout != "done\n" || len(f.model.requests()) != 1 || f.status().Run.ID != first.Run.ID {
+			t.Fatalf("retry %q of the returned run: %+v", retry, r)
+		}
+	}
+	for _, conflict := range [][]string{{"-input", "lost-answer", "-goal", "Write another summary", "-constraints", "Be brief"}, {"-input", "lost-answer", "-goal", "Write the summary"}} {
+		if r := f.cli(nil, "run", conflict...); r.code != exitError || !strings.Contains(r.stderr, "input ID already exists with different content") {
+			t.Fatalf("conflicting retry %q: %+v", conflict, r)
+		}
+	}
+	if r := f.cli(nil, "run", "-session", "s", "-goal", "g"); r.code != exitUsage || !strings.Contains(r.stderr, "-session requires -input") {
+		t.Fatalf("a session without an input: %+v", r)
+	}
+	if r := f.cli(nil, "run", "-session", "s", "-input", "lost-answer", "-goal", "Write the summary", "-constraints", "Be brief"); r.code != exitOK || f.status().Run.ID == first.Run.ID {
+		t.Fatalf("a session input of the same ID is another input: %+v", r)
+	}
+}

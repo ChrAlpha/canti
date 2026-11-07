@@ -83,6 +83,7 @@ type chatTUI struct {
 	prepare           func()
 	submit            func(string) (int, error, os.Signal)
 	interrupt         func(os.Signal)
+	abandon           func() // detaches from the active run; nil stops it
 	signals           <-chan os.Signal
 	outputFailure     <-chan error
 	display           *chatDisplay
@@ -323,10 +324,15 @@ func (m *chatTUI) stop(sig os.Signal) {
 	}
 }
 
+// cancel ends the active run when the chat can no longer show it: it stops
+// the run, or, attached to a host process that keeps driving it, detaches.
 func (m *chatTUI) cancel() {
 	if !m.stopping {
 		m.stopping = true
-		if m.interrupt != nil {
+		switch {
+		case m.abandon != nil:
+			m.abandon()
+		case m.interrupt != nil:
 			m.interrupt(os.Interrupt)
 		}
 	}
@@ -379,7 +385,10 @@ func (m chatTUI) View() tea.View {
 	return v
 }
 
-func runChatTUI(session string, prepare func(), submit func(string) (int, error, os.Signal), interrupt func(os.Signal), signals <-chan os.Signal, display *chatDisplay, outputFailure <-chan error, input io.Reader, terminal io.Writer) (int, error) {
+// runChatTUI runs the chat terminal UI. A chat that ends while a run is
+// active calls abandon, or with a nil abandon interrupts the run, as it does
+// when it can no longer show the run.
+func runChatTUI(session string, prepare func(), submit func(string) (int, error, os.Signal), interrupt func(os.Signal), abandon func(), signals <-chan os.Signal, display *chatDisplay, outputFailure <-chan error, input io.Reader, terminal io.Writer) (int, error) {
 	f, ok := input.(*os.File)
 	if !ok || !term.IsTerminal(f.Fd()) {
 		return exitError, errors.New("chat terminal input is unavailable")
@@ -423,6 +432,14 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 		return submit(goal)
 	}
 	m := newChatTUI(session, wrappedPrepare, wrappedSubmit, wrappedInterrupt, signals, outputFailure, display)
+	if abandon != nil {
+		m.abandon = func() {
+			gate.Lock()
+			interrupted = true
+			gate.Unlock()
+			abandon()
+		}
+	}
 	var p *tea.Program
 	ready := make(chan struct{})
 	gateInput, stopInput, err := startChatInput(f, func(msg tea.Msg) {
@@ -452,7 +469,10 @@ func runChatTUI(session string, prepare func(), submit func(string) (int, error,
 	closed = true
 	needsStop := running && !interrupted
 	gate.Unlock()
-	if needsStop && interrupt != nil {
+	switch {
+	case needsStop && abandon != nil:
+		abandon()
+	case needsStop && interrupt != nil:
 		interrupt(os.Interrupt)
 	}
 	active.Wait()

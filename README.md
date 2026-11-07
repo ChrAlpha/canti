@@ -93,6 +93,7 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | `canti status`, `canti history` | Print the run state as JSON, or its transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Record the job, or the outcome, of an effect whose result is unknown |
+| `canti host` | Serve the state directory to the commands that drive runs, which start one on demand unless given `-host embedded`, until a signal or `canti host -stop` |
 
 A run created by a canti whose context rules differ, as its stored context
 version records, is not resumed: inspect it, then stop it, resolving it first
