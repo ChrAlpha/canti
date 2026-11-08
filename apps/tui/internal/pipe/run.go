@@ -85,7 +85,7 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 			turn.InputLost()
 		case e := <-events:
 			if e.Result != nil {
-				return finishInput(*e.Result, out, diagnostic, displayErr, interrupted)
+				return finishInput(*e.Result, turn.Snapshot.InputID, c.ID(), out, diagnostic, displayErr, interrupted)
 			}
 			if displayErr == nil {
 				displayErr = show(diagnostic, e)
@@ -96,8 +96,11 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 		}
 	}
 }
-func finishInput(result session.Result, out, diagnostic io.Writer, displayErr error, interrupted bool) (int, error, bool) {
+func finishInput(result session.Result, inputID, sessionID string, out, diagnostic io.Writer, displayErr error, interrupted bool) (int, error, bool) {
 	answer, note := present.Result(result)
+	if result.Uncertain {
+		note += present.Reconciliation(inputID, sessionID)
+	}
 	_, err := io.WriteString(out, answer)
 	if err == nil {
 		_, err = io.WriteString(diagnostic, note)

@@ -305,7 +305,10 @@ Input that fails validation (length, UTF-8 or context admission) is reported;
 the terminal retains one rejected snapshot for explicit restoration. Malformed
 pipe block openers are reported without submission. A run that needs resolution,
 or constraints and flags leaving no room for any input, ends the client with
-recovery advice. Neither mode claims a `return` proves business success.
+recovery advice. If acceptance remains unknown at exit, both presenters print
+the pending InputID and require the original goal and launch flags for
+reconciliation before new input. Neither mode claims a `return` proves business
+success.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's

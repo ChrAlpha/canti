@@ -55,6 +55,13 @@ func (r *inputReader) Next(ctx context.Context, signals <-chan os.Signal, failur
 	case <-ctx.Done():
 		return input{}, session.Error, ctx.Err()
 	}
+	return r.await(ctx, signals, failures)
+}
+
+// await arbitrates a completed read against exit requests. A signal that was
+// queued before the completed input is handled takes precedence even when the
+// select chooses the input branch.
+func (r *inputReader) await(ctx context.Context, signals <-chan os.Signal, failures <-chan error) (input, int, error) {
 	select {
 	case entry := <-r.inputs:
 		if pendingSignal(signals) {

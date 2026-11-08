@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/ChrAlpha/canti/apps/tui/internal/present"
 	"github.com/ChrAlpha/canti/apps/tui/internal/session"
 )
 
@@ -87,7 +88,7 @@ func writeExit(output io.Writer, m Model, id string) error {
 		}
 	}
 	if m.pending != nil {
-		_, err := fmt.Fprintf(output, "canti: acceptance of input %s is unknown; reconcile with \"canti run -session %s -input %[1]s\" and the original goal and launch flags before starting new input.\n", m.pending.InputID, id)
+		_, err := io.WriteString(output, present.Reconciliation(m.pending.InputID, id))
 		return err
 	}
 	_, err := fmt.Fprintf(output, "canti: continue session with \"canti-tui -session %s\"; new runs use the current launch flags.\n", id)

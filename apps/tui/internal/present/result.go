@@ -46,3 +46,8 @@ func Result(out session.Result) (answer, diagnostic string) {
 	}
 	return Clean(answer), Clean(b.String())
 }
+
+// Reconciliation is mandatory outcome guidance, independent of log level.
+func Reconciliation(inputID, sessionID string) string {
+	return fmt.Sprintf("canti: acceptance of input %s is unknown; reconcile with \"canti run -session %s -input %[1]s\" and the original goal and launch flags before starting new input.\n", inputID, sessionID)
+}
