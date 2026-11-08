@@ -223,10 +223,10 @@ func ReadAttachment(directory string) (Attachment, error) {
 }
 func (a Attachment) validate() error {
 	u, err := url.Parse(a.Endpoint)
-	if err != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" || !canonicalDigest(a.AuthorityID) || a.Format != environmentFormat || !canonicalDigest(a.HelperDigest) || !canonicalDigest(a.ContainerID) || filepath.Clean(a.Directory) != a.Directory || !filepath.IsAbs(a.Directory) || a.DaemonID == "" || len(a.ContainerID) != 64 || a.Incarnation == 0 || a.User == "" || !filepath.IsAbs(a.Home) || filepath.Clean(a.Home) != a.Home || a.Path == "" || a.Helper != "/canti/bin/"+a.HelperDigest+"/canti-job" {
+	if err != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" || !canonicalDigest(a.AuthorityID) || a.Format != environmentFormat || !canonicalDigest(a.HelperDigest) || !canonicalDigest(a.ContainerID) || filepath.Clean(a.Directory) != a.Directory || !filepath.IsAbs(a.Directory) || a.DaemonID == "" || len(a.ContainerID) != 64 || a.Incarnation == 0 || a.User == "" || !filepath.IsAbs(a.Home) || filepath.Clean(a.Home) != a.Home || a.Path == "" || a.Helper != "/canti/bin/"+a.HelperDigest+"/canti-job" {
 		return errors.New("docker: invalid pinned environment attachment")
 	}
-	return nil
+	return validatePreparedMounts(a.Directory, a.Mounts)
 }
 func environmentEngine(endpoint string) *Executor {
 	return &Executor{cfg: Config{Docker: "docker", StopGrace: 5 * time.Second}, timeouts: timeouts{callTimeout, transferTimeout}, engine: endpointEngine("docker", endpoint)}
@@ -268,7 +268,7 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 		return Attachment{}, errors.New("docker: init path must be clean and absolute")
 	}
 	u, parseErr := url.Parse(endpoint)
-	if parseErr != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
+	if parseErr != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
 		return Attachment{}, errors.New("docker: attachment requires a local Unix Docker endpoint")
 	}
 	x := environmentEngine(endpoint)
@@ -342,14 +342,20 @@ func checkPrepared(dir, authorityID string, c preparedContainer) error {
 	if c.Config.Labels[authorityLabel] != authorityID || c.Config.Labels[controlLabel] != dir || !c.State.Running || c.State.Paused || c.State.Restarting || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
 		return errors.New("docker: prepared environment needs matching control label, running state, no auto-remove and no automatic restart")
 	}
+	return validatePreparedMounts(dir, mountProjection(c))
+}
+func validatePreparedMounts(dir string, mounts []EnvironmentMount) error {
 	public, spool := false, false
-	for _, m := range c.Mounts {
-		switch m.Destination {
+	for _, m := range mounts {
+		switch m.Target {
 		case helperRoot:
-			public = m.Type == "bind" && m.Source == filepath.Join(dir, "public") && !m.RW
+			public = m.Type == "bind" && m.Source == filepath.Join(dir, "public") && !m.Writable
 		case spoolRoot:
-			spool = m.Type == "bind" && m.Source == filepath.Join(dir, "spool") && m.RW
+			spool = m.Type == "bind" && m.Source == filepath.Join(dir, "spool") && m.Writable
 		default:
+			if reservedMountOverlap(m.Target) {
+				return errors.New("docker: environment mount shadows reserved helper or spool paths")
+			}
 			if within(m.Source, dir) || within(dir, m.Source) {
 				return errors.New("docker: environment mounts trusted control state")
 			}
@@ -359,6 +365,9 @@ func checkPrepared(dir, authorityID string, c preparedContainer) error {
 		return errors.New("docker: prepared environment needs separate read-only /canti helper and writable /var/lib/canti/jobs bind mounts")
 	}
 	return nil
+}
+func reservedMountOverlap(target string) bool {
+	return within(helperRoot, target) || within(target, helperRoot) || within(spoolRoot, target) || within(target, spoolRoot)
 }
 func readEnvironment(dir string) (environmentManifest, environmentState, error) {
 	var m environmentManifest
@@ -491,7 +500,7 @@ func (x *Executor) checkAttachment(ctx context.Context, a Attachment) error {
 	if c.Config.Labels[authorityLabel] != a.AuthorityID || c.ID != a.ContainerID || c.Config.Labels[controlLabel] != a.Directory {
 		return fmt.Errorf("%w: environment identity changed", harness.ErrJobLost)
 	}
-	return nil
+	return validatePreparedMounts(a.Directory, mountProjection(c))
 }
 
 func attachmentIncarnation(dir string, a Attachment, state environmentState) (Attachment, bool, error) {

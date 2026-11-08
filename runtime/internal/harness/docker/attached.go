@@ -159,6 +159,9 @@ func (x *Attached) cached(e harness.Effect) (harness.Job, bool, error) {
 	return *r.Terminal, true, nil
 }
 func (x *Attached) mirror(r attachedRecord) error {
+	if err := validateAttachedTerminal(r); err != nil {
+		return err
+	}
 	path := x.cachePath(r.Effect.ID)
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -296,29 +299,30 @@ func (x *Attached) reserve(ctx context.Context, e harness.Effect, s *environment
 	s.ActiveSpec, s.ActiveState = e.Spec, x.cfg.State
 	return r, saveEnvironmentState(x.cfg.Attachment.Directory, *s)
 }
-func (x *Attached) reconcileActive(ctx context.Context, s *environmentState) error {
+func (x *Attached) activeOwner(ctx context.Context, s environmentState) (*Attached, attachedRecord, error) {
 	var r attachedRecord
 	found, err := readJSON(filepath.Join(x.jobDir(s.Active), "command.json"), &r)
 	if err != nil || !found {
-		return errors.Join(err, errors.New("docker: missing active command authority"))
+		return nil, r, errors.Join(err, errors.New("docker: missing active command authority"))
 	}
-	if r.Effect.Spec != s.ActiveSpec || r.Config.State != s.ActiveState || r.Config.Attachment.AuthorityID != x.cfg.Attachment.AuthorityID || attachedSpecification(r.Config, r.Effect.Command) != s.ActiveSpec {
-		return errors.New("docker: active command origin contradicts its authority slot")
+	if r.Effect.ID != s.Active || r.Effect.Spec != s.ActiveSpec || r.Config.State != s.ActiveState || r.Config.Attachment.AuthorityID != x.cfg.Attachment.AuthorityID || attachedSpecification(r.Config, r.Effect.Command) != s.ActiveSpec {
+		return nil, r, errors.New("docker: active command origin contradicts its authority slot")
 	}
-	if _, err := prepareAttachedConfig(r.Config); err != nil {
-		return err
-	}
-	if r.Effect.ID != s.Active {
-		return errors.New("docker: active slot names a different effect")
-	}
-	if _, err := EnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
-		return err
-	}
-	previous, err := NewAttached(r.Config)
+	owner, err := NewAttached(r.Config)
 	if err != nil {
-		return err
+		return nil, r, err
 	}
-	r, _, err = previous.readJob(r.Effect)
+	r, found, err = owner.readJob(r.Effect)
+	if err != nil || !found {
+		return nil, r, errors.Join(err, errors.New("docker: invalid active command authority"))
+	}
+	if _, err = EnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
+		return nil, r, err
+	}
+	return owner, r, nil
+}
+func (x *Attached) reconcileActive(ctx context.Context, s *environmentState) error {
+	previous, r, err := x.activeOwner(ctx, *s)
 	if err != nil {
 		return err
 	}
@@ -362,7 +366,7 @@ func (x *Attached) unbound(ctx context.Context, e harness.Effect, op string, s *
 
 func validateAttachedTerminal(r attachedRecord) error {
 	j := r.Terminal
-	if j == nil || j.ID != r.ExecID || j.Fenced != r.Fenced || !j.DispatchedAt.Equal(r.DispatchedAt) {
+	if j == nil || !terminal(j.Status) || j.ID != r.ExecID || j.Fenced != r.Fenced || !j.DispatchedAt.Equal(r.DispatchedAt) {
 		return errors.New("docker: terminal receipt contradicts command authority")
 	}
 	if j.ID != "" {

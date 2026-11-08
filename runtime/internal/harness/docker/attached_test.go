@@ -40,6 +40,7 @@ type attachedFake struct {
 	startEntered, startRelease          chan struct{}
 	startOnce                           sync.Once
 	labelIdentity, extraMount           string
+	extraTarget                         string
 }
 
 func newAttachedFake(t *testing.T) *attachedFake {
@@ -147,10 +148,14 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 			RW                        bool
 		}{"bind", f.workspace, "/workspace", true})
 		if f.extraMount != "" {
+			target := f.extraTarget
+			if target == "" {
+				target = "/extra"
+			}
 			c.Mounts = append(c.Mounts, struct {
 				Type, Source, Destination string
 				RW                        bool
-			}{"bind", f.extraMount, "/extra", false})
+			}{"bind", f.extraMount, target, false})
 		}
 		json.NewEncoder(w).Encode(c)
 		return
@@ -858,5 +863,119 @@ func TestAttachedNeverBoundCancellationDoesNotDisturbOtherState(t *testing.T) {
 	}
 	if f.starts != 1 || f.stops != 0 {
 		t.Fatal("unbound cancellation disturbed live foreground work")
+	}
+}
+
+func TestAttachedReservedMountsCannotBeShadowedAtAttachmentOrRestart(t *testing.T) {
+	for _, target := range []string{"/canti/bin", "/canti/bin/version/canti-job", spoolRoot + "/effect", "/var/lib/canti", "/"} {
+		t.Run(target, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			f.mu.Lock()
+			f.extraMount, f.extraTarget = t.TempDir(), target
+			f.mu.Unlock()
+			if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err == nil {
+				t.Fatal("attached with a reserved path shadow")
+			}
+			if _, err := x.Drive(t.Context(), effectFor(x, "shadow", "true")); err == nil {
+				t.Fatal("dispatched with a reserved path shadow")
+			}
+			c := x.cfg
+			c.Attachment.Mounts = append(c.Attachment.Mounts, EnvironmentMount{Type: "bind", Source: f.extraMount, Target: target})
+			if _, err := NewAttached(c); err == nil {
+				t.Fatal("reconstructed a stored reserved path shadow")
+			}
+			if f.starts != 0 {
+				t.Fatal("started a command despite shadowing")
+			}
+		})
+	}
+}
+
+func TestAttachedLifecycleRejectsInvalidTerminalBeforeMirroringOrReleasingSlot(t *testing.T) {
+	for _, invalid := range []string{"shape", "binding", "nonterminal"} {
+		t.Run(invalid, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			e := effectFor(x, "invalid_terminal", "sleep 60")
+			if _, err := x.Drive(t.Context(), e); err != nil {
+				t.Fatal(err)
+			}
+			r, found, err := x.readJob(e)
+			if err != nil || !found {
+				t.Fatalf("record: %v", err)
+			}
+			j := x.baseJob(r)
+			j.Status = harness.JobSucceeded
+			code := 0
+			j.ExitCode, j.StartedAt, j.FinishedAt = &code, time.Now().UTC(), time.Now().UTC()
+			switch invalid {
+			case "shape":
+				j.ExitCode = nil
+			case "binding":
+				j.Binding.Generation++
+			case "nonterminal":
+				j.Status, j.ExitCode, j.StartedAt, j.FinishedAt = harness.JobRunning, nil, time.Time{}, time.Time{}
+			}
+			r.Terminal = &j
+			if err = x.saveJob(r); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(x.jobDir(e.ID), "command.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = ControlEnvironment(t.Context(), f.dir, "stop"); err == nil {
+				t.Fatal("accepted invalid terminal")
+			}
+			if _, err = os.Stat(x.cachePath(e.ID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("mirrored invalid terminal: %v", err)
+			}
+			_, state, err := readEnvironment(f.dir)
+			if err != nil || state.Active != e.ID {
+				t.Fatalf("released slot: %+v: %v", state, err)
+			}
+			after, err := os.ReadFile(filepath.Join(x.jobDir(e.ID), "command.json"))
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("mutated command record: %v", err)
+			}
+			if f.stops != 0 || f.starts != 1 {
+				t.Fatalf("mutated Docker: starts=%d stops=%d", f.starts, f.stops)
+			}
+		})
+	}
+}
+
+func TestAttachedCompleteOutputStaysCompleteAfterRestart(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	if _, err := ControlEnvironment(t.Context(), f.dir, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ControlEnvironment(t.Context(), f.dir, "start"); err != nil {
+		t.Fatal(err)
+	}
+	e := effectFor(x, "after_restart", "printf retained")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "retained")
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobSucceeded || !j.Output.Complete || !strings.Contains(j.Output.Detail, "stored attachment observation") || strings.HasPrefix(j.Output.Detail, ";") {
+		t.Fatalf("post-restart output=%+v: %v", j, err)
+	}
+}
+
+func TestAttachedRejectsUnixEndpointUserinfo(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	endpoint := "unix://fixture-user:fixture-password@/synthetic-engine.sock"
+	if _, err := AttachEnvironment(t.Context(), f.dir, endpoint, "dev", ""); err == nil {
+		t.Fatal("attachment accepted URL userinfo")
+	}
+	c := x.cfg
+	c.Attachment.Endpoint = endpoint
+	if _, err := NewAttached(c); err == nil {
+		t.Fatal("stored attachment accepted URL userinfo")
 	}
 }

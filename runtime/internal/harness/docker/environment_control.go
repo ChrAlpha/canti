@@ -261,24 +261,7 @@ func (x *Attached) retire(ctx context.Context, s *environmentState) (Environment
 
 func (x *Attached) stopEnvironment(ctx context.Context, s *environmentState, operation string) error {
 	if s.Active != "" {
-		var r attachedRecord
-		found, err := readJSON(filepath.Join(x.jobDir(s.Active), "command.json"), &r)
-		if err != nil || !found {
-			return errors.Join(err, errors.New("docker: missing active command authority"))
-		}
-		if r.Effect.Spec != s.ActiveSpec || r.Config.State != s.ActiveState || r.Config.Attachment.AuthorityID != x.cfg.Attachment.AuthorityID || attachedSpecification(r.Config, r.Effect.Command) != s.ActiveSpec {
-			return errors.New("docker: active command origin contradicts authority slot")
-		}
-		if _, err := prepareAttachedConfig(r.Config); err != nil {
-			return err
-		}
-		if _, err := EnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
-			return err
-		}
-		if r.Effect.ID != s.Active {
-			return errors.New("docker: active slot names another effect")
-		}
-		owner, err := NewAttached(r.Config)
+		owner, r, err := x.activeOwner(ctx, *s)
 		if err != nil {
 			return err
 		}

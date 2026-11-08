@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
@@ -242,8 +243,7 @@ func (x *Attached) completed(ctx context.Context, s *environmentState, r *attach
 		return harness.Job{}, err
 	}
 	if x.cfg.Attachment.AdmissionEpoch != r.Epoch {
-		j.Output.Detail += "; environment restarted since admission; inspect background services"
-		j.Output.Complete = false
+		j.Output.Detail = strings.TrimPrefix(j.Output.Detail+"; environment restarted since the stored attachment observation; inspect background services", "; ")
 	}
 	return x.finishAttached(s, r, j)
 }

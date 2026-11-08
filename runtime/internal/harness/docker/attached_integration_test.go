@@ -121,7 +121,7 @@ func TestAttachedDockerRetainsEnvironmentAcrossCommandsAndRestart(t *testing.T) 
 		t.Fatal(err)
 	}
 	after := runCommand("after_restart", `canti-test-tool; cat /root/.config/canti/value`)
-	if after.Preview != "persistent-toolprivate-config" {
+	if after.Preview != "persistent-toolprivate-config" || !after.Output.Complete {
 		t.Fatalf("restart lost filesystem: %+v", after)
 	}
 }
