@@ -125,3 +125,60 @@ func TestAttachedDockerRetainsEnvironmentAcrossCommandsAndRestart(t *testing.T) 
 		t.Fatalf("restart lost filesystem: %+v", after)
 	}
 }
+
+func TestAttachedDockerRejectsSymlinkBindSources(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	endpoint := os.Getenv("DOCKER_HOST")
+	if endpoint == "" {
+		out, err := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		endpoint = strings.TrimSpace(string(out))
+	}
+	if !strings.HasPrefix(endpoint, "unix://") {
+		t.Skip("attached execution requires a local Unix Docker endpoint")
+	}
+	for _, hidden := range []string{"authority", "state"} {
+		t.Run(hidden, func(t *testing.T) {
+			control, workspace, state := t.TempDir(), t.TempDir(), t.TempDir()
+			helper := filepath.Join(t.TempDir(), "protocol-fixture")
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
+				t.Fatal(err)
+			}
+			if err := docker.InitEnvironment(control, helper); err != nil {
+				t.Fatal(err)
+			}
+			authority, err := docker.EnvironmentIdentity(control)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := state
+			if hidden == "authority" {
+				target = filepath.Join(control, "authority")
+			}
+			alias := filepath.Join(t.TempDir(), "friendly-bind")
+			if err = os.Symlink(target, alias); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--host", endpoint, "run", "-d", "--label", "io.canti.test=persistent-environment", "--label", "io.canti.control=" + control, "--label", "io.canti.authority=" + authority, "--mount", "type=bind,src=" + filepath.Join(control, "public") + ",dst=/canti,readonly", "--mount", "type=bind,src=" + filepath.Join(control, "spool") + ",dst=/var/lib/canti/jobs", "--mount", "type=bind,src=" + workspace + ",dst=/workspace", "--mount", "type=bind,src=" + alias + ",dst=/leak,readonly", "--user", "0:0", "--env", "HOME=/root", "--env", "PATH=/usr/bin:/bin", "alpine:3.23", "sleep", "60"}
+			out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("prepare symlink bind: %v %s", err, out)
+			}
+			id := strings.TrimSpace(string(out))
+			t.Cleanup(func() {
+				if out, err := exec.Command("docker", "--host", endpoint, "rm", "-f", id).CombinedOutput(); err != nil {
+					t.Errorf("remove symlink bind fixture: %v %s", err, out)
+				}
+			})
+			if _, err = docker.AttachEnvironment(ctx, control, endpoint, id, ""); err == nil || !strings.Contains(err.Error(), "canonical host paths") {
+				t.Fatalf("accepted actual Docker symlink bind: %v", err)
+			}
+			if _, err = os.Stat(filepath.Join(control, "authority", "environment.json")); !os.IsNotExist(err) {
+				t.Fatalf("published unsafe attachment: %v", err)
+			}
+		})
+	}
+}

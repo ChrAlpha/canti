@@ -40,7 +40,7 @@ type attachedFake struct {
 	startEntered, startRelease          chan struct{}
 	startOnce                           sync.Once
 	labelIdentity, extraMount           string
-	extraTarget                         string
+	extraTarget, extraType              string
 }
 
 func newAttachedFake(t *testing.T) *attachedFake {
@@ -149,13 +149,17 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 		}{"bind", f.workspace, "/workspace", true})
 		if f.extraMount != "" {
 			target := f.extraTarget
+			kind := f.extraType
+			if kind == "" {
+				kind = "bind"
+			}
 			if target == "" {
 				target = "/extra"
 			}
 			c.Mounts = append(c.Mounts, struct {
 				Type, Source, Destination string
 				RW                        bool
-			}{"bind", f.extraMount, target, false})
+			}{kind, f.extraMount, target, false})
 		}
 		json.NewEncoder(w).Encode(c)
 		return
@@ -977,5 +981,90 @@ func TestAttachedRejectsUnixEndpointUserinfo(t *testing.T) {
 	c.Attachment.Endpoint = endpoint
 	if _, err := NewAttached(c); err == nil {
 		t.Fatal("stored attachment accepted URL userinfo")
+	}
+}
+
+func TestAttachedRejectsSymlinkBindSourcesBeforeAdmissionAndDispatch(t *testing.T) {
+	for _, hidden := range []string{"authority", "state", "ordinary-data"} {
+		t.Run(hidden, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			target := t.TempDir()
+			if hidden == "authority" {
+				target = filepath.Join(f.dir, "authority")
+			}
+			if hidden == "state" {
+				target = x.cfg.State
+			}
+			alias := filepath.Join(t.TempDir(), "friendly-bind")
+			if err := os.Symlink(target, alias); err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			f.extraMount = alias
+			f.mu.Unlock()
+			if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err == nil || !strings.Contains(err.Error(), "canonical host paths") {
+				t.Fatalf("attach symlink: %v", err)
+			}
+			if _, err := EnvironmentWorkdir(t.Context(), x.cfg.Attachment, f.workspace, x.cfg.State, ""); err == nil {
+				t.Fatal("admitted symlink source")
+			}
+			if _, err := x.Drive(t.Context(), effectFor(x, "hidden", "true")); err == nil {
+				t.Fatal("dispatched with symlink source")
+			}
+			if f.starts != 0 || f.stops != 0 {
+				t.Fatal("mutated Docker with symlink source")
+			}
+		})
+	}
+}
+
+func TestAttachedRechecksCanonicalBindSourcesWithoutReadingThemDuringReconstruction(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	source := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.extraMount = source
+	f.mu.Unlock()
+	c := x.cfg
+	c.Attachment.Mounts = append(c.Attachment.Mounts, EnvironmentMount{Type: "bind", Source: source, Target: "/extra"})
+	if _, err := EnvironmentWorkdir(t.Context(), c.Attachment, c.Workspace, c.State, c.Workdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(source, source+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(c.State, source); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := NewAttached(c)
+	if err != nil {
+		t.Fatalf("pure reconstruction read the changed host path: %v", err)
+	}
+	if _, err = rebuilt.Drive(t.Context(), effectFor(rebuilt, "recheck", "true")); err == nil {
+		t.Fatal("dispatch trusted a source replaced by a symlink")
+	}
+	if _, err = ControlEnvironment(t.Context(), f.dir, "start"); err == nil {
+		t.Fatal("restart trusted a source replaced by a symlink")
+	}
+	if f.starts != 0 || f.stops != 0 {
+		t.Fatal("mutated Docker before rejecting changed bind")
+	}
+}
+
+func TestAttachedDoesNotTraverseNamedVolumeSources(t *testing.T) {
+	f := newAttachedFake(t)
+	f.mu.Lock()
+	f.extraMount, f.extraType = "/synthetic-docker-internals/not-readable/volumes/task/_data", "volume"
+	f.mu.Unlock()
+	if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err != nil {
+		t.Fatalf("traversed named volume internals: %v", err)
+	}
+	x := f.executor(t)
+	if _, err := x.Drive(t.Context(), effectFor(x, "named_volume", "true")); err != nil {
+		t.Fatalf("named volume dispatch: %v", err)
 	}
 }

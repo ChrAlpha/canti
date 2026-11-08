@@ -41,6 +41,8 @@ type Attachment struct {
 
 // EnvironmentMount is immutable Docker mount metadata, retained so a resumed
 // executor can reject an exposed journal before trusting local receipt files.
+// Bind sources are canonical host paths, verified on observation; rebuilding
+// stored configuration uses this snapshot without filesystem access.
 type EnvironmentMount struct {
 	Type, Source, Target string
 	Writable             bool
@@ -342,11 +344,14 @@ func checkPrepared(dir, authorityID string, c preparedContainer) error {
 	if c.Config.Labels[authorityLabel] != authorityID || c.Config.Labels[controlLabel] != dir || !c.State.Running || c.State.Paused || c.State.Restarting || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
 		return errors.New("docker: prepared environment needs matching control label, running state, no auto-remove and no automatic restart")
 	}
-	return validatePreparedMounts(dir, mountProjection(c))
+	return checkEnvironmentMounts(dir, mountProjection(c))
 }
 func validatePreparedMounts(dir string, mounts []EnvironmentMount) error {
 	public, spool := false, false
 	for _, m := range mounts {
+		if m.Type == "bind" && (!filepath.IsAbs(m.Source) || filepath.Clean(m.Source) != m.Source) {
+			return errors.New("docker: bind sources must be clean absolute host paths")
+		}
 		switch m.Target {
 		case helperRoot:
 			public = m.Type == "bind" && m.Source == filepath.Join(dir, "public") && !m.Writable
@@ -363,6 +368,27 @@ func validatePreparedMounts(dir string, mounts []EnvironmentMount) error {
 	}
 	if !public || !spool {
 		return errors.New("docker: prepared environment needs separate read-only /canti helper and writable /var/lib/canti/jobs bind mounts")
+	}
+	return nil
+}
+
+// checkEnvironmentMounts checks live bind sources separately from the pure
+// snapshot validator. Docker may retain a symlink spelling in Mounts.Source.
+func checkEnvironmentMounts(dir string, mounts []EnvironmentMount) error {
+	if err := validatePreparedMounts(dir, mounts); err != nil {
+		return err
+	}
+	for _, m := range mounts {
+		if m.Type != "bind" {
+			continue
+		}
+		canonical, err := filepath.EvalSymlinks(m.Source)
+		if err != nil {
+			return fmt.Errorf("docker: cannot verify local bind source %q: %w", m.Source, err)
+		}
+		if canonical != m.Source {
+			return fmt.Errorf("docker: bind source %q uses a symlink; recreate the prepared container with canonical host paths", m.Source)
+		}
 	}
 	return nil
 }
@@ -444,7 +470,11 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 	if err != nil {
 		return "", err
 	}
-	return pinnedEnvironmentWorkdir(Attachment{Mounts: mountProjection(c)}, workspace, state, requested)
+	mounts := mountProjection(c)
+	if err := checkEnvironmentMounts(a.Directory, mounts); err != nil {
+		return "", err
+	}
+	return pinnedEnvironmentWorkdir(Attachment{Mounts: mounts}, workspace, state, requested)
 }
 func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) (string, error) {
 	var candidates []string
@@ -500,7 +530,7 @@ func (x *Executor) checkAttachment(ctx context.Context, a Attachment) error {
 	if c.Config.Labels[authorityLabel] != a.AuthorityID || c.ID != a.ContainerID || c.Config.Labels[controlLabel] != a.Directory {
 		return fmt.Errorf("%w: environment identity changed", harness.ErrJobLost)
 	}
-	return validatePreparedMounts(a.Directory, mountProjection(c))
+	return checkEnvironmentMounts(a.Directory, mountProjection(c))
 }
 
 func attachmentIncarnation(dir string, a Attachment, state environmentState) (Attachment, bool, error) {
