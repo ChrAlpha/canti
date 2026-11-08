@@ -31,7 +31,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
@@ -45,7 +45,12 @@ CREATE TABLE runs (
 	input_tokens INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	output_bytes INTEGER NOT NULL DEFAULT 0,
-	steps INTEGER NOT NULL DEFAULT 0
+	steps INTEGER NOT NULL DEFAULT 0,
+	context_seq INTEGER NOT NULL DEFAULT 0,
+	usage_attempts INTEGER NOT NULL DEFAULT 0,
+	input_reports INTEGER NOT NULL DEFAULT 0,
+	output_reports INTEGER NOT NULL DEFAULT 0,
+	lost_attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE transitions (
 	run_id TEXT NOT NULL REFERENCES runs (id),
@@ -85,9 +90,9 @@ const (
 	runSQL       = `SELECT semantics, run FROM runs WHERE id = ?`
 	lastRunSQL   = `SELECT semantics, run FROM runs ORDER BY n DESC LIMIT 1`
 	initialSQL   = `SELECT semantics, initial FROM runs WHERE id = ?`
-	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps FROM runs WHERE id = ?`
-	addSQL       = `UPDATE runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
-		output_bytes = output_bytes + ?, steps = steps + ? WHERE id = ?`
+	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps, usage_attempts, input_reports, output_reports, lost_attempts FROM runs WHERE id = ?`
+	addSQL       = `UPDATE runs SET input_tokens = ?, output_tokens = ?, output_bytes = ?, steps = ?,
+        usage_attempts = ?, input_reports = ?, output_reports = ?, lost_attempts = ? WHERE id = ?`
 	latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
 	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
 		FROM transitions WHERE run_id = ? AND seq = ?`
@@ -339,12 +344,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
 	}
-	d := delta(t)
-	if d == (harness.Totals{}) {
-		return nil
-	}
-	_, err = s.stmt(ctx, tx, addSQL).ExecContext(ctx, d.Usage.InputTokens, d.Usage.OutputTokens, d.OutputBytes, d.Steps, r.run)
-	return err
+	return s.addTotals(ctx, tx, r.run, delta(t))
 }
 
 type record struct {
@@ -383,10 +383,16 @@ func encode(t harness.Transition) (record, error) {
 
 func delta(t harness.Transition) harness.Totals {
 	var d harness.Totals
+	settled := false
 	switch t.Event.(type) {
-	case core.ResponseSaved, core.ResponseIncomplete:
-		if t.Facts.Response != nil {
-			d.Usage = t.Facts.Response.Usage
+	case core.ResponseSaved, core.ResponseIncomplete, core.RequestRejected:
+		settled = true
+	case core.StopRequested:
+		settled = t.From.Phase == core.PhaseRequestSent
+	case core.AttemptStarted:
+		if t.From.Phase == core.PhaseRequestSent {
+			settled = true
+			d.Coverage.Lost = 1
 		}
 	case core.Performed:
 		d.Steps = 1
@@ -396,7 +402,55 @@ func delta(t harness.Transition) harness.Totals {
 			d.OutputBytes = t.Facts.Observation.Output.Bytes
 		}
 	}
+	if settled {
+		d.Coverage.Attempts = 1
+		if r := t.Facts.Response; r != nil {
+			d.Usage.InputTokens, d.Usage.OutputTokens = r.Usage.InputTokens, r.Usage.OutputTokens
+			if r.Usage.InputReported {
+				d.Coverage.InputReports = 1
+			}
+			if r.Usage.OutputReported {
+				d.Coverage.OutputReports = 1
+			}
+		} else {
+			d.Coverage.Lost = 1
+		}
+	}
 	return d
+}
+
+// Read and add in the write transaction rather than relying on SQLite's
+// arithmetic, which promotes an overflowing INTEGER to an imprecise REAL.
+func (s *Store) addTotals(ctx context.Context, tx *sql.Tx, runID string, d harness.Totals) error {
+	if d == (harness.Totals{}) {
+		return nil
+	}
+	total, err := s.totals(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	pairs := [][2]*int64{
+		{&total.Usage.InputTokens, &d.Usage.InputTokens}, {&total.Usage.OutputTokens, &d.Usage.OutputTokens},
+		{&total.OutputBytes, &d.OutputBytes}, {&total.Coverage.Attempts, &d.Coverage.Attempts},
+		{&total.Coverage.InputReports, &d.Coverage.InputReports}, {&total.Coverage.OutputReports, &d.Coverage.OutputReports},
+		{&total.Coverage.Lost, &d.Coverage.Lost},
+	}
+	for _, pair := range pairs {
+		*pair[0], err = harness.CheckedAdd(*pair[0], *pair[1])
+		if err != nil {
+			return err
+		}
+	}
+	if err = total.Usage.Validate(); err != nil {
+		return err
+	}
+	steps, err := harness.CheckedAdd(int64(total.Steps), int64(d.Steps))
+	if err != nil || int64(int(steps)) != steps {
+		return errors.New("sqlite: step count overflow")
+	}
+	_, err = s.stmt(ctx, tx, addSQL).ExecContext(ctx, total.Usage.InputTokens, total.Usage.OutputTokens, total.OutputBytes, steps,
+		total.Coverage.Attempts, total.Coverage.InputReports, total.Coverage.OutputReports, total.Coverage.Lost, runID)
+	return err
 }
 
 // checkEffect applies harness.CheckEffect to t inside the transaction tx

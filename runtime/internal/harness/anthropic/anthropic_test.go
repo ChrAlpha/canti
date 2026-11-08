@@ -462,7 +462,7 @@ func TestCompleteClassifiesStopReason(t *testing.T) {
 			if stopReason(err) != "" {
 				t.Fatalf("err = %v, want retryable", err)
 			}
-			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7}}
+			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7, InputReported: true, OutputReported: true}}
 			if !reflect.DeepEqual(resp, want) {
 				t.Fatalf("response = %+v\nwant %+v", resp, want)
 			}
@@ -474,7 +474,7 @@ func TestCompleteDefaultsResponseModel(t *testing.T) {
 	srv := serve(t, reply(http.StatusOK, `{"type":"message","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`))
 	m := newModel(t, srv.URL, nil)
 	resp, err := m.Complete(context.Background(), freeze(t, m))
-	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, OutputTokens: 2}) {
+	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, OutputTokens: 2, InputReported: true, OutputReported: true}) {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
 }
@@ -685,5 +685,34 @@ func TestConfirmedContextLimitSignals(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUsagePresenceAndNumericContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		want        harness.Usage
+		invalid     bool
+	}{
+		{"missing", `null`, harness.Usage{}, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
+		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
+		{"negative", `{"input_tokens":-1}`, harness.Usage{}, true},
+		{"fractional", `{"output_tokens":0.5}`, harness.Usage{}, true},
+		{"integer overflow", `{"input_tokens":9223372036854775808}`, harness.Usage{}, true},
+		{"sum overflow", `{"input_tokens":9223372036854775807,"output_tokens":1}`, harness.Usage{}, true},
+		{"duplicate", `{"input_tokens":1,"input_tokens":2}`, harness.Usage{}, true},
+		{"cache overflow", `{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}`, harness.Usage{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"stop_reason":"end_turn","usage":` + tc.usage + `}`
+			srv := serve(t, reply(200, body))
+			m := newModel(t, srv.URL, nil)
+			resp, err := m.Complete(context.Background(), freeze(t, m))
+			var stop *harness.StopError
+			if errors.As(err, &stop) != tc.invalid || resp.Usage != tc.want || string(resp.Body) != body || resp.Complete == tc.invalid {
+				t.Fatalf("usage=%+v complete=%v error=%v", resp.Usage, resp.Complete, err)
+			}
+		})
 	}
 }

@@ -207,6 +207,10 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if err != nil {
 		return resp, err
 	}
+	resp.Usage, _, err = provider.Usage(resp.Body, true)
+	if err != nil {
+		return resp, err
+	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
 	}
@@ -218,8 +222,6 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if msg.Model != "" {
 		resp.Model = msg.Model
 	}
-	u := msg.Usage
-	resp.Usage = harness.Usage{InputTokens: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, OutputTokens: u.OutputTokens}
 	if req.Adapter == toolAdapter {
 		fields, ok := provider.ExactObject(resp.Body)
 		if !ok {

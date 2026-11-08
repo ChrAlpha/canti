@@ -77,8 +77,12 @@ func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.S
 
 // Totals returns the run-wide sums maintained by Commit.
 func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error) {
+	return s.totals(ctx, nil, runID)
+}
+
+func (s *Store) totals(ctx context.Context, tx *sql.Tx, runID string) (harness.Totals, error) {
 	var t harness.Totals
-	err := s.stmts[totalsSQL].QueryRowContext(ctx, runID).Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps)
+	err := s.stmt(ctx, tx, totalsSQL).QueryRowContext(ctx, runID).Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps, &t.Coverage.Attempts, &t.Coverage.InputReports, &t.Coverage.OutputReports, &t.Coverage.Lost)
 	return t, missing(err, "run")
 }
 

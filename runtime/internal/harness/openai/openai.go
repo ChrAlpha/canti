@@ -187,6 +187,10 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if err != nil {
 		return resp, err
 	}
+	resp.Usage, _, err = provider.Usage(resp.Body, false)
+	if err != nil {
+		return resp, err
+	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
 	}
@@ -196,7 +200,6 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		return resp, errors.New("openai: malformed response")
 	}
 	resp.Model = cmp.Or(r.Model, resp.Model)
-	resp.Usage = harness.Usage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
 	switch status := provider.ExactString(fields, "status"); {
 	case status == "completed":
 		resp.Complete = true

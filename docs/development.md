@@ -315,7 +315,7 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 16. Schema 3, semantics 6, executor
+Each run stores current context version 16. Schema 4, semantics 6, executor
 record format 2 and host protocol 5 form one current contract. Unsupported
 formats and context versions are rejected; use a fresh state directory. No
 migration or old-run settlement path is supported. Same-version frozen bytes,

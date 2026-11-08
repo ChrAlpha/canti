@@ -296,7 +296,11 @@ func (l *Loop) spent(ctx context.Context, run Run) (core.StopReason, string, err
 	if err != nil {
 		return "", "", err
 	}
-	switch tokens := t.Usage.InputTokens + t.Usage.OutputTokens; {
+	tokens, err := CheckedAdd(t.Usage.InputTokens, t.Usage.OutputTokens)
+	if err != nil {
+		return "", "", err
+	}
+	switch {
 	case b.Tokens > 0 && tokens >= b.Tokens:
 		return core.StopBudgetExhausted, fmt.Sprintf("%d tokens reached the %d-token budget", tokens, b.Tokens), nil
 	case b.OutputBytes > 0 && t.OutputBytes >= b.OutputBytes:
@@ -362,7 +366,7 @@ func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, erro
 	resp, err := l.model.Complete(call, req)
 	if err != nil && ctx.Err() == nil && call.Err() != nil {
 		why := fmt.Sprintf("the %v wall-time budget ran out during the model request", run.Budget.WallTime)
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: why})
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopTimedOut}, Facts{Failure: why, Response: &resp})
 	}
 	if err == nil && (!resp.Complete || len(resp.Body) == 0) {
 		err = errors.New("harness: model reported success without a complete response")
@@ -372,9 +376,9 @@ func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, erro
 	case err == nil:
 		return l.runner.Commit(ctx, snap, core.ResponseSaved{Step: s.Step, Attempt: attempt}, Facts{Response: &resp})
 	case errors.As(err, &stop):
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: stop.Reason}, Facts{Failure: err.Error()})
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: stop.Reason}, Facts{Failure: err.Error(), Response: &resp})
 	}
-	facts := Facts{Failure: err.Error()}
+	facts := Facts{Failure: err.Error(), Response: &resp}
 	if len(resp.Body) > 0 {
 		resp.Complete = false
 		facts.Response = &resp

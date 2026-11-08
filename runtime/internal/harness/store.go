@@ -123,8 +123,18 @@ type StepRecord struct {
 // the number of observed, performed, or resolved steps.
 type Totals struct {
 	Usage       Usage
+	Coverage    UsageCoverage
 	OutputBytes int64
 	Steps       int
+}
+
+// UsageCoverage describes settled attempts, including unknown reports and lost
+// sends. Reported totals are retrospective and cannot bound unreported charges.
+type UsageCoverage struct {
+	Attempts      int64
+	InputReports  int64
+	OutputReports int64
+	Lost          int64
 }
 
 // Snapshot is the committed position of a run: the state and the sequence of

@@ -187,7 +187,7 @@ func TestCompleteSendsFrozenBytesOnceWithBearer(t *testing.T) {
 		got.Header.Get("x-api-key") != "" || got.Header.Get("anthropic-version") != "" {
 		t.Fatalf("headers = %v", got.Header)
 	}
-	if resp.Model != "test-model-2026" || resp.Usage != (harness.Usage{InputTokens: 10, OutputTokens: 7}) || resp.Protocol != protocol || resp.Adapter != adapter {
+	if resp.Model != "test-model-2026" || resp.Usage != (harness.Usage{InputTokens: 10, OutputTokens: 7, InputReported: true, OutputReported: true}) || resp.Protocol != protocol || resp.Adapter != adapter {
 		t.Fatalf("response = %+v", resp)
 	}
 	if d := string(m.Decision(resp)); d != `{"kind":"return","payload":"done"}` {
@@ -338,5 +338,33 @@ func TestConfirmedContextLimitSignals(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUsagePresenceAndNumericContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		want        harness.Usage
+		invalid     bool
+	}{
+		{"missing", `null`, harness.Usage{}, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
+		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
+		{"negative", `{"input_tokens":-1}`, harness.Usage{}, true},
+		{"fractional", `{"output_tokens":0.5}`, harness.Usage{}, true},
+		{"integer overflow", `{"input_tokens":9223372036854775808}`, harness.Usage{}, true},
+		{"sum overflow", `{"input_tokens":9223372036854775807,"output_tokens":1}`, harness.Usage{}, true},
+		{"duplicate", `{"input_tokens":1,"input_tokens":2}`, harness.Usage{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"status":"completed","usage":` + tc.usage + `}`
+			srv := serve(t, reply(200, body))
+			m := newModel(t, srv.URL, nil)
+			resp, err := m.Complete(context.Background(), freeze(t, m))
+			var stop *harness.StopError
+			if errors.As(err, &stop) != tc.invalid || resp.Usage != tc.want || string(resp.Body) != body || resp.Complete == tc.invalid {
+				t.Fatalf("usage=%+v complete=%v error=%v", resp.Usage, resp.Complete, err)
+			}
+		})
 	}
 }

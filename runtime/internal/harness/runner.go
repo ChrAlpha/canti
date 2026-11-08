@@ -73,6 +73,11 @@ func (r Runner) Commit(ctx context.Context, snap Snapshot, event core.Event, fac
 // check reports whether f holds exactly the records event permits, which
 // leads to next.
 func (f Facts) check(event core.Event, next core.State) error {
+	if f.Response != nil {
+		if err := f.Response.Usage.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrFacts, err)
+		}
+	}
 	var allowed Facts
 	switch e := event.(type) {
 	case core.RequestFrozen:
@@ -88,6 +93,11 @@ func (f Facts) check(event core.Event, next core.State) error {
 	case core.ResponseIncomplete:
 		if f.Response != nil && f.Response.Complete {
 			return fmt.Errorf("%w: incomplete response cannot be marked complete", ErrFacts)
+		}
+		allowed.Response, allowed.Failure = f.Response, f.Failure
+	case core.RequestRejected:
+		if f.Response == nil || f.Failure == "" {
+			return fmt.Errorf("%w: rejected response and reason required", ErrFacts)
 		}
 		allowed.Response, allowed.Failure = f.Response, f.Failure
 	case core.ResponseLoaded:
@@ -126,7 +136,7 @@ func (f Facts) check(event core.Event, next core.State) error {
 	case core.OutcomeUnknown:
 		allowed.Failure, allowed.Receipt = f.Failure, f.Receipt
 	case core.StopRequested:
-		allowed.Failure = f.Failure
+		allowed.Failure, allowed.Response = f.Failure, f.Response
 	}
 	if f != allowed {
 		return fmt.Errorf("%w: records do not belong to %T", ErrFacts, event)

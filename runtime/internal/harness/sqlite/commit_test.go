@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -47,6 +48,8 @@ func unchanged(t testing.TB, s *Store, runID string, want []harness.Transition, 
 	if got := history(t, s, runID); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Transitions() = %#v, want %#v", got, want)
 	}
+	// Coverage is independently derived from the exact expected history.
+	totals.Coverage = sums(want).Coverage
 	if got := totalsOf(t, s, runID); got != totals {
 		t.Fatalf("Totals() = %#v, want %#v", got, totals)
 	}
@@ -87,7 +90,7 @@ func TestCommitPersistsTransitionsAndTotalsAcrossReopen(t *testing.T) {
 	if got := latestOf(t, s, "run-1"); got != d.snap {
 		t.Fatalf("Latest() = %#v, want %#v", got, d.snap)
 	}
-	want := harness.Totals{Usage: harness.Usage{InputTokens: 10, OutputTokens: 5}, OutputBytes: 42, Steps: 1}
+	want := harness.Totals{Coverage: harness.UsageCoverage{Attempts: 1}, Usage: harness.Usage{InputTokens: 10, OutputTokens: 5}, OutputBytes: 42, Steps: 1}
 	unchanged(t, s, "run-1", d.commits, want)
 	page, err := s.Transitions(ctx, "run-1", 2, 3)
 	if err != nil {
@@ -345,5 +348,70 @@ func TestConcurrentStoresCommitOneTransitionPerSeq(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestUsageSettlementCoverageAndReplay(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
+			ctx := context.Background()
+			path := tempPath(t)
+			s, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := newDriver(t, s, createRun(t, s, "coverage", core.Limits{MaxAttempts: 4}))
+			d.freeze()
+			d.send()
+			// A crash leaves a send unreported. The next started attempt
+			// settles it as lost, independently of later received reports.
+			d.do(core.AttemptStarted{Step: 1, Attempt: 2}, harness.Facts{})
+			d.do(core.ResponseIncomplete{Step: 1, Attempt: 2}, harness.Facts{Failure: "missing report"})
+			d.send()
+			response := &harness.Response{Body: []byte(`{"error":"known failure"}`), Usage: harness.Usage{InputReported: true, OutputTokens: 9, OutputReported: true}}
+			if terminal {
+				d.do(core.StopRequested{Reason: core.StopUnrecoverable}, harness.Facts{Response: response, Failure: "provider failure"})
+			} else {
+				d.do(core.RequestRejected{Step: 1, Attempt: 3}, harness.Facts{Response: response, Failure: "confirmed overflow"})
+			}
+			last := d.commits[len(d.commits)-1]
+			if err := s.Commit(ctx, last); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s, err = Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			got := totalsOf(t, s, "coverage")
+			want := harness.Totals{Usage: harness.Usage{OutputTokens: 9}, Coverage: harness.UsageCoverage{Attempts: 3, InputReports: 1, OutputReports: 1, Lost: 2}}
+			if got != want {
+				t.Fatalf("totals=%+v want=%+v", got, want)
+			}
+		})
+	}
+}
+
+func TestUsageOverflowRollsBackEntireTransition(t *testing.T) {
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "overflow", limits))
+	d.freeze()
+	d.send()
+	if _, err := s.db.Exec(`UPDATE runs SET input_tokens=? WHERE id='overflow'`, int64(math.MaxInt64)); err != nil {
+		t.Fatal(err)
+	}
+	before := d.snap
+	_, err := d.runner.Commit(context.Background(), before, core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: responseFor(before.State, execBody("x"), harness.Usage{InputTokens: 1, InputReported: true})})
+	if err == nil {
+		t.Fatal("overflow committed")
+	}
+	if got := latestOf(t, s, "overflow"); got != before {
+		t.Fatalf("failed accounting changed head: %+v", got)
+	}
+	if got := totalsOf(t, s, "overflow"); got.Usage.InputTokens != math.MaxInt64 || got.Coverage.Attempts != 0 {
+		t.Fatalf("failed accounting changed totals: %+v", got)
 	}
 }

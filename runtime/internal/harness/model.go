@@ -2,7 +2,9 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -61,6 +63,24 @@ type Response struct {
 type Usage struct {
 	InputTokens  int64
 	OutputTokens int64
+	// Presence is independent for each provider count: a reported zero is
+	// known; an absent counter is unknown. Totals keep sums separately from
+	// the coverage of the attempts contributing them.
+	InputReported  bool
+	OutputReported bool
+}
+
+// CheckedAdd sums nonnegative resource counters without wrapping.
+func CheckedAdd(a, b int64) (int64, error) {
+	if a < 0 || b < 0 || a > math.MaxInt64-b {
+		return 0, errors.New("harness: invalid or overflowing resource count")
+	}
+	return a + b, nil
+}
+
+func (u Usage) Validate() error {
+	_, err := CheckedAdd(u.InputTokens, u.OutputTokens)
+	return err
 }
 
 // StopError reports a model failure that no retry of the same bytes can fix;

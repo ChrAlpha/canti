@@ -40,7 +40,18 @@ func sums(transitions []harness.Transition) harness.Totals {
 	var t harness.Totals
 	for _, tr := range transitions {
 		switch tr.Event.(type) {
-		case core.ResponseSaved, core.ResponseIncomplete:
+		case core.ResponseSaved, core.ResponseIncomplete, core.RequestRejected:
+			t.Coverage.Attempts++
+			if tr.Facts.Response == nil {
+				t.Coverage.Lost++
+				continue
+			}
+			if tr.Facts.Response.Usage.InputReported {
+				t.Coverage.InputReports++
+			}
+			if tr.Facts.Response.Usage.OutputReported {
+				t.Coverage.OutputReports++
+			}
 			t.Usage.InputTokens += tr.Facts.Response.Usage.InputTokens
 			t.Usage.OutputTokens += tr.Facts.Response.Usage.OutputTokens
 		case core.Performed:

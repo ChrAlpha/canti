@@ -130,7 +130,7 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 			t.Fatalf("Recent(0, %d) = %#v, %v; want %#v", limit, got, err, records)
 		}
 	}
-	totals := harness.Totals{Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 42, Steps: 2}
+	totals := harness.Totals{Coverage: harness.UsageCoverage{Attempts: 4}, Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 42, Steps: 2}
 	if got := totalsOf(t, s, "run-1"); got != totals {
 		t.Fatalf("Totals() = %#v, want %#v", got, totals)
 	}
