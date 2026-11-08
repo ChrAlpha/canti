@@ -4,7 +4,9 @@ import (
 	"fmt"
 
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
-) // report prints the outcome of the run at snap, of config c, and returns its
+)
+
+// report prints the outcome of the run at snap, of config c, and returns its
 // exit status, or active while the run is still active. Callers release the
 // workspace lock first: behind a stderr queue each line waits up to
 // stderrFinalTime.

@@ -1428,3 +1428,72 @@ func TestStopAndInspectedResolutionReuseTheAcceptedExecutionConfiguration(t *tes
 		})
 	}
 }
+
+func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t *testing.T) {
+	h := testHost(t, Options{})
+	var mu sync.Mutex
+	var id string
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`)
+			return
+		}
+		decision := core.Decision{Kind: core.Return, Payload: "done"}
+		switch calls {
+		case 1:
+			decision = core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/runs/%s/goal","reason":"retain original task"}`, id)}
+		case 2:
+			decision = core.Decision{Kind: core.Exec, Payload: `canti:focus {"sources":[{"seq":5,"source":0}]}`}
+		}
+		text, _ := json.Marshal(decision)
+		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
+	}))
+	defer server.Close()
+	ack := submit(t, h, Submission{Binding: binding(server.URL)})
+	mu.Lock()
+	id = ack.Run.ID
+	mu.Unlock()
+	drive, err := h.Drive(context.Background(), id, binding(server.URL), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := drive.Result()
+	if err != nil || snap.State.Phase != core.PhaseReturned || snap.State.Step != 3 {
+		t.Fatalf("drive=%+v %v", snap, err)
+	}
+	focus, reset := 0, 0
+	for after := (Cursor{RunID: id}); ; {
+		page, err := h.Progress(context.Background(), after, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.Outcome != nil && item.Outcome.Focus {
+				focus++
+				if item.Step != 2 || item.Outcome.FocusSources != 1 {
+					t.Fatalf("focus=%+v", item)
+				}
+			}
+			if item.Kind == ItemContextReset {
+				reset++
+				if item.Step != 3 || item.AnchorSeq != 13 || item.Seq != 13 {
+					t.Fatalf("reset=%+v", item)
+				}
+			}
+		}
+		after = page.Next
+		if !page.More {
+			break
+		}
+	}
+	view, err := h.View(context.Background(), id)
+	if err != nil || focus != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
+		t.Fatalf("projection lost reset/focus/unknown usage: focus=%d reset=%d view=%+v error=%v", focus, reset, view, err)
+	}
+}

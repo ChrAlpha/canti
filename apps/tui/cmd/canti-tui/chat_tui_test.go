@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -9,6 +11,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
@@ -427,5 +430,37 @@ func TestChatInputOverflowCannotBeLostAtRunCompletion(t *testing.T) {
 	m = updated.(chatTUI)
 	if m.code != exitError || m.err == nil || cmd == nil || !strings.Contains(m.err.Error(), "exceeds limit") {
 		t.Fatalf("overflow lost after completion: code=%d err=%v cmd=%v", m.code, m.err, cmd)
+	}
+}
+
+func TestContextRecoveryAndUsagePresentation(t *testing.T) {
+	var output bytes.Buffer
+	render(&output, hostrpc.Item{Kind: "context_reset", Step: 7, AnchorSeq: 42})
+	render(&output, hostrpc.Item{Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true, FocusSources: 2}})
+	render(&output, hostrpc.Item{Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true, FocusSources: 0}})
+	for _, want := range []string{"context reset at sequence 42; continuing step 7", "focus replaced with 2 frozen sources", "focus replaced with 0 frozen sources"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("missing recovery display %q: %s", want, output.String())
+		}
+	}
+	for _, reported := range []bool{false, true} {
+		t.Run(fmt.Sprint(reported), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			app := &app{stdout: &stdout, stderr: &stderr}
+			coverage := hostrpc.UsageCoverage{Attempts: 2, Lost: 1}
+			if reported {
+				coverage.InputReports = 1
+				coverage.OutputReports = 1
+			}
+			run := hostrpc.Run{Status: hostrpc.StatusReturned, Result: "answer", Totals: hostrpc.Totals{Coverage: coverage}}
+			code, err := app.report(run, nil)
+			if code != exitOK || err != nil || stdout.String() != "answer\n" {
+				t.Fatalf("return changed by usage: %d %v %q", code, err, stdout.String())
+			}
+			want := fmt.Sprintf("reported usage input 0 output 0; coverage input %d/2 output %d/2; lost 1", coverage.InputReports, coverage.OutputReports)
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("unknown/reported-zero distinction lost: %s", stderr.String())
+			}
+		})
 	}
 }
