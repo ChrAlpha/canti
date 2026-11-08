@@ -1,0 +1,32 @@
+{
+  "name": "canti private Docker development environment",
+  "build": {
+    "dockerfile": "../../persistent-environment/Dockerfile",
+    "args": {
+      "USER_UID": "${localEnv:CANTI_UID}",
+      "USER_GID": "${localEnv:CANTI_GID}"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4": {}
+  },
+  "privileged": true,
+  "init": true,
+  "containerUser": "developer",
+  "remoteUser": "developer",
+  "updateRemoteUserUID": false,
+  "overrideCommand": true,
+  "shutdownAction": "none",
+  "workspaceMount": "source=${localEnv:CANTI_WORKSPACE},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localEnv:CANTI_ENVIRONMENT}/public,target=/canti,type=bind,readonly",
+    "source=${localEnv:CANTI_ENVIRONMENT}/spool,target=/var/lib/canti/jobs,type=bind",
+    "source=canti-dind-docker-${devcontainerId},target=/var/lib/docker,type=volume",
+    "source=canti-dind-containerd-${devcontainerId},target=/var/lib/containerd,type=volume"
+  ],
+  "runArgs": [
+    "--label", "io.canti.control=${localEnv:CANTI_ENVIRONMENT}",
+    "--label", "io.canti.authority=${localEnv:CANTI_AUTHORITY_ID}"
+  ]
+}
