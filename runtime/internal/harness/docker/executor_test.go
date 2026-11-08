@@ -180,6 +180,75 @@ func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
 	}
 }
 
+func TestCheckLayoutHandlesCreationDuringValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, target string
+		tail               bool
+		refused            bool
+	}{
+		{name: "state directory", kind: "directory"},
+		{name: "missing ancestor directory", kind: "directory", tail: true},
+		{name: "link to separate directory", kind: "link", target: "plain", tail: true},
+		{name: "link into workspace", kind: "link", target: "workspace", tail: true, refused: true},
+		{name: "dangling link", kind: "link", target: "missing", tail: true, refused: true},
+		{name: "link to colon directory", kind: "link", target: "a:b", tail: true, refused: true},
+		{name: "file", kind: "file", refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			ws, entry := filepath.Join(root, "workspace"), filepath.Join(root, "state")
+			for _, name := range []string{ws, filepath.Join(root, "plain"), filepath.Join(root, "a:b")} {
+				if err := os.Mkdir(name, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state := entry
+			if tc.tail {
+				state = filepath.Join(entry, "missing", "leaf")
+			}
+			tree := func() (paths []string) {
+				if err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+					paths = append(paths, p)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return paths
+			}
+			created := false
+			var afterCreation []string
+			lookup := func(dir string) (os.FileInfo, error) {
+				if dir == entry && !created {
+					if _, err := os.Lstat(entry); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("creation point already exists: %v", err)
+					}
+					var err error
+					switch tc.kind {
+					case "directory":
+						err = os.Mkdir(entry, 0o700)
+					case "link":
+						err = os.Symlink(filepath.Join(root, tc.target), entry)
+					case "file":
+						err = os.WriteFile(entry, []byte("kept"), 0o600)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					created, afterCreation = true, tree()
+				}
+				return os.Lstat(dir)
+			}
+			err := checkLayout(ws, state, lookup)
+			if !created || (err != nil) != tc.refused {
+				t.Fatalf("layout after actual creation: created=%t error=%v; refused=%t", created, err, tc.refused)
+			}
+			if after := tree(); !slices.Equal(after, afterCreation) {
+				t.Fatalf("validation changed the tree after concurrent creation: %v -> %v", afterCreation, after)
+			}
+		})
+	}
+}
+
 func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 	root := t.TempDir()
 	ws, file := filepath.Join(root, "real", "ws"), filepath.Join(root, "file")
@@ -210,6 +279,7 @@ func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 	for _, tc := range []struct{ name, state, want string }{
 		{"relative", "state", "not a clean absolute path"},
 		{"unclean, inside the workspace through a link", link + "/../ws/state", "not a clean absolute path"},
+		{"state is a file", file, "not a directory"},
 		{"below a file", filepath.Join(file, "state"), filepath.Join(file, "state")},
 		{"below a link to a missing directory of the workspace", filepath.Join(dangling, "state"), filepath.Join(ws, "missing")},
 		{"with a colon", filepath.Join(root, "a:b", "state"), "is not a directory that can be mounted"},
@@ -224,6 +294,33 @@ func TestCheckLayoutRefusesAStatePathItCannotResolve(t *testing.T) {
 				t.Fatalf("CheckLayout changed %q to %q", before, after)
 			}
 		})
+	}
+}
+
+func TestCheckLayoutRefusesAnAncestorRemovedAfterLookup(t *testing.T) {
+	root := t.TempDir()
+	ws, ancestor := filepath.Join(root, "workspace"), filepath.Join(root, "state")
+	for _, dir := range []string{ws, ancestor} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed := false
+	lookup := func(dir string) (os.FileInfo, error) {
+		info, err := os.Lstat(dir)
+		if dir == ancestor && err == nil {
+			if err := os.Remove(ancestor); err != nil {
+				t.Fatal(err)
+			}
+			removed = true
+		}
+		return info, err
+	}
+	if err := checkLayout(ws, filepath.Join(ancestor, "leaf"), lookup); !removed || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("lost ancestor: removed=%t error=%v", removed, err)
+	}
+	if _, err := os.Lstat(ancestor); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("validation recreated a lost ancestor: %v", err)
 	}
 }
 

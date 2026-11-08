@@ -914,6 +914,162 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
+// pausedPublication holds the real drive in its final history read, after the
+// terminal transaction is visible but before publication can finish.
+type pausedPublication struct {
+	harness.Journal
+	reached, release chan struct{}
+}
+
+func (p pausedPublication) Recent(ctx context.Context, id string, before int64, limit int) ([]harness.StepRecord, error) {
+	page, err := p.Journal.Recent(ctx, id, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	snap, err := p.Journal.Latest(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if snap.State.Closed() {
+		close(p.reached)
+		// A stalled filesystem operation may outlive cancellation. Shutdown
+		// must retain the host lock until this publisher actually returns.
+		<-p.release
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return page, nil
+}
+
+func TestSubmitWaitsForClosedRunPublicationWithoutCancellingItsDrive(t *testing.T) {
+	p := pausedPublication{reached: make(chan struct{}), release: make(chan struct{})}
+	h := testHost(t, Options{WrapJournal: func(j harness.Journal) harness.Journal { p.Journal = j; return p }})
+	var once sync.Once
+	release := func() { once.Do(func() { close(p.release) }) }
+	t.Cleanup(release)
+	url := answering(t, core.Decision{Kind: core.Return, Payload: "done"})
+	first := submit(t, h, Submission{InputID: "first", Binding: binding(url)})
+	d, err := h.Drive(t.Context(), first.Run.ID, binding(url), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-p.reached
+	next := Submission{InputID: "next", Goal: "next goal", Spec: testSpec(h), Binding: binding(url)}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if ack, err := h.Submit(ctx, next); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("new input overtook the closed run's publisher: run=%s err=%v", ack.Run.ID, err)
+	}
+	if _, err := h.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("cancelled admission created a run: %v", err)
+	}
+	result := filepath.Join(HistoryRoot(h.opts.State), first.Run.ID, "result")
+	if _, err := os.Stat(result); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a second publisher ran beside the driver: %v", err)
+	}
+	if !h.Driving(first.Run.ID) {
+		t.Fatal("cancelling admission ended the prior drive")
+	}
+	release()
+	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("prior drive: %+v, %v", snap, err)
+	}
+	if body, err := os.ReadFile(result); err != nil || string(body) != "phase: returned\n\ndone" {
+		t.Fatalf("final publication: %q, %v", body, err)
+	}
+	// A publication failure still refuses admission after the driver ends.
+	// Removing the bad derived entry then permits repair from the same fact.
+	if err := os.Remove(result); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(result, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Submit(t.Context(), next); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("admission ignored a failed publication: %v", err)
+	}
+	if _, err := h.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("failed publication admitted a run: %v", err)
+	}
+	if err := os.Remove(result); err != nil {
+		t.Fatal(err)
+	}
+	if ack, err := h.Submit(t.Context(), next); err != nil || ack.Replayed || ack.Run.ID == first.Run.ID {
+		t.Fatalf("admission after publication: %+v, %v", ack, err)
+	}
+	if body, err := os.ReadFile(result); err != nil || string(body) != "phase: returned\n\ndone" {
+		t.Fatalf("admission did not repair the final result: %q, %v", body, err)
+	}
+	if got := kinds(t, h, first.Run.ID); slices.Contains(got, "stop_requested") {
+		t.Fatalf("waiting for publication stopped the prior run: %v", got)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.drivers) != 0 || len(h.runs) != 0 {
+		t.Fatalf("publication wait leaked drivers or run locks: %d, %d", len(h.drivers), len(h.runs))
+	}
+}
+
+func TestShutdownRetainsOwnershipUntilClosedRunPublicationEnds(t *testing.T) {
+	p := pausedPublication{reached: make(chan struct{}), release: make(chan struct{})}
+	h := testHost(t, Options{WrapJournal: func(j harness.Journal) harness.Journal { p.Journal = j; return p }})
+	var once sync.Once
+	release := func() { once.Do(func() { close(p.release) }) }
+	t.Cleanup(release)
+	url := answering(t, core.Decision{Kind: core.Return, Payload: "done"})
+	id := submit(t, h, Submission{InputID: "first", Binding: binding(url)}).Run.ID
+	d, err := h.Drive(t.Context(), id, binding(url), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-p.reached
+	next := Submission{InputID: "next", Goal: "next goal", Spec: testSpec(h), Binding: binding(url)}
+	admission := make(chan error, 1)
+	go func() { _, err := h.Submit(t.Context(), next); admission <- err }()
+	waitFor(t, func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.active > 0
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := h.Shutdown(ctx); !errors.Is(err, ErrNotQuiescent) {
+		t.Fatalf("shutdown released a stalled publisher: %v", err)
+	}
+	if err := <-admission; !errors.Is(err, context.Canceled) && !errors.Is(err, ErrClosing) {
+		t.Fatalf("shutdown did not cancel admission: %v", err)
+	}
+	if other, err := Open(t.Context(), h.opts, false); !errors.Is(err, ErrLocked) {
+		if other != nil {
+			other.Close()
+		}
+		t.Fatalf("another host acquired the live publisher's state: %v", err)
+	}
+	release()
+	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("terminal fact after shutdown: %+v, %v", snap, err)
+	}
+	if err := h.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(t.Context(), Options{State: h.opts.State, Workspace: h.opts.Workspace}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("shutdown admitted the next input: %v", err)
+	}
+	if ack, err := reopened.Submit(t.Context(), next); err != nil || ack.Replayed {
+		t.Fatalf("restart did not repair and admit: %+v, %v", ack, err)
+	}
+	result := filepath.Join(HistoryRoot(h.opts.State), id, "result")
+	if body, err := os.ReadFile(result); err != nil || string(body) != "phase: returned\n\ndone" {
+		t.Fatalf("restart publication: %q, %v", body, err)
+	}
+}
+
 // TestPagesStayWithinTheirBoundsAtTheFactLimits requires that a run whose
 // decisions hold texts of megabytes, of multi-byte runes, yields pages within
 // PageBytes whose every text is within its cap, cut at a rune boundary, and
