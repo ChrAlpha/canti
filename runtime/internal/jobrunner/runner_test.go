@@ -72,6 +72,10 @@ func TestInheritedBackgroundPipeCannotHoldCompletion(t *testing.T) {
 }
 func TestInitializationAndWorkingDirectoryAreExplicit(t *testing.T) {
 	c := config(t, "printf '%s:%s' \"$TOOL_PATH\" \"$PWD\"")
+	c.Workdir = filepath.Join(c.Workdir, strings.Repeat("long-directory-", 12))
+	if err := os.MkdirAll(c.Workdir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	c.Init = filepath.Join(t.TempDir(), "init.sh")
 	if err := os.WriteFile(c.Init, []byte("export TOOL_PATH=persistent\ncd /\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -80,8 +84,9 @@ func TestInitializationAndWorkingDirectoryAreExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Preview != "persistent:"+c.Workdir {
-		t.Fatalf("preview=%q", rec.Preview)
+	output, err := os.ReadFile(filepath.Join(c.Directory, "output"))
+	if err != nil || *rec.ExitCode != 0 || string(output) != "persistent:"+c.Workdir {
+		t.Fatalf("retained output=%q: %v", output, err)
 	}
 }
 func TestEvidenceDoesNotFollowAnOutputSymlink(t *testing.T) {
