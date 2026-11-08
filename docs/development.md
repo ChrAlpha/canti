@@ -399,18 +399,25 @@ merge commit. Commits with identical non-documentation trees reuse an earlier
 successful build/vet in that invocation; each distinct code tree is checked,
 including a broken intermediate commit later reverted. The native
 `actions/setup-go` cache uses all three module sum files and `go.work.sum`.
-Each build mode has a stable `GOCACHE` path, which
-is part of the cache archive version, so a short PTY job cannot publish the
-cache used by the full integration suite. Cache snapshots are immutable until
-dependencies change; Go still checks current source and rebuilds affected
-packages on every run. Only Go modules and compiler outputs are cached, within
-GitHub's repository cache budget of 10 GB.
+Each workload has a stable `GOCACHE` path, which is part of the cache archive
+version. Quality and commits have their own scopes so an earlier lint publisher
+cannot exclude their compiler outputs; lint keeps the standard scope and PTY
+is separate from full integration.
+Cache snapshots are immutable until dependencies change; Go still checks current
+source and rebuilds affected packages on every run. Only Go modules and compiler
+outputs are cached, within GitHub's repository cache budget of 10 GB.
 
-`unit`, `integration-shards`, and `long-shards` each run four independent
-shards of `make ci-unit`, `make ci-integration`, or `make ci-long`.
+`unit` and `long-shards` each run four independent shards of `make ci-unit` or
+`make ci-long`; `integration-shards` runs six shards of `make ci-integration`.
+Six-way integration is a measured trial: compare the actual critical path and
+runner cost, and retain the count only if the results justify it.
 `CI_SHARD_COUNT` and `CI_SHARD_INDEX` partition the names discovered by
-`go test -list .` using a stable hash; every selected top-level test, fuzz seed,
-and example belongs to exactly one shard, and its subtests stay together.
+`go test -list .`; unit and integration use a stable hash. Long tests are placed
+longest first on the least loaded shard, using measured duration estimates in
+`scripts/ci-shard.py` and a 40-second estimate for newly discovered tests.
+Estimates affect placement only; every selected top-level test, fuzz seed, and
+example belongs to exactly one shard, and its subtests stay together. The
+partition supports any positive shard count, including empty shards.
 Without shard variables the targets run their complete original suites.
 Discovery uses the same race and build-tag flags and fails on a compilation
 error. `pty` runs `make ci-pty` serially on its own runner. Docker jobs pull

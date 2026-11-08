@@ -107,15 +107,40 @@ class GateTests(unittest.TestCase):
 
 
 class ShardTests(unittest.TestCase):
+    def test_long_balance_preserves_discovered_membership_for_any_count(self):
+        names = list(shard.LONG_SECONDS) + ["TestNewLongCase", "FuzzNewLongSeed", "ExampleNewLong"]
+        for count in (1, 2, 3, 4, 6, 8, 16):
+            for args in ([], ["-skip", "^TestSession"], ["-run", "^(TestNew|Fuzz|Example)"]):
+                expected = shard.selected(names, args, 0, 1)
+                parts = [shard.selected(names, args, index, count, True) for index in range(count)]
+                flattened = [name for part in parts for name in part]
+                self.assertCountEqual(flattened, expected, (count, args))
+                self.assertEqual(len(flattened), len(set(flattened)))
+                self.assertEqual(parts, [shard.selected(list(reversed(names)), args, index, count, True)
+                                         for index in range(count)])
+
+    def test_long_balance_reduces_the_measured_peak_without_adding_stale_hints(self):
+        names = list(shard.LONG_SECONDS)
+        parts = [shard.selected(names, [], index, 4, True) for index in range(4)]
+        loads = [sum(shard.LONG_SECONDS[name] for name in part) for part in parts]
+        original = [sum(shard.LONG_SECONDS[name] for name in shard.selected(names, [], index, 4))
+                    for index in range(4)]
+        self.assertLess(max(loads), max(original))
+        self.assertLess(max(loads) - min(loads), 10)
+        discovered = ["TestNewLongCase"]
+        self.assertEqual([name for index in range(4)
+                          for name in shard.selected(discovered, [], index, 4, True)], discovered)
+
     def test_union_and_exclusion_match_each_original_suite_exactly(self):
         names = [f"TestContract{index}" for index in range(1000)] + ["FuzzDecode", "ExampleRun"]
         for args in ([], ["-skip", "^(TestContract0|TestContract1)$"],
                      ["-run", "^(TestContract0|TestContract1)$"]):
             expected = shard.selected(names, args, 0, 1)
-            parts = [shard.selected(names, args, index, 4) for index in range(4)]
-            flattened = [name for part in parts for name in part]
-            self.assertCountEqual(flattened, expected)
-            self.assertEqual(len(flattened), len(set(flattened)))
+            for count in (4, 6):
+                parts = [shard.selected(names, args, index, count) for index in range(count)]
+                flattened = [name for part in parts for name in part]
+                self.assertCountEqual(flattened, expected)
+                self.assertEqual(len(flattened), len(set(flattened)))
 
     def test_discovery_keeps_tests_fuzz_seeds_and_examples(self):
         events = '\n'.join([

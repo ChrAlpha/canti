@@ -1,8 +1,8 @@
 name: Set up cached Go
-description: Use setup-go's native cache with separate compiler modes
+description: Use setup-go's native cache with separate workload snapshots
 inputs:
   scope:
-    description: Compiler mode (standard, race, integration, or pty)
+    description: Cache scope (standard, quality, commits, race, integration, or pty)
     required: true
 runs:
   using: composite
@@ -11,8 +11,8 @@ runs:
       shell: bash
       env:
         SCOPE: ${{ inputs.scope }}
-      # The cache archive version includes GOCACHE's path, isolating modes even
-      # though setup-go uses the same dependency key. Keep paths stable per mode.
+      # The cache archive version includes GOCACHE's path, isolating workloads
+      # even with the same dependency key. Keep paths stable per scope.
       run: echo "GOCACHE=$RUNNER_TEMP/go-build-$SCOPE" >> "$GITHUB_ENV"
     - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
       with:
