@@ -125,7 +125,7 @@ func selectedDockerEndpoint(ctx context.Context) (string, error) {
 		endpoint = strings.TrimSpace(output.String())
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("persistent attachment requires a local Unix Docker endpoint")
 	}
 	return endpoint, nil

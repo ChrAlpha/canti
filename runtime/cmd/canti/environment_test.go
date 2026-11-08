@@ -67,3 +67,13 @@ func TestEnvironmentEndpointSelectionPinsExplicitLocalHost(t *testing.T) {
 		t.Fatal("accepted remote endpoint for local authority")
 	}
 }
+
+func TestEnvironmentEndpointSelectionRejectsUserinfo(t *testing.T) {
+	t.Setenv("DOCKER_CONTEXT", "")
+	for _, endpoint := range []string{"unix://fixture-user@/synthetic-engine.sock", "unix://fixture-user:fixture-password@/synthetic-engine.sock"} {
+		t.Setenv("DOCKER_HOST", endpoint)
+		if _, err := selectedDockerEndpoint(t.Context()); err == nil {
+			t.Fatal("accepted synthetic URL userinfo")
+		}
+	}
+}
