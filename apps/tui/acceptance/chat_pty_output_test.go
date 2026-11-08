@@ -1,23 +1,22 @@
-//go:build linux
+//go:build acceptance && linux
 
-package main
+package acceptance
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/charmbracelet/x/ansi"
 )
 
 func TestChatPTYExitPreservesCompleteTranscript(t *testing.T) {
 	answer := "answer-start\n" + strings.Repeat("0123456789abcdef0123456789abcdef\n", 200) + "answer-complete"
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: answer}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: answer}})
 	p := startPTYChat(t, f, nil)
 	pos := p.await(t, "ready", 0)
 	p.send(t, "keep the complete answer\r")
 	p.await(t, "answer-complete", pos)
-	if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 {
 		t.Fatalf("answer did not return: %+v", s)
 	}
 	p.send(t, "\x03")

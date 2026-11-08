@@ -1,6 +1,6 @@
-//go:build linux
+//go:build acceptance && linux
 
-package main
+package acceptance
 
 import (
 	"net/http"
@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -27,7 +26,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		history.WriteString(line(i) + "\n")
 	}
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: history.String()}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: history.String()}})
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second answer"}`})
 	f.model.answer(1, 3, reply{text: `{"kind":"return","payload":"third answer"}`})
 	entered := make(chan struct{})
@@ -58,37 +57,37 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	p := startPTYChatWithEnv(t, f, nil, []string{"TERM=tmux-256color"}, "-model-url", gate.URL)
 	pos := p.await(t, "ready", 0)
 	p.send(t, "first request\r")
-	pos = p.await(t, "new input discarded", pos)
+	pos = p.await(t, "draft editable", pos)
 	unblockFirst()
 	p.await(t, line(39), pos)
 	pos = p.await(t, "eady", pos)
 	p.send(t, "second request\r")
-	p.await(t, "new input discarded", pos)
+	p.await(t, "draft editable", pos)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("second request did not reach provider")
 	}
 	pos = len(ansi.Strip(p.text()))
-	p.send(t, "discarded text\r\x1b[200~discarded paste\x1b[5~\x1b[201~\x1b[5")
+	p.send(t, "draft text\r\x1b[200~draft paste\x1b[5~\x1b[201~\x1b[5")
 	p.awaitInputRead(t)
 	p.send(t, "~")
 	p.await(t, line(12), pos)
 	pos = len(ansi.Strip(p.text()))
 	p.send(t, "\x1b[6~")
 	pos = p.await(t, line(39), pos)
-	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != core.PhaseRequestSent {
+	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != "request_sent" {
 		t.Fatalf("navigation changed the active run: %+v", s)
 	}
 	unblock()
 	p.await(t, "second answer", pos)
 	pos = p.await(t, "eady", pos)
-	p.send(t, "explicit next\r")
+	p.send(t, "\r")
 	p.await(t, "third answer", pos)
-	if s := f.status(); s.Run.SessionSeq != 3 || s.Run.Goal != "explicit next" || s.Phase != core.PhaseReturned {
+	if s := f.status(); s.Run.SessionSeq != 3 || s.Run.Goal != "draft textdraft paste" || s.Phase != "returned" {
 		t.Fatalf("busy input leaked into the next run: %+v", s)
 	}
-	if prompts := f.model.prompts(1); len(prompts) != 3 || strings.Contains(strings.Join(prompts, "\n"), "discarded") {
+	if prompts := f.model.prompts(1); len(prompts) != 3 || !strings.Contains(prompts[2], "draft textdraft paste") {
 		t.Fatalf("busy input entered model context: %q", prompts)
 	}
 	p.send(t, "\x03")

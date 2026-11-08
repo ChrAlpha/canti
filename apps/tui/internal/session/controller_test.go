@@ -243,6 +243,14 @@ func TestExplicitUncertainRetryDrivesItsReplayedIdleRun(t *testing.T) {
 	if out := first.Outcome(); !out.Uncertain {
 		t.Fatalf("lost ACK not retained: %+v", out)
 	}
+	if _, err := c.Start(context.Background(), NewSnapshot("new input")); err == nil {
+		t.Fatal("new input bypassed uncertain acceptance")
+	}
+	changed := snapshot
+	changed.Goal = "changed goal"
+	if _, err := c.Start(context.Background(), changed); err == nil {
+		t.Fatal("reconciliation changed the submitted snapshot")
+	}
 	second, err := c.Start(context.Background(), snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -273,5 +281,36 @@ func TestInputLossDoesNotEscalateAnExplicitStop(t *testing.T) {
 	turn.Interrupt()
 	if !canceled {
 		t.Fatal("explicit second interrupt did not abandon")
+	}
+}
+
+func TestFirstOwnedInputLossRequestsStopAndAwaitsCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	turn := newTurn(Snapshot{}, true, cancel)
+	rpc := &stopRace{waiting: make(chan struct{}), stopping: make(chan struct{}), release: make(chan struct{})}
+	c := New(Config{HostMode: Owned})
+	done := make(chan Result, 1)
+	go func() { done <- c.follow(ctx, rpc, turn, "run") }()
+	<-rpc.waiting
+	turn.InputLost()
+	turn.InputLost()
+	<-rpc.stopping
+	select {
+	case out := <-done:
+		t.Fatalf("input loss abandoned cleanup: %+v", out)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if ctx.Err() != nil {
+		t.Fatal("input loss escalated to force cancellation")
+	}
+	close(rpc.release)
+	select {
+	case out := <-done:
+		if out.Code != Stopped || rpc.views.Load() != 1 {
+			t.Fatal(out)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not finish")
 	}
 }

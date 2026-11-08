@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Go 1.26 or newer for the workspace and TUI; runtime and SDK declare their independent minimums in `go.mod`.
-- Make and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
+- Make, Python 3 for dependency provenance verification, and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
   targets.
 - A C compiler and a supported platform for Go's race detector.
 - A Unix-like OS: the CLI and executor use `flock` and process groups. Only
@@ -33,15 +33,18 @@ Cloning requires repository access while the repository is private.
 
 | Command | Purpose |
 | --- | --- |
-| `make check` | Read-only formatting validation, vet, the test-name check, and all unit tests |
+| `make check` | Formatting, module/test boundaries, vet, test names, unit and offline executable acceptance, and native dependency regressions |
 | `make fmt` | Check `gofmt` output; does not rewrite files |
 | `make vet` | `go vet` across all modules, then with `-tags integration,live` so tagged test files compile |
-| `make test` | Unit tests in every module |
-| `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
+| `make test` | Unit tests in every module; no sibling executable builds |
+| `make acceptance` | Offline separate-executable tests; root builds and supplies runtime, TUI and runtime fault-fixture binaries |
+| `make native-deps` | Verify replacement provenance/reconstruction and run both upstream race suites |
+| `make isolation` | Copy runtime and SDK alone, then build and run their default tests without TUI source |
+| `make integration` | `go test -count=1 -race -tags integration ./...`: unit, Docker-backed, long-history and separate-executable acceptance tests |
 | `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
 | `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
-| `make ci-pty` | The tests listed in `PTY_TESTS`, which open a pseudo-terminal, alone in one test binary; needs Docker |
+| `make ci-pty` | Serial native terminal and executable acceptance packages selected by `PTY_TESTS`; needs Docker |
 | `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
 | `make lint` | The cognitive complexity limit of `.golangci.yml`, through a pinned golangci-lint fetched by `go run` |
 | `make commits BASE=main` | Build and vet, without and with the tags, every commit after `BASE` in a temporary worktree; `scripts/check-commits.sh BASE` takes a base whose name contains `$` |
@@ -152,16 +155,22 @@ defaults to `warn`.
 **Terminal input (TTY):** `canti-tui` uses a full-screen TUI on the alternate screen,
 rendered to standard error. There is currently no plain interactive terminal
 mode. Enter submits, Alt+Enter inserts a newline, and PgUp/PgDn scroll the
-retained display, including while a run is running or stopping. Text, paste,
-and Enter received during a run are discarded; they cannot queue another run.
-An incomplete input sequence or paste is drained before editing reopens.
+retained display, including while submitting, running or stopping. Text and paste always edit the
+in-memory draft. Enter during an active run retains the draft and reports that
+send is unavailable. Completion enables manual sending; it never submits or
+replays a busy Enter. Alt+Enter continues to insert newlines while busy. A
+submitted snapshot is separate from newer edits: a rejected input can be restored
+with Ctrl+R into an empty draft. If acknowledgement remains unknown, Ctrl+R
+reconciles the same InputID while preserving the new draft.
 Ctrl+C stops the current run and waits for cleanup before returning to the
 editor; a second Ctrl+C abandons that cleanup wait, leaving recovery to
 `canti resume` or `canti stop`. Ctrl+C while idle exits.
 
 The TUI combines answers, diagnostics, and committed step output in one
-viewport. Its pending output buffer and transcript each retain at most 64 KiB
-of text, with omission notices when older text is dropped. Only text from this
+viewport. Its typed progress queue retains at most 128 entries and 64 KiB; acceptance and
+final outcome have separate bounded protocol slots. The transcript retains at
+most 256 entries and 64 KiB, with omission notices. Final outcome and recovery
+guidance survive progress eviction. Only text from this
 process invocation is displayed: reopening with `-session ID` does **not** load
 previous conversation or execution history. On exit, the retained transcript
 is printed to standard error. The alternate screen and this bounded tail do
@@ -176,7 +185,8 @@ when the client detaches. Operational commands also support `-host embedded`,
 which runs a host in that command's process.
 
 `canti-tui -host owned` launches a separate runtime process exclusively for each
-input and reaps it before reopening the editor. It rejects any existing host,
+input and reaps it before enabling the next submission. The editor remains
+editable throughout cleanup. It rejects any existing host,
 including a different process winning a startup race; every successful Hello
 must report the PID of the child it launched. Use `-host auto` to attach to a
 shared host. The setup briefly opens an owned host to initialize the state
@@ -254,7 +264,8 @@ block after `<<WORD` or `<<'WORD'`, ending at a line exactly equal to `WORD`.
 `WORD` consists of ASCII letters, digits, underscores, or hyphens. `<<-WORD`
 also strips leading tabs. An input that starts with `<<` must be sent in a
 block. These block markers are not special in the TUI editor. Piped inputs are
-processed sequentially; the TTY busy-input discard rule does not apply.
+processed sequentially. Oversized lines and blocks are rejected in full; their
+boundaries are consumed with bounded storage, so following inputs remain intact.
 Answers go to standard output; prompts, commands, output previews, execution
 status, and diagnostics go to standard error. End of input exits with status
 0, or 1 inside an unfinished block, which is not submitted.
@@ -264,30 +275,35 @@ tails, and execution status. Lines containing control characters are quoted
 as Go strings after `(quoted)`; answers and output are cleaned of control
 characters. A stopped run reports its stop reason and recorded steps. SIGTERM,
 or Ctrl+C with non-TTY input, stops the run and ends chat with the run's status:
-3 if stopped, 0 if it had already returned. A TUI input or output failure,
-including a terminal hangup (SIGHUP), requests a stop and cleanup, then exits
-with an error; abrupt process loss may still require `canti resume` or
-`canti stop`.
+3 if stopped, 0 if it had already returned. A terminal UI input or output failure,
+including a terminal hangup (SIGHUP), detaches in auto mode or requests stop
+and cleanup in owned mode, then exits with an error; abrupt process loss may still require `canti resume` or
+`canti stop`. Pipe SIGHUP uses the same ownership policy; an auto detach
+reports status 5 without requesting persistent stop.
 
-Chat never changes the file status flags of the descriptors it inherits. It
-writes to a pipe or terminal through its own reopened description, so that a
-display write waits at most 250 ms, and the TUI reads its terminal the same
-way. When that description cannot be opened, as for a pipe or terminal of
-another user, without `/proc`, or for a pseudo-terminal master, chat says so
-once on standard error for an output and writes to the inherited descriptor,
-which can then block it, and the TUI reads the inherited terminal after a
-poll; a hung-up terminal output still ends chat with an error before it
-touches any state. The TUI must be the only reader of its terminal: another
-process reading it can take or delay input, including input typed during a
-run that chat would discard.
+The client preserves inherited file-status flags. Output to a pipe or terminal
+uses its own reopened description and a 250 ms write deadline; socket output
+uses per-call nonblocking writes. A pipe or terminal that cannot support bounded
+output (including a pseudo-terminal master) is refused before host startup or
+state creation. Ordinary pipe and file presentation remains supported. Native
+Bubble Tea owns the exclusive input reader, decoding, raw mode and restoration;
+no output operation consumes input or changes the draft. SIGKILL cannot restore
+terminal modes.
 
-Empty input is skipped. The TUI editor caps inserted text at its character
-limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted
-input that fails validation (length, UTF-8, or `-context-bytes`) is reported and
-editing continues. A malformed block opener in non-TTY mode is also reported
-without submitting it. A refused input, a run that needs resolution, or
-constraints and flags that leave no room for any input end chat with the status
-and recovery advice `run` would print.
+Empty input is skipped. Editor admission and native paste storage use the
+runtime's goal-byte limit. Pending escape sequences are capped at 64 KiB.
+Oversized paste preserves the draft and recovers at its end marker, allowing at
+most another 64 KiB or two seconds. Exhausting either recovery bound, or an
+unterminated control sequence, ends input through the same ownership policy.
+Tea 2.1.1 and its pinned ultraviolet revision are local, licensed source
+replacements under `apps/tui/third_party`; their manifest and patch are verified
+against upstream archives by `make native-deps`.
+
+Input that fails validation (length, UTF-8 or context admission) is reported;
+the terminal retains one rejected snapshot for explicit restoration. Malformed
+pipe block openers are reported without submission. A run that needs resolution,
+or constraints and flags leaving no room for any input, ends the client with
+recovery advice. Neither mode claims a `return` proves business success.
 
 The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's
@@ -378,11 +394,11 @@ Keep large outputs, credentials, databases, and local task state outside Git.
 ## CI and delivery
 
 The CI workflow runs on pushes to `main` and pull requests in parallel jobs.
-`check` runs `make fmt vet`, `make test-names`, `make lint`, `make ci-unit`,
+`check` runs `make fmt graph vet`, `make native-deps`, `make test-names`, `make lint`, `make ci-unit`,
 and a CLI version smoke test. `make lint` runs golangci-lint's `gocognit` at
 a cognitive complexity of 30 over the production code, without and with the
 `integration,live` tags; `.golangci.yml` lists the only exceptions, core's
-`State.Next` and `State.Validate` and the chat input decoder. For a pull
+`State.Next` and `State.Validate`. For a pull
 request, `commits` runs `scripts/check-commits.sh` with the base branch,
 which builds and vets every commit after it in a temporary worktree.
 `integration`, `long`, and `pty` each pull
@@ -391,8 +407,13 @@ and fail if any container labelled `canti.effect` is left; together they run
 each test of `make integration` once. The Makefile lists the tests of the last
 two jobs: `LONG_TESTS` are the slow acceptance tests, and `PTY_TESTS` are the
 tests that open a pseudo-terminal, which wait for terminal output within fixed
-deadlines; `ci-pty` runs them alone so that no other test binary competes for
-the CPU. Add a new test of either kind to its list. `make test-names` fails
+deadlines; `ci-pty` runs `internal/terminal` and the app acceptance package
+sequentially with `-p 1`. App acceptance uses the `acceptance` build tag and
+receives binaries from root orchestration, including the runtime-owned fault
+fixture for SQLite locks and execution receipt checks. Default module tests
+build no sibling source, and the module graph check includes test dependencies.
+The `module-minimum` job builds/tests an isolated runtime+SDK copy on Go 1.25
+with automatic toolchain upgrades disabled. Add a new test of either kind to its list. `make test-names` fails
 when a listed name is not a test, when a test that opens a pseudo-terminal is
 not in `PTY_TESTS`, or when `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, or a
 document under `docs/` cites a test that does not exist; the dated evidence

@@ -1,6 +1,6 @@
-//go:build integration
+//go:build acceptance && integration
 
-package main
+package acceptance
 
 import (
 	"io"
@@ -8,16 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/ChrAlpha/canti/runtime/core"
 )
 
 func TestChatShowsCommandsAndTheirOutput(t *testing.T) {
-	f, image := dockerFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: "printf 'hello\\033[2J\\nworld\\n'\nseq 20\n:\n:\n:\n:\n:\n:\nexit 3"},
-		2: {Kind: core.Return, Payload: "done"},
+	f, image := dockerFixture(t, map[int]decision{
+		1: {Kind: "exec", Payload: "printf 'hello\\033[2J\\nworld\\n'\nseq 20\n:\n:\n:\n:\n:\n:\nexit 3"},
+		2: {Kind: "return", Payload: "done"},
 	})
-	_, wait := f.startWith(strings.NewReader("go\n"), nil, "chat", "-image", image)
+	_, wait := f.startWith(strings.NewReader("go\n"), nil, tuiCommand, "-image", image)
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("chat: %+v", r)
@@ -29,11 +27,11 @@ func TestChatShowsCommandsAndTheirOutput(t *testing.T) {
 }
 
 func TestChatShowsATimedOutJob(t *testing.T) {
-	f, image := dockerFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: "sleep 60"},
-		2: {Kind: core.Return, Payload: "gave up"},
+	f, image := dockerFixture(t, map[int]decision{
+		1: {Kind: "exec", Payload: "sleep 60"},
+		2: {Kind: "return", Payload: "gave up"},
 	})
-	_, wait := f.startWith(strings.NewReader("wait\n"), nil, "chat", "-image", image, "-job-timeout", "2s")
+	_, wait := f.startWith(strings.NewReader("wait\n"), nil, tuiCommand, "-image", image, "-job-timeout", "2s")
 	r := wait()
 	if r.code != exitOK || r.stdout != "gave up\n" || !strings.Contains(r.stderr, "$ sleep 60\n└ timed_out") || strings.Contains(r.stderr, "exit 1") {
 		t.Fatalf("chat: %+v", r)
@@ -41,11 +39,11 @@ func TestChatShowsATimedOutJob(t *testing.T) {
 }
 
 func TestChatShowsAllOfACommandWithCarriageReturns(t *testing.T) {
-	f, image := dockerFixture(t, map[int]core.Decision{
-		1: {Kind: core.Exec, Payload: "touch hidden # \r echo shown"},
-		2: {Kind: core.Return, Payload: "done"},
+	f, image := dockerFixture(t, map[int]decision{
+		1: {Kind: "exec", Payload: "touch hidden # \r echo shown"},
+		2: {Kind: "return", Payload: "done"},
 	})
-	_, wait := f.startWith(strings.NewReader("go\n"), nil, "chat", "-image", image)
+	_, wait := f.startWith(strings.NewReader("go\n"), nil, tuiCommand, "-image", image)
 	r := wait()
 	if r.code != exitOK || !strings.Contains(r.stderr, "$ (quoted) \"touch hidden # \\r echo shown\"\n└ exit 0\n") {
 		t.Fatalf("chat: %+v", r)
@@ -56,11 +54,11 @@ func TestChatShowsAllOfACommandWithCarriageReturns(t *testing.T) {
 }
 
 func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
-	f, image := recoveryFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "third answer"}})
+	f, image := recoveryFixture(t, map[int]decision{1: {Kind: "return", Payload: "third answer"}})
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
 	f.model.answer(1, 2, reply{text: `{"kind":"exec","payload":"echo started > started; sleep 60"}`})
 	in, w := io.Pipe()
-	cmd, wait := f.startWith(in, nil, "chat", "-session", "s", "-image", image)
+	cmd, wait := f.startWith(in, nil, tuiCommand, "-session", "s", "-image", image)
 	io.WriteString(w, "first request\n")
 	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
 	io.WriteString(w, "interrupted request\n")
@@ -68,7 +66,7 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return f.status().Phase == core.PhaseStopped })
+	waitFor(t, func() bool { return f.status().Phase == "stopped" })
 	s := f.status()
 	w.Close()
 	r := wait()
@@ -77,11 +75,11 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 		!strings.Contains(r.stderr, "stopped: cancelled") {
 		t.Fatalf("chat: %+v", r)
 	}
-	_, wait = f.startWith(strings.NewReader("third request\n"), nil, "chat", "-session", "s", "-image", image)
+	_, wait = f.startWith(strings.NewReader("third request\n"), nil, tuiCommand, "-session", "s", "-image", image)
 	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
-	if s.Reason != core.StopCancelled || s.Totals.Steps != 1 || f.status().Run.SessionSeq != 3 {
+	if s.Reason != "cancelled" || s.Totals.Steps != 1 || f.status().Run.SessionSeq != 3 {
 		t.Fatalf("interrupted run: %+v", s)
 	}
 	p := f.model.prompts(1)

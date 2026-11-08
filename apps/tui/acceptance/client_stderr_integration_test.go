@@ -1,6 +1,6 @@
-//go:build integration
+//go:build acceptance && integration
 
-package main
+package acceptance
 
 import (
 	"bytes"
@@ -14,16 +14,14 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ChrAlpha/canti/runtime/core"
 )
 
 func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 	for _, abandon := range []bool{false, true} {
 		t.Run(fmt.Sprintf("abandon=%v", abandon), func(t *testing.T) {
-			f, image := recoveryFixture(t, map[int]core.Decision{
-				1: {Kind: core.Exec, Payload: "echo started >> effects; sleep 60; echo finished >> effects"},
-				2: {Kind: core.Return, Payload: "done"},
+			f, image := recoveryFixture(t, map[int]decision{
+				1: {Kind: "exec", Payload: "echo started >> effects; sleep 60; echo finished >> effects"},
+				2: {Kind: "return", Payload: "done"},
 			})
 			env := []string{"ANTHROPIC_API_KEY=" + f.key}
 			blocked := filepath.Join(t.TempDir(), "cleanup")
@@ -61,7 +59,7 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 				t.Fatalf("queued input was executed: %+v", s)
 			}
 			if !abandon {
-				if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled {
+				if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" {
 					t.Fatalf("first signal did not finish cleanup: %+v", s)
 				}
 			}
@@ -69,7 +67,7 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 			if r := f.cli(nil, "stop"); r.code != exitStopped {
 				t.Fatalf("finish cleanup: %+v", r)
 			}
-			if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Totals.Steps != 1 {
+			if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Totals.Steps != 1 {
 				t.Fatalf("stopped result: %+v", s)
 			}
 			if data, err := os.ReadFile(filepath.Join(f.workspace, "effects")); err != nil || string(data) != "started\n" {
@@ -80,7 +78,7 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 			for _, e := range h {
 				if e.Facts.Observation != nil {
 					observed++
-					if e.Facts.Observation.Execution != core.ExecutionCancelled {
+					if e.Facts.Observation.Execution != "cancelled" {
 						t.Fatalf("unexpected observation: %+v", e.Facts.Observation)
 					}
 				}
@@ -95,10 +93,7 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 
 func startChatWithBlockedStderr(t *testing.T, f *fixture, image string, env []string) (*exec.Cmd, func() result) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	in, input, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +109,8 @@ func startChatWithBlockedStderr(t *testing.T, f *fixture, image string, env []st
 	if err := r.SetReadDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, exe, pinHost(append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image}, fixtureModel...))...)
+	exe, argv := executable(t, env, append([]string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image}, fixtureModel...))
+	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)

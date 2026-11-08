@@ -1,6 +1,6 @@
-//go:build linux
+//go:build acceptance && linux
 
-package main
+package acceptance
 
 import (
 	"encoding/json"
@@ -9,14 +9,12 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ChrAlpha/canti/runtime/core"
 )
 
 func TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: strings.Repeat("x", 4096) + "\nanswer-01"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: strings.Repeat("x", 4096) + "\nanswer-01"}})
 	for i := 2; i <= 32; i++ {
-		decision, err := json.Marshal(core.Decision{Kind: core.Return, Payload: strings.Repeat("x", 4096) + fmt.Sprintf("\nanswer-%02d", i)})
+		decision, err := json.Marshal(decision{Kind: "return", Payload: strings.Repeat("x", 4096) + fmt.Sprintf("\nanswer-%02d", i)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -28,7 +26,7 @@ func TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded(t *test
 	for i := 1; i <= 32; i++ {
 		p.send(t, fmt.Sprintf("round %02d\r", i))
 		pos = p.await(t, fmt.Sprintf("answer-%02d", i), pos)
-		if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != int64(i) || s.Run.Goal != fmt.Sprintf("round %02d", i) {
+		if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != int64(i) || s.Run.Goal != fmt.Sprintf("round %02d", i) {
 			t.Fatalf("round %d did not return: %+v", i, s)
 		}
 	}

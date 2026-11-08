@@ -512,7 +512,7 @@ func (d *eventScanner) discardPaste(buf []byte) (int, bool) {
 			}
 		}
 	}
-	if n > DefaultDiscardLimit-d.discardBytes {
+	if n > DefaultDiscardLimit-d.discardBytes || !complete && len(buf) >= DefaultDiscardLimit-d.discardBytes {
 		d.limitErr = ErrInputLimit
 		return 0, false
 	}

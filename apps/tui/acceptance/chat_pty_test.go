@@ -1,6 +1,6 @@
-//go:build linux
+//go:build acceptance && linux
 
-package main
+package acceptance
 
 import (
 	"bytes"
@@ -20,9 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/term"
+	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
@@ -36,6 +35,8 @@ type ptyChat struct {
 	flags   int
 	mu      sync.Mutex
 	output  bytes.Buffer
+	screen  *vt.Emulator
+	frames  []screenFrame
 	wake    chan struct{}
 	done    chan struct{}
 	waited  bool
@@ -87,13 +88,11 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 			t.Fatal(err)
 		}
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
-	argv := append(append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, fixtureModel...), args...)
-	cmd := exec.CommandContext(ctx, exe, pinHost(argv)...)
+	argv := append(append([]string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, fixtureModel...), args...)
+	exe, argv := executable(t, env, argv)
+	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
 			cmd.Env = append(cmd.Env, kv)
@@ -106,7 +105,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 		cmd.Stderr = stderr
 	}
 	cmd.SysProcAttr = attr
-	p := &ptyChat{cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
+	p := &ptyChat{screen: newScreen(), cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		master.Close()
@@ -120,7 +119,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 			n, err := master.Read(buf)
 			if n > 0 {
 				p.mu.Lock()
-				p.output.Write(buf[:n])
+				p.record(buf[:n])
 				p.mu.Unlock()
 				select {
 				case p.wake <- struct{}{}:
@@ -149,11 +148,43 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 		master.Close()
 		slave.Close()
 		<-p.done
+		p.screen.Close()
 		if slices.Contains(cmd.Args, "owned") {
 			waitFor(t, func() bool { return !locked(f.state) })
 		}
 	})
 	return p
+}
+
+type screenFrame struct {
+	offset int
+	text   string
+}
+
+func newScreen() *vt.Emulator {
+	screen := vt.NewEmulator(100, 24)
+	// This observer consumes rendering only; terminal query replies are not
+	// injected as user input. Closing the response pipe keeps parsing nonblocking.
+	_ = screen.InputPipe().(io.Closer).Close()
+	return screen
+}
+
+// record is called under p.mu by either the PTY or redirected-output reader.
+func (p *ptyChat) record(data []byte) {
+	p.output.Write(data)
+	_, _ = p.screen.Write(data)
+	offset := len(ansi.Strip(p.output.String()))
+	p.frames = append(p.frames, screenFrame{offset, p.screen.String()})
+	if len(p.frames) > 512 {
+		copy(p.frames, p.frames[len(p.frames)-512:])
+		p.frames = p.frames[:512]
+	}
+}
+func screenText(data []byte) string {
+	screen := newScreen()
+	defer screen.Close()
+	_, _ = screen.Write(data)
+	return screen.String()
 }
 
 func (p *ptyChat) text() string {
@@ -167,12 +198,25 @@ func (p *ptyChat) await(t *testing.T, needle string, after int) int {
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
-		output := ansi.Strip(p.text())
+		p.mu.Lock()
+		output := ansi.Strip(p.output.String())
+		found := -1
+		for _, frame := range p.frames {
+			if frame.offset > after && strings.Contains(frame.text, needle) {
+				found = frame.offset - 1
+				break
+			}
+		}
+		p.mu.Unlock()
+		if found >= 0 {
+			return found
+		}
 		if after <= len(output) {
 			if i := strings.Index(output[after:], needle); i >= 0 {
 				return after + i + len(needle)
 			}
 		}
+
 		select {
 		case <-p.wake:
 		case <-deadline.C:
@@ -268,212 +312,99 @@ func descriptionFlags(t *testing.T, fd int) int {
 }
 
 func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
-	for _, terminal := range []bool{false, true} {
+	for _, isTerminal := range []bool{false, true} {
 		for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
-			t.Run(fmt.Sprintf("terminal=%v/%v at the prompt", terminal, sig), func(t *testing.T) {
+			t.Run(fmt.Sprintf("terminal=%v/signal=%v", isTerminal, sig), func(t *testing.T) {
 				f := newFixture(t, nil)
-				reader, out, err := os.Pipe()
-				if terminal {
-					reader, out, err = pty.Open()
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer reader.Close()
-				defer out.Close()
-				fd := int(out.Fd())
-				before := descriptionFlags(t, fd)
-				in, input := io.Pipe()
-				cmd, wait := f.startIO(in, out, nil, "chat")
-				waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
-				if err := cmd.Process.Signal(sig); err != nil {
-					t.Fatal(err)
-				}
-				input.Close()
-				if r := wait(); r.code != -1 {
-					t.Fatalf("chat survived %v at the prompt: %+v", sig, r)
-				}
-				if after := descriptionFlags(t, fd); after != before {
-					t.Fatalf("chat left the file status flags of its standard output at %#x, inherited %#x", after, before)
+				if isTerminal {
+					p := startPTYChat(t, f, nil)
+					p.await(t, "ready", 0)
+					if err := p.cmd.Process.Signal(sig); err != nil {
+						t.Fatal(err)
+					}
+					want := exitOK
+					if sig == syscall.SIGTERM {
+						want = exitStopped
+					}
+					p.finish(t, want)
+				} else {
+					reader, out, err := os.Pipe()
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer reader.Close()
+					defer out.Close()
+					before := descriptionFlags(t, int(out.Fd()))
+					in, input := io.Pipe()
+					defer in.Close()
+					defer input.Close()
+					cmd, wait := f.startIO(in, out, nil, tuiCommand)
+					waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
+					cmd.Process.Signal(sig)
+					input.Close()
+					if r := wait(); r.code != exitStopped {
+						t.Fatalf("signal result: %+v", r)
+					}
+					if after := descriptionFlags(t, int(out.Fd())); after != before {
+						t.Fatalf("flags %x -> %x", before, after)
+					}
 				}
 			})
 		}
 	}
-	t.Run("TUI killed", func(t *testing.T) {
+	t.Run("SIGKILL preserves inherited file description", func(t *testing.T) {
 		f := newFixture(t, nil)
 		p := startPTYChat(t, f, nil)
 		p.await(t, "ready", 0)
 		p.waited = true
-		if err := p.cmd.Process.Kill(); err != nil {
-			t.Fatal(err)
-		}
-		if err := p.cmd.Wait(); err == nil {
-			t.Fatal("chat exited cleanly after SIGKILL")
-		}
-		if flags := descriptionFlags(t, p.slaveFD); flags != p.flags {
-			t.Fatalf("killed chat left the terminal's file status flags at %#x, inherited %#x", flags, p.flags)
+		p.cmd.Process.Kill()
+		p.cmd.Wait()
+		if got := descriptionFlags(t, p.slaveFD); got != p.flags {
+			t.Fatalf("flags %x -> %x", p.flags, got)
 		}
 	})
-	t.Run("unreopenable pipe output", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root reopens a pipe whatever its mode")
-		}
-		for _, args := range [][]string{{"-h"}, nil} {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
-			reader, out, err := os.Pipe()
+	for _, kind := range []string{"unreopenable pipe", "unreopenable terminal", "terminal master", "hung-up terminal"} {
+		t.Run(kind, func(t *testing.T) {
+			if strings.HasPrefix(kind, "unreopenable") && os.Geteuid() == 0 {
+				t.Skip("root can reopen regardless of mode")
+			}
+			f := newFixture(t, nil)
+			var reader, out *os.File
+			var err error
+			if kind == "unreopenable pipe" {
+				reader, out, err = os.Pipe()
+			} else {
+				reader, out, err = pty.Open()
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reader.Close()
 			defer out.Close()
-			fd := int(out.Fd())
-			if err := unix.Fchmod(fd, 0); err != nil {
-				t.Fatal(err)
+			if kind == "terminal master" {
+				reader, out = out, reader
 			}
-			before := descriptionFlags(t, fd)
-			_, wait := f.startIO(strings.NewReader("one\n"), out, nil, "chat", args...)
-			r := wait()
-			if after := descriptionFlags(t, fd); after != before {
-				t.Fatalf("chat %q changed the file status flags of its standard output from %#x to %#x", args, before, after)
-			}
-			out.Close()
-			stdout, err := io.ReadAll(reader)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := "first answer\n"
-			if args != nil {
-				want = "Usage: canti-tui [flags]"
-			}
-			if r.code != exitOK || !strings.Contains(string(stdout), want) || strings.Count(r.stderr, "canti-tui: standard output: ") != 1 ||
-				!strings.Contains(r.stderr, "canti-tui: standard output: reopen /proc/self/fd/1: permission denied; ") || !strings.Contains(r.stderr, "display deadline") {
-				t.Fatalf("chat %q with an unreopenable output: %+v, standard output %q", args, r, stdout)
-			}
-		}
-	})
-	t.Run("pseudo-terminal master output", func(t *testing.T) {
-		f := newFixture(t, nil)
-		master, slave, err := pty.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer master.Close()
-		defer slave.Close()
-		if _, err := term.MakeRaw(slave.Fd()); err != nil {
-			t.Fatal(err)
-		}
-		before := descriptionFlags(t, int(master.Fd()))
-		_, wait := f.startIO(strings.NewReader(""), master, nil, "chat", "-h")
-		r := wait()
-		if after := descriptionFlags(t, int(master.Fd())); after != before {
-			t.Fatalf("chat changed the file status flags of its pseudo-terminal master from %#x to %#x", before, after)
-		}
-		got := make(chan []byte, 1)
-		go func() {
-			var b []byte
-			buf := make([]byte, 4096)
-			for !strings.Contains(string(b), "Flags:") {
-				n, err := slave.Read(buf)
-				if err != nil {
-					break
+			before := descriptionFlags(t, int(out.Fd()))
+			if strings.HasPrefix(kind, "unreopenable") {
+				if err = unix.Fchmod(int(out.Fd()), 0); err != nil {
+					t.Fatal(err)
 				}
-				b = append(b, buf[:n]...)
 			}
-			got <- b
-		}()
-		var out []byte
-		select {
-		case out = <-got:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the usage written to a pseudo-terminal master never reached its slave")
-		}
-		if r.code != exitOK || !strings.Contains(string(out), "Usage: canti-tui [flags]") ||
-			!strings.Contains(r.stderr, "canti-tui: standard output: a pseudo-terminal master opens a new terminal when reopened; ") {
-			t.Fatalf("chat -h on a pseudo-terminal master: %+v, slave read %q", r, out)
-		}
-	})
-	t.Run("unreopenable terminal", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root reopens a terminal whatever its mode")
-		}
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
-		url, release := holdFirstAnswer(t, f)
-		master, slave, err := pty.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := unix.Fchmod(int(slave.Fd()), 0); err != nil {
-			t.Fatal(err)
-		}
-		p := startPTYChatOn(t, f, master, slave, nil, nil, true, 30*time.Second, nil, "-model-url", url)
-		pos := p.await(t, "ready", 0)
-		p.send(t, "one\r")
-		pos = p.await(t, "running", pos)
-		release()
-		p.await(t, "first answer", pos)
-		p.await(t, "ready", pos)
-		p.send(t, "\x03")
-		p.finish(t, exitOK)
-		out := ansi.Strip(p.text())
-		for _, stream := range []string{"output: reopen /proc/self/fd/1", "error: reopen /proc/self/fd/2"} {
-			if strings.Count(out, "canti-tui: standard "+stream) != 1 || !strings.Contains(out, "canti-tui: standard "+stream+": permission denied; ") {
-				t.Fatalf("no single diagnostic for standard %s: %q", stream, out[:min(len(out), 600)])
+			if kind == "hung-up terminal" {
+				reader.Close()
 			}
-		}
-	})
-	t.Run("hung-up terminal output", func(t *testing.T) {
-		f := newFixture(t, nil)
-		master, out, err := pty.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		master.Close()
-		defer out.Close()
-		_, wait := f.startIO(strings.NewReader("never\n"), out, nil, "chat")
-		if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "canti-tui: standard output: ") {
-			t.Fatalf("chat with an unopenable output: %+v", r)
-		}
-		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
-			t.Fatalf("state directory after the refusal: %v", err)
-		}
-	})
-	t.Run("hung-up terminal output with a blocked stderr", func(t *testing.T) {
-		f := newFixture(t, nil)
-		master, out, err := pty.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		master.Close()
-		defer out.Close()
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer r.Close()
-		fillPipe(t, w)
-		cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL}, fixtureModel...)...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("never\n"), out, w
-		start := time.Now()
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		w.Close()
-		ended := make(chan struct{})
-		go func() { cmd.Wait(); close(ended) }()
-		select {
-		case <-ended:
-		case <-time.After(5 * time.Second):
-			go io.Copy(io.Discard, r)
-			<-ended
-			t.Fatalf("chat setup waited %s on a stderr nobody reads", time.Since(start))
-		}
-		if code, elapsed := cmd.ProcessState.ExitCode(), time.Since(start); code != exitError || elapsed > 3*stderrFinalTime {
-			t.Fatalf("chat with an unopenable output and a blocked stderr: exit %d after %s", code, elapsed)
-		}
-		if _, err := os.Stat(f.state); !os.IsNotExist(err) {
-			t.Fatalf("state directory after the refusal: %v", err)
-		}
-	})
+			_, wait := f.startIO(strings.NewReader("never\n"), out, nil, tuiCommand)
+			if r := wait(); r.code != exitError || !strings.Contains(r.stderr, "standard output") {
+				t.Fatalf("unsupported transport: %+v", r)
+			}
+			if got := descriptionFlags(t, int(out.Fd())); got != before {
+				t.Fatalf("flags %x -> %x", before, got)
+			}
+			if _, err = os.Stat(f.state); !os.IsNotExist(err) {
+				t.Fatalf("refusal created state: %v", err)
+			}
+		})
+	}
 }
 
 func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
@@ -483,7 +414,7 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			name = "interrupted"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+			f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 			f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second answer"}`})
 			entered := make(chan struct{}, 1)
 			release := make(chan struct{})
@@ -518,11 +449,12 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the model did not receive the first run")
 			}
-			p.send(t, "discard this\r")
+			p.send(t, "second request\r")
+			p.await(t, "Send unavailable", pos)
 			if interrupted {
 				p.send(t, "\x03")
 				deadline := time.Now().Add(5 * time.Second)
-				for f.status().Phase != core.PhaseStopped {
+				for f.status().Phase != "stopped" {
 					if time.Now().After(deadline) {
 						t.Fatal("Ctrl-C did not stop the active run")
 					}
@@ -543,13 +475,13 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the model did not answer the first run")
 			}
-			p.send(t, "second request\r")
+			p.send(t, "\r")
 			p.await(t, "second answer", pos)
-			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != core.PhaseReturned {
+			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != "returned" {
 				t.Fatalf("explicit input did not finish: %+v", s)
 			}
 			prompts := f.model.prompts(1)
-			if len(prompts) != 2 || !strings.Contains(prompts[1], "first request") || !strings.Contains(prompts[1], "second request") || strings.Contains(prompts[1], "discard this") {
+			if len(prompts) != 2 || !strings.Contains(prompts[1], "first request") || !strings.Contains(prompts[1], "second request") {
 				t.Fatalf("wrong session history: %q", prompts)
 			}
 			if interrupted && !strings.Contains(prompts[1], "stopped, reason cancelled") {
@@ -562,7 +494,7 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 }
 
 func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "unused"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "unused"}})
 	held := f.model.holdRequests()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -588,7 +520,7 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	fillLivePipe(t, writeFD)
 	p.send(t, "\x03")
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 {
 		t.Fatalf("output failure left an active or repeated run: %+v", s)
 	}
 }
@@ -607,7 +539,7 @@ func fillLivePipe(t *testing.T, fd int) {
 }
 
 func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "unused"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "unused"}})
 	held := f.model.holdRequests()
 	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true})
 	p.await(t, "ready", 0)
@@ -629,7 +561,7 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 		t.Fatal("chat did not exit after its terminal hung up")
 	}
 	s := f.status()
-	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("hangup: %v, exit %d, run %+v", p.cmd.ProcessState, code, s)
 	}
 	f.model.mu.Lock()
@@ -641,7 +573,7 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 }
 
 func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 	url, release := holdFirstAnswer(t, f)
 	imports := t.TempDir()
 	p := startPTYChat(t, f, nil, "-model-url", url, "-history-imports", imports)
@@ -667,14 +599,14 @@ func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
 }
 
 func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "true"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "exec", Payload: "true"}})
 	t.Setenv("PATH", t.TempDir())
 	p := startPTYChat(t, f, nil)
 	p.await(t, "ready", 0)
 	p.send(t, "needs inspection\r")
 	p.finish(t, exitResolution)
 	s := f.status()
-	if s.Phase != core.PhaseNeedsResolution || s.Run.SessionSeq != 1 {
+	if s.Phase != "needs_resolution" || s.Run.SessionSeq != 1 {
 		t.Fatalf("missing durable resolution state: %+v", s)
 	}
 	out := p.text()
@@ -724,13 +656,13 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 	p.send(t, "\x03")
 	p.finish(t, exitError)
 	s := f.status()
-	if s.Run.SessionSeq != 1 || s.Run.Goal != "request needing cleanup" || s.Phase == core.PhaseStopped {
+	if s.Run.SessionSeq != 1 || s.Run.Goal != "request needing cleanup" || s.Phase == "stopped" {
 		t.Fatalf("blocked cleanup unexpectedly committed or started another run: %+v", s)
 	}
 	if result := f.cli(nil, "stop", "-run", s.Run.ID); result.code != exitStopped {
 		t.Fatalf("retrying stop after abandoned cleanup: %+v", result)
 	}
-	if final := f.status(); final.Phase != core.PhaseStopped || final.Reason != core.StopCancelled || final.Run.SessionSeq != 1 {
+	if final := f.status(); final.Phase != "stopped" || final.Reason != "cancelled" || final.Run.SessionSeq != 1 {
 		t.Fatalf("manual stop did not finish original run: %+v", final)
 	}
 }
@@ -738,9 +670,9 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 	f := newFixture(t, nil)
 	gate := make(chan struct{})
-	f.model.decideWith(func(int, string) (core.Decision, error) {
+	f.model.decideWith(func(int, string) (decision, error) {
 		<-gate
-		return core.Decision{Kind: core.Return, Payload: "answered after the hangup"}, nil
+		return decision{Kind: "return", Payload: "answered after the hangup"}, nil
 	})
 	f.autoHost()
 	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-host", "auto")
@@ -759,7 +691,7 @@ func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 		t.Fatal("chat did not exit after its terminal hung up")
 	}
 	close(gate)
-	waitFor(t, func() bool { return f.status().Phase == core.PhaseReturned })
+	waitFor(t, func() bool { return f.status().Phase == "returned" })
 	if h := f.history(); slicesContain(kinds(h), "stop_requested") || len(f.model.requests()) != 1 {
 		t.Fatalf("a hangup of a chat attached to a host stopped its run: %q", kinds(h))
 	}

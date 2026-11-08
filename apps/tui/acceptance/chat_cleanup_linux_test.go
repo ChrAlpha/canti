@@ -1,20 +1,18 @@
-package main
+//go:build acceptance
+
+package acceptance
 
 import (
 	"bytes"
-	"database/sql"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/runtime/core"
-	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 )
 
 func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "answer"}})
 	held := f.model.holdRequests()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -33,7 +31,7 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 		var output []byte
 		var chunk [4096]byte
 		deadline := time.Now().Add(5 * time.Second)
-		for !bytes.Contains([]byte(ansi.Strip(string(output))), []byte(needle)) {
+		for !bytes.Contains([]byte(screenText(output)), []byte(needle)) {
 			n, err := unix.Read(readFD, chunk[:])
 			if n > 0 {
 				output = append(output, chunk[:n]...)
@@ -57,31 +55,17 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 		t.Fatal("first request did not reach provider")
 	}
 	awaitFrame("running")
-	db, err := sql.Open("sqlite", filepath.Join(f.state, "canti.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	conn, err := db.Conn(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	defer conn.ExecContext(t.Context(), "ROLLBACK")
+	releaseLock := holdWriteLock(t, f)
+	defer releaseLock()
 	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
 	}
 	fillLivePipe(t, writeFD)
-	p.send(t, "discard while busy\rpartial\x03")
+	p.send(t, "draft while busy\rpartial\x03")
 	time.Sleep(3 * 250 * time.Millisecond)
-	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
-		t.Fatal(err)
-	}
+	releaseLock()
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != 1 {
 		t.Fatalf("display failure abandoned cancellation or admitted busy input: %+v, requests=%d", s, len(f.model.requests()))
 	}
 	f.model.mu.Lock()
@@ -90,7 +74,7 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 	if r := f.cli(nil, "run", "-session", "pty", "-input", "next", "-goal", "fresh"); r.code != exitOK {
 		t.Fatalf("next session input failed: %+v", r)
 	}
-	if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
+	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
 		t.Fatalf("session did not continue after cancellation: %+v", s)
 	}
 }

@@ -244,10 +244,9 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 }
 
 // hostCommands are the commands that take -host.
-var hostCommands = map[string]bool{"run": true, "chat": true, "resume": true, "stop": true, "resolve": true}
+var hostCommands = map[string]bool{"run": true, "resume": true, "stop": true, "resolve": true}
 
-// pinHost uses -host embedded for operational commands and -host owned for
-// the independent TUI after
+// pinHost uses -host embedded after
 // a command that takes -host and names none, so that every test runs the
 // command in its own process unless it names -host auto, or unpinned names
 // the default.
@@ -258,9 +257,7 @@ func pinHost(args []string) []string {
 		return slices.DeleteFunc(slices.Clone(args), func(a string) bool { return a == unpinned })
 	}
 	mode := "embedded"
-	if args[0] == "chat" {
-		mode = "owned"
-	}
+
 	return append([]string{args[0], "-host", mode}, args[1:]...)
 }
 
@@ -381,21 +378,16 @@ func (f *fixture) startWith(stdin io.Reader, env []string, command string, args 
 func (f *fixture) startIO(stdin io.Reader, stdout io.Writer, env []string, command string, args ...string) (*exec.Cmd, func() result) {
 	f.t.Helper()
 	all := []string{command, "-workspace", f.workspace, "-state", f.state}
-	if command == "run" || command == "resume" || command == "chat" {
+	if command == "run" || command == "resume" {
 		all = append(all, "-model-url", f.model.URL)
 	}
-	if command == "run" || command == "chat" {
+	if command == "run" {
 		all = append(all, fixtureModel...)
 	}
 	cmd, wait := startCLIWith(f.t, stdin, stdout, append([]string{"ANTHROPIC_API_KEY=" + f.key}, env...), append(all, args...)...)
 	return cmd, func() result {
 		r := wait()
-		// A signal may kill the client before its separately owned runtime has
-		// completed parent-death shutdown. Await that lifecycle before inspecting
-		// SQLite files, whose WAL/SHM disappear as the runtime closes them.
-		if command == "chat" && r.code < 0 && slices.Contains(cmd.Args, "owned") {
-			waitFor(f.t, func() bool { return !locked(f.state) })
-		}
+
 		f.mu.Lock()
 		f.output.WriteString(r.stdout + r.stderr)
 		f.mu.Unlock()
@@ -553,4 +545,22 @@ func toolReply(decisions ...core.Decision) string {
 	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
 		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
 	return string(data)
+}
+
+func holdFirstAnswer(t *testing.T, f *fixture) (url string, release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	var releaseOnce, holdOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(held) }) }
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		holdOnce.Do(func() {
+			select {
+			case <-held:
+			case <-r.Context().Done():
+			}
+		})
+		f.model.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { release(); gate.Close() })
+	return gate.URL, release
 }

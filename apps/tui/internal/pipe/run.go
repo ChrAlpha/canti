@@ -2,19 +2,16 @@
 package pipe
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/ChrAlpha/canti/apps/tui/internal/present"
 	"github.com/ChrAlpha/canti/apps/tui/internal/session"
-	"github.com/muesli/cancelreader"
 )
 
 type input struct {
@@ -23,33 +20,11 @@ type input struct {
 }
 
 func Run(ctx context.Context, c *session.Controller, in *os.File, out, diagnostic io.Writer, signals <-chan os.Signal, failures <-chan error) (int, error) {
-	reader, err := cancelreader.NewReader(in)
+	reader, err := newInputReader(in, diagnostic, c.GoalLimit)
 	if err != nil {
 		return session.Error, err
 	}
-	requests := make(chan struct{})
-	inputs := make(chan input)
-	closing := make(chan struct{})
-	var reads sync.WaitGroup
-	reads.Add(1)
-	go func() {
-		defer reads.Done()
-		buf := bufio.NewReader(reader)
-		for {
-			select {
-			case <-closing:
-				return
-			case <-requests:
-				text, err := readInput(buf, diagnostic, c.GoalLimit)
-				select {
-				case inputs <- input{text, err}:
-				case <-closing:
-					return
-				}
-			}
-		}
-	}()
-	defer func() { close(closing); reader.Cancel(); reads.Wait(); reader.Close() }()
+	defer reader.Close()
 	if _, err = fmt.Fprintf(diagnostic, "canti: session %s; continue it with \"canti-tui -session %[1]s\".\n", c.ID()); err != nil {
 		return session.Error, err
 	}
@@ -57,20 +32,9 @@ func Run(ctx context.Context, c *session.Controller, in *os.File, out, diagnosti
 		if _, err = fmt.Fprint(diagnostic, "> "); err != nil {
 			return session.Error, fmt.Errorf("showing chat prompt: %w", err)
 		}
-		select {
-		case requests <- struct{}{}:
-		case <-ctx.Done():
-			return session.Error, ctx.Err()
-		}
-		var entry input
-		select {
-		case entry = <-inputs:
-		case <-signals:
-			return session.Stopped, nil
-		case err := <-failures:
-			return session.Error, err
-		case <-ctx.Done():
-			return session.Error, ctx.Err()
+		entry, code, err := reader.Next(ctx, signals, failures)
+		if code != session.OK || err != nil {
+			return code, err
 		}
 		var opener *openerError
 		var overflow *overflowError
@@ -107,26 +71,8 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 	if err != nil {
 		return session.Error, err, true
 	}
-	events := make(chan session.Event)
-	relayCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var relay sync.WaitGroup
-	relay.Add(1)
-	go func() {
-		defer relay.Done()
-		for {
-			e, err := turn.Next(relayCtx)
-			if err != nil {
-				return
-			}
-			select {
-			case events <- e:
-			case <-relayCtx.Done():
-				return
-			}
-		}
-	}()
-	defer func() { cancel(); relay.Wait() }()
+	events, closeEvents := turnEvents(turn)
+	defer closeEvents()
 	interrupted := false
 	var displayErr error
 	for {
@@ -139,19 +85,7 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 			turn.InputLost()
 		case e := <-events:
 			if e.Result != nil {
-				answer, note := present.Result(*e.Result)
-				if _, err = io.WriteString(out, answer); err == nil {
-					_, err = io.WriteString(diagnostic, note)
-				}
-				if displayErr != nil {
-					return session.Error, displayErr, true
-				}
-				if err != nil {
-					return session.Error, err, true
-				}
-				result := e.Result
-				stop := interrupted || result.NoInputFits || result.Code != session.OK && result.Code != session.Stopped && !result.Rejected
-				return result.Code, nil, stop
+				return finishInput(*e.Result, out, diagnostic, displayErr, interrupted)
 			}
 			if displayErr == nil {
 				displayErr = show(diagnostic, e)
@@ -162,6 +96,42 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 		}
 	}
 }
+func finishInput(result session.Result, out, diagnostic io.Writer, displayErr error, interrupted bool) (int, error, bool) {
+	answer, note := present.Result(result)
+	_, err := io.WriteString(out, answer)
+	if err == nil {
+		_, err = io.WriteString(diagnostic, note)
+	}
+	if displayErr != nil {
+		return session.Error, displayErr, true
+	}
+	if err != nil {
+		return session.Error, err, true
+	}
+	stop := interrupted || result.NoInputFits || result.Code != session.OK && result.Code != session.Stopped && !(result.Rejected && result.Code == session.Usage)
+	return result.Code, nil, stop
+}
+func turnEvents(turn *session.Turn) (<-chan session.Event, func()) {
+	events := make(chan session.Event)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			e, err := turn.Next(ctx)
+			if err != nil {
+				return
+			}
+			select {
+			case events <- e:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return events, func() { cancel(); <-done }
+}
+
 func show(w io.Writer, e session.Event) error {
 	var b strings.Builder
 	if e.Diagnostic != "" {

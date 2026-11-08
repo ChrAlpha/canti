@@ -74,16 +74,15 @@ func result(r hostrpc.Run, err error) Result {
 // Controller serializes turns. Runtime process fields are used only by Setup
 // or its single active worker. UI drafts are never retained here.
 type Controller struct {
-	cfg            Config
-	runtime        runtimeClient
-	GoalLimit      int
-	mu             sync.Mutex
-	current        *Turn
-	uncertainInput string
+	cfg       Config
+	runtime   runtimeClient
+	GoalLimit int
+	mu        sync.Mutex
+	current   *Turn
+	uncertain *Snapshot
 }
 
 func New(cfg Config) *Controller {
-
 	return &Controller{cfg: cfg, runtime: runtimeClient{workspace: cfg.Workspace, state: cfg.State, runtimePath: cfg.RuntimePath, hostMode: cfg.HostMode, hostWait: cfg.HostWait, env: cfg.Environment, logLevel: cfg.LogLevel.String()}}
 }
 func (c *Controller) ID() string  { return c.cfg.SessionID }
@@ -100,9 +99,7 @@ func (c *Controller) Setup(ctx context.Context) error {
 		return err
 	}
 	c.cfg.Spec = v.Spec
-
 	c.GoalLimit = v.GoalLimit
-
 	_, err = c.runtime.connect(ctx)
 	if c.Owned() {
 		c.runtime.closeHost(ctx)
@@ -134,9 +131,12 @@ func (c *Controller) Start(ctx context.Context, s Snapshot) (*Turn, error) {
 	if c.current != nil {
 		return nil, errors.New("a run is still active")
 	}
+	if c.uncertain != nil && *c.uncertain != s {
+		return nil, errors.New("reconcile the pending InputID before submitting new input")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	t := newTurn(s, c.Owned(), cancel)
-	t.reconcile = c.uncertainInput == s.InputID
+	t.reconcile = c.uncertain != nil
 	c.current = t
 	go func() {
 		out := c.run(ctx, t)
@@ -147,9 +147,10 @@ func (c *Controller) Start(ctx context.Context, s Snapshot) (*Turn, error) {
 		c.mu.Lock()
 		c.current = nil
 		if out.Uncertain {
-			c.uncertainInput = s.InputID
-		} else if c.uncertainInput == s.InputID {
-			c.uncertainInput = ""
+			saved := s
+			c.uncertain = &saved
+		} else {
+			c.uncertain = nil
 		}
 		c.mu.Unlock()
 		t.finish(out)
@@ -173,6 +174,11 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 	})
 	if err != nil {
 		out := Result{Err: err, Code: Error, Uncertain: lost}
+		var refusal *hostrpc.RemoteError
+		if errors.As(err, &refusal) {
+			out.Rejected = true
+			out.Uncertain = false
+		}
 		if errors.As(err, new(hostrpc.SpecError)) {
 			out.Code = Usage
 			out.Rejected = true

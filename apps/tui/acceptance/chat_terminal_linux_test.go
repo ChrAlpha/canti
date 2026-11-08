@@ -1,4 +1,6 @@
-package main
+//go:build acceptance
+
+package acceptance
 
 import (
 	"bytes"
@@ -7,23 +9,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/runtime/core"
-	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 )
 
-func TestChatTerminalDiscardsBusyInput(t *testing.T) {
+func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 	for _, tc := range []struct{ interrupted, canonical bool }{{false, true}, {true, true}, {false, false}, {true, false}} {
 		t.Run(fmt.Sprintf("interrupt=%v/canonical=%v", tc.interrupted, tc.canonical), func(t *testing.T) {
-			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+			f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 			f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
 			entered := make(chan struct{}, 2)
 			release := make(chan struct{})
@@ -55,10 +54,11 @@ func TestChatTerminalDiscardsBusyInput(t *testing.T) {
 				t.Fatal("first request did not reach provider")
 			}
 			p.send(t, "busy complete\rbusy partial")
+			p.await(t, "busy partial", pos)
 			if tc.interrupted {
 				p.send(t, "\x03")
 				deadline := time.Now().Add(5 * time.Second)
-				for f.status().Phase != core.PhaseStopped {
+				for f.status().Phase != "stopped" {
 					if time.Now().After(deadline) {
 						t.Fatal("Ctrl-C did not stop the active run")
 					}
@@ -75,17 +75,17 @@ func TestChatTerminalDiscardsBusyInput(t *testing.T) {
 			if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != wantRequests {
 				t.Fatalf("busy or read-ahead input created another run: %+v", s)
 			}
-			p.send(t, "fresh\r")
+			p.send(t, "\r")
 			answer := "fresh answer"
 			if tc.interrupted {
 				answer = "first answer"
 			}
 			p.await(t, answer, pos)
-			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || s.Phase != core.PhaseReturned {
+			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "read aheadbusy completebusy partial" || s.Phase != "returned" {
 				t.Fatalf("fresh input did not advance cleanly: %+v", s)
 			}
 			prompts := f.model.prompts(1)
-			if len(prompts) != wantRequests+1 || strings.Contains(prompts[len(prompts)-1], "busy complete") || strings.Contains(prompts[len(prompts)-1], "read ahead") {
+			if len(prompts) != wantRequests+1 || !strings.Contains(prompts[len(prompts)-1], "read aheadbusy completebusy partial") {
 				t.Fatalf("stale input entered model context: %q", prompts)
 			}
 			p.send(t, "\x03")
@@ -99,7 +99,7 @@ func TestChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 }
 
 func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"fresh answer"}`})
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -148,7 +148,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	var initial bytes.Buffer
 	var chunk [4096]byte
 	until := time.Now().Add(5 * time.Second)
-	for !strings.Contains(ansi.Strip(initial.String()), "ready") {
+	for !strings.Contains(screenText(initial.Bytes()), "ready") {
 		n, readErr := unix.Read(readFD, chunk[:])
 		if n > 0 {
 			initial.Write(chunk[:n])
@@ -181,18 +181,10 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not reach provider")
 	}
-	store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	run, err := store.LastRun(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	initial.Reset()
 	until = time.Now().Add(5 * time.Second)
-	for !strings.Contains(ansi.Strip(initial.String()), "running") {
+	for !strings.Contains(screenText(initial.Bytes()), "running") {
 		n, readErr := unix.Read(readFD, chunk[:])
 		if n > 0 {
 			initial.Write(chunk[:n])
@@ -224,22 +216,10 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	}
 	fillLivePipe(t, writeFD)
 	unblock()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		s, err := store.Latest(t.Context(), run.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Phase == core.PhaseReturned {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first run did not return before output pressure was released")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	f.awaitReturned()
+
 	time.Sleep(50 * time.Millisecond)
-	p.send(t, "stale during blocked display\r")
+	p.send(t, "draft during blocked display")
 	time.Sleep(50 * time.Millisecond)
 	drained := make(chan struct{})
 	go func() {
@@ -248,7 +228,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 			n, readErr := unix.Read(readFD, chunk[:])
 			if n > 0 {
 				p.mu.Lock()
-				p.output.Write(chunk[:n])
+				p.record(chunk[:n])
 				p.mu.Unlock()
 				select {
 				case p.wake <- struct{}{}:
@@ -267,7 +247,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		r.Close()
 		<-drained
 	}()
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for !strings.Contains(ansi.Strip(p.text()), "ready") {
 		if time.Now().After(deadline) {
 			err := p.cmd.Process.Signal(syscall.Signal(0))
@@ -281,16 +261,16 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("busy input survived output recovery: %+v, requests=%d, output tail=%q", s, len(f.model.requests()), p.text()[max(0, len(p.text())-500):])
 	}
-	// A committed return precedes chatDone. Observe the second running/ready
+	// A committed return precedes the final session event. Observe the second running/ready
 	// cycle before sending the idle quit key, rather than racing that delivery.
 	pos := len(ansi.Strip(p.text()))
-	p.send(t, "fresh\r")
+	p.send(t, "\r")
 	pos = p.await(t, "running", pos)
 	unblockLater()
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		if s := f.status(); s.Run.SessionSeq == 2 && s.Phase == core.PhaseReturned {
-			if s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
+		if s := f.status(); s.Run.SessionSeq == 2 && s.Phase == "returned" {
+			if s.Run.Goal != "draft during blocked display" || len(f.model.requests()) != 2 {
 				t.Fatalf("fresh input did not advance cleanly: %+v, requests=%d", s, len(f.model.requests()))
 			}
 			break
@@ -318,7 +298,7 @@ func TestChatPromptWriteBackpressure(t *testing.T) {
 }
 
 func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "answer"}})
 	entered, release := make(chan struct{}, 1), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -357,7 +337,7 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 		var output []byte
 		var chunk [4096]byte
 		deadline := time.Now().Add(5 * time.Second)
-		for !bytes.Contains([]byte(ansi.Strip(string(output))), []byte(needle)) {
+		for !bytes.Contains([]byte(screenText(output)), []byte(needle)) {
 			n, readErr := unix.Read(readFD, chunk[:])
 			if n > 0 {
 				output = append(output, chunk[:n]...)
@@ -390,45 +370,25 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 		t.Fatal("first request did not reach provider")
 	}
 	awaitFrame("running")
-	store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	run, err := store.LastRun(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	if err := unix.SetNonblock(writeFD, true); err != nil {
 		t.Fatal(err)
 	}
 	fillLivePipe(t, writeFD)
 	close(release)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		snapshot, err := store.Latest(t.Context(), run.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snapshot.State.Phase == core.PhaseReturned {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first run did not return while output was blocked")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	f.awaitReturned()
+
 	if err := p.cmd.Process.Signal(signal); err != nil {
 		t.Fatal(err)
 	}
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != core.PhaseReturned || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("signal changed completed run: %+v, requests=%d", s, len(f.model.requests()))
 	}
 }
 
 func testChatPromptDisplayDeadline(t *testing.T) {
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "answer"}})
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "answer"}})
 	held := f.model.holdRequests()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -462,7 +422,7 @@ func testChatPromptDisplayDeadline(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("full terminal output took %s to terminate", elapsed)
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || s.Phase != core.PhaseStopped || s.Reason != core.StopCancelled || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || s.Phase != "stopped" || s.Reason != "cancelled" || len(f.model.requests()) != 1 {
 		t.Fatalf("output failure replayed busy input or lost cancellation: %+v, requests=%d", s, len(f.model.requests()))
 	}
 }

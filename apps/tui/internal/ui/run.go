@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,7 +62,7 @@ func Run(ctx context.Context, c *session.Controller, input *os.File, output io.W
 	if err := writeExit(output, m, c.ID()); runErr == nil {
 		runErr = err
 	}
-	if runErr != nil && !errors.Is(runErr, tea.ErrProgramKilled) {
+	if runErr != nil {
 		return session.Error, runErr
 	}
 	if m.err != nil {

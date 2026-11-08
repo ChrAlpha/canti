@@ -13,7 +13,7 @@ problem() {
 
 listed() {
 	for module in runtime sdk/go apps/tui; do
-		(cd "$root/$module" && GOWORK=off go test -list . -tags "$1" ./...) >"$tmp/list"
+		(cd "$root/$module" && GOWORK=off go test -list . -tags "acceptance,$1" ./...) >"$tmp/list"
 		awk '/^ok[ \t]/ { for (i = 0; i < n; i++) print $2, names[i]; n = 0; next }
 			/^(Test|Fuzz|Benchmark|Example)/ { names[n++] = $0 }' "$tmp/list"
 	done
@@ -36,7 +36,7 @@ while read -r name; do
 		problem "LONG: $name is not a test with -tags integration"
 done <"$tmp/long"
 while read -r name; do
-	awk -v n="$name" '$2 == n { if ($1 ~ /\/(runtime\/cmd\/canti|apps\/tui\/(cmd\/canti-tui|internal\/terminal))$/) found++; else other = 1 } END { exit found != 1 || other }' "$tmp/integration" ||
+	awk -v n="$name" '$2 == n { if ($1 ~ /\/(apps\/tui\/(acceptance|internal\/terminal))$/) found++; else other = 1 } END { exit found != 1 || other }' "$tmp/integration" ||
 		problem "PTY: $name must exist once in an approved terminal test package with -tags integration"
 done <"$tmp/pty"
 sort "$tmp/long" "$tmp/pty" | uniq -d >"$tmp/both"
@@ -45,7 +45,7 @@ while read -r name; do
 done <"$tmp/both"
 
 for module in runtime sdk/go apps/tui; do
-	(cd "$root/$module" && GOWORK=off go list -tags integration,live -f '{{.Dir}}{{range .TestGoFiles}} {{.}}{{end}}{{range .XTestGoFiles}} {{.}}{{end}}' ./...) >>"$tmp/testfiles"
+	(cd "$root/$module" && GOWORK=off go list -tags acceptance,integration,live -f '{{.Dir}}{{range .TestGoFiles}} {{.}}{{end}}{{range .XTestGoFiles}} {{.}}{{end}}' ./...) >>"$tmp/testfiles"
 done
 cat "$tmp/testfiles" |
 	while read -r dir files; do
