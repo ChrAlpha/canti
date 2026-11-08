@@ -51,7 +51,7 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 	}
 	b := BindingFrom(&v.Binding)
 	sub := host.Submission{SessionID: v.Submission.SessionID, Goal: v.Submission.Goal, Constraints: constraints, Spec: spec, Binding: b}
-	if err := host.Validate(v.State, sub); err != nil {
+	if err := host.Validate(ctx, v.State, sub); err != nil {
 		return nil, err
 	}
 	if err := validateCredential(ctx, v.State, spec.Config, b, h); err != nil {

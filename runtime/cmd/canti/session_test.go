@@ -10,8 +10,12 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/runtime/internal/host"
 )
 
 func TestSessionDialogueAndInputRetry(t *testing.T) {
@@ -307,5 +311,46 @@ func TestAStandaloneInputRetryNamesTheSameRun(t *testing.T) {
 	}
 	if r := f.cli(nil, "run", "-session", "s", "-input", "lost-answer", "-goal", "Write the summary", "-constraints", "Be brief"); r.code != exitOK || f.status().Run.ID == first.Run.ID {
 		t.Fatalf("a session input of the same ID is another input: %+v", r)
+	}
+}
+
+func TestPersistentInputRetryDoesNotResolveTheEnvironmentAgain(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{})
+	spec := runSpec(t)
+	c := &spec.Config
+	c.Ephemeral, c.Environment, c.EnvironmentWorkdir = false, filepath.Join(t.TempDir(), "missing-environment"), "/workspace"
+	c.Workspace, c.Provider = f.workspace, f.model.URL
+	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
+	digest := strings.Repeat("a", 64)
+	c.Attachment = &docker.Attachment{Format: 1, Directory: c.Environment, Endpoint: "unix:///unavailable.sock", DaemonID: "daemon", ContainerID: digest, AuthorityID: digest, Incarnation: 1,
+		Helper: "/canti/bin/" + digest + "/canti-job", HelperDigest: digest, User: "1000", Home: "/home/developer", Path: "/usr/bin:/bin",
+		Mounts: []docker.EnvironmentMount{{Type: "bind", Source: c.Workspace, Target: "/workspace", Writable: true}, {Type: "bind", Source: filepath.Join(c.Environment, "public"), Target: "/canti"}, {Type: "bind", Source: filepath.Join(c.Environment, "spool"), Target: "/var/lib/canti/jobs", Writable: true}}}
+	run, initial, err := host.NewRun("retry exact goal", "", spec, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.InputID = "accepted-input"
+	if err := os.MkdirAll(f.state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(t.Context(), filepath.Join(f.state, "canti.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Submit(t.Context(), run, initial)
+	store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.cli(nil, "run", "-input", run.InputID, "-goal", run.Goal, "-ephemeral=false", "-environment", c.Environment)
+	if r.code != exitActive || len(f.model.requests()) != 0 {
+		t.Fatalf("offline input replay = %+v; calls=%d", r, len(f.model.requests()))
+	}
+	status := f.status()
+	if status.Run.ID != run.ID || status.Seq != 0 || status.Execution.Environment == nil || status.Execution.Environment.ContainerID != digest {
+		t.Fatalf("replay changed stored facts: %+v", status)
+	}
+	if _, err := os.Stat(c.Environment); !os.IsNotExist(err) {
+		t.Fatalf("retry created environment: %v", err)
 	}
 }

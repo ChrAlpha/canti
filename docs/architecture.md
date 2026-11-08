@@ -529,7 +529,15 @@ requests retain their exact bytes and provider/API provenance across restart.
 
 ## Execution
 
-The executor owns the physical lifecycle and its durable ordering.
+The executor owns the physical lifecycle and its durable ordering. New runs
+explicitly select persistent attachment or ephemeral execution. The host commits
+the resolved attachment and mapped cwd in Run.Config before accepting commands.
+Input replay returns stored facts before resolving a live environment; resumed
+construction and Specification remain offline and use retained mount metadata.
+The CLI owns Docker-context selection; the host reads no ambient environment.
+Context 18 describes logical retrieval addresses in attached mode, and RPC 7
+projects pinned environments and typed command binding/cessation evidence.
+Earlier frozen context and wire records retain their original bytes.
 The ephemeral Docker executor computes a canonical specification over its effective
 configuration, command, wrapper and retention policy. It uses one named container per effect,
 with effect/state/spec ownership labels. Configuration identity does not freeze
@@ -594,10 +602,12 @@ Host Inspect caps one physical sample at 30 seconds and includes its timestamp
 and unavailability; it is separate from journal-only status and progress.
 
 Docker's trust assumptions remain: the daemon and same-user state directory
-writers are trusted. Jobs see the workspace read-write, artifacts and step records
-read-only, with no journal, latch, binding or daemon socket mount. No host credential
-enters a job. Jobs use init, the configured user, dropped capabilities,
-no-new-privileges, configured networking and resource limits. Model credentials
+writers are trusted. Ephemeral jobs see the workspace read-write, artifacts and step records
+read-only, with no journal, latch, binding or daemon socket mount. They use init,
+the configured user, dropped capabilities, no-new-privileges, networking and
+resource limits. Persistent commands use the prepared environment policy and
+read history, artifacts and imports through native retrieval logical addresses;
+those addresses promise no shell mounts. Neither mode inherits host model credentials. Model credentials
 are removed from the CLI environment before children start and are used only for
 the exact provider/API binding. The executor specification checks configuration
 identity; it is not a security proof against a principal with daemon access.

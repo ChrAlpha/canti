@@ -53,3 +53,7 @@ type Validation = wire.Validation
 type Validated = wire.Validated
 
 const OpValidate = wire.OpValidate
+
+type Environment = wire.Environment
+type EnvironmentBinding = wire.EnvironmentBinding
+type Cessation = wire.Cessation

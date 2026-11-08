@@ -22,6 +22,7 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
 
@@ -45,7 +46,7 @@ func testHost(t *testing.T, opts Options) *Host {
 
 func testSpec(h *Host) Spec {
 	return Spec{
-		Config: RunConfig{Workspace: h.opts.Workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
+		Config: RunConfig{Ephemeral: true, Workspace: h.opts.Workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
 			API: APIMessages, Model: "test-model", MaxTokens: 1000, Structured: true, RequestBytes: 256 << 10, ContextVersion: ContextVersion},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 2},
 	}
@@ -1651,5 +1652,137 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 	view, err := h.View(context.Background(), id)
 	if err != nil || focus != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
 		t.Fatalf("projection lost reset/focus/unknown usage: focus=%d reset=%d view=%+v error=%v", focus, reset, view, err)
+	}
+}
+
+// persistentSpec supplies committed wiring without a live attachment directory.
+// Rebuilding and replaying this run must remain entirely offline.
+func persistentSpec(h *Host) Spec {
+	s := testSpec(h)
+	c := &s.Config
+	c.Provider = "http://127.0.0.1:1"
+	c.Ephemeral, c.Environment = false, filepath.Join(filepath.Dir(h.opts.State), "environment")
+	c.EnvironmentWorkdir = "/workspace/project"
+	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
+	hash := strings.Repeat("a", 64)
+	c.Attachment = &docker.Attachment{Format: 1, Directory: c.Environment, Endpoint: "unix:///missing/docker.sock", DaemonID: "test-daemon", ContainerID: hash, AuthorityID: hash, Incarnation: 1,
+		Helper: "/canti/bin/" + hash + "/canti-job", HelperDigest: hash, User: "1000:1000", Home: "/home/developer", Path: "/usr/local/bin:/usr/bin:/bin", AdmissionEpoch: "epoch-1",
+		Mounts: []docker.EnvironmentMount{{Type: "bind", Source: c.Workspace, Target: "/workspace", Writable: true}, {Type: "bind", Source: filepath.Join(c.Environment, "public"), Target: "/canti"}, {Type: "bind", Source: filepath.Join(c.Environment, "spool"), Target: "/var/lib/canti/jobs", Writable: true}}}
+	return s
+}
+
+func TestPersistentReplayUsesStoredAttachmentWithoutEnvironmentAccess(t *testing.T) {
+	h := testHost(t, Options{})
+	spec := persistentSpec(h)
+	run, initial, err := NewRun("goal", "constraints", spec, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.InputID = "persistent-input"
+	if _, err := h.store.Submit(t.Context(), run, initial); err != nil {
+		t.Fatal(err)
+	}
+	request := spec
+	request.Config.Attachment = nil
+	request.Config.EnvironmentWorkdir = ""
+	ack, err := h.Submit(t.Context(), Submission{InputID: run.InputID, Goal: run.Goal, Constraints: run.Constraints, ExplicitConstraints: true, Binding: Binding{Provider: spec.Config.Provider}, Spec: request})
+	if err != nil || !ack.Replayed || len(ack.Differs) != 0 {
+		t.Fatalf("offline replay = %+v, %v", ack, err)
+	}
+	if ack.Config.Attachment == nil || ack.Config.Attachment.ContainerID != spec.Config.Attachment.ContainerID {
+		t.Fatal("replay lost accepted container identity")
+	}
+	x, err := NewExecutor(ack.Config, h.opts.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(Environment(ack.Config, run.Budget), "logical native retrieval addresses") {
+		t.Fatal("archive addresses were presented as shell mounts")
+	}
+	first := x.Specification("printf hello")
+	second, err := NewExecutor(ack.Config, h.opts.State)
+	if err != nil || first != second.Specification("printf hello") {
+		t.Fatalf("offline spec changed: %v", err)
+	}
+	if _, err := os.Stat(spec.Config.Environment); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconstruction created environment: %v", err)
+	}
+}
+
+func TestPersistentReconstructionRejectsEveryMountExposingState(t *testing.T) {
+	h := testHost(t, Options{})
+	for _, writable := range []bool{false, true} {
+		for _, source := range []string{h.opts.State, filepath.Dir(h.opts.State), filepath.Join(h.opts.State, "artifacts")} {
+			s := persistentSpec(h)
+			s.Config.Environment = filepath.Join(t.TempDir(), "environment")
+			s.Config.Attachment.Directory = s.Config.Environment
+			s.Config.Attachment.Mounts[1].Source = filepath.Join(s.Config.Environment, "public")
+			s.Config.Attachment.Mounts[2].Source = filepath.Join(s.Config.Environment, "spool")
+			s.Config.Attachment.Mounts = append(s.Config.Attachment.Mounts, docker.EnvironmentMount{Type: "bind", Source: source, Target: "/exposed", Writable: writable})
+			if _, err := NewExecutor(s.Config, h.opts.State); err == nil || !strings.Contains(err.Error(), "exposes run state") {
+				t.Fatalf("accepted exposed state source %s writable=%t: %v", source, writable, err)
+			}
+		}
+	}
+}
+
+func TestNewPersistentAdmissionRequiresLiveValidationBeforeRunCommit(t *testing.T) {
+	h := testHost(t, Options{})
+	spec := persistentSpec(h)
+	_, err := h.Submit(t.Context(), Submission{InputID: "new-input", Goal: "goal", Spec: spec})
+	if err == nil {
+		t.Fatal("accepted a new run with an unavailable attachment")
+	}
+	if _, err := h.store.LastRun(t.Context()); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("failed admission stored run: %v", err)
+	}
+}
+
+func TestPersistentAcceptancePinsTheStoredPhysicalExecutionContract(t *testing.T) {
+	h := testHost(t, Options{})
+	spec := persistentSpec(h)
+	spec.Config.Provider = answering(t, core.Decision{Kind: core.Exec, Payload: "echo accepted"})
+	run, initial, err := NewRun("goal", "", spec, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreateRun(t.Context(), run, initial); err != nil {
+		t.Fatal(err)
+	}
+	stored, c, err := h.Find(t.Context(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := NewModel(c, c.Provider, binding(c.Provider).Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop, err := h.loop(stored, c, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap harness.Snapshot
+	for range 3 {
+		snap, err = loop.Step(t.Context(), run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if snap.State.Phase != core.PhaseEffectSaved {
+		t.Fatalf("acceptance phase: %+v", snap.State)
+	}
+	accepted, err := h.store.Accepted(t.Context(), run.ID, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewExecutor(c, h.opts.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Execution == nil || accepted.Execution.Spec != executor.Specification(snap.State.Decision.Payload) || accepted.Execution.ConfigDigest != harness.ConfigDigest(run.Config) {
+		t.Fatalf("accepted another physical contract: %+v", accepted)
+	}
+	if _, err := os.Stat(c.Environment); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("acceptance touched unavailable environment: %v", err)
 	}
 }

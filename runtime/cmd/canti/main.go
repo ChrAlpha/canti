@@ -243,16 +243,9 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	registerSpec(fs, &s)
 	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
-		if err := checkTask("-goal", *goal, *constraints); err != nil {
+		if err := a.prepareRunConfig(fs, &s.Config, *goal, *constraints, *input != ""); err != nil {
 			return exitUsage, err
 		}
-		if err := canonicalImports(&s.Config, *input != ""); err != nil {
-			return exitUsage, err
-		}
-		if err := a.checkHostMode(); err != nil {
-			return exitUsage, err
-		}
-		s.Config.Workspace = a.workspace
 		if *session != "" || *input != "" {
 			setConstraints := false
 			fs.Visit(func(f *flag.Flag) {
@@ -263,6 +256,9 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 			return a.submitSession(ctx, *session, *input, *goal, *constraints, setConstraints, s, *url, *once)
 		}
 		if _, _, err := host.NewRun(*goal, *constraints, s, time.Now()); err != nil {
+			return exitUsage, err
+		}
+		if err := host.Validate(ctx, a.state, host.Submission{Goal: *goal, Constraints: *constraints, Spec: s}); err != nil {
 			return exitUsage, err
 		}
 		if err := a.checkCredential(ctx, s.Config, *url); err != nil {
@@ -278,9 +274,6 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 				a.binding(s.Config.API, *url), *once)
 		}
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
-			return exitError, err
-		}
-		if _, err := host.NewExecutor(s.Config, a.state); err != nil {
 			return exitError, err
 		}
 		h, err := a.openHost(ctx, true)

@@ -108,7 +108,7 @@ func ParseCursor(s string) (host.Cursor, error) {
 // SpecOf is the wire form of s.
 func SpecOf(s host.Spec) Spec {
 	c, b, l := s.Config, s.Budget, s.Limits
-	return Spec{Workspace: c.Workspace, Image: c.Image, Network: c.Network, Memory: c.Memory, CPUs: c.CPUs, Pids: c.Pids, OutputLimit: c.OutputLimit,
+	return Spec{Ephemeral: c.Ephemeral, Environment: c.Environment, EnvironmentWorkdir: c.EnvironmentWorkdir, Workspace: c.Workspace, Image: c.Image, Network: c.Network, Memory: c.Memory, CPUs: c.CPUs, Pids: c.Pids, OutputLimit: c.OutputLimit,
 		API: c.API, Model: c.Model, MaxTokens: c.MaxTokens, Effort: c.Effort, Structured: c.Structured, DecisionFormat: c.DecisionFormat,
 		Fallbacks: c.Fallbacks, RequestBytes: c.RequestBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports,
 		MaxSteps: l.MaxSteps, MaxAttempts: l.MaxAttempts,
@@ -126,7 +126,7 @@ func SpecFrom(s Spec) (host.Spec, error) {
 		return host.Spec{}, fmt.Errorf("job timeout: %w", err)
 	}
 	return host.Spec{
-		Config: host.RunConfig{Workspace: s.Workspace, Image: s.Image, Network: s.Network, Memory: s.Memory, CPUs: s.CPUs, Pids: s.Pids, OutputLimit: s.OutputLimit,
+		Config: host.RunConfig{Ephemeral: s.Ephemeral, Environment: s.Environment, EnvironmentWorkdir: s.EnvironmentWorkdir, Workspace: s.Workspace, Image: s.Image, Network: s.Network, Memory: s.Memory, CPUs: s.CPUs, Pids: s.Pids, OutputLimit: s.OutputLimit,
 			API: s.API, Model: s.Model, MaxTokens: s.MaxTokens, Effort: s.Effort, Structured: s.Structured, DecisionFormat: s.DecisionFormat,
 			Fallbacks: s.Fallbacks, RequestBytes: s.RequestBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports,
 		},
@@ -166,6 +166,7 @@ func RunOf(v host.View, driveErr error) Run {
 		Driver: driver(v.Driving), Drivable: v.Drivable, Why: v.Why,
 		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
 		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
+	w.Ephemeral, w.Environment = v.Config.Ephemeral, EnvironmentOf(v.Config)
 	if s.Phase == core.PhaseReturned {
 		w.Result = s.Decision.Payload
 	}
@@ -204,4 +205,12 @@ func PageOf(p host.Page) Page {
 		w.Items = append(w.Items, item)
 	}
 	return w
+}
+
+// EnvironmentOf projects stored wiring without sampling a live environment.
+func EnvironmentOf(c host.RunConfig) *Environment {
+	if a := c.Attachment; a != nil {
+		return &Environment{Directory: a.Directory, ContainerID: a.ContainerID, DaemonID: a.DaemonID, Incarnation: a.Incarnation, Workdir: c.EnvironmentWorkdir}
+	}
+	return nil
 }

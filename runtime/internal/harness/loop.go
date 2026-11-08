@@ -20,8 +20,9 @@ const historyPage = 64
 // LoopConfig wires a Loop to its environment. Zero values take the defaults
 // noted on each field.
 type LoopConfig struct {
+	NativeArchive  bool             // archive paths are logical addresses, without shell mounts
 	Environment    string           // Frame.Environment
-	History        string           // host directory PublishHistory publishes the step records of every run under, which jobs see as archive.RunsRoot
+	History        string           // host directory for published step records; archive.RunsRoot is their logical address
 	Limits         PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
@@ -30,7 +31,6 @@ type LoopConfig struct {
 	Logger         *slog.Logger     // discards
 	Reader         *archive.Reader
 	DecisionTool   bool // Frame.DecisionTool
-
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.

@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 (cd "$root/runtime" && GOWORK=off go build -race -o "$tmp/canti" ./cmd/canti)
+(cd "$root/runtime" && GOWORK=off go build -o "$tmp/canti-job" ./cmd/canti-job)
 (cd "$root/runtime" && GOWORK=off go test -c -race -tags integration -o "$tmp/canti-fixture" ./cmd/canti)
 (cd "$root/apps/tui" && GOWORK=off go build -race -o "$tmp/canti-tui" ./cmd/canti-tui)
 export CANTI_ACCEPTANCE_RUNTIME="$tmp/canti"

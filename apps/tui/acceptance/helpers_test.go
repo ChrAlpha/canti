@@ -78,7 +78,7 @@ func newScriptedModel(t *testing.T, key string, script map[int]decision) *script
 
 // fixtureModel names the model API and model of a fixture's run and chat,
 // which a test can override with later flags; canti has neither default.
-var fixtureModel = []string{"-api", "anthropic-messages", "-model", "fixture-model"}
+var fixtureModel = []string{"-ephemeral", "-api", "anthropic-messages", "-model", "fixture-model"}
 
 var progressLine = regexp.MustCompile(`(?m)^Step (\d+)(?: of at most \d+| \(unlimited steps\)), attempt \d+ of \d+\.$`)
 
@@ -403,6 +403,10 @@ func (f *fixture) startIO(stdin io.Reader, stdout io.Writer, env []string, comma
 
 // status is the object the status command prints.
 type status struct {
+	Execution struct {
+		Ephemeral   bool                 `json:"ephemeral"`
+		Environment *hostrpc.Environment `json:"environment"`
+	} `json:"execution"`
 	Run struct {
 		SessionID   string    `json:"session_id"`
 		SessionSeq  int64     `json:"session_seq"`

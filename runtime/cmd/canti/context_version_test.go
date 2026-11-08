@@ -88,6 +88,10 @@ func contextRules(t *testing.T) string {
 	for _, tool := range []bool{false, true} {
 		initial := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: host.Environment(spec.Config, spec.Budget), RunID: run.ID, Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 4, DecisionTool: tool, RetrievalEnabled: true, ImportsEnabled: true, ContextState: &harness.ContextState{FirstStep: 1}}
 		frames := []harness.Frame{initial}
+		persistent := initial
+		persistent.NativeArchive = true
+		persistent.Environment = host.Environment(host.RunConfig{Environment: "/environment", EnvironmentWorkdir: "/workspace"}, spec.Budget)
+		frames = append(frames, persistent)
 		recent := initial
 		recent.Step = 2
 		recent.Receipts = []harness.StepReceipt{{Step: 1, Seq: 5, Purpose: "Inspect original", Status: "done"}}
@@ -126,7 +130,7 @@ func contextRules(t *testing.T) string {
 
 func corpusRules(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v17")
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v18")
 	scenarios, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)

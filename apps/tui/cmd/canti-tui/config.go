@@ -15,6 +15,9 @@ import (
 func registerSpec(fs *flag.FlagSet, s *hostrpc.Spec) {
 	c, b, l := s, s, s
 
+	fs.BoolVar(&c.Ephemeral, "ephemeral", false, "run each command in a separate restricted container; select this or -environment")
+	fs.StringVar(&c.Environment, "environment", "", "persistent attachment `directory`; select this or -ephemeral")
+	fs.StringVar(&c.EnvironmentWorkdir, "environment-workdir", "", "absolute command `directory` inside the mapped workspace")
 	fs.StringVar(&c.Image, "image", "debian:bookworm-slim", "container `image` of every job")
 	fs.StringVar(&c.Network, "network", "none", "container `network` of every job")
 	fs.StringVar(&c.Memory, "memory", "2g", "memory `limit` of every job; unlimited if empty")
@@ -50,4 +53,28 @@ func defaultState(workspace string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(workspace))
 	return filepath.Join(base, "canti", hex.EncodeToString(sum[:8])), nil
+}
+
+func executionFlags(fs *flag.FlagSet, c *hostrpc.Spec) error {
+	if c.Ephemeral == (c.Environment != "") {
+		return fmt.Errorf("select exactly one of -environment DIRECTORY or -ephemeral")
+	}
+	if c.Environment == "" {
+		if c.EnvironmentWorkdir != "" {
+			return fmt.Errorf("-environment-workdir requires -environment")
+		}
+		return nil
+	}
+	var conflict string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "image", "network", "memory", "cpus", "pids":
+			conflict = f.Name
+		}
+	})
+	if conflict != "" {
+		return fmt.Errorf("-%s requires -ephemeral; provision persistent environment limits and network externally", conflict)
+	}
+	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
+	return nil
 }

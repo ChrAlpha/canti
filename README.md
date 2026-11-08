@@ -5,9 +5,11 @@ the right information for each agent step.
 
 canti is a single-machine durable agent: a stateless Go decision core and a
 harness that commits every fact to a SQLite journal before acting on it, runs
-each command in its own Docker container, and asks a model for one decision
+commands in an explicitly prepared persistent Docker development environment or
+an explicitly selected ephemeral container, and asks a model for one decision
 per step through the Anthropic Messages API or the Responses API; the run
-names its model API and model, and canti assumes neither. Any later process resumes a run from the journal.
+names its model API and model, and canti assumes neither. Later processes reconstruct the accepted run configuration from the journal
+and recover its execution evidence.
 It is an architectural experiment for a future Memoh agent runtime.
 
 [Architecture](docs/architecture.md) | [Development](docs/development.md) |
@@ -43,9 +45,10 @@ observable.
 - `runtime/internal/harness/sqlite` is the journal: one row per transition with its
   facts, a sequence compare-and-set, idempotent retries, and strict decoding,
   on WAL with `synchronous=FULL`.
-- `runtime/internal/harness/docker` runs each effect in one container named from its
-  effect ID behind a durable start latch, so a restart never starts a job
-  twice, and keeps bounded output artifacts and previews.
+- `runtime/internal/harness/docker` provides persistent attached commands with
+  distinct Exec IDs and shared environment authority, and ephemeral per-effect
+  containers. Both retain accepted execution identities and bounded output.
+- `runtime/cmd/canti-job` is the one-shot capture helper packaged beside `canti`.
 - `runtime/internal/harness/anthropic` and `runtime/internal/harness/openai` are the Messages
   and Responses adapters; `runtime/internal/harness/provider` sends the frozen request
   bytes of each attempt once over `net/http` for both. The Chat Completions
@@ -67,31 +70,45 @@ journal.
 
 ```sh
 go build -o bin/canti ./runtime/cmd/canti
+go build -o bin/canti-job ./runtime/cmd/canti-job
 go build -o bin/canti-tui ./apps/tui/cmd/canti-tui
 export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY with -api anthropic-messages
-mkdir -p ~/demo
-bin/canti run -workspace ~/demo -api openai-responses -model MODEL \
-  -goal "Write hello.txt containing hello, then return"
+# Prepare and attach the ordinary Docker environment in the development guide.
+bin/canti run -workspace ~/canti-demo/workspace \
+  -environment ~/canti-demo/environment -api openai-responses -model MODEL \
+  -goal "Install a tool, write hello.txt, then return"
+bin/canti-tui -workspace ~/canti-demo/workspace \
+  -environment ~/canti-demo/environment -api openai-responses -model MODEL
 ```
 
-By default each command the agent chooses runs in a new
-`debian:bookworm-slim` container with the workspace mounted at `/workspace`,
-no network, and the host user's uid. It can read, but not change, earlier
-outputs under `/canti/artifacts` and a record of every completed step of
-every run of the state directory, its own included, under
-`/canti/runs/<run ID>/`.
-An image must provide `/bin/sh` and a `/tmp` that the job's uid can write,
-where each job's shell records its exit status; without it the first step
-already ends with an unknown outcome. `canti run -h` lists the image, limit,
-model, and budget flags. Every canti command takes `-workspace` (default:
-the current directory). The journal lives in a state directory that must
-not overlap the workspace, neither inside it nor containing it; a workspace
-that contains the default state root, such as `$HOME`, needs `-state`.
+New runs and chat select `-environment DIRECTORY` or `-ephemeral`. The normal
+engineering workflow uses a private persistent environment: tools, HOME,
+configuration, files, caches and services survive commands, runs, sessions and
+context resets. Each command starts a fresh shell in the mapped workspace.
+[Development](docs/development.md#persistent-development-environments) provides
+ordinary Docker/Dev Container and official Docker-in-Docker examples, including
+preparation, attachment, package installation, networking and rebuilds.
+
+`-ephemeral` selects a fresh `debian:bookworm-slim` container for each command,
+with the workspace at `/workspace`, no network, and the host user's uid.
+It retains read-only artifacts and step-record mounts. Persistent execution uses
+native `canti:retrieve` and `canti:focus` for archive access; `/canti/runs`,
+`/canti/artifacts` and `/canti/imports` are logical retrieval addresses there.
+`-image`, `-network`, `-memory`, `-cpus` and `-pids` apply only to `-ephemeral`;
+provision the persistent environment's resources and network externally.
+
+Every canti command takes `-workspace` (default the current directory). Keep the
+journal's `-state` outside the workspace, environment authority and every
+container mount. Resume, inspection and stop use the accepted stored execution
+configuration. Cancellation and command timeout stop a persistent environment,
+including services; explicit `environment start` preserves its files. A run's
+completion leaves it running. Unknown outcomes remain subject to inspection or
+explicit resolution.
 
 | Command | Effect |
 | --- | --- |
-| `canti run -goal TEXT` | Start a run and drive it until it returns or stops |
-| `canti-tui [-session ID]` | Talk with the agent: each input becomes the next run of one session |
+| `canti run -environment DIR -goal TEXT` | Start a run and drive it until it returns or stops |
+| `canti-tui -environment DIR [-session ID]` | Talk with the agent: each input becomes the next run of one session |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
@@ -159,7 +176,7 @@ are not tested. Of two host reboots met live, a job killed by one was recorded
 with Docker's exit code 255; canti now reports a job killed before its shell
 records an exit status unknown rather than exited, tested with `docker kill`,
 while a signal the job observes, as from a graceful daemon shutdown, is
-reported as its exit status. The container of an unknown job is kept for
+reported as its exit status. In ephemeral mode, the container of an unknown job is kept for
 `docker logs canti-<effect ID>` and must be removed by hand. Several hosts are
 out of scope. Cost is not measured. Only retained job output is bounded on
 disk, per job and per run; workspace writes, the journal, and a running job's
