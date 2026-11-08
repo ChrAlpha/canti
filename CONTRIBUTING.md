@@ -6,7 +6,7 @@ and harness APIs may change before a stable release.
 
 ## Local setup
 
-Use Go 1.26 or newer, Make, and a POSIX shell. `make check` needs no
+Use Go 1.26 or newer, Make, Python 3 (dependency provenance checks), and a POSIX shell. `make check` needs no
 credentials, model access, database server, container runtime, or Memoh
 checkout; `make integration` needs a Docker daemon.
 

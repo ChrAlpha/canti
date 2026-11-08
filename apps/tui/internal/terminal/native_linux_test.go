@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -278,7 +279,11 @@ func TestStreamRejectsIncompleteSequenceOverLimit(t *testing.T) {
 
 func TestNativeInitFailureRestoresPTY(t *testing.T) {
 	if os.Getenv("CANTI_NATIVE_INIT_FAIL") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestNativeInitFailureRestoresPTY$", "-test.v")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeInitFailureRestoresPTY$", "-test.v")
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+		cmd.WaitDelay = time.Second
 		cmd.Env = append(os.Environ(), "CANTI_NATIVE_INIT_FAIL=1")
 		output, e := cmd.CombinedOutput()
 		t.Log(string(output))
@@ -299,6 +304,15 @@ func TestNativeInitFailureRestoresPTY(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer term.Restore(fd, before)
+	flagsBefore, e := unix.FcntlInt(fd, unix.F_GETFL, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	fdsBefore, e := os.ReadDir("/proc/self/fd")
+	if e != nil {
+		t.Fatal(e)
+	}
+	goroutinesBefore := runtime.NumGoroutine()
 	var limits unix.Rlimit
 	if e = unix.Getrlimit(unix.RLIMIT_NOFILE, &limits); e != nil {
 		t.Fatal(e)
@@ -320,6 +334,23 @@ func TestNativeInitFailureRestoresPTY(t *testing.T) {
 	}
 	if runErr == nil {
 		t.Fatal("expected input initialization error")
+	}
+	flagsAfter, e := unix.FcntlInt(fd, unix.F_GETFL, 0)
+	if e != nil || flagsAfter != flagsBefore {
+		t.Fatalf("flags %x -> %x: %v", flagsBefore, flagsAfter, e)
+	}
+	fdsAfter, e := os.ReadDir("/proc/self/fd")
+	if e != nil || len(fdsAfter) != len(fdsBefore) {
+		t.Fatalf("descriptors %d -> %d: %v", len(fdsBefore), len(fdsAfter), e)
+	}
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > goroutinesBefore && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.NumGoroutine() > goroutinesBefore {
+		buf := make([]byte, 64<<10)
+		n := runtime.Stack(buf, true)
+		t.Fatalf("initialization leaked goroutines: %s", buf[:n])
 	}
 	t.Logf("initialization error=%v; state restored=%v", runErr, reflect.DeepEqual(before, after))
 	if !reflect.DeepEqual(before, after) {

@@ -69,6 +69,10 @@ type TerminalReader struct {
 	MaxSequenceBytes int
 	MaxPasteBytes    int
 
+	// IncompleteTimeout retains incomplete control strings for this duration, then
+	// returns ErrInputTimeout. Zero preserves the escape ambiguity timeout.
+	IncompleteTimeout time.Duration
+
 	// ReportEOF lets the owner distinguish input closure from cancellation.
 	ReportEOF bool
 
@@ -196,7 +200,7 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 	if interval <= 0 {
 		interval = DefaultEscTimeout
 	}
-	tick := time.NewTicker(min(interval, 50*time.Millisecond))
+	tick := time.NewTimer(interval)
 	defer tick.Stop()
 	for {
 		select {
@@ -206,7 +210,7 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 			if ctx.Err() != nil || errors.Is(err, cancelreader.ErrCanceled) {
 				return nil
 			}
-			if d.eventScanner.paste != nil || pendingControl(buf.Bytes()) {
+			if d.eventScanner.paste != nil || d.IncompleteTimeout > 0 && pendingControl(buf.Bytes()) {
 				return io.ErrUnexpectedEOF
 			}
 			d.sendEvents(ctx, eventc, buf.Bytes(), true)
@@ -218,19 +222,21 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 			if d.eventScanner.pasteOverflow && now.Sub(d.eventScanner.overflowAt) >= DefaultInputTimeout {
 				return ErrInputTimeout
 			}
-			if !pendingSince.IsZero() && now.Sub(pendingSince) >= DefaultInputTimeout {
+			if d.IncompleteTimeout > 0 && !pendingSince.IsZero() && now.Sub(pendingSince) >= d.IncompleteTimeout {
 				return ErrInputTimeout
 			}
 			if d.eventScanner.paste != nil && now.Sub(lastRead) >= DefaultInputTimeout {
 				return ErrInputTimeout
 			}
-			if buf.Len() > 0 && now.Sub(lastRead) >= interval && !pendingControl(buf.Bytes()) && d.eventScanner.paste == nil {
+			if buf.Len() > 0 && now.Sub(lastRead) >= interval && (d.IncompleteTimeout <= 0 || !pendingControl(buf.Bytes())) && d.eventScanner.paste == nil {
 				buf.Next(d.sendEvents(ctx, eventc, buf.Bytes(), true))
 				if buf.Len() == 0 {
 					pendingSince = time.Time{}
 				}
 			}
+			tick.Reset(min(interval, 50*time.Millisecond))
 		case read := <-readc:
+			tick.Reset(interval)
 			lastRead = time.Now()
 			for len(read) > 0 {
 				remaining := d.MaxSequenceBytes - buf.Len()
@@ -266,7 +272,7 @@ func pendingControl(b []byte) bool {
 	}
 	switch b[1] {
 	case ']', 'P', '_', '^', 'X':
-		return true
+		return len(b) > 2 && b[2] != 0x1b
 	case '[':
 		return len(b) > 2
 	}

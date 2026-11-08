@@ -78,6 +78,7 @@ func (p *Program) initInputReader(cancel bool) error {
 	drv.MaxSequenceBytes = p.inputSequenceLimit
 	drv.MaxPasteBytes = p.inputPasteLimit
 	drv.ReportEOF = true
+	drv.IncompleteTimeout = uv.DefaultInputTimeout
 	drv.SetLogger(p.logger)
 	p.inputScanner = drv
 	p.readLoopDone = make(chan struct{})

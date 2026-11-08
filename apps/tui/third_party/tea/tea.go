@@ -562,7 +562,8 @@ type Program struct {
 	once sync.Once
 
 	// rendererDone is used to stop the renderer.
-	rendererDone chan struct{}
+	rendererDone    chan struct{}
+	rendererStarted uint32
 
 	// Initial window size. Mainly used for testing.
 	width, height int
@@ -1455,6 +1456,7 @@ func (p *Program) startRenderer() {
 
 	// Start the renderer.
 	p.renderer.start()
+	atomic.StoreUint32(&p.rendererStarted, 1)
 	go func() {
 		for {
 			select {
@@ -1474,6 +1476,9 @@ func (p *Program) startRenderer() {
 // If kill is true, the renderer will be stopped immediately without flushing
 // the last frame.
 func (p *Program) stopRenderer(kill bool) {
+	if atomic.LoadUint32(&p.rendererStarted) == 0 {
+		return
+	}
 	// Stop the renderer before acquiring the mutex to avoid a deadlock.
 	p.once.Do(func() {
 		p.rendererDone <- struct{}{}

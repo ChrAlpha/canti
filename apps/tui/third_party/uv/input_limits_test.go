@@ -35,6 +35,7 @@ func TestInputRecoveryBounds(t *testing.T) {
 			defer cr.Close()
 			reader := NewTerminalReader(cr, "xterm")
 			reader.MaxPasteBytes = 8
+			reader.IncompleteTimeout = DefaultInputTimeout
 			events := make(chan Event, 16)
 			done := make(chan error, 1)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -93,5 +94,24 @@ func TestPasteOverflowScannerBoundsAndRecovers(t *testing.T) {
 	}
 	if k, ok := e[1].(KeyPressEvent); !ok || k.Text != "y" {
 		t.Fatal(e)
+	}
+}
+
+func TestBoundedInputPreservesAltControlIntroducers(t *testing.T) {
+	for _, input := range []string{"\x1b]", "\x1b^", "\x1b]\x1b'", "\x1b^\x1b&"} {
+		reader := NewTerminalReader(strings.NewReader(input), "xterm")
+		reader.IncompleteTimeout = DefaultInputTimeout
+		events := make(chan Event, 8)
+		if err := reader.StreamEvents(context.Background(), events); err != nil {
+			t.Fatalf("%q: %v", input, err)
+		}
+		if len(events) != len(input)/2 {
+			t.Fatalf("%q: %d events", input, len(events))
+		}
+		for len(events) > 0 {
+			if e := <-events; e.(KeyPressEvent).Mod != ModAlt {
+				t.Fatal(e)
+			}
+		}
 	}
 }
