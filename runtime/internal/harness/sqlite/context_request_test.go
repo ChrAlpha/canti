@@ -41,6 +41,8 @@ func TestContextRequestRejectsMalformedSelectedRecord(t *testing.T) {
 		`UPDATE transitions SET facts = json_insert(facts, '$.Unknown', 1)`,
 		`UPDATE transitions SET facts = '{}'`,
 		`UPDATE transitions SET facts = json_set(facts, '$.Request.Body', 'not base64')`,
+		`UPDATE transitions SET facts = json_remove(facts,'$.Request.ContextState')`,
+		`UPDATE transitions SET facts = json_set(facts,'$.Request.ContextState.AnchorSeq',1)`,
 		`UPDATE transitions SET event = json_insert(event, '$.Unknown', 1)`,
 		`UPDATE transitions SET semantics = 999`,
 		`UPDATE transitions SET from_state = json_set(from_state, '$.RunID', 'other')`,

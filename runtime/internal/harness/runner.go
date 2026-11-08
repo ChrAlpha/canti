@@ -195,6 +195,9 @@ func ValidateTransition(t Transition) error {
 	}
 
 	if r := t.Facts.Request; r != nil {
+		if r.ContextState.AnchorSeq >= t.Seq {
+			return fmt.Errorf("%w: frozen anchor must precede its request", ErrFacts)
+		}
 		if err := r.ContextState.Validate(t.To.Step, t.Seq); err != nil {
 			return fmt.Errorf("%w: %v", ErrFacts, err)
 		}

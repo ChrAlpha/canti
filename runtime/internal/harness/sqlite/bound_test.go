@@ -231,3 +231,17 @@ func TestProgressSelectsNoBodyAndClipsEveryText(t *testing.T) {
 		t.Errorf("a progress row may take %d bytes", ProgressRowBytes)
 	}
 }
+
+func TestReceiptLookupUsesBoundedCompletionIndexes(t *testing.T) {
+	s := open(t, tempPath(t))
+	detail := plan(t, s, receiptSQL, "run", int64(math.MaxInt64), 5)
+	t.Logf("receipt plan: %s", detail)
+	for _, index := range []string{"transitions_steps (run_id=? AND seq<?)", "transitions_performed (run_id=? AND seq<?)"} {
+		if !strings.Contains(detail, "INDEX "+index) {
+			t.Errorf("receipt plan does not bound selected identities through %s: %s", index, detail)
+		}
+	}
+	if !strings.Contains(detail, "SEARCH t USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq=?)") {
+		t.Errorf("receipt hydration does not use one primary-key read per selected identity: %s", detail)
+	}
+}

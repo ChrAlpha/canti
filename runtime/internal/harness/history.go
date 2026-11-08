@@ -246,11 +246,14 @@ func repairStep(dir string, r StepRecord) error {
 	if err != nil {
 		return err
 	}
+	createdDirectory := false
 	if r.retrieval() != nil {
 		evidence := filepath.Join(dir, archive.EvidenceDir)
-		if _, err := exists(evidence, true); err != nil {
+		found, err := exists(evidence, true)
+		if err != nil {
 			return err
 		}
+		createdDirectory = !found
 		if err := os.MkdirAll(evidence, 0o755); err != nil {
 			return err
 		}
@@ -281,7 +284,10 @@ func repairStep(dir string, r StepRecord) error {
 			return newIntegrityError("published record %s has conflicting bytes", target)
 		}
 	}
-	return syncDir(dir)
+	if createdDirectory {
+		return syncDir(dir)
+	}
+	return nil
 }
 
 // putFile publishes data as dir/name unless it exists.

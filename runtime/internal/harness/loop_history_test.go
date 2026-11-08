@@ -21,7 +21,7 @@ import (
 )
 
 // Budgets of TestLoopBoundsRequestsAsHistoryGrows, chosen before measuring;
-// the step and read budgets follow from the prompt total.
+// the step/read budgets follow from the seeded anchor and bounded pages.
 const (
 	commandBytes  = 2000
 	previewBytes  = 4000
@@ -217,9 +217,9 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 	for _, b := range body.Messages[0].Content {
 		user += b.Text
 	}
-	s.prompt, s.shown = len(body.System)+len(user), strings.Count(user, "\n### Step ")
-	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("\n### Step %d\n", n-s.shown+1),
-		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), "Continue the seeded history measurement.")
+	s.prompt, s.shown = len(body.System)+len(user), len(s.req.Context.Bytes.Steps)
+	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("### Step %d (sequence ", n-s.shown+1),
+		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), fmt.Sprintf("anchor sequence %d; first step %d", s.req.ContextState.AnchorSeq, n-s.shown+1))
 
 	for _, name := range []string{f.path, f.path + "-wal"} {
 		if info, err := os.Stat(name); err == nil {
@@ -242,10 +242,11 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	}
 	limits := harness.DefaultPromptLimits()
 	budget := limits.Total + requestSlack
-	// Every shown step renders its whole command and preview.
+	// All receipts after the committed anchor remain visible; only the latest
+	// completion renders its whole command and preview.
 	fit := seedPageSteps
 	// Preparation also reads the previous step's completion, which selects
-	// the window: one record in one page.
+	// the latest body: one record in one page.
 	maxRecords, maxPages := fit+historyPage+1, fit/historyPage+2
 	maxReads := 4 + maxPages
 
