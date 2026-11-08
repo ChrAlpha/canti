@@ -1,0 +1,190 @@
+//go:build integration
+
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
+)
+
+func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
+	f, image := recoveryFixture(t, nil)
+	draft := "Orchid draft: wait 30 seconds and retry 3 times."
+	correction := "Release authorization replaces earlier guidance: wait 47 seconds and retry 5 times."
+	inputs := map[string]string{
+		"draft":    draft,
+		"approval": "Orchid release record.\n" + strings.Repeat("background\n", 100) + correction,
+		"binary":   "unrelated\x00output",
+		"noise":    strings.Repeat("Orchid noise\n", 50000),
+	}
+	for name, body := range inputs {
+		if err := os.WriteFile(filepath.Join(f.workspace, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := f.cli(nil, "run", "-once", "-goal", "Resume deployment using original release authorization", "-image", image,
+		"-context-bytes", "1048576", "-window-steps", "8", "-max-steps", "30", "-token-budget", "5000", "-wall-time", "4m", "-job-timeout", "10s")
+	if r.code != exitActive {
+		t.Fatalf("start: %d %s", r.code, r.stderr)
+	}
+	run, step := f.status().Run.ID, 1
+	deadline := time.Now().Add(210 * time.Second)
+	act := func(command string) {
+		t.Helper()
+		d := core.Decision{Kind: core.Exec, Payload: command}
+		if command == "done" {
+			d.Kind = core.Return
+		}
+		body, _ := json.Marshal(d)
+		f.model.answer(step, 1, reply{text: string(body)})
+		for n := 0; n < 100 && time.Now().Before(deadline); n++ {
+			r := f.cli(nil, "resume", "-once")
+			if r.code != exitActive && r.code != exitOK {
+				t.Fatalf("step %d: %d %s", step, r.code, r.stderr)
+			}
+			s := f.status()
+			if s.Phase == core.PhaseReturned || s.Step > step {
+				step++
+				return
+			}
+		}
+		t.Fatalf("step %d exceeded process or wall-time budget", step)
+	}
+	observe := func() harness.Observation {
+		t.Helper()
+		for _, e := range slices.Backward(f.history()) {
+			if e.Facts.Observation != nil {
+				o := *e.Facts.Observation
+				if o.ExitCode == nil || *o.ExitCode != 0 {
+					t.Fatalf("failed action at step %d: %+v", step-1, o)
+				}
+				return o
+			}
+		}
+		t.Fatal("missing observation")
+		return harness.Observation{}
+	}
+	handover := func(first int) {
+		t.Helper()
+		for step < first+8 {
+			act("printf 'checkpoint\\n'")
+			observe()
+		}
+		act(harness.HandoverPrefix + "Continue deployment. Check original release decisions and any amendments before applying settings.")
+		if latestOutcome(t, f.history()).Handover == nil {
+			t.Fatal("handover was not committed")
+		}
+	}
+	query := func(q archive.RetrievalQuery) archive.Retrieval {
+		t.Helper()
+		body, _ := json.Marshal(q)
+		act("canti:retrieve " + string(body))
+		o := latestOutcome(t, f.history())
+		if o.Retrieval == nil || o.Retrieval.Error != "" {
+			t.Fatalf("retrieval failed: %+v", o)
+		}
+		return *o.Retrieval
+	}
+	paths := map[string]string{}
+	for _, name := range []string{"draft", "approval", "binary", "noise"} {
+		act("cat " + name + "; rm " + name)
+		o := observe()
+		if !o.Output.Complete || o.Output.Bytes != int64(len(inputs[name])) {
+			t.Fatalf("original output %s not fully retained: %+v", name, o)
+		}
+		paths[name] = "/canti/artifacts/" + o.Output.Path
+	}
+	act("# canti:discovery\nprintf 'Orchid approved wait 999 seconds\\n'")
+	handover(1)
+	calls := 0
+	for window := 0; window < 2; window++ {
+		first := step
+		q := archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/" + run + "/steps",
+			Reason: "find release candidates including amendments", Query: "Orchid", Limit: 1024}
+		found := map[string]bool{}
+		seenCursors := map[string]bool{}
+		gap := false
+		for page := 0; ; page++ {
+			if page == 4 {
+				t.Fatal("dense source prevented candidate discovery within four calls")
+			}
+			got := query(q)
+			calls++
+			encoded, _ := json.Marshal(got)
+			var coverage struct {
+				SkippedCount int `json:"skipped_count"`
+			}
+			if err := json.Unmarshal(encoded, &coverage); err != nil {
+				t.Fatal(err)
+			}
+			gap = gap || coverage.SkippedCount > 0
+			if gap && (!got.Incomplete || coverage.SkippedCount != 1) {
+				t.Fatalf("lost or duplicated binary coverage gap: %s", encoded)
+			}
+			bytes := 0
+			for _, source := range got.Sources {
+				found[source.Path] = true
+				bytes += source.Length
+				if source.Path == paths["binary"] || strings.Contains(source.Path, "/00000005/") {
+					t.Fatalf("returned binary or marked echo: %+v", source)
+				}
+			}
+			if bytes > q.Limit {
+				t.Fatalf("candidate bytes %d exceed limit %d", bytes, q.Limit)
+			}
+			if !got.More {
+				if !gap || !got.Incomplete || got.NextCursor != "" {
+					t.Fatalf("final coverage missing: %s", encoded)
+				}
+				break
+			}
+			if got.NextCursor == "" || seenCursors[got.NextCursor] {
+				t.Fatal("discovery did not advance")
+			}
+			seenCursors[got.NextCursor] = true
+			q.Cursor = got.NextCursor
+		}
+		if !found[paths["draft"]] || !found[paths["approval"]] || !found[paths["noise"]] {
+			t.Fatalf("missing original candidates: %v", found)
+		}
+		fresh := f.model.prompts(first)
+		if len(fresh) != 1 || strings.Contains(fresh[0], correction) || strings.Contains(fresh[0], draft) {
+			t.Fatal("fresh window already contained prior decisions")
+		}
+		for _, name := range []string{"draft", "approval"} {
+			query(archive.RetrievalQuery{Operation: "read", Path: paths[name], Reason: "inspect full decision and possible amendment", Limit: 4096})
+		}
+		checkStep := step
+		if window == 0 {
+			handover(first)
+		} else {
+			act("printf 'wait=47 retry=5\\n' > settings")
+		}
+		shown := f.model.prompts(checkStep)
+		if len(shown) != 1 || !strings.Contains(shown[0], draft) || !strings.Contains(shown[0], correction) ||
+			!strings.Contains(shown[0], `"incomplete":true`) || !strings.Contains(shown[0], `"skipped_count":1`) || strings.Contains(shown[0], "999 seconds") {
+			t.Fatal("frozen request lacks decisions or coverage, or includes retrieval echo")
+		}
+	}
+	act("done")
+	settings, err := os.ReadFile(filepath.Join(f.workspace, "settings"))
+	if err != nil || string(settings) != "wait=47 retry=5\n" || f.status().Phase != core.PhaseReturned {
+		t.Fatalf("task result: %q %v", settings, err)
+	}
+	frozenBytes := 0
+	for _, e := range f.history() {
+		if e.Facts.Request != nil {
+			frozenBytes += len(e.Facts.Request.Body)
+		}
+	}
+	t.Logf("SCRIPTED_CANDIDATES windows=3 discover_calls=%d model_calls=%d frozen_request_bytes=%d noise_bytes=%d binary_sources=1; real CLI/SQLite/Docker, repeated process resume, scripted decisions; no autonomous task score", calls, len(f.model.requests()), frozenBytes, len(inputs["noise"]))
+}

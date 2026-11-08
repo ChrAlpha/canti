@@ -4,7 +4,9 @@
 
 canti explores a fully stateless run kernel with a separate harness that
 composes the right information for each step and performs every I/O. The
-implementation is an independent Go module, `github.com/ChrAlpha/canti`. A
+implementation is a monorepo of independent Go modules: `github.com/ChrAlpha/canti/runtime`,
+`github.com/ChrAlpha/canti/sdk/go`, and `github.com/ChrAlpha/canti/apps/tui`,
+joined by root `go.work`. A
 future Memoh adapter may consume it; canti does not import Memoh internal
 packages.
 
@@ -18,27 +20,29 @@ is not.
 
 | Area | Owns | Evidence |
 | --- | --- | --- |
-| `core/decode.go` | Decision protocol and decoding | Offline tests |
-| `core/state.go`, `core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
-| `internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
-| `internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
-| `internal/harness/runner.go` | Transition derivation and atomic commit | Recording-store tests; used by the loop |
-| `internal/harness/action.go`, `outcome.go`, `effect.go`, `perform.go` | The normalized action of an accepted exec decision and its recovery contract, the local outcome and its presentation, the provenance check of every effect transition, and the harness's own actions | Offline tests over SQLite; Docker-backed gate tests |
-| `internal/harness/loop.go` | Driving committed intents to a halt, measured budgets, persistent stop, explicit resolution | Tests with a fake model and executor over SQLite; end to end through the CLI |
-| `internal/harness/executor.go` | Executor contract: accepted descriptor, bounded Drive, non-starting Inspect/Cancel, authoritative receipt | Implemented by `docker` |
-| `internal/harness/executortest` | Executable start latch contract | Passed by an offline reference and the Docker executor; rejects single-clause mutants |
-| `internal/harness/artifacts.go` | Observation and output reference records | Types |
-| `internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
-| `internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations, their continuations, and the evidence each returns | Offline tests on real directories |
-| `internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
-| `internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
-| `internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
-| `internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
-| `internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
-| `internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 4, with physical inspection and operator owner provenance), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
-| `cmd/canti` | CLI: commands, flags, signals, terminal, environment and credential | Subprocess tests; Docker-backed gate tests |
+| `runtime/core/decode.go` | Decision protocol and decoding | Offline tests |
+| `runtime/core/state.go`, `runtime/core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
+| `runtime/internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
+| `runtime/internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
+| `runtime/internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
+| `runtime/internal/harness/runner.go` | Transition derivation and atomic commit | Recording-store tests; used by the loop |
+| `runtime/internal/harness/action.go`, `outcome.go`, `effect.go`, `perform.go` | The normalized action of an accepted exec decision and its recovery contract, the local outcome and its presentation, the provenance check of every effect transition, and the harness's own actions | Offline tests over SQLite; Docker-backed gate tests |
+| `runtime/internal/harness/loop.go` | Driving committed intents to a halt, measured budgets, persistent stop, explicit resolution | Tests with a fake model and executor over SQLite; end to end through the CLI |
+| `runtime/internal/harness/executor.go` | Executor contract: accepted descriptor, bounded Drive, non-starting Inspect/Cancel, authoritative receipt | Implemented by `docker` |
+| `runtime/internal/harness/executortest` | Executable start latch contract | Passed by an offline reference and the Docker executor; rejects single-clause mutants |
+| `runtime/internal/harness/artifacts.go` | Observation and output reference records | Types |
+| `runtime/internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
+| `runtime/internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations, their continuations, and the evidence each returns | Offline tests on real directories |
+| `runtime/internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
+| `runtime/internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
+| `runtime/internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
+| `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
+| `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
+| `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 5, with side-effect-free preflight validation and opaque progress cursors), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
+| `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
+| `apps/tui/cmd/canti-tui` | Terminal and pipe chat, runtime selection and launch, rendering protocol projections | Pure UI tests; runtime end-to-end tests launch the separate TUI executable |
 
 The core imports only the standard library and holds no per-run state between
 calls. The journal uses `modernc.org/sqlite`, a cgo-free SQLite implementation. Model I/O, history, time, storage, and execution belong to the
@@ -306,11 +310,17 @@ moves its run on.
 open or needs resolution, and publishes the step records of that run first,
 refusing when it cannot.
 
-A command drives its run through the host of the state directory: by
+An operational command drives its run through the host of the state directory: by
 default (`-host auto`) the host process that serves the state directory
 (`canti host`, started on demand), which outlives its clients; with
 `-host embedded` one in its own process, whose lifetime is the command's, so
-the signal rules above end the run with the command. Three events then stay distinct:
+the signal rules above end the run with the command. The independent TUI uses
+`-host auto` for shared attachment or `-host owned` for an exclusive subprocess
+per input. Owned refuses an existing/shared host and checks the child PID at
+handshake; it releases that host between inputs. Hangup stops the owned run;
+a second signal abandons cleanup and shuts the owned host down. Abrupt client
+death shuts down its child without asserting an outcome. The following detach
+row applies to clients of a shared host. Three events stay distinct:
 
 | Event | Journal | Drive | Job |
 | --- | --- | --- | --- |
@@ -653,7 +663,7 @@ bodies, and Docker's log of a running job are not counted. See
 
 ## Complexity budget
 
-Keep one Go module and the current package split. V1 has one model protocol,
+Keep runtime, SDK, and TUI in their independent Go modules. V1 has one model protocol,
 one SQLite journal, and one queryable executor. Distributed scheduling,
 multi-tenant policy, generic workflow graphs, automatic planning, automatic
 memory compaction, and mid-run user input are outside the initial experiment;

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.25 or newer; `go.mod` declares the minimum version.
+- Go 1.25 or newer; each module’s `go.mod` declares the minimum version.
 - Make and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
   targets.
 - A C compiler and a supported platform for Go's race detector.
@@ -14,11 +14,12 @@
   `/tmp` the test uid can write, and the common shell tools the tests call,
   including `wget`.
 
-The module depends on `modernc.org/sqlite`, a cgo-free SQLite, pinned by the
-committed `go.sum`. `make check` needs no credentials, `.env` file, database
+The runtime module depends on `modernc.org/sqlite`, a cgo-free SQLite, pinned by the
+committed `runtime/go.sum`. `make check` needs no credentials, `.env` file, database
 server, container runtime, or Memoh service. Run commands in this repository,
-not its parent workspace. If a parent `go.work` includes other modules, use
-`GOWORK=off`.
+not its parent workspace. Root `go.work` enumerates all three modules. To verify a module independently,
+run its commands inside that module with `GOWORK=off`. Runtime and TUI use
+relative SDK replacements; standalone builds require the monorepo checkout.
 
 ```sh
 git clone https://github.com/ChrAlpha/canti.git
@@ -34,8 +35,8 @@ Cloning requires repository access while the repository is private.
 | --- | --- |
 | `make check` | Read-only formatting validation, vet, the test-name check, and all unit tests |
 | `make fmt` | Check `gofmt` output; does not rewrite files |
-| `make vet` | `go vet ./...`, then `go vet -tags integration,live ./...` so tagged test files compile |
-| `make test` | `go test ./...` |
+| `make vet` | `go vet` across all modules, then with `-tags integration,live` so tagged test files compile |
+| `make test` | Unit tests in every module |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: the unit tests plus the Docker-backed tests and the long-history measurement |
 | `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
 | `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
@@ -44,12 +45,12 @@ Cloning requires repository access while the repository is private.
 | `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
 | `make lint` | The cognitive complexity limit of `.golangci.yml`, through a pinned golangci-lint fetched by `go run` |
 | `make commits BASE=main` | Build and vet, without and with the tags, every commit after `BASE` in a temporary worktree; `scripts/check-commits.sh BASE` takes a base whose name contains `$` |
-| `go test -count=1 -race ./...` | Fresh race-enabled unit test run |
-| `go test -count=1 -race -tags integration -run 'TestGate' -v ./cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
-| `go test ./core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
-| `go test ./core -run 'TestNext\|TestIntent\|TestValidate\|TestTrajectory\|TestIllegal' -v` | Transition table, budgets, invariants, trajectories, and rejected events |
-| `go test ./internal/harness -run 'TestCommit\|TestLoop\|TestEffect\|TestRunner\|TestStale\|TestOffline' -v` | Commit protocol, accepted-effect execution, failure, and cancellation cases |
-| `go test ./internal/harness/sqlite -run TestCrashKeepsAcknowledgedCommits -v` | SIGKILL of a committing process and recovery of every acknowledged commit |
+| `go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...` | Fresh race-enabled unit test run |
+| `go test -count=1 -race -tags integration -run 'TestGate' -v ./runtime/cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
+| `go test ./runtime/core -run TestDecodeRejectsInvalidProtocol -v` | Focused protocol regression cases |
+| `go test ./runtime/core -run 'TestNext\|TestIntent\|TestValidate\|TestTrajectory\|TestIllegal' -v` | Transition table, budgets, invariants, trajectories, and rejected events |
+| `go test ./runtime/internal/harness -run 'TestCommit\|TestLoop\|TestEffect\|TestRunner\|TestStale\|TestOffline' -v` | Commit protocol, accepted-effect execution, failure, and cancellation cases |
+| `go test ./runtime/internal/harness/sqlite -run TestCrashKeepsAcknowledgedCommits -v` | SIGKILL of a committing process and recovery of every acknowledged commit |
 | `git diff --check` | Check pending patches for whitespace errors |
 
 Use `gofmt -w path/to/changed.go` on changed files to resolve a formatting
@@ -62,8 +63,8 @@ sends one real request and is never part of `make check`, `make integration`,
 or CI:
 
 ```sh
-ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/anthropic
-OPENAI_API_KEY=... OPENAI_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./internal/harness/openai
+ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./runtime/internal/harness/anthropic
+OPENAI_API_KEY=... OPENAI_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./runtime/internal/harness/openai
 ```
 
 Each skips without its credential and model, as canti has no default model.
@@ -76,7 +77,8 @@ decision, not a loop.
 ## CLI
 
 ```sh
-go build -o bin/canti ./cmd/canti
+go build -o bin/canti ./runtime/cmd/canti
+go build -o bin/canti-tui ./apps/tui/cmd/canti-tui
 ./bin/canti -version
 ./bin/canti -h
 ./bin/canti run -h
@@ -106,7 +108,7 @@ workspace unlocked, each write waiting at most 1 s.
 
 A run names its model API with `-api`, `anthropic-messages` or
 `openai-responses`, and its model with `-model`; neither has a default, and
-`-api openai-completions` is refused. `run`, `chat`, and `resume` read the
+`-api openai-completions` is refused. `canti run`, `canti-tui`, and `canti resume` read the
 credential of the run's API, `ANTHROPIC_API_KEY` or else
 `ANTHROPIC_AUTH_TOKEN` for `anthropic-messages` and `OPENAI_API_KEY` for
 `openai-responses`. A new run stores its provider, the API base URL from
@@ -142,12 +144,12 @@ and fails when the goal or the constraints differ. A run without `-input`
 always creates new work. Use the same ID to retry a submission whose outcome
 was lost.
 
-`chat` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
+`canti-tui` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
 accepted input becomes the next run of one serial session. `-session ID`
 continues a session; each new run uses the current launch flags. The log level
 defaults to `warn`.
 
-**Terminal input (TTY):** `chat` uses a full-screen TUI on the alternate screen,
+**Terminal input (TTY):** `canti-tui` uses a full-screen TUI on the alternate screen,
 rendered to standard error. There is currently no plain interactive terminal
 mode. Enter submits, Alt+Enter inserts a newline, and PgUp/PgDn scroll the
 retained display, including while a run is running or stopping. Text, paste,
@@ -168,12 +170,41 @@ for a run's full recorded transitions. Display history is separate from the
 session context supplied to the model; the next input still receives earlier
 dialogue as far as it fits `-context-bytes`.
 
-**Host process.** `run`, `chat`, `resume`, `stop`, and `resolve` drive the
-run through the host process that serves the state directory (`-host auto`,
-the default), which keeps driving it when the command ends; `-host embedded`
-drives it in the command's own process instead, which the signal rules of
-the run then end with the command. The tests pin `-host embedded` for every
-command that names no `-host`. A client that finds no host and an unlocked
+**Host process.** Operational commands and `canti-tui` default to `-host auto`,
+which attaches to the shared host of the state directory and leaves it driving
+when the client detaches. Operational commands also support `-host embedded`,
+which runs a host in that command's process.
+
+`canti-tui -host owned` launches a separate runtime process exclusively for each
+input and reaps it before reopening the editor. It rejects any existing host,
+including a different process winning a startup race; every successful Hello
+must report the PID of the child it launched. Use `-host auto` to attach to a
+shared host. The setup briefly opens an owned host to initialize the state
+layout, then releases it; between inputs no host or admission lock is held.
+Ctrl+C requests persistent stop and waits for cleanup. A second signal abandons
+the wait and shuts down the owned host, returning error status 1; unfinished
+cleanup remains recoverable through `canti stop`.
+Terminal hangup or display failure stops the active run before owned shutdown.
+An abrupt client death sends SIGTERM to its child, which shuts down its drive;
+it does not invent a successful result or a persistent stop. Unknown effects
+retain the normal inspection/resolution contract. Auto mode instead detaches
+on terminal hangup or a second signal, leaving the shared host driving.
+
+The TUI always uses the public protocol and never opens the journal. `-runtime
+PATH` selects the runtime executable; otherwise it finds `canti` on PATH.
+Before creating state it calls the runtime's versioned `preflight` interface,
+which validates configuration, layout, credentials, execution resource settings
+and context admission without writes. A live host binds validation to its own
+state/workspace and supplies inherited constraints. Empty SessionID validates a
+standalone submission with its supplied constraints. Validation reserves no
+admission or input identity; Submit rechecks everything under the host lock.
+Preflight requires exactly one JSON request of at most 1 MiB. The client caps
+stdout at 1 MiB and stderr at 16 KiB, kills the process group on overflow or
+cancellation, limits total time to 30 seconds and inherited-pipe cleanup to one
+second, and rejects trailing/unknown response fields. Test fixtures select
+embedded operational commands and owned TUI clients unless a test names auto.
+
+A client that finds no host and an unlocked
 state directory starts `canti host` in a session of
 its own, with no credential in its environment and logging to `host.log` in
 the state directory, and waits up to `-host-wait` (10 s) for it to serve; it
@@ -213,7 +244,7 @@ binaries on that `PATH` reaches the host's next call. To use another Docker
 environment, stop the host once it drives nothing, with `canti host -stop`
 or SIGTERM to the process it reports, and run the next command from that
 environment, which starts a new host; or run the command with
-`-host embedded`, which uses its own environment. The model provider is not
+`-host embedded` (operational CLI) or `-host owned` (TUI), which uses its own environment. The model provider is not
 resolved this way: each run stores its own.
 
 **Pipe or file input (non-TTY):** inputs are read one line at a time, or as a
@@ -283,7 +314,7 @@ among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
 Each run stores current context version 16. Schema 3, semantics 5, executor
-record format 2 and host protocol 4 form one current contract. Unsupported
+record format 2 and host protocol 5 form one current contract. Unsupported
 formats and context versions are rejected; use a fresh state directory. No
 migration or old-run settlement path is supported. Same-version frozen bytes,
 provider bindings, accepted identities and results remain immutable.
@@ -302,13 +333,13 @@ scripted model.
 
 Read [architecture](architecture.md) for interfaces and ownership. Read
 [V1 acceptance](v1-acceptance.md) before changing a concrete adapter or a
-gate. Keep tests beside the package they verify: `core/*_test.go`,
-`internal/harness/*_test.go` (the loop tests use a fake model and executor
-over a real SQLite journal), `internal/harness/sqlite`, `internal/harness/docker`
+gate. Keep tests beside the package they verify: `runtime/core/*_test.go`,
+`runtime/internal/harness/*_test.go` (the loop tests use a fake model and executor
+over a real SQLite journal), `runtime/internal/harness/sqlite`, `runtime/internal/harness/docker`
 (a fake daemon for unit tests, the daemon for `integration_test.go`),
-`internal/harness/anthropic` and `internal/harness/openai` (a local HTTP
-server), and `cmd/canti`, whose tests run the test binary as the CLI in
-subprocesses against a scripted server of both model APIs. The gate tests are `cmd/canti/gate_*_test.go`.
+`runtime/internal/harness/anthropic` and `runtime/internal/harness/openai` (a local HTTP
+server), and `runtime/cmd/canti`, whose tests run the test binary as the CLI in
+subprocesses against a scripted server of both model APIs. The gate tests are `runtime/cmd/canti/gate_*_test.go`.
 
 Protocol and transition tests should stay deterministic and require no
 credentials. A new run rule belongs in `core.State.Next` with a row in the
@@ -319,18 +350,18 @@ left running. Live model checks must be explicit opt-ins with finite budgets;
 do not make paid provider calls part of default tests.
 
 `TestLoopScenariosKeepTheirCommittedRecords` compares what its scenarios commit
-with `internal/harness/testdata/frozen-requests/<scenario>`: the exact body of
+with `runtime/internal/harness/testdata/frozen-requests/<scenario>`: the exact body of
 every frozen model request and, in `journal.txt`, the event ID and facts of
 every transition. It also fails on a directory
 that no scenario records. Only for an intended prompt, adapter, or record
 change, rewrite them with
-`go test ./internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
+`go test ./runtime/internal/harness -run TestLoopScenariosKeepTheirCommittedRecords -update-requests`
 and review the diff. `TestContextVersionPinsItsRules` digests these goldens
 into the rules of the current context version, which
-`cmd/canti/testdata/context-v<version>.txt` records once: rewriting the
+`runtime/cmd/canti/testdata/context-v<version>.txt` records once: rewriting the
 goldens of a scenario, or adding one, which may observe a changed rule,
 requires a new context version, recorded with
-`go test ./cmd/canti -run TestContextVersionPinsItsRules -record-context`.
+`go test ./runtime/cmd/canti -run TestContextVersionPinsItsRules -record-context`.
 Review changes to current request bytes separately from journal identity changes.
 The current corpus verifies same-version frozen requests, including cold restart
 and lost acknowledgements. Historical files remain audit evidence; current

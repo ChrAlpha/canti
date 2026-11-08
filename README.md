@@ -29,28 +29,30 @@ observable.
 
 ## Components
 
-- `core` accepts exactly one JSON decision, `exec` or `return`, and holds the
+- `runtime/core` accepts exactly one JSON decision, `exec` or `return`, and holds the
   complete run projection and its pure transition rules. It imports only the
   standard library and keeps no state between calls.
-- `internal/harness` builds each request from committed facts within byte
+- `runtime/internal/harness` builds each request from committed facts within byte
   limits, commits one transition per fact, reads each accepted decision once
   into an action whose recovery contract it commits with it, and drives
   committed intents to a halt with step, attempt, wall-time, token,
   output-byte, and job-time budgets.
-- `internal/archive` reads the step records, artifacts, and imported history
+- `runtime/internal/archive` reads the step records, artifacts, and imported history
   that jobs see, for the harness's retrieval action, without following a
   symlink below its root directories or reading environment files.
-- `internal/harness/sqlite` is the journal: one row per transition with its
+- `runtime/internal/harness/sqlite` is the journal: one row per transition with its
   facts, a sequence compare-and-set, idempotent retries, and strict decoding,
   on WAL with `synchronous=FULL`.
-- `internal/harness/docker` runs each effect in one container named from its
+- `runtime/internal/harness/docker` runs each effect in one container named from its
   effect ID behind a durable start latch, so a restart never starts a job
   twice, and keeps bounded output artifacts and previews.
-- `internal/harness/anthropic` and `internal/harness/openai` are the Messages
-  and Responses adapters; `internal/harness/provider` sends the frozen request
+- `runtime/internal/harness/anthropic` and `runtime/internal/harness/openai` are the Messages
+  and Responses adapters; `runtime/internal/harness/provider` sends the frozen request
   bytes of each attempt once over `net/http` for both. The Chat Completions
   API is not supported.
-- `cmd/canti` is the CLI.
+- `runtime/cmd/canti` is the operational CLI and host executable.
+- `sdk/go/hostrpc` is the independent protocol and client module.
+- `apps/tui/cmd/canti-tui` is the independent terminal and pipe chat client.
 
 ## Running an agent
 
@@ -64,7 +66,8 @@ its environment before starting any child process; no credential enters the
 journal.
 
 ```sh
-go build -o bin/canti ./cmd/canti
+go build -o bin/canti ./runtime/cmd/canti
+go build -o bin/canti-tui ./apps/tui/cmd/canti-tui
 export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY with -api anthropic-messages
 mkdir -p ~/demo
 bin/canti run -workspace ~/demo -api openai-responses -model MODEL \
@@ -88,12 +91,12 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | Command | Effect |
 | --- | --- |
 | `canti run -goal TEXT` | Start a run and drive it until it returns or stops |
-| `canti chat [-session ID]` | Talk with the agent: each input becomes the next run of one session |
+| `canti-tui [-session ID]` | Talk with the agent: each input becomes the next run of one session |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Recover an inspected effect, or record an operator assertion with `-note` and, for exited/timed-out work, `-owner` |
-| `canti host` | Serve the state directory to the commands that drive runs, which start one on demand unless given `-host embedded`, until a signal or `canti host -stop` |
+| `canti host` | Serve the state directory to the commands that drive runs, which start one on demand unless an operational command uses `-host embedded` or the TUI uses `-host owned`, until a signal or `canti host -stop` |
 
 Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
@@ -165,7 +168,7 @@ behavior should come with deterministic protocol tests. New harness behavior
 should state its durable commit point, restart behavior, and treatment of
 unknown external state.
 
-Before opening a pull request, run `make check`, `go test -count=1 -race ./...`,
+Before opening a pull request, run `make check`, `go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...`,
 and `git diff --check`, plus `make integration` when a change touches storage,
 execution, the model adapter, or the CLI. The CI runs the checks and the
 integration tests on pushes to `main` and on pull requests.
