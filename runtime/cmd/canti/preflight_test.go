@@ -166,11 +166,7 @@ func TestPersistentPreflightChecksActualMountsBeforeCreatingState(t *testing.T) 
 	}
 	// Only the transport socket needs a short path; state, mounts and helper
 	// fixtures still exercise the caller's original (possibly long) TMPDIR.
-	socketDir, err := os.MkdirTemp("/tmp", "canti-preflight-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	socketDir := shortSocketDir(t)
 	endpoint := filepath.Join(socketDir, "d.sock")
 	listener, err := net.Listen("unix", endpoint)
 	if err != nil {

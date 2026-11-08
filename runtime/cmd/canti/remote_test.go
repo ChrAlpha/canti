@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -253,7 +254,11 @@ func (b stopCommitBarrier) Commit(ctx context.Context, tr harness.Transition) er
 }
 
 func TestExternalStopKeepsOwnerAttached(t *testing.T) {
+	stateRoot := shortSocketDir(t)
 	f := newFixture(t, nil)
+	// Host RPC lives inside State, so only that fixture directory must be short.
+	// Register its cleanup before the fixture's journal/credential checks.
+	f.state = filepath.Join(stateRoot, "state")
 	entered := make(chan struct{})
 	var once sync.Once
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

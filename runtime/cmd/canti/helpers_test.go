@@ -319,6 +319,18 @@ func startCLIIn(t *testing.T, dir string, stdin io.Reader, stdout io.Writer, env
 	}
 }
 
+// shortSocketDir bounds only Unix transport paths. Workspace and other test
+// data still use the caller's TMPDIR, including long-path verification runs.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/tmp", "canti-socket-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	return root
+}
+
 // fixture is one workspace and state directory driven against a scripted
 // model with a fake API key. When the test ends it fails if the key appears
 // in any CLI output or any file under the state directory.
