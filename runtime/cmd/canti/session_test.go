@@ -35,11 +35,13 @@ func TestSessionDialogueAndInputRetry(t *testing.T) {
 		t.Fatalf("second run: %+v", s)
 	}
 	p := f.model.prompts(1)[1]
-	for _, want := range []string{"Explain both options", "Option two: sync.", "Use the second option", first} {
+	for _, want := range []string{"Use the second option", "No new infrastructure", "Previous run: /canti/runs/" + first + "/"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("missing %q in %s", want, p)
 		}
 	}
+	checkFile(t, filepath.Join(f.state, "history", first, "goal"), "Explain both options")
+	checkFile(t, filepath.Join(f.state, "history", first, "result"), "phase: returned\n\nOption one: async. Option two: sync.")
 	if r := f.cli(nil, "run", args...); r.code != exitOK || len(f.model.requests()) != 2 {
 		t.Fatalf("old retry after newer run: %+v", r)
 	}
@@ -114,17 +116,23 @@ func TestSessionCrashReplayAndFrozenRetry(t *testing.T) {
 
 func TestSessionGrowthRemainsBoundedAndIsolated(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: strings.Repeat("answer ", 300)}})
+	var previous string
 	for i := 0; i < 40; i++ {
-		if r := f.cli(nil, "run", "-session", "growing", "-input", fmt.Sprint(i), "-goal", fmt.Sprintf("question-%02d %s", i, strings.Repeat("x", 1000)), "-context-bytes", "98304"); r.code != exitOK {
+		if r := f.cli(nil, "run", "-session", "growing", "-input", fmt.Sprint(i), "-goal", fmt.Sprintf("question-%02d %s", i, strings.Repeat("x", 1000)), "-request-bytes", "98304"); r.code != exitOK {
 			t.Fatalf("round %d: %+v", i, r)
 		}
 		s := f.status()
+		p := f.model.prompts(1)[i]
+		if previous != "" && !strings.Contains(p, "Previous run: /canti/runs/"+previous+"/") {
+			t.Fatalf("round %d lost navigation", i)
+		}
+		previous = s.Run.ID
 		if s.Run.SessionSeq != int64(i+1) || s.Run.SessionID != "growing" {
 			t.Fatalf("round %d: %+v", i, s.Run)
 		}
 	}
 	ps := f.model.prompts(1)
-	if len(ps) != 40 || !strings.Contains(ps[39], "question-38") || strings.Contains(ps[39], "question-00") {
+	if len(ps) != 40 || !strings.Contains(ps[39], "question-39") || strings.Contains(ps[39], "question-38") || strings.Contains(ps[39], "question-00") {
 		t.Fatal("history projection did not remain bounded")
 	}
 	for i, p := range ps {
@@ -212,8 +220,8 @@ func TestSessionUnknownEffectCannotBeBypassed(t *testing.T) {
 
 func TestSessionRetryReportsTheAcceptedInput(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-context-bytes", "80000"}
-	second := []string{"-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-context-bytes", "120000"}
+	first := []string{"-session", "s", "-input", "first", "-goal", strings.Repeat("g", 8000), "-request-bytes", "80000"}
+	second := []string{"-session", "s", "-input", "second", "-goal", "g", "-constraints", strings.Repeat("c", 16000), "-request-bytes", "120000"}
 	for _, args := range [][]string{first, second} {
 		if r := f.cli(nil, "run", args...); r.code != exitOK {
 			t.Fatalf("%q: %+v", args[3], r)

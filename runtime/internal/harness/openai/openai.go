@@ -184,12 +184,13 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	resp := harness.Response{Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter}
 	reply, err := m.endpoint.Post(ctx, req.Body, provider.Header("authorization", "Bearer "+m.cfg.APIKey))
 	resp.Body = reply.Body
+	usage, _, usageErr := provider.Usage(resp.Body, false)
+	resp.Usage = usage
 	if err != nil {
 		return resp, err
 	}
-	resp.Usage, _, err = provider.Usage(resp.Body, false)
-	if err != nil {
-		return resp, err
+	if usageErr != nil {
+		return resp, usageErr
 	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
@@ -207,7 +208,7 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	case status == "incomplete" && r.IncompleteDetails != nil:
 		return resp, fmt.Errorf("openai: incomplete response: %s", r.IncompleteDetails.Reason)
 	case status == "failed" && r.Error != nil:
-		if errorFields, ok := provider.ExactObject(provider.ExactField(fields, "error")); ok && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
+		if errorFields, ok := provider.ExactObject(provider.ExactField(fields, "error")); reply.Status == 200 && ok && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
 			return resp, &harness.ContextLimitError{Status: reply.Status, Code: "context_length_exceeded", RequestID: reply.Header.Get("x-request-id")}
 		}
 		return resp, fmt.Errorf("openai: failed response: %s: %s", r.Error.Code, r.Error.Message)

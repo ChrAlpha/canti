@@ -152,7 +152,7 @@ func TestOpenReadOnlyReadsWALWithReadonlyDirectoryAndExistingSidecars(t *testing
 func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
-	if _, err := w.db.Exec(`PRAGMA user_version = 4`); err != nil {
+	if _, err := w.db.Exec(`PRAGMA user_version = 5`); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := OpenReadOnly(context.Background(), path); !errors.Is(err, ErrIncompatible) {

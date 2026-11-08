@@ -98,7 +98,14 @@ func (e *Endpoint) Post(ctx context.Context, body []byte, header http.Header) (R
 		return Reply{}, e.failure(ctx, attempt, err)
 	}
 	defer res.Body.Close()
-	r := Reply{Status: res.StatusCode, Header: res.Header}
+	r := Reply{Status: res.StatusCode, Header: res.Header.Clone()}
+	if e.cfg.Secret != "" {
+		for name, values := range r.Header {
+			for i, value := range values {
+				r.Header[name][i] = strings.ReplaceAll(value, e.cfg.Secret, "[redacted]")
+			}
+		}
+	}
 	r.Body, err = io.ReadAll(io.LimitReader(res.Body, e.cfg.MaxResponseBytes+1))
 	if e.cfg.Secret != "" {
 		r.Body = bytes.ReplaceAll(r.Body, []byte(e.cfg.Secret), []byte("[redacted]"))

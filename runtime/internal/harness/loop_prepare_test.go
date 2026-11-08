@@ -3,8 +3,6 @@ package harness_test
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -130,111 +128,58 @@ func sessionTransitions(t *testing.T, f *fixture) []harness.Transition {
 	return ts
 }
 
+func (j *tampered) Context(ctx context.Context, snap harness.Snapshot) (harness.ContextState, error) {
+	v, err := j.Store.Context(ctx, snap)
+	return tamper(j, "Context", snap.State.RunID, v, err)
+}
+func (j *tampered) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
+	v, err := j.Store.Receipts(ctx, id, before, limit)
+	return tamper(j, "Receipts", id, v, err)
+}
+
 func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
-	incompatible := fmt.Errorf("%w: frozen request missing", sqlite.ErrIncompatible)
-	for _, tc := range []struct {
-		method, run string
-		err         error
-	}{
-		{"LatestRequest", sessionRun, errTransient},
-		{"LatestRequest", sessionRun, incompatible},
-		{"SessionRuns", "", errTransient},
-		{"Latest", earlierRun, errTransient},
-		{"Totals", earlierRun, errTransient},
-		{"Recent", earlierRun, errTransient},
-		{"LatestRequest", earlierRun, errTransient},
-	} {
-		t.Run(fmt.Sprintf("%s %s/%v", tc.method, tc.run, tc.err), func(t *testing.T) {
+	for _, method := range []string{"Context", "Receipts", "Recent", "SessionRuns"} {
+		t.Run(method, func(t *testing.T) {
 			f := sessionAfterAStep(t)
-			ctx := f.bounded()
 			before := sessionTransitions(t, f)
 			prompts, sent := f.model.calls()
-			j := &tampered{Store: f.open(), method: tc.method, run: tc.run, alter: func(v any) (any, error) { return v, tc.err }}
+			j := &tampered{Store: f.open(), method: method, alter: func(v any) (any, error) { return v, errTransient }}
 			l := f.loopOn(j)
-			snap, err := l.Step(ctx, sessionRun)
-			after := sessionTransitions(t, f)
-			if !errors.Is(err, tc.err) || snap.Seq != before[len(before)-1].Seq || len(after) != len(before) {
-				t.Fatalf("Step() = %+v, %v after %d transitions, the last %s %+v; want %v and no commit",
-					snap.State, err, len(after), after[len(after)-1].Event.Kind(), after[len(after)-1].Facts, tc.err)
+			snap, err := l.Step(f.bounded(), sessionRun)
+			if !errors.Is(err, errTransient) || snap.Seq != before[len(before)-1].Seq || len(sessionTransitions(t, f)) != len(before) {
+				t.Fatalf("failed read committed: %+v %v", snap, err)
 			}
 			if p, s := f.model.calls(); !j.done || p != prompts || s != sent {
-				t.Fatalf("read reached %t; froze %d prompts and sent %d requests, want none", j.done, p-prompts, s-sent)
+				t.Fatal("failed read reached model")
 			}
-			snap, err = l.Step(ctx, sessionRun)
-			if err != nil || snap.State.Phase != core.PhaseRequestFrozen || snap.State.Step != 2 {
-				t.Fatalf("Step() after the failed read = %+v, %v; want a request frozen for step 2", snap.State, err)
+			snap, err = l.Step(f.bounded(), sessionRun)
+			if err != nil || snap.State.Phase != core.PhaseRequestFrozen {
+				t.Fatalf("recovery=%+v %v", snap, err)
 			}
-			req, err := f.store.LatestRequest(ctx, sessionRun)
-			want := []harness.ContextSessionSource{{RunID: earlierRun, SessionSeq: 1, Status: "stopped", IncludedGoal: true}}
-			if err != nil || req.Context == nil || !slices.Equal(req.Context.Session, want) {
-				t.Fatalf("frozen session context = %+v, %v; want %+v", req.Context, err, want)
-			}
-			snap, err = l.Run(ctx, sessionRun)
-			if err != nil || snap.State.Phase != core.PhaseReturned || snap.State.Decision.Payload != "done" {
-				t.Fatalf("Run() = %+v, %v; want the scripted return", snap.State, err)
+			request, err := f.store.LatestRequest(f.bounded(), sessionRun)
+			if err != nil || request.Context.SessionNavigation != earlierRun {
+				t.Fatalf("session navigation=%+v %v", request.Context, err)
 			}
 		})
 	}
 }
-
 func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
-	alter := func(method, run string, alter func(any) (any, error)) func(*sqlite.Store) harness.Journal {
-		return func(s *sqlite.Store) harness.Journal {
-			return &tampered{Store: s, method: method, run: run, alter: alter}
-		}
-	}
-	request := func(edit func(*harness.Request)) func(any) (any, error) {
-		return func(v any) (any, error) {
-			r := v.(harness.Request)
-			edit(&r)
-			return r, nil
-		}
-	}
-	for _, tc := range []struct {
-		name    string
-		journal func(*sqlite.Store) harness.Journal
-		failure string
-	}{
-		{"window request missing after progress", alter("LatestRequest", sessionRun, func(any) (any, error) { return harness.Request{}, harness.ErrNotFound }),
-			"harness: durable context window request is missing after progress"},
-		{"window configuration changed", alter("LatestRequest", sessionRun, request(func(r *harness.Request) { r.Window = nil })),
-			"harness: window configuration changed during a run"},
-		{"invalid window", alter("LatestRequest", sessionRun, request(func(r *harness.Request) { r.Window = &harness.Window{FirstStep: 3} })),
-			"harness: invalid context window at step 2"},
-		{"no session sequence", alter("Run", sessionRun, func(v any) (any, error) {
-			r := v.(harness.Run)
-			r.SessionSeq = 0
-			return r, nil
-		}), "harness: session sequence is required"},
-		{"candidate limit exceeded", alter("SessionRuns", "", func(v any) (any, error) { return slices.Repeat(v.([]harness.Run), 9), nil }),
-			"harness: session journal exceeded the candidate limit"},
-		{"invalid earlier run", alter("SessionRuns", "", func(v any) (any, error) {
-			runs := v.([]harness.Run)
-			runs[0].SessionSeq = 2
-			return runs, nil
-		}), "harness: invalid earlier session run"},
-		{"earlier run not terminal", alter("Latest", earlierRun, func(any) (any, error) {
-			return harness.Snapshot{State: core.State{RunID: earlierRun, Phase: core.PhaseIdle}}, nil
-		}), `harness: earlier session run "session-earlier" is not terminal`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, method := range []string{"Run", "SessionRuns"} {
+		t.Run(method, func(t *testing.T) {
 			f := sessionAfterAStep(t)
-			prompts, _ := f.model.calls()
-			j := tc.journal(f.open())
+			j := &tampered{Store: f.open(), method: method, alter: func(v any) (any, error) {
+				if method == "Run" {
+					r := v.(harness.Run)
+					r.SessionSeq = 0
+					return r, nil
+				}
+				runs := v.([]harness.Run)
+				runs[0].SessionID = "wrong"
+				return runs, nil
+			}}
 			snap, err := f.loopOn(j).Step(f.bounded(), sessionRun)
-			if err != nil {
-				t.Fatalf("Step() error = %v, want an unrecoverable stop", err)
-			}
-			wantState(t, snap, core.PhaseStopped, core.StopUnrecoverable)
-			ts := sessionTransitions(t, f)
-			if last := ts[len(ts)-1]; last.Event.Kind() != "stop_requested" || last.Facts != (harness.Facts{Failure: tc.failure}) || last.Seq != snap.Seq {
-				t.Fatalf("last transition = %s %+v at %d, want stop_requested with %q at %d", last.Event.Kind(), last.Facts, last.Seq, tc.failure, snap.Seq)
-			}
-			if p, _ := f.model.calls(); p != prompts {
-				t.Fatalf("froze %d prompts, want none", p-prompts)
-			}
-			if tj, ok := j.(*tampered); ok && !tj.done {
-				t.Fatal("the tampered read was not reached")
+			if err != nil || snap.State.Reason != core.StopUnrecoverable || !j.done {
+				t.Fatalf("corrupt context=%+v %v", snap, err)
 			}
 		})
 	}

@@ -1,7 +1,6 @@
 package harness
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -13,41 +12,27 @@ import (
 // ActionNamespace begins every harness action: an exec payload whose first
 // word, after leading ActionSpace, begins with it is never a command.
 // ActionSpace holds the bytes that may precede that word and the one byte
-// that may follow an action's name. RetrievePrefix, HandoverPrefix, and
-// HandoverCarryPrefix are the forms the prompt teaches. DiscoveryMarker begins a shell
+// that may follow an action's name. RetrievePrefix and FocusPrefix are the forms the prompt teaches. DiscoveryMarker begins a shell
 // command that searches the step records; discovery skips its steps and
 // those of every harness action.
 const (
-	ActionNamespace     = "canti:"
-	ActionSpace         = " \t\n\r"
-	focusName           = ActionNamespace + "focus"
-	FocusPrefix         = focusName + " "
-	retrieveName        = ActionNamespace + "retrieve"
-	handoverName        = ActionNamespace + "handover"
-	handoverCarryName   = ActionNamespace + "handover-carry"
-	RetrievePrefix      = retrieveName + " "
-	HandoverPrefix      = handoverName + " "
-	HandoverCarryPrefix = handoverCarryName + " "
-	DiscoveryMarker     = "# canti:discovery"
+	ActionNamespace = "canti:"
+	ActionSpace     = " \t\n\r"
+	retrieveName    = ActionNamespace + "retrieve"
+	focusName       = ActionNamespace + "focus"
+	RetrievePrefix  = retrieveName + " "
+	FocusPrefix     = focusName + " "
+	DiscoveryMarker = "# canti:discovery"
 )
 
-// ActionName names what an accepted exec decision asks for.
 type ActionName string
 
 const (
 	ActionCommand  ActionName = "command"
 	ActionRetrieve ActionName = "retrieve"
 	ActionFocus    ActionName = "focus"
-	ActionHandover ActionName = "handover"
-	// ActionHandoverCarry is a handover that carries committed evidence
-	// into the window it opens; its arguments are one JSON object.
-	ActionHandoverCarry ActionName = "handover_carry"
-	ActionUnknown       ActionName = "unknown"
+	ActionUnknown  ActionName = "unknown"
 )
-
-// handover reports whether n hands over: the actions a required handover
-// does not refuse.
-func (n ActionName) handover() bool { return n == ActionHandover || n == ActionHandoverCarry }
 
 // Recovery is the recovery contract that the trusted implementation of an
 // action guarantees.
@@ -75,21 +60,14 @@ func (r Recovery) Local() bool { return r == RecoveryRead || r == RecoveryLocal 
 const (
 	codeRetrievalDisabled = "retrieval_disabled"
 	codeUnknownAction     = "unknown_action"
-	codeHandoverRequired  = "handover_required"
-
-	retrievalDisabled = "retrieval is disabled for this run"
-	unknownAction     = "unknown harness action; the actions are " + retrieveName + ", " + handoverName + ", and " + handoverCarryName
-	handoverRequired  = "handover is required before any more work; use " + handoverName
+	retrievalDisabled     = "retrieval is disabled for this run"
+	unknownAction         = "unknown harness action; the actions are " + retrieveName + " and " + focusName
 )
 
-// problemText returns the text that an outcome shows for code.
 func problemText(code string) string {
-	return map[string]string{codeRetrievalDisabled: retrievalDisabled, codeUnknownAction: unknownAction, codeHandoverRequired: handoverRequired}[code]
+	return map[string]string{codeRetrievalDisabled: retrievalDisabled, codeUnknownAction: unknownAction}[code]
 }
-
-// Problem returns the text of the refusal of a, or else of why it cannot be
-// performed, or "" when neither applies: the detail of its outcome.
-func (a Action) Problem() string { return problemText(cmp.Or(a.Refused, a.Invalid)) }
+func (a Action) Problem() string { return problemText(a.Invalid) }
 
 // MaxActionBytes bounds the JSON encoding of every valid Action, whose
 // strings are codes of a closed set and whose offset is an int.
@@ -105,16 +83,15 @@ type Action struct {
 	Recovery Recovery
 	Args     int    `json:",omitempty"`
 	Invalid  string `json:",omitempty"`
-	Refused  string `json:",omitempty"`
 }
 
 // NormalizeAction reads payload, accepted under a request that requires a
-// handover when requested, by a loop that has a reader when reader is set.
+// focus, by a loop that has a reader when reader is set.
 // The loop commits its result once, with the acceptance. Afterwards only
 // CheckEffect, which compares the two at the commit, and Matches, which ties
 // a read action to its payload by rules no version changes, look at the
 // payload's word again; performance alone interprets its arguments.
-func NormalizeAction(payload string, requested, reader bool) Action {
+func NormalizeAction(payload string, reader bool) Action {
 	a := Action{Name: ActionCommand, Recovery: RecoveryExternal}
 	if word, args, reserved := actionWord(payload); reserved {
 		a.Args = args
@@ -126,17 +103,11 @@ func NormalizeAction(payload string, requested, reader bool) Action {
 			}
 		case focusName:
 			a.Name, a.Recovery = ActionFocus, RecoveryLocal
-		case handoverName:
-			a.Name, a.Recovery = ActionHandover, RecoveryLocal
-		case handoverCarryName:
-			a.Name, a.Recovery = ActionHandoverCarry, RecoveryLocal
 		default:
 			a.Name, a.Recovery, a.Invalid = ActionUnknown, RecoveryLocal, codeUnknownAction
 		}
 	}
-	if requested && !a.Name.handover() {
-		a.Recovery, a.Refused = RecoveryLocal, codeHandoverRequired
-	}
+
 	return a
 }
 
@@ -155,7 +126,7 @@ func actionWord(payload string) (word string, args int, reserved bool) {
 // Matches reports whether a, a valid action, is a reading of payload by
 // rules that no later version changes: a command exactly for a payload
 // outside ActionNamespace, the offset of the arguments after its word, and
-// the word of a retrieval or a handover. An unknown action matches any word
+// the word of a retrieval or focus. An unknown action matches any word
 // of the namespace, so that a version that learns its word does not
 // reinterpret it.
 func (a Action) Matches(payload string) error {
@@ -165,8 +136,7 @@ func (a Action) Matches(payload string) error {
 		return fmt.Errorf("harness: a %s action records a payload %s the reserved namespace", a.Name, map[bool]string{true: "in", false: "outside"}[reserved])
 	case a.Name != ActionCommand && a.Args != args:
 		return fmt.Errorf("harness: the %s action records arguments at %d, not at %d", a.Name, a.Args, args)
-	case a.Name == ActionFocus && word != focusName, a.Name == ActionRetrieve && word != retrieveName, a.Name == ActionHandover && word != handoverName,
-		a.Name == ActionHandoverCarry && word != handoverCarryName:
+	case a.Name == ActionFocus && word != focusName, a.Name == ActionRetrieve && word != retrieveName:
 		return fmt.Errorf("harness: the %s action records the word %q", a.Name, word)
 	}
 	return nil
@@ -175,25 +145,16 @@ func (a Action) Matches(payload string) error {
 // Validate checks that a recorded action is one that normalization yields
 // for some payload.
 func (a Action) Validate() error {
-	want := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionFocus: RecoveryLocal, ActionHandover: RecoveryLocal,
-		ActionHandoverCarry: RecoveryLocal, ActionUnknown: RecoveryLocal}
-	recovery, ok := want[a.Name]
-	switch {
-	case !ok:
-		return fmt.Errorf("harness: unknown action %q", a.Name)
-	case a.Refused != "" && (a.Refused != codeHandoverRequired || a.Name.handover()):
-		return fmt.Errorf("harness: %s action cannot be refused with %q", a.Name, a.Refused)
-	case a.Refused != "":
-		recovery = RecoveryLocal
+	recovery, ok := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionFocus: RecoveryLocal, ActionUnknown: RecoveryLocal}[a.Name]
+	if !ok || a.Recovery != recovery {
+		return fmt.Errorf("harness: invalid action recovery")
+	}
+	if (a.Name == ActionCommand) != (a.Args == 0) || a.Args < 0 {
+		return fmt.Errorf("harness: invalid action argument offset")
 	}
 	invalid := map[ActionName]string{ActionUnknown: codeUnknownAction}[a.Name]
-	switch {
-	case a.Recovery != recovery:
-		return fmt.Errorf("harness: %s action has recovery %q, want %q", a.Name, a.Recovery, recovery)
-	case (a.Name == ActionCommand) != (a.Args == 0) || a.Args < 0:
-		return fmt.Errorf("harness: %s action has argument offset %d", a.Name, a.Args)
-	case a.Invalid != invalid && !(a.Name == ActionRetrieve && a.Invalid == codeRetrievalDisabled):
-		return fmt.Errorf("harness: %s action is invalid for %q", a.Name, a.Invalid)
+	if a.Invalid != invalid && !(a.Name == ActionRetrieve && a.Invalid == codeRetrievalDisabled) {
+		return fmt.Errorf("harness: invalid action problem code")
 	}
 	return nil
 }

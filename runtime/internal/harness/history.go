@@ -355,3 +355,44 @@ func syncDir(dir string) error {
 	}
 	return errors.Join(d.Sync(), d.Close())
 }
+
+// repairSnapshot restores one requested historical observation from its
+// authoritative journal record. Arbitrary shell opens do not invoke repair.
+func (l *Loop) repairSnapshot(ctx context.Context, q archive.RetrievalQuery) error {
+	target, ok := archive.ParseSnapshotPath(q.Path)
+	if !ok {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	record, err := l.journal.CompletionAtStep(ctx, target.RunID, target.Step)
+	if err != nil {
+		return err
+	}
+	retrieval := record.retrieval()
+	if retrieval == nil {
+		return errors.New("harness: snapshot target is not a retrieval")
+	}
+	if target.Source != nil && *target.Source >= len(retrieval.Sources) {
+		return errors.New("harness: snapshot source does not exist")
+	}
+	dir := filepath.Join(l.cfg.History, target.RunID)
+	if _, err := exists(dir, true); err != nil {
+		return err
+	}
+	steps := filepath.Join(dir, archive.StepsDir)
+	if _, err := exists(steps, true); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(steps, 0o755); err != nil {
+		return err
+	}
+	if err := putStep(dir, steps, record); err != nil {
+		return err
+	}
+	return ctx.Err()
+}

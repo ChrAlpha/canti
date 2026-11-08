@@ -5,12 +5,12 @@ package harness_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,21 +48,12 @@ func TestLoopLongStability(t *testing.T) {
 	defer cancel()
 	steps := 80
 	if raw := os.Getenv("CANTI_STABILITY_STEPS"); raw != "" {
-		var err error
-		steps, err = strconv.Atoi(raw)
-		if err != nil || steps < 1 || steps > 10000 {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 10000 {
 			t.Fatal("CANTI_STABILITY_STEPS must be 1..10000")
 		}
+		steps = n
 	}
-	windowSteps := 3
-	if raw := os.Getenv("CANTI_STABILITY_WINDOW_STEPS"); raw != "" {
-		var err error
-		windowSteps, err = strconv.Atoi(raw)
-		if err != nil || windowSteps != 0 && windowSteps != 3 {
-			t.Fatal("CANTI_STABILITY_WINDOW_STEPS must be 0 or 3")
-		}
-	}
-	reader, sources, manifestSHA := stabilityCorpus(ctx, t)
 	maxSteps := steps
 	if raw := os.Getenv("CANTI_STABILITY_UNLIMITED_STEPS"); raw != "" {
 		unlimited, err := strconv.ParseBool(raw)
@@ -73,28 +64,24 @@ func TestLoopLongStability(t *testing.T) {
 			maxSteps = 0
 		}
 	}
+	reader, sources, manifest := stabilityCorpus(ctx, t)
 	f := newFixture(t, core.Limits{MaxSteps: maxSteps, MaxAttempts: 5}, harness.Budget{})
 	f.cfg.Reader = &reader
-	f.cfg.WindowSteps = windowSteps
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	f.cfg.Limits.Total = 128 << 10
-	defer func() { _ = f.store.Close() }()
+	defer func() { f.store.Close() }()
 	ackKinds := func() map[string]bool {
-		return map[string]bool{
-			"request_frozen": true, "attempt_started": true, "response_incomplete": true,
-			"response_saved": true, "response_loaded": true, "performed": true, "observed": true,
-		}
+		return map[string]bool{"request_frozen": true, "attempt_started": true, "response_incomplete": true, "request_rejected": true, "response_saved": true, "response_loaded": true, "performed": true, "observed": true}
 	}
 	ack := &lostStabilityAck{Journal: f.store, remaining: ackKinds(), covered: map[string]int{}}
-	attempts := map[int]int{}
-	firstSent := map[string][]byte{}
-	sourceByStep := map[int]string{}
-	nextSource := 0
-	var retries, reopens, handovers, maxPrompt, sent int
-	lateArmed := false
+	calls := map[int]int{}
+	seenRequests := map[[2]int][32]byte{}
+	retries, reopens, resets, repairs, sends, maxPrompt := 0, 0, 0, 0, 0, 0
+	late := false
 	type resource struct {
-		heap       uint64
-		goroutines int
+		heap        uint64
+		goroutines  int
+		descriptors int
 	}
 	resources := map[int]resource{}
 	start := time.Now()
@@ -104,54 +91,44 @@ func TestLoopLongStability(t *testing.T) {
 			t.Fatal(err)
 		}
 		if before.State.Intent() == core.IntentHalt {
-			if before.State.Phase != core.PhaseReturned || before.State.Step != steps {
-				t.Fatalf("silent or early stop at step %d: %+v", before.State.Step, before.State)
-			}
 			break
 		}
-		var req harness.Request
+		step := before.State.Step
+		if !late && steps >= 80 && step >= steps/2 {
+			ack.remaining = ackKinds()
+			late = true
+		}
+		var request harness.Request
 		sending := before.State.Intent() == core.IntentSendRequest
 		if sending {
-			req, err = f.store.Request(ctx, runID, before.State.Step, before.State.RequestRev)
-			if err != nil || req.Window == nil {
-				t.Fatalf("missing frozen request at step %d: %v", before.State.Step, err)
-			}
-			step := before.State.Step
-			if !lateArmed && steps >= 80 && step >= steps/2 && req.Window.Requested {
-				for kind := range ackKinds() {
-					if ack.covered[kind] != 1 {
-						t.Fatalf("initial lost acknowledgement missing: %s", kind)
-					}
-				}
-				ack.remaining = ackKinds()
-				lateArmed = true
+			request, err = f.store.Request(ctx, runID, step, before.State.RequestRev)
+			if err != nil || request.ContextState == nil {
+				t.Fatalf("frozen request missing: %v", err)
 			}
 			answer := execReply(fmt.Sprintf("echo STABILITY_STEP_%05d", step))
 			if step == steps {
 				answer = returnReply("stability complete")
-			} else if req.Window.Requested {
-				answer = execReply(fmt.Sprintf("%sContinue at step %d; verify original evidence references.", harness.HandoverPrefix, step))
 			} else if step%5 != 0 {
-				source := sourceByStep[step]
-				if source == "" {
-					source = sources[nextSource%len(sources)]
-					sourceByStep[step] = source
-					nextSource++
-				}
+				source := sources[(step-step/5-1)%len(sources)]
 				query, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/" + source, Reason: "verify original source", Limit: 8192})
-				answer = execReply("canti:retrieve " + string(query))
+				answer = execReply(harness.RetrievePrefix + string(query))
 			}
-			if attempts[step] == 0 && step%11 == 0 {
-				answer = reply{body: "partial", usage: usage, err: errors.New("incomplete scripted response")}
-			} else if before.State.RequestRev == 1 && step%17 == 0 && attempts[step] <= 1 {
+			switch {
+			case calls[step] == 0 && step > 1 && step%7 == 0:
+				answer = reply{body: `{}`, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}
+			case calls[step] == 0 && step%11 == 0:
+				answer = reply{body: "partial", usage: usage, err: errors.New("scripted transport failure")}
+			case before.State.RequestRev == 1 && step%17 == 0 && calls[step] <= 1:
 				answer = reply{body: "invalid decision", usage: usage}
 			}
 			f.model.mu.Lock()
 			f.model.replies = []reply{answer}
 			f.model.mu.Unlock()
 		}
-		loop := f.loopOn(ack)
-		after, stepErr := loop.Step(ctx, runID)
+		after, stepErr := f.loopOn(ack).Step(ctx, runID)
+		if stepErr != nil && !errors.Is(stepErr, errLostStabilityAck) {
+			t.Fatalf("step=%d turn=%d: %v", step, turn, stepErr)
+		}
 		if errors.Is(stepErr, errLostStabilityAck) {
 			after, err = f.store.Latest(ctx, runID)
 			if err != nil {
@@ -159,46 +136,50 @@ func TestLoopLongStability(t *testing.T) {
 			}
 		}
 		f.model.mu.Lock()
-		for _, p := range f.model.prompts {
-			maxPrompt = max(maxPrompt, len(p.System)+len(p.User()))
-		}
-		for _, body := range f.model.sent {
-			if !sending || !bytes.Equal(body, req.Body) {
-				t.Fatal("model received bytes other than the frozen request")
+		if len(f.model.sent) > 0 {
+			if !sending || len(f.model.sent) != 1 || !bytes.Equal(f.model.sent[0], request.Body) {
+				t.Fatal("model send differs from committed bytes")
 			}
-			key := fmt.Sprintf("%d/%d", before.State.Step, before.State.RequestRev)
-			if prior, ok := firstSent[key]; ok && !bytes.Equal(prior, body) {
-				t.Fatal("retry changed frozen request bytes")
+			key := [2]int{step, before.State.RequestRev}
+			sum := sha256.Sum256(request.Body)
+			if prior, ok := seenRequests[key]; ok {
+				if prior != sum {
+					t.Fatal("same revision changed across retry")
+				}
+				retries++
+			} else {
+				seenRequests[key] = sum
 			}
-			firstSent[key] = body
-			sent++
-			attempts[before.State.Step]++
+			calls[step]++
+			sends++
 		}
-		f.model.prompts, f.model.sent = nil, nil
+		for _, prompt := range f.model.prompts {
+			n := len(prompt.System) + len(prompt.User())
+			if n > f.cfg.Limits.Total {
+				t.Fatal("request resource cap exceeded")
+			}
+			maxPrompt = max(maxPrompt, n)
+		}
+		f.model.prompts = nil
+		f.model.sent = nil
 		f.model.mu.Unlock()
-		f.exec.mu.Lock()
-		f.exec.calls = nil
-		if after.State.Step != before.State.Step {
-			delete(f.exec.jobs, before.State.EffectID)
-			delete(f.exec.fenced, before.State.EffectID)
-		}
-		f.exec.mu.Unlock()
-		if after.State.Step != before.State.Step {
-			delete(attempts, before.State.Step)
-			delete(sourceByStep, before.State.Step)
-			for rev := 1; rev <= before.State.RequestRev; rev++ {
-				delete(firstSent, fmt.Sprintf("%d/%d", before.State.Step, rev))
+		if after.State.Step != before.State.Step || after.State.Intent() == core.IntentHalt {
+			completed := after.State.Step - 1
+			if after.State.Intent() == core.IntentHalt {
+				completed = steps
+			}
+			if completed == 50 || completed == 500 || after.State.Intent() == core.IntentHalt {
+				runtime.GC()
+				var mem runtime.MemStats
+				runtime.ReadMemStats(&mem)
+				descriptors, err := os.ReadDir("/proc/self/fd")
+				if err != nil {
+					t.Fatal(err)
+				}
+				resources[completed] = resource{mem.HeapAlloc, runtime.NumGoroutine(), len(descriptors)}
 			}
 		}
-		if stepErr != nil {
-			if !errors.Is(stepErr, errLostStabilityAck) {
-				t.Fatalf("step %d: %v", before.State.Step, stepErr)
-			}
-		}
-		if after.State.Phase == core.PhaseStopped || after.State.Phase == core.PhaseNeedsResolution {
-			t.Fatalf("unexpected terminal phase at step %d: %+v", after.State.Step, after.State)
-		}
-		if stepErr != nil || after.State.Step != before.State.Step && after.State.Step%13 == 0 {
+		if turn%13 == 0 {
 			if err := f.store.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -209,145 +190,106 @@ func TestLoopLongStability(t *testing.T) {
 			ack.Journal = f.store
 			reopens++
 		}
-		completed := after.State.Step - 1
-		if after.State.Intent() == core.IntentHalt {
-			completed = steps
-		}
-		if completed == 50 || completed == 500 || completed == steps {
-			if _, sampled := resources[completed]; !sampled {
-				runtime.GC()
-				var stats runtime.MemStats
-				runtime.ReadMemStats(&stats)
-				resources[completed] = resource{stats.HeapAlloc, runtime.NumGoroutine()}
-			}
-		}
-		if after.State.Intent() == core.IntentHalt {
-			break
-		}
-		if turn == steps*100-1 {
-			t.Fatal("stability loop exceeded finite transition budget")
-		}
+	}
+	final, err := f.store.Latest(ctx, runID)
+	if err != nil || final.State.Phase != core.PhaseReturned || final.State.Step != steps {
+		t.Fatalf("stability did not complete: %+v %v", final, err)
 	}
 	var want harness.Totals
-	requests, repairs, retrievals, retrievedBytes := 0, 0, 0, 0
+	var previous *harness.Transition
 	unique := map[string]bool{}
-	sequence := int64(0)
-	windowFirst := 1
-	var pendingHandover *harness.Handover
-	var pendingStep int
-	evidenceCounts := map[string]int{}
-	for {
-		page, err := f.store.Transitions(ctx, runID, sequence, 256)
+	retrievals, retrievedBytes := 0, 0
+	current := harness.InitialContext()
+	for after := int64(0); ; {
+		page, err := f.store.Transitions(ctx, runID, after, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page) == 0 {
-			break
-		}
 		for _, tr := range page {
-			if tr.Seq != sequence+1 {
-				t.Fatalf("sequence gap after %d: %d", sequence, tr.Seq)
+			if previous != nil && (previous.Seq+1 != tr.Seq || previous.To != tr.From) {
+				t.Fatal("journal chain broken across restart")
 			}
-			sequence = tr.Seq
-			switch tr.Event.Kind() {
-			case "request_frozen":
-				requests++
-				if tr.To.RequestRev > 1 {
-					repairs++
-					previous, err := f.store.Request(ctx, runID, tr.To.Step, tr.To.RequestRev-1)
-					if err != nil || previous.Window == nil || tr.Facts.Request == nil || tr.Facts.Request.Window == nil || !previous.Window.Equal(*tr.Facts.Request.Window) || !strings.Contains(string(tr.Facts.Request.Body), "Rejected response") {
-						t.Fatal("protocol repair did not preserve the frozen context window")
+			next, err := tr.From.Next(tr.Event)
+			if err != nil || next != tr.To {
+				t.Fatalf("non-core transition: %+v %v", tr, err)
+			}
+			if tr.Facts.Request != nil {
+				if tr.Facts.Request.ContextState == nil || !tr.Facts.Request.ContextState.Equal(current) {
+					t.Fatal("frozen context differs from committed selection")
+				}
+				if len(tr.Facts.Request.Body) > f.cfg.Limits.Total {
+					t.Fatal("serialized request exceeds cap")
+				}
+			}
+			if tr.Event.Kind() == "request_rejected" {
+				resets++
+				if tr.Facts.ContextState == nil || tr.Facts.ContextState.AnchorSeq != tr.Seq || tr.Facts.ContextState.FirstStep != tr.From.Step {
+					t.Fatal("reset changed step or lost anchor")
+				}
+			}
+			if tr.Event.Kind() == "response_loaded" && tr.To.Phase == core.PhaseIdle {
+				repairs++
+			}
+			if tr.Facts.ContextState != nil {
+				current = *tr.Facts.ContextState
+			}
+			settled := tr.Event.Kind() == "response_saved" || tr.Event.Kind() == "response_incomplete" || tr.Event.Kind() == "request_rejected" || tr.Event.Kind() == "stop_requested" && tr.From.Phase == core.PhaseRequestSent
+			lost := tr.Event.Kind() == "attempt_started" && tr.From.Phase == core.PhaseRequestSent
+			if settled || lost {
+				want.Coverage.Attempts++
+				if response := tr.Facts.Response; response != nil {
+					want.Usage.InputTokens += response.Usage.InputTokens
+					want.Usage.OutputTokens += response.Usage.OutputTokens
+					if response.Usage.InputReported {
+						want.Coverage.InputReports++
 					}
-				}
-				if tr.Facts.Request == nil || tr.Facts.Request.Window == nil || len(tr.Facts.Request.Body) > f.cfg.Limits.Total {
-					t.Fatal("request missing window or exceeds total byte limit")
-				}
-				w := tr.Facts.Request.Window
-				if tr.To.RequestRev == 1 {
-					if pendingHandover != nil {
-						if w.FirstStep != pendingStep+1 || w.SourceStep != pendingStep || w.Handover != pendingHandover.Text {
-							t.Fatal("accepted handover did not advance to its exact next window")
-						}
-						windowFirst = w.FirstStep
-						pendingHandover = nil
-						clear(evidenceCounts)
-					} else if w.FirstStep != windowFirst {
-						t.Fatal("context window advanced without an accepted handover or moved backward")
+					if response.Usage.OutputReported {
+						want.Coverage.OutputReports++
 					}
+				} else {
+					want.Coverage.Lost++
 				}
-				for evidence, count := range evidenceCounts {
-					if strings.Count(string(tr.Facts.Request.Body), evidence) != count {
-						t.Fatal("retrieved original evidence missing or duplicated in frozen request")
-					}
-				}
-				if w.FirstStep > 1 && (w.SourceStep != w.FirstStep-1 || w.Handover == "") {
-					t.Fatal("handover provenance is discontinuous")
-				}
-				if w.FirstStep > 1 && strings.Contains(string(tr.Facts.Request.Body), "### Step 1\n") {
-					t.Fatal("old history flowed into a new window")
-				}
-				if w.FirstStep > 1 && strings.Contains(string(tr.Facts.Request.Body), fmt.Sprintf("### Step %d\n", w.FirstStep-1)) {
-					t.Fatal("previous window flowed into a new window")
-				}
-			case "response_incomplete":
-				retries++
-				fallthrough
-			case "response_saved":
-				if tr.Facts.Response != nil {
-					want.Usage.InputTokens += tr.Facts.Response.Usage.InputTokens
-					want.Usage.OutputTokens += tr.Facts.Response.Usage.OutputTokens
-				}
-			case "observed":
+			}
+			if tr.Event.Kind() == "observed" || tr.Event.Kind() == "performed" {
 				want.Steps++
-				if o := tr.Facts.Observation; o != nil {
-					want.OutputBytes += o.Output.Bytes
-					if strings.HasPrefix(tr.From.Decision.Payload, "canti:") || o.Retrieval != nil || o.Handover != nil {
-						t.Fatal("a harness action was observed as a command")
-					}
+			}
+			if observation := tr.Facts.Observation; observation != nil {
+				want.OutputBytes += observation.Output.Bytes
+			}
+			switch tr.Event.Kind() {
+			case "observed":
+				if tr.Facts.Observation == nil || tr.Facts.Observation.Retrieval != nil || strings.HasPrefix(tr.From.Decision.Payload, "canti:") {
+					t.Fatal("local action was observed as an external command")
 				}
 			case "performed":
-				want.Steps++
-				o := tr.Facts.Outcome
-				payload := tr.From.Decision.Payload
-				if o == nil || o.Status != harness.OutcomeDone || tr.Facts.Observation != nil {
-					t.Fatalf("builtin action did not complete: %+v", tr.Facts)
-				}
-				if strings.HasPrefix(payload, "canti:retrieve ") != (o.Retrieval != nil) || strings.HasPrefix(payload, "canti:handover ") != (o.Handover != nil) {
-					t.Fatal("builtin decision and performed outcome disagree")
-				}
-				if o.Retrieval != nil {
-					if o.Retrieval.Error != "" || len(o.Retrieval.Sources) == 0 {
-						t.Fatal("scheduled retrieval did not deliver source evidence")
-					}
-					retrievals++
-					if !strings.Contains(payload, o.Retrieval.Query.Path) {
-						t.Fatal("retrieval performed a different source path")
-					}
-					if len(o.Retrieval.Evidence) != len(o.Retrieval.Sources) {
-						t.Fatal("retrieval did not commit the evidence of every source")
-					}
-					for i, source := range o.Retrieval.Sources {
-						text := o.Retrieval.Evidence[i]
-						evidence := fmt.Sprintf("Path %s:\nSource 0: bytes [%d,%d), sha256 %s:\n%s\n", source.Path, source.Offset, source.Offset+int64(source.Length), source.SHA256, text)
-						evidenceCounts[evidence]++
-						unique[source.Path] = true
-						retrievedBytes += source.Length
-					}
-				}
-				if o.Handover != nil {
-					handovers++
-					pendingHandover = o.Handover
-					pendingStep = tr.From.Step
-					if w := tr.Facts.Window; w == nil || !w.Equal(harness.Window{FirstStep: pendingStep + 1, SourceStep: pendingStep, Handover: o.Handover.Text}) {
-						t.Fatalf("the handover committed the window %+v", w)
-					}
+				outcome := tr.Facts.Outcome
+				if outcome == nil || outcome.Status != harness.OutcomeDone || outcome.Retrieval == nil || tr.Facts.Observation != nil || outcome.Retrieval.Error != "" || len(outcome.Retrieval.Sources) == 0 || !strings.Contains(tr.From.Decision.Payload, outcome.Retrieval.Query.Path) {
+					t.Fatal("scheduled local retrieval did not commit its accepted original observation")
 				}
 			}
+			if outcome := tr.Facts.Outcome; outcome != nil && outcome.Retrieval != nil {
+				retrievals++
+				for i, source := range outcome.Retrieval.Sources {
+					ref := harness.EvidenceRef{SourceSeq: tr.Seq, Step: tr.From.Step, Source: i, Length: source.Length, SHA256: source.SHA256}
+					record, err := f.store.Completion(ctx, runID, tr.Seq)
+					if err != nil || harness.ValidateEvidence(record, ref) != nil {
+						t.Fatal("committed evidence differs from source hash")
+					}
+					unique[source.Path] = true
+					retrievedBytes += source.Length
+				}
+			}
+			copy := tr
+			previous = &copy
+			after = tr.Seq
+		}
+		if len(page) < 64 {
+			break
 		}
 	}
 	got, err := f.store.Totals(ctx, runID)
-	if err != nil || got != want {
-		t.Fatalf("durable totals %+v, want %+v: %v", got, want, err)
+	if err != nil || got != want || got.Steps != steps-1 {
+		t.Fatalf("durable totals=%+v want=%+v error=%v", got, want, err)
 	}
 	if err := f.store.Close(); err != nil {
 		t.Fatal(err)
@@ -357,74 +299,44 @@ func TestLoopLongStability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if durable, err := f.store.Totals(ctx, runID); err != nil || durable != got {
-		t.Fatalf("totals changed after reopen: %+v, %v", durable, err)
+		t.Fatalf("totals changed after final reopen: %+v %v", durable, err)
 	}
-	final, err := f.store.Latest(ctx, runID)
-	if err != nil || final.State.Phase != core.PhaseReturned || final.State.Step != steps || want.Steps != steps-1 {
-		t.Fatalf("final state %+v, totals %+v: %v", final.State, want, err)
+	final, err = f.store.Latest(ctx, runID)
+	if err != nil || final.State.Phase != core.PhaseReturned || final.State.Step != steps {
+		t.Fatalf("final state lost after reopen: %+v %v", final, err)
+	}
+	for _, job := range f.exec.jobs {
+		if job.runs != 1 {
+			t.Fatalf("accepted external effect replayed: %+v", job)
+		}
 	}
 	if steps >= 80 {
-		if !lateArmed && (windowSteps == 3 || steps >= 2000) {
-			t.Fatal("late lost acknowledgements were not armed after a handover request")
-		}
 		for kind := range ackKinds() {
-			wantCount := 1
-			if lateArmed {
-				wantCount = 2
-			}
-			if ack.covered[kind] != wantCount {
-				t.Fatalf("lost acknowledgement %s covered %d times, want %d", kind, ack.covered[kind], wantCount)
+			if ack.covered[kind] != 2 {
+				t.Fatalf("lost acknowledgement %s covered %d times", kind, ack.covered[kind])
 			}
 		}
 	}
 	if steps >= 50 {
 		base, end := resources[50], resources[steps]
-		if base.heap == 0 || end.heap == 0 || end.heap > base.heap+(32<<20) || end.goroutines > base.goroutines+8 {
-			t.Fatalf("retained resources grew beyond budget: step50=%+v final=%+v", base, end)
-		}
-		if steps >= 500 {
-			mid := resources[500]
-			if mid.heap == 0 || mid.heap > base.heap+(32<<20) || mid.goroutines > base.goroutines+8 {
-				t.Fatalf("retained resources grew beyond budget: step50=%+v step500=%+v", base, mid)
-			}
+		if base.heap == 0 || end.heap == 0 || end.heap > base.heap+(32<<20) || end.goroutines > base.goroutines+8 || end.descriptors > base.descriptors+8 {
+			t.Fatalf("resource growth beyond bounds: first=%+v final=%+v", base, end)
 		}
 	}
-	if (windowSteps == 3 && steps >= 8 || steps >= 2000) && handovers == 0 || steps >= 11 && retries == 0 || steps >= 17 && repairs == 0 || steps >= 2 && retrievals == 0 || steps >= 13 && reopens == 0 || sent == 0 || requests == 0 {
-		t.Fatalf("missing stability behavior: sends=%d requests=%d retries=%d repairs=%d retrievals=%d handovers=%d reopens=%d", sent, requests, retries, repairs, retrievals, handovers, reopens)
+	if steps >= 500 {
+		base, mid := resources[50], resources[500]
+		if mid.heap == 0 || mid.heap > base.heap+(32<<20) || mid.goroutines > base.goroutines+8 || mid.descriptors > base.descriptors+8 {
+			t.Fatalf("resource growth at intermediate checkpoint: step50=%+v step500=%+v", base, mid)
+		}
+	}
+	if steps >= 80 && (resets < 2 || retries == 0 || repairs == 0 || len(unique) == 0 || reopens == 0) {
+		t.Fatalf("missing stability boundary: reset=%d retry=%d repair=%d sources=%d reopen=%d", resets, retries, repairs, len(unique), reopens)
 	}
 	if steps >= 8*len(sources) && len(unique) != len(sources) {
-		t.Fatalf("retrieved %d of %d frozen sources", len(unique), len(sources))
+		t.Fatalf("read %d of %d corpus sources", len(unique), len(sources))
 	}
-	ackTypes := make([]string, 0, len(ack.covered))
-	for kind := range ack.covered {
-		ackTypes = append(ackTypes, kind)
-	}
-	slices.Sort(ackTypes)
-	summary, _ := json.Marshal(struct {
-		Schedule       string         `json:"schedule"`
-		ManifestSHA256 string         `json:"manifest_sha256"`
-		TimeBudgetMS   int64          `json:"time_budget_ms"`
-		WindowSteps    int            `json:"window_steps"`
-		Steps          int            `json:"steps"`
-		Requests       int            `json:"requests"`
-		Retries        int            `json:"retries"`
-		Retrievals     int            `json:"retrievals"`
-		UniqueFiles    int            `json:"unique_files"`
-		RetrievedBytes int            `json:"retrieved_bytes"`
-		Handovers      int            `json:"handovers"`
-		Reopens        int            `json:"reopens"`
-		MaxPromptBytes int            `json:"max_prompt_bytes"`
-		ElapsedMS      int64          `json:"elapsed_ms"`
-		Repairs        int            `json:"repairs"`
-		AckTypes       []string       `json:"ack_types"`
-		AckCounts      map[string]int `json:"ack_counts"`
-		HeapStep50     uint64         `json:"heap_step_50"`
-		HeapStep500    uint64         `json:"heap_step_500"`
-		HeapFinal      uint64         `json:"heap_final"`
-		Goroutines50   int            `json:"goroutines_step_50"`
-		Goroutines500  int            `json:"goroutines_step_500"`
-		GoroutinesEnd  int            `json:"goroutines_final"`
-		DurableTotals  harness.Totals `json:"durable_totals"`
-	}{"loop-stability/1", manifestSHA, (15 * time.Minute).Milliseconds(), windowSteps, steps, requests, retries, retrievals, len(unique), retrievedBytes, handovers, reopens, maxPrompt, time.Since(start).Milliseconds(), repairs, ackTypes, ack.covered, resources[50].heap, resources[500].heap, resources[steps].heap, resources[50].goroutines, resources[500].goroutines, resources[steps].goroutines, got})
+	summary, _ := json.Marshal(map[string]any{
+		"schedule": "loop-stability/2", "manifest_sha256": manifest, "time_budget_ms": (15 * time.Minute).Milliseconds(), "steps": steps, "requests": len(seenRequests), "sends": sends, "retries": retries, "retrievals": retrievals, "unique_files": len(unique), "retrieved_bytes": retrievedBytes, "context_resets": resets, "reopens": reopens, "max_prompt_bytes": maxPrompt, "elapsed_ms": time.Since(start).Milliseconds(), "repairs": repairs, "ack_counts": ack.covered, "heap_step_50": resources[50].heap, "heap_step_500": resources[500].heap, "heap_final": resources[steps].heap, "goroutines_step_50": resources[50].goroutines, "goroutines_step_500": resources[500].goroutines, "goroutines_final": resources[steps].goroutines, "descriptors_step_50": resources[50].descriptors, "descriptors_final": resources[steps].descriptors, "durable_totals": got,
+	})
 	t.Logf("CANTI_STABILITY %s", summary)
 }

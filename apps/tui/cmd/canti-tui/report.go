@@ -13,6 +13,10 @@ func (a *app) report(s hostrpc.Run, err error) (int, error) {
 	if a.display != nil {
 		out = finalStderr{a.display}
 	}
+	if err == nil && s.Totals.Coverage.Attempts > 0 {
+		c := s.Totals.Coverage
+		fmt.Fprintf(out, "canti: reported usage input %d output %d; coverage input %d/%d output %d/%d; lost %d\n", s.Totals.InputTokens, s.Totals.OutputTokens, c.InputReports, c.Attempts, c.OutputReports, c.Attempts, c.Lost)
+	}
 	switch {
 	case err != nil:
 		return exitError, err

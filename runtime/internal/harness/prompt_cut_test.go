@@ -70,7 +70,6 @@ func TestCutMatchesRunePrefix(t *testing.T) {
 
 func TestContextValidationRejectsNegativeTextLimits(t *testing.T) {
 	f := testFrame()
-	f.HandoverBytes = 2048
 	for _, field := range []string{"command", "preview"} {
 		t.Run(field, func(t *testing.T) {
 			limits := DefaultPromptLimits()
@@ -79,7 +78,7 @@ func TestContextValidationRejectsNegativeTextLimits(t *testing.T) {
 			} else {
 				limits.Preview = -1024
 			}
-			if err := f.ValidateContext(limits); err == nil {
+			if _, err := f.Prompt(limits); err == nil {
 				t.Fatal("negative text limit accepted")
 			}
 		})

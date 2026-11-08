@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"testing"
 	"time"
 
@@ -23,7 +22,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 		t.Fatalf("prior: %+v", r)
 	}
 	priorID := f.status().Run.ID
-	if r := f.cli(nil, "run", "-once", "-session", "diagnostic", "-input", "second", "-goal", "verify evidence and create done.txt", "-image", image, "-window-steps", "2", "-max-steps", "8", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
+	if r := f.cli(nil, "run", "-once", "-session", "diagnostic", "-input", "second", "-goal", "verify evidence and create done.txt", "-image", image, "-max-steps", "8", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
 		t.Fatalf("freeze: %+v", r)
 	}
 	runID := f.status().Run.ID
@@ -39,8 +38,9 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	query, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/runs/" + runID + "/steps/00000001/preview", Reason: "verify original evidence"})
 	answer(2, 2, core.Exec, "canti:retrieve "+string(query))
 	f.model.answer(3, 1, reply{text: "invalid decision"})
-	answer(3, 2, core.Exec, harness.HandoverPrefix+"Verify proof.txt contains evidence and create done.txt; original evidence is step 1.")
-	answer(4, 1, core.Exec, "test \"$(cat proof.txt)\" = evidence && printf verified > done.txt")
+	answer(3, 2, core.Exec, harness.FocusPrefix+`{"sources":[{"seq":12,"source":0}]}`)
+	f.model.answer(4, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+	answer(4, 2, core.Exec, "test \"$(cat proof.txt)\" = evidence && printf verified > done.txt")
 	answer(5, 1, core.Return, "Verified evidence and created done.txt.")
 	deadline := time.Now().Add(100 * time.Second)
 	completed := false
@@ -77,8 +77,8 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 			t.Fatalf("identity: %+v", report)
 		}
 		capture := report.Request.Capture
-		if len(capture.Session) != 1 || capture.Session[0].RunID != priorID {
-			t.Fatalf("session provenance: %+v", capture.Session)
+		if capture.SessionNavigation != priorID {
+			t.Fatalf("session provenance: %+v", capture.SessionNavigation)
 		}
 		raw := f.cli(nil, "context", append(args, "-raw")...)
 		if raw.code != exitOK || raw.stdout != string(tr.Facts.Request.Body) {
@@ -100,15 +100,15 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 		}
 		reports = append(reports, report)
 	}
-	if len(reports) != 6 {
+	if len(reports) != 7 {
 		t.Fatalf("frozen revisions: %d", len(reports))
 	}
 	requested := reports[2].Request.Capture
-	if !slices.Contains(requested.Handover.Reasons, "window_steps") || len(requested.Sources) != 0 || requested.Retrievals[0].Step != 2 || requested.Retrievals[0].Operation != "read" {
-		t.Fatalf("handover/evidence: %+v", requested)
+	if len(requested.Sources) != 1 || len(requested.Retrievals) != 1 || requested.Retrievals[0].Step != 2 {
+		t.Fatalf("retrieval provenance=%+v", requested)
 	}
-	if reports[3].Request.Capture.Handover.Status != "request_revision" || reports[4].Request.Window.FirstStep != 4 || reports[4].Delta.WindowChanged == nil || !*reports[4].Delta.WindowChanged || len(reports[4].Request.Capture.Sources) != 0 {
-		t.Fatal("repair or next window was misrepresented")
+	if reports[3].Request.Capture.Preparation != "protocol_repair" || len(reports[4].Request.Capture.Focus) != 1 || reports[5].Request.Anchor.FirstStep != 4 || reports[5].Delta.AnchorChanged == nil || !*reports[5].Delta.AnchorChanged || len(reports[5].Request.Capture.Sources) != 0 {
+		t.Fatal("focus/repair/reset misrepresented")
 	}
 	if after := f.history(); !reflect.DeepEqual(before, after) || len(f.model.requests()) != calls {
 		t.Fatal("inspection changed execution")
@@ -124,5 +124,5 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	if _, err := os.Stat(filepath.Join(f.state, "history")); !os.IsNotExist(err) {
 		t.Fatal("inspection republished history")
 	}
-	t.Logf("SCRIPTED_CONTEXT requests=6 windows=2 transport_retries=1 protocol_repairs=1 business_result=verified; real CLI/SQLite/Docker, process-per-transition resume")
+	t.Logf("SCRIPTED_CONTEXT requests=7 contexts=2 injected_provider_rejections=1 transport_retries=1 protocol_repairs=1 business_result=verified; real CLI/SQLite/Docker, process-per-transition resume")
 }

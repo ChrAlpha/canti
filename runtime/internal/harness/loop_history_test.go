@@ -56,12 +56,8 @@ func fill(head, unit string, size int) string {
 }
 
 func historyRequest(step int) *harness.Request {
-	w := &harness.Window{FirstStep: (step-1)/seedPageSteps*seedPageSteps + 1}
-	if w.FirstStep > 1 {
-		w.SourceStep = w.FirstStep - 1
-		w.Handover = "Continue the seeded history measurement."
-	}
-	return &harness.Request{Window: w, Body: fmt.Appendf(nil, `{"seeded_step":%d}`, step), Model: "seed", Protocol: "seed/v1", Adapter: "seed"}
+	initial := harness.InitialContext()
+	return &harness.Request{ContextState: &initial, Body: fmt.Appendf(nil, `{"seeded_step":%d}`, step), Model: "seed", Protocol: "seed/v1", Adapter: "seed"}
 }
 
 func historyResponse(step int) *harness.Response {
@@ -89,11 +85,26 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 		var facts harness.Facts
 		switch s.Phase {
 		case core.PhaseIdle:
-			event, facts = core.RequestFrozen{}, harness.Facts{Request: historyRequest(s.Step)}
+			current, err := f.store.Context(ctx, snap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := historyRequest(s.Step)
+			request.ContextState = &current
+			event, facts = core.RequestFrozen{}, harness.Facts{Request: request}
 		case core.PhaseRequestFrozen:
 			event = core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}
 		case core.PhaseRequestSent:
-			event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
+			if s.Step > 1 && (s.Step-1)%seedPageSteps == 0 && s.Attempt == 1 {
+				current, err := f.store.Context(ctx, snap)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: s.Step}
+				event, facts = core.RequestRejected{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+			} else {
+				event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
+			}
 		case core.PhaseResponseSaved:
 			event = core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: historyResponse(s.Step).Body}
 			facts = harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution(stringPayload(historyResponse(s.Step).Body))}

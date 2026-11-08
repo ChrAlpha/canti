@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 )
 
 var (
@@ -114,7 +115,7 @@ func TestCommitRecordsTransitionWithFacts(t *testing.T) {
 	rec := &recorder{}
 	runner := newRunner(t, rec)
 	from := snapAt(t, core.PhaseIdle)
-	request := Request{Body: []byte("frozen"), Model: "m", Protocol: "p", Adapter: "a"}
+	request := Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("frozen"), Model: "m", Protocol: "p", Adapter: "a"}
 
 	got, err := runner.Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &request})
 	if err != nil {
@@ -155,7 +156,7 @@ func TestCommitWritesSelfLoopTransitionWithNewSeq(t *testing.T) {
 func TestCommitDerivesDeterministicEventIDs(t *testing.T) {
 	ctx := context.Background()
 	from := snapAt(t, core.PhaseIdle)
-	facts := Facts{Request: &Request{Body: []byte("x")}}
+	facts := Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}}
 
 	recA, recB := &recorder{}, &recorder{}
 	a, err := newRunner(t, recA).Commit(ctx, from, core.RequestFrozen{}, facts)
@@ -181,7 +182,7 @@ func TestCommitRetryAfterLostAckIsIdempotent(t *testing.T) {
 	rec := &recorder{loseAckAt: core.PhaseRequestFrozen}
 	runner := newRunner(t, rec)
 	from := snapAt(t, core.PhaseIdle)
-	facts := Facts{Request: &Request{Body: []byte("x")}}
+	facts := Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}}
 
 	if _, err := runner.Commit(ctx, from, core.RequestFrozen{}, facts); !errors.Is(err, errInjected) {
 		t.Fatalf("error = %v, want the lost acknowledgement", err)
@@ -248,7 +249,7 @@ func TestCommitRejectsSequenceGap(t *testing.T) {
 	runner := newRunner(t, rec)
 	from := snapAt(t, core.PhaseIdle)
 
-	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
@@ -268,7 +269,7 @@ func TestCommitRejectsFromOutsideTheChain(t *testing.T) {
 	runner := newRunner(t, rec)
 	from := snapAt(t, core.PhaseIdle)
 
-	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	mid, err := runner.Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
@@ -297,8 +298,9 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 		facts Facts
 	}{
 		{"frozen request without bytes", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{}},
+		{"frozen request missing context", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("frozen")}}},
 		{"frozen request with empty body", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{}}},
-		{"frozen request with a response", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}, Response: &Response{}}},
+		{"frozen request with a response", snapAt(t, core.PhaseIdle), core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}, Response: &Response{}}},
 		{"attempt with facts", snapAt(t, core.PhaseRequestFrozen), core.AttemptStarted{Step: 1, Attempt: 1}, Facts{Failure: "x"}},
 		{"saved response without record", snapAt(t, core.PhaseRequestSent), core.ResponseSaved{Step: 1, Attempt: 1}, Facts{}},
 		{"saved response incomplete", snapAt(t, core.PhaseRequestSent), core.ResponseSaved{Step: 1, Attempt: 1}, Facts{Response: &Response{Body: execBody}}},
@@ -308,7 +310,7 @@ func TestCommitRequiresFactsForEvent(t *testing.T) {
 		{"observation mismatch", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &Observation{Execution: core.ExecutionTimedOut}}},
 		{"observation with failure text", awaiting, core.Observed{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{Observation: &observation, Failure: "x"}},
 		{"resolution without record", advance(t, awaiting, core.OutcomeUnknown{EffectID: awaiting.State.EffectID}), core.Resolved{EffectID: awaiting.State.EffectID, Execution: core.ExecutionExited}, Facts{}},
-		{"stop with a request", snapAt(t, core.PhaseIdle), core.StopRequested{Reason: core.StopTimedOut}, Facts{Request: &Request{Body: []byte("x")}, Failure: "x"}},
+		{"stop with a request", snapAt(t, core.PhaseIdle), core.StopRequested{Reason: core.StopTimedOut}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}, Failure: "x"}},
 		{"stop with an observation", awaiting, core.StopRequested{Reason: core.StopCancelled}, Facts{Observation: &observation}},
 	}
 	for _, tt := range tests {
@@ -333,7 +335,7 @@ func TestCommitReportsCoreErrorsBeforeFacts(t *testing.T) {
 		facts Facts
 		want  error
 	}{
-		{"invalid event with permitted facts", snapAt(t, core.PhaseIdle), &core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}}, core.ErrInvalidEvent},
+		{"invalid event with permitted facts", snapAt(t, core.PhaseIdle), &core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}}, core.ErrInvalidEvent},
 		{"illegal transition with wrong facts", snapAt(t, core.PhaseStopped), core.RequestFrozen{}, Facts{}, core.ErrIllegalTransition},
 	}
 	for _, tt := range tests {
@@ -387,7 +389,7 @@ func TestRunnerRefusesInvalidStates(t *testing.T) {
 		from Snapshot
 	}{
 		{"commit", func(r Runner, s Snapshot) (Snapshot, error) {
-			return r.Commit(context.Background(), s, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+			return r.Commit(context.Background(), s, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 		}, Snapshot{State: core.State{Phase: core.PhaseIdle}}},
 	}
 	for _, tt := range tests {
@@ -407,7 +409,7 @@ func TestRunnerRefusesInvalidStates(t *testing.T) {
 		rec := &recorder{}
 		from := snapAt(t, core.PhaseIdle)
 		from.Seq = -1
-		got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+		got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 		if err == nil || len(rec.log) != 0 || got != from {
 			t.Fatalf("negative sequence reached I/O: %#v, %v, log %v", got, err, rec.log)
 		}
@@ -417,7 +419,7 @@ func TestRunnerRefusesInvalidStates(t *testing.T) {
 func TestCommitStopsAtStoreFailure(t *testing.T) {
 	rec := &recorder{failAt: core.PhaseRequestFrozen}
 	from := snapAt(t, core.PhaseIdle)
-	got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	got, err := newRunner(t, rec).Commit(context.Background(), from, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 	if !errors.Is(err, errInjected) {
 		t.Fatalf("error = %v, want injected failure", err)
 	}
@@ -431,7 +433,7 @@ func TestCommitHonoursCancellationBeforeWriting(t *testing.T) {
 	cancel()
 	rec := &recorder{}
 	from := snapAt(t, core.PhaseIdle)
-	got, err := newRunner(t, rec).Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{Body: []byte("x")}})
+	got, err := newRunner(t, rec).Commit(ctx, from, core.RequestFrozen{}, Facts{Request: &Request{ContextState: &ContextState{FirstStep: 1}, Body: []byte("x")}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want cancellation", err)
 	}
@@ -456,7 +458,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 		t.Fatal(err)
 	}
 	performed := Snapshot{Seq: 4, State: effect}
-	done := &Outcome{Status: OutcomeDone, Handover: &Handover{RunID: "run-1", FirstStep: 1, Text: "next"}}
+	done := &Outcome{Status: OutcomeDone, Focus: &FocusSelection{}}
 	bad := []struct {
 		name  string
 		snap  Snapshot
@@ -469,12 +471,11 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 		{"outcome on an acceptance", saved, accept, Facts{Action: &commandAction, Outcome: done}},
 		{"performed without outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{}},
 		{"invalid outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: &Outcome{Status: OutcomeDone}}},
-		{"window outside the next step", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: done, Window: &Window{FirstStep: 3, SourceStep: 2, Handover: "next"}}},
 		{"observation on a performance", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: done, Observation: &Observation{Execution: core.ExecutionExited}}},
 		{"window on an observation", performed, core.Observed{EffectID: effect.EffectID, Execution: core.ExecutionFailedToStart},
-			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart}, Window: &Window{FirstStep: 2, SourceStep: 1, Handover: "next"}}},
+			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart}, ContextState: &ContextState{FirstStep: 1}}},
 		{"handover in an observation", performed, core.Observed{EffectID: effect.EffectID, Execution: core.ExecutionFailedToStart},
-			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart, Handover: done.Handover}}},
+			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart, Retrieval: &archive.Retrieval{}}}},
 	}
 	for _, tc := range bad {
 		rec := &recorder{}
@@ -484,7 +485,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 	}
 	rec := &recorder{}
 	if _, err := newRunner(t, rec).Commit(ctx, performed, core.Performed{EffectID: effect.EffectID},
-		Facts{Outcome: done, Window: &Window{FirstStep: 2, SourceStep: 1, Handover: "next"}}); err != nil {
+		Facts{Outcome: done, ContextState: &ContextState{FirstStep: 1}}); err != nil {
 		t.Fatalf("a performed handover: %v", err)
 	}
 }

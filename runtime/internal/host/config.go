@@ -39,12 +39,9 @@ type RunConfig struct {
 	Structured     bool   `json:"structured"`
 	DecisionFormat string `json:"decision_format,omitempty"`
 	Fallbacks      bool   `json:"fallbacks"`
-	ContextBytes   int    `json:"context_bytes"`
+	RequestBytes   int    `json:"request_bytes"`
 	ContextVersion int    `json:"context_version"`
 	HistoryImports string `json:"history_imports,omitempty"`
-	WindowSteps    int    `json:"window_steps,omitempty"`
-	WindowBytes    int    `json:"window_bytes,omitempty"`
-	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
 // ContextVersion names the rules that decide the context of a run, which
@@ -67,8 +64,8 @@ func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, fmt.Errorf("context version %d is unsupported; want %d", c.ContextVersion, ContextVersion)
 	}
 	switch {
-	case c.WindowSteps < 0 || c.WindowBytes < 0 || c.HandoverBytes < 1 || c.HandoverBytes > 8192:
-		return harness.Run{}, core.State{}, errors.New("window limits must be nonnegative and handover-bytes must be 1..8192")
+	case c.RequestBytes < 1 || c.RequestBytes > harness.MaxRequestBytes:
+		return harness.Run{}, core.State{}, errors.New("-request-bytes must be 1..8388608")
 	case c.MaxTokens < 1 || c.OutputLimit < 1:
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
@@ -94,12 +91,9 @@ func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
 	}
-	fit, err := harness.ContextFit(ContextConfig(c, b), run, s.Limits)
-	if err == nil {
-		err = fit.Check()
-	}
+	err = harness.CheckOrientation(ContextConfig(c, b), run, s.Limits)
 	if err != nil {
-		return harness.Run{}, core.State{}, fmt.Errorf("-context-bytes: %w", err)
+		return harness.Run{}, core.State{}, fmt.Errorf("-request-bytes: %w", err)
 	}
 	run.Config, err = json.Marshal(c)
 	return run, initial, err
@@ -134,7 +128,7 @@ func CanonicalImports(dir string) (string, error) {
 func ContextConfig(c RunConfig, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
 		Environment: Environment(c, b), Limits: PromptLimits(c),
-		Reader: &archive.Reader{Imports: c.HistoryImports}, WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes,
+		Reader:       &archive.Reader{Imports: c.HistoryImports},
 		DecisionTool: c.DecisionFormat == "tool",
 	}
 }
@@ -181,7 +175,7 @@ func Unresumable(c RunConfig) string {
 // PromptLimits are the prompt limits of a run of c.
 func PromptLimits(c RunConfig) harness.PromptLimits {
 	l := harness.DefaultPromptLimits()
-	l.Total = c.ContextBytes
+	l.Total = c.RequestBytes
 	return l
 }
 

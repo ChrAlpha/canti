@@ -425,3 +425,22 @@ func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.
 		}
 	}
 }
+
+func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		t.Run(format, func(t *testing.T) {
+			body := `{"usage":{"input_tokens":3,"output_tokens":0},"status":"failed","error":{"code":"context_length_exceeded"}}`
+			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Length", "4096")
+				io.WriteString(w, body)
+			})
+			m := newModel(t, server.URL, func(c *Config) { c.DecisionFormat = format })
+			response, err := m.Complete(context.Background(), freeze(t, m))
+			var limit *harness.ContextLimitError
+			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true, OutputReported: true}) {
+				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
+			}
+		})
+	}
+}

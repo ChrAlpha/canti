@@ -32,12 +32,13 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 		}
 	}
 	r := f.cli(nil, "run", "-once", "-goal", "Resume deployment using original release authorization", "-image", image,
-		"-context-bytes", "1048576", "-window-steps", "8", "-max-steps", "30", "-token-budget", "5000", "-wall-time", "4m", "-job-timeout", "10s")
+		"-request-bytes", "1048576", "-max-steps", "30", "-token-budget", "5000", "-wall-time", "4m", "-job-timeout", "10s")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
 	run, step := f.status().Run.ID, 1
 	deadline := time.Now().Add(210 * time.Second)
+	nextCall := 1
 	act := func(command string) {
 		t.Helper()
 		d := core.Decision{Kind: core.Exec, Payload: command}
@@ -45,7 +46,8 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			d.Kind = core.Return
 		}
 		body, _ := json.Marshal(d)
-		f.model.answer(step, 1, reply{text: string(body)})
+		f.model.answer(step, nextCall, reply{text: string(body)})
+		nextCall = 1
 		for n := 0; n < 100 && time.Now().Before(deadline); n++ {
 			r := f.cli(nil, "resume", "-once")
 			if r.code != exitActive && r.code != exitOK {
@@ -79,8 +81,23 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			act("printf 'checkpoint\\n'")
 			observe()
 		}
-		act(harness.HandoverPrefix + "Continue deployment. Check original release decisions and any amendments before applying settings.")
-		if latestOutcome(t, f.history()).Handover == nil {
+		f.model.answer(step, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+		for n := 0; n < 10; n++ {
+			r := f.cli(nil, "resume", "-once")
+			if r.code != exitActive {
+				t.Fatalf("reset: %+v", r)
+			}
+			h := f.history()
+			if h[len(h)-1].Kind == "request_rejected" {
+				break
+			}
+			if n == 9 {
+				t.Fatal("reset did not commit")
+			}
+		}
+		nextCall = 2
+		act(harness.FocusPrefix + `{"sources":[]}`)
+		if latestOutcome(t, f.history()).Focus == nil {
 			t.Fatal("handover was not committed")
 		}
 	}

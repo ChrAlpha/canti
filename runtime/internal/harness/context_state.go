@@ -25,7 +25,7 @@ func (c ContextState) Validate(step int, seq int64) error {
 	if c.AnchorSeq < 0 || c.AnchorSeq > seq || c.FirstStep < 1 || c.FirstStep > step || (c.AnchorSeq == 0 && c.FirstStep != 1) {
 		return fmt.Errorf("harness: invalid context anchor at step %d sequence %d", step, seq)
 	}
-	if err := validateCarry(c.Focus, step); err != nil {
+	if err := validateFocus(c.Focus, step); err != nil {
 		return err
 	}
 	for _, r := range c.Focus {
@@ -45,7 +45,10 @@ type ContextRejection struct {
 // CheckContextMutation validates a context-bearing transition against the
 // current materialized head, within the same transaction that extends it.
 func CheckContextMutation(t Transition, current ContextState) error {
-	if r := t.Facts.Request; r != nil && r.ContextState != nil {
+	if r := t.Facts.Request; r != nil {
+		if r.ContextState == nil {
+			return fmt.Errorf("%w: frozen context is required", ErrFacts)
+		}
 		if !current.Equal(*r.ContextState) {
 			return fmt.Errorf("%w: frozen context differs from current head", ErrFacts)
 		}
@@ -58,20 +61,9 @@ func CheckContextMutation(t Transition, current ContextState) error {
 	}
 	switch t.Event.(type) {
 	case core.RequestRejected:
-		rejection := t.Facts.Rejection
-		if rejection == nil || !rejection.Previous.Equal(current) {
-			return fmt.Errorf("%w: rejection context differs from head", ErrFacts)
-		}
-		if t.To.Phase == core.PhaseIdle {
-			want := ContextState{AnchorSeq: t.Seq, FirstStep: t.From.Step}
-			if next == nil || !next.Equal(want) {
-				return fmt.Errorf("%w: rejection must atomically open its empty context", ErrFacts)
-			}
-		} else if next != nil {
-			return fmt.Errorf("%w: exhausted rejection cannot open a context", ErrFacts)
-		}
+		return checkRejectedContext(t, current)
 	case core.StopRequested:
-		if rejection := t.Facts.Rejection; rejection != nil && (t.Facts.Response == nil || !rejection.Previous.Equal(current)) {
+		if rejection := t.Facts.Rejection; rejection != nil && (t.Facts.Response == nil || !rejection.Signal.Confirmed() || !rejection.Previous.Equal(current)) {
 			return fmt.Errorf("%w: terminal rejection differs from context head", ErrFacts)
 		}
 		if next != nil {
@@ -90,6 +82,23 @@ func CheckContextMutation(t Transition, current ContextState) error {
 		if next != nil {
 			return fmt.Errorf("%w: context mutation does not belong to %s", ErrFacts, t.Event.Kind())
 		}
+	}
+	return nil
+}
+
+func checkRejectedContext(t Transition, current ContextState) error {
+	next := t.Facts.ContextState
+	rejection := t.Facts.Rejection
+	if rejection == nil || !rejection.Signal.Confirmed() || !rejection.Previous.Equal(current) {
+		return fmt.Errorf("%w: rejection context differs from head", ErrFacts)
+	}
+	if t.To.Phase == core.PhaseIdle {
+		want := ContextState{AnchorSeq: t.Seq, FirstStep: t.From.Step}
+		if next == nil || !next.Equal(want) {
+			return fmt.Errorf("%w: rejection must atomically open its empty context", ErrFacts)
+		}
+	} else if next != nil {
+		return fmt.Errorf("%w: exhausted rejection cannot open a context", ErrFacts)
 	}
 	return nil
 }

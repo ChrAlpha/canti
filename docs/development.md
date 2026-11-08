@@ -130,12 +130,12 @@ prompt, and budget flags of
 `-workspace` must name the run's workspace. Defaults: image
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, 16,000 output tokens per
-response, no effort, structured output on, fallbacks off, 256 KiB per
-prompt (`-context-bytes`, including handover reserve; it must hold the goal,
-constraints, and the reserves for one more step and a failed handover, about
-68 KiB with a short goal and the default handover; `run` refuses a smaller
-value with the total it needs), 20 steps, 3 attempts per step, 30 min wall
-time, no token budget, 256 MiB of output per run, and 10 min per job.
+response, no effort, structured output on, fallbacks off, 8 MiB per rendered
+request and serialized provider body (`-request-bytes`), 20 steps, 3 attempts per
+step, 30 min wall time, no token budget, 256 MiB of output per run, and 10 min per
+job. `-token-budget` stops after the threshold of reported input plus output usage
+is reached. Unknown usage is retained as unknown; no counts are estimated.
+Status and TUI reports show coverage and lost attempts alongside reported totals.
 
 `run -input ID` names the submission: a later `run` with the same input ID,
 within its `-session` if one is given and otherwise among standalone inputs,
@@ -168,7 +168,7 @@ is printed to standard error. The alternate screen and this bounded tail do
 not preserve a complete native terminal or tmux scrollback. Use `canti history`
 for a run's full recorded transitions. Display history is separate from the
 session context supplied to the model; the next input still receives earlier
-dialogue as far as it fits `-context-bytes`.
+navigation to the previous run; retrieve its dialogue explicitly.
 
 **Host process.** Operational commands and `canti-tui` default to `-host auto`,
 which attaches to the shared host of the state directory and leaves it driving
@@ -283,7 +283,7 @@ run that chat would discard.
 
 Empty input is skipped. The TUI editor caps inserted text at its character
 limit; bracketed paste exceeding the goal's byte limit is rejected. Submitted
-input that fails validation (length, UTF-8, or `-context-bytes`) is reported and
+input that fails validation (length, UTF-8, or `-request-bytes`) is reported and
 editing continues. A malformed block opener in non-TTY mode is also reported
 without submitting it. A refused input, a run that needs resolution, or
 constraints and flags that leave no room for any input end chat with the status
@@ -298,16 +298,14 @@ holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which jobs see
 at `/canti/runs/<run ID>/`.
-Each run is bound to the workspace it was created in. Handover windows are
-always enabled; `-window-steps` and `-window-bytes` optionally request an
-earlier handover, while zero leaves the automatic capacity trigger active.
-A `canti:handover` drops what the window read, and the next window rereads
-what it needs; a `canti:handover-carry` keeps the committed evidence it names
-in the next window (see [Input](architecture.md#input)). In one live coding
-task with one model, measured before the carry existed, `-window-steps 12`
-runs used 11 to 34 windows, and with failing cases fed back they took three
-to six times the steps of capacity-triggered runs, so keep zero for long work.
-`-handover-bytes` bounds the continuation text (2048 bytes by default).
+Each run is bound to the workspace it was created in. Confirmed provider overflow
+opens a fresh anchor at the same unfinished step when retry remains possible.
+The goal, constraints and archive navigation survive; old receipts and selected
+focus are removed. A fresh orientation-only overflow stops immediately. No
+summary is required. `canti:focus {"sources":[{"seq":N,"source":I}]}` replaces
+the selected frozen source ranges; an empty array clears them. Exact historical
+snapshots remain readable from step `evidence.json` and `evidence/0000` files.
+Removed handover/window flags and actions are rejected. See [Input](architecture.md#input).
 History retrieval is always available; `-history-imports` adds a read-only
 archive, a directory named relative to the command's working directory and
 stored canonical. A new run needs it to exist; a retry of an input names its
@@ -315,8 +313,8 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 16. Schema 4, semantics 6, executor
-record format 2 and host protocol 5 form one current contract. Unsupported
+Each run stores current context version 17. Schema 4, semantics 6, executor
+record format 2 and host protocol 6 form one current contract. Unsupported
 formats and context versions are rejected; use a fresh state directory. No
 migration or old-run settlement path is supported. Same-version frozen bytes,
 provider bindings, accepted identities and results remain immutable.
@@ -369,7 +367,7 @@ The current corpus verifies same-version frozen requests, including cold restart
 and lost acknowledgements. Historical files remain audit evidence; current
 readers do not interpret old semantics or migrate old databases. Rejection tests
 cover unsupported formats. Same-version corruption tests cover accepted identity,
-receipt provenance, carry references and exact immutable request bytes.
+receipt provenance, focus references and exact immutable request bytes.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

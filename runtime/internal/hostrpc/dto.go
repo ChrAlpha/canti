@@ -40,14 +40,13 @@ var (
 	}
 	itemWords = map[host.ItemKind]string{
 		host.ItemDecided: "decided", host.ItemReturned: "returned", host.ItemRetrying: "retrying", host.ItemCompleted: "completed",
-		host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested", host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped",
+		host.ItemContextReset: "context_reset", host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested", host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped",
 	}
 	outcomeWords = map[harness.OutcomeStatus]string{
-		harness.OutcomeDone: "done", harness.OutcomeFailed: "failed", harness.OutcomeRefused: "refused",
+		harness.OutcomeDone: "done", harness.OutcomeFailed: "failed",
 	}
 	actionWords = map[harness.ActionName]string{
-		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionHandover: "handover",
-		harness.ActionHandoverCarry: "handover_carry", harness.ActionUnknown: "unknown",
+		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionFocus: "focus", harness.ActionUnknown: "unknown",
 	}
 )
 
@@ -111,8 +110,8 @@ func SpecOf(s host.Spec) Spec {
 	c, b, l := s.Config, s.Budget, s.Limits
 	return Spec{Workspace: c.Workspace, Image: c.Image, Network: c.Network, Memory: c.Memory, CPUs: c.CPUs, Pids: c.Pids, OutputLimit: c.OutputLimit,
 		API: c.API, Model: c.Model, MaxTokens: c.MaxTokens, Effort: c.Effort, Structured: c.Structured, DecisionFormat: c.DecisionFormat,
-		Fallbacks: c.Fallbacks, ContextBytes: c.ContextBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports,
-		WindowSteps: c.WindowSteps, WindowBytes: c.WindowBytes, HandoverBytes: c.HandoverBytes, MaxSteps: l.MaxSteps, MaxAttempts: l.MaxAttempts,
+		Fallbacks: c.Fallbacks, RequestBytes: c.RequestBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports,
+		MaxSteps: l.MaxSteps, MaxAttempts: l.MaxAttempts,
 		WallTime: b.WallTime.String(), TokenBudget: b.Tokens, OutputBudget: b.OutputBytes, JobTimeout: b.JobTimeout.String()}
 }
 
@@ -129,8 +128,8 @@ func SpecFrom(s Spec) (host.Spec, error) {
 	return host.Spec{
 		Config: host.RunConfig{Workspace: s.Workspace, Image: s.Image, Network: s.Network, Memory: s.Memory, CPUs: s.CPUs, Pids: s.Pids, OutputLimit: s.OutputLimit,
 			API: s.API, Model: s.Model, MaxTokens: s.MaxTokens, Effort: s.Effort, Structured: s.Structured, DecisionFormat: s.DecisionFormat,
-			Fallbacks: s.Fallbacks, ContextBytes: s.ContextBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports,
-			WindowSteps: s.WindowSteps, WindowBytes: s.WindowBytes, HandoverBytes: s.HandoverBytes},
+			Fallbacks: s.Fallbacks, RequestBytes: s.RequestBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports,
+		},
 		Budget: harness.Budget{WallTime: wall, Tokens: s.TokenBudget, OutputBytes: s.OutputBudget, JobTimeout: job},
 		Limits: core.Limits{MaxSteps: s.MaxSteps, MaxAttempts: s.MaxAttempts},
 	}, nil
@@ -165,7 +164,7 @@ func RunOf(v host.View, driveErr error) Run {
 		Status: status(s.Phase), Phase: word(phaseWords, s.Phase), Step: s.Step, StopReason: word(reasonWords, s.Reason), EffectID: s.EffectID,
 		Cursor: CursorOf(v.Cursor()), ContextVersion: v.Config.ContextVersion, API: v.Config.API, Provider: v.Config.Provider,
 		Driver: driver(v.Driving), Drivable: v.Drivable, Why: v.Why,
-		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps},
+		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
 		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
 	if s.Phase == core.PhaseReturned {
 		w.Result = s.Decision.Payload
@@ -196,11 +195,11 @@ func PageOf(p host.Page) Page {
 	for _, it := range p.Items {
 		item := Item{Seq: it.Seq, Step: it.Step, Kind: word(itemWords, it.Kind), Command: it.Command, Purpose: it.Purpose,
 			Action: word(actionWords, harness.ActionName(it.Action)), Result: it.Result, Local: it.Local, Resolved: it.Resolved,
-			Execution: word(executionWords, it.Execution), ExitCode: it.ExitCode, Preview: it.Preview, Detail: it.Detail, Window: it.Window,
+			Execution: word(executionWords, it.Execution), ExitCode: it.ExitCode, Preview: it.Preview, Detail: it.Detail, AnchorSeq: it.AnchorSeq,
 			StopReason: word(reasonWords, it.Reason), Failure: it.Failure, Truncated: it.Truncated}
 		if o := it.Outcome; o != nil {
 			item.Outcome = &Outcome{Status: word(outcomeWords, o.Status), Detail: o.Detail, Retrieval: o.Retrieval, RetrievalError: o.RetrievalError,
-				Sources: o.Sources, Entries: o.Entries, Handover: o.Handover}
+				Sources: o.Sources, Entries: o.Entries, Focus: o.Focus, FocusSources: o.FocusSources}
 		}
 		w.Items = append(w.Items, item)
 	}

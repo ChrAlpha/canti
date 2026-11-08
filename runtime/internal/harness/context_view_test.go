@@ -64,19 +64,19 @@ func TestContextRequestComparisonKeepsMissingMetadataUnknown(t *testing.T) {
 		}
 		return v
 	}
-	old := frozen(1, 1, 1, &harness.Request{Body: []byte("old"), Window: &harness.Window{FirstStep: 1}})
-	current := frozen(5, 1, 2, &harness.Request{Body: []byte("current"), Window: &harness.Window{FirstStep: 1}, Context: &harness.ContextCapture{Bytes: harness.ContextBytes{Total: 2}}})
+	old := frozen(1, 1, 1, &harness.Request{Body: []byte("old"), ContextState: &harness.ContextState{FirstStep: 1}})
+	current := frozen(5, 1, 2, &harness.Request{Body: []byte("current"), ContextState: &harness.ContextState{FirstStep: 1}, Context: &harness.ContextCapture{Bytes: harness.ContextBytes{Total: 2}}})
 	delta := harness.CompareContextRequests(old, current)
-	if old.CaptureAvailable || delta.PromptBytes != nil || delta.WindowChanged == nil || *delta.WindowChanged || delta.BodyBytes != 4 || old.BodyBytes != 3 {
+	if old.CaptureAvailable || delta.PromptBytes != nil || delta.AnchorChanged == nil || *delta.AnchorChanged || delta.BodyBytes != 4 || old.BodyBytes != 3 {
 		t.Fatalf("invented optional metadata: %+v %+v", old, delta)
 	}
-	next := frozen(9, 2, 1, &harness.Request{Body: []byte("next"), Window: &harness.Window{FirstStep: 2}, Context: &harness.ContextCapture{Bytes: harness.ContextBytes{Total: 1}}})
+	next := frozen(9, 2, 1, &harness.Request{Body: []byte("next"), ContextState: &harness.ContextState{AnchorSeq: 8, FirstStep: 2}, Context: &harness.ContextCapture{Bytes: harness.ContextBytes{Total: 1}}})
 	delta = harness.CompareContextRequests(current, next)
-	if delta.WindowChanged == nil || !*delta.WindowChanged || delta.PromptBytes == nil || *delta.PromptBytes != -1 || delta.BodyBytes != -3 {
+	if delta.AnchorChanged == nil || !*delta.AnchorChanged || delta.PromptBytes == nil || *delta.PromptBytes != -1 || delta.BodyBytes != -3 {
 		t.Fatalf("wrong next-window delta: %+v", delta)
 	}
 	for _, pair := range [][2]harness.ContextRequest{{{}, current}, {current, {}}, {{}, {}}} {
-		if d := harness.CompareContextRequests(pair[0], pair[1]); d.WindowChanged != nil {
+		if d := harness.CompareContextRequests(pair[0], pair[1]); d.AnchorChanged != nil {
 			t.Fatalf("invented a window change from missing optional metadata: %+v", d)
 		}
 	}

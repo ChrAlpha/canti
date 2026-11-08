@@ -37,14 +37,14 @@ func seed(t *testing.T, f *fixture, r harness.Runner, d core.Decision, obs harne
 	}
 	body, _ := json.Marshal(d)
 	step := snap.State.Step
-	commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte("frozen"), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
+	commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{ContextState: &harness.ContextState{FirstStep: 1}, Body: []byte("frozen"), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
 	commit(core.AttemptStarted{Step: step, Attempt: snap.State.Attempt}, harness.Facts{})
 	commit(core.ResponseSaved{Step: step, Attempt: snap.State.Attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
 	if d.Kind == core.Return {
 		commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{})
 		return
 	}
-	a := harness.NormalizeAction(d.Payload, false, true)
+	a := harness.NormalizeAction(d.Payload, true)
 	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{Action: &a, Execution: fixtureExecution(d.Payload)})
 	effect := snap.State.EffectID
 	if resolved {

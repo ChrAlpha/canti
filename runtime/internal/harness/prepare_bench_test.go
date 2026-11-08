@@ -37,37 +37,34 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 	}
 	snap := harness.Snapshot{State: state}
 	body := []byte(`{"kind":"exec","payload":"go test ./..."}`)
-	for step := 1; step <= completed; step++ {
-		w := &harness.Window{FirstStep: 1}
-		if first := completed - window + 1; first > 1 && step >= first {
-			w = &harness.Window{FirstStep: first, SourceStep: first - 1, Handover: "Continue inspecting the workspace."}
-		}
-		for _, event := range []core.Event{
-			core.RequestFrozen{}, core.AttemptStarted{Step: step, Attempt: 1},
-			core.ResponseSaved{Step: step, Attempt: 1}, core.ResponseLoaded{Step: step, Attempt: 1, Body: body},
-		} {
-			var facts harness.Facts
-			switch event.(type) {
-			case core.RequestFrozen:
-				facts.Request = &harness.Request{Body: []byte(`{"seed":"` + strings.Repeat("x", 32<<10) + `"}`), Window: w}
-			case core.ResponseSaved:
-				facts.Response = &harness.Response{Body: body, Complete: true}
-			case core.ResponseLoaded:
-				facts.Action = &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}
-				facts.Execution = fixtureExecution("go test ./...")
-			}
-			snap, err = runner.Commit(ctx, snap, event, facts)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		effect := snap.State.EffectID
-
-		snap, err = runner.Commit(ctx, snap, core.Observed{EffectID: effect, Execution: core.ExecutionFailedToStart},
-			harness.Facts{Observation: &harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}, Receipt: &harness.Job{EffectID: effect, Spec: fixtureExecution("go test ./...").Spec, ID: "job-" + effect, Status: harness.JobFailedToStart, Preview: strings.Repeat("output\n", 600)}})
+	current := harness.InitialContext()
+	commit := func(event core.Event, facts harness.Facts) {
+		t.Helper()
+		var err error
+		snap, err = runner.Commit(ctx, snap, event, facts)
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	freeze := func() {
+		commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{"seed":"` + strings.Repeat("x", 32<<10) + `"}`), ContextState: &current}})
+	}
+	for step := 1; step <= completed; step++ {
+		if first := completed - window + 1; first > 1 && step == first {
+			freeze()
+			commit(core.AttemptStarted{Step: step, Attempt: 1}, harness.Facts{})
+			next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: step}
+			commit(core.RequestRejected{Step: step, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next})
+			current = next
+		}
+		freeze()
+		attempt := snap.State.Attempt
+		commit(core.AttemptStarted{Step: step, Attempt: attempt}, harness.Facts{})
+		commit(core.ResponseSaved{Step: step, Attempt: attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true}})
+		commit(core.ResponseLoaded{Step: step, Attempt: attempt, Body: body}, harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution("go test ./...")})
+		observation := harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}
+		receipt := fixtureReceipt(snap.State, observation)
+		commit(core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart}, harness.Facts{Observation: &observation, Receipt: &receipt})
 	}
 	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused", Model: "offline-benchmark"})
 	if err != nil {
@@ -122,12 +119,12 @@ func TestPrepareReadsOnlyActiveWindow(t *testing.T) {
 				t.Fatalf("read %d records in %d pages for a %d-step window", p.records, p.pages, tc.window)
 			}
 			body := string(p.frozen.Body)
-			if got := strings.Count(body, "### Step "); got != tc.window {
+			if got := len(p.frozen.Context.Bytes.Steps); got != tc.window {
 				t.Fatalf("request has %d steps, want %d", got, tc.window)
 			}
 			previous := -1
 			for step := tc.completed - tc.window + 1; step <= tc.completed; step++ {
-				at := strings.Index(body, fmt.Sprintf("### Step %d\\n", step))
+				at := strings.Index(body, fmt.Sprintf("### Step %d (sequence ", step))
 				if at <= previous {
 					t.Fatalf("step %d is missing or out of order", step)
 				}

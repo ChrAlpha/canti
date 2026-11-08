@@ -16,7 +16,7 @@ type ArtifactRef struct {
 	Detail    string
 }
 
-// Observation is the durable external result. Retrieval and Handover are
+// Observation is the durable external result. Retrieval and focus are
 // transient presentation fields for local outcomes; persisted observations
 // must leave both nil.
 type Observation struct {
@@ -25,5 +25,4 @@ type Observation struct {
 	Preview   string
 	Output    ArtifactRef
 	Retrieval *archive.Retrieval `json:",omitempty"`
-	Handover  *Handover          `json:",omitempty"`
 }

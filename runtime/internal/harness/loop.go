@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -31,16 +30,7 @@ type LoopConfig struct {
 	Logger         *slog.Logger     // discards
 	Reader         *archive.Reader
 	DecisionTool   bool // Frame.DecisionTool
-	WindowSteps    int
-	WindowBytes    int
-	HandoverBytes  int
-	// carryMarginStep is a private test seam, set only through
-	// SetCarryMarginStep in tests: a carry must also leave one maximal step
-	// of work capacity, beyond the step the reserve fits. It is the arm of
-	// the admission comparison in BenchmarkWorkingSet that was measured and
-	// not adopted; production never sets it, so the shipped rule is that a
-	// carry leaves positive work capacity.
-	carryMarginStep bool
+
 }
 
 // Loop drives the committed intents of runs in a Journal until they halt.
@@ -86,15 +76,7 @@ func normalize(cfg LoopConfig) (LoopConfig, error) {
 	if cfg.Poll < 0 || cfg.InspectRetries < 0 {
 		return cfg, errors.New("harness: loop poll and inspect retries must not be negative")
 	}
-	if cfg.WindowSteps < 0 || cfg.WindowBytes < 0 || cfg.HandoverBytes < 0 {
-		return cfg, errors.New("harness: context window limits must not be negative")
-	}
-	if cfg.HandoverBytes == 0 {
-		cfg.HandoverBytes = 2048
-	}
-	if cfg.HandoverBytes > 8192 {
-		return cfg, errors.New("harness: handover exceeds 8192 bytes")
-	}
+
 	if cfg.Limits == (PromptLimits{}) {
 		cfg.Limits = DefaultPromptLimits()
 	}
@@ -318,32 +300,6 @@ func (l *Loop) late(run Run) string {
 	return ""
 }
 
-// windowSteps reads the active page only, bounded by the persisted first step
-// and the snapshot sequence. An older page never re-enters the prompt.
-func (l *Loop) windowSteps(ctx context.Context, runID string, f Frame, snapshotSeq int64) ([]StepRecord, error) {
-	var steps []StepRecord
-	n := f.Step - f.Window.FirstStep
-	for before := snapshotSeq + 1; len(steps) < n; {
-		limit := min(historyPage, n-len(steps))
-		page, err := l.journal.Recent(ctx, runID, before, limit)
-		if err != nil {
-			return nil, err
-		}
-		for i := len(page) - 1; i >= 0; i-- {
-			record := page[i]
-			if record.Step >= f.Window.FirstStep && record.Step < f.Step {
-				steps = append(steps, record)
-			}
-		}
-		if len(page) < limit || len(page) == 0 || page[0].Step <= f.Window.FirstStep {
-			break
-		}
-		before = page[0].Seq
-	}
-	slices.Reverse(steps)
-	return steps, nil
-}
-
 func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
@@ -381,11 +337,8 @@ func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, erro
 	case errors.As(err, &stop):
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: stop.Reason}, Facts{Failure: err.Error(), Response: &resp})
 	}
+	resp.Complete = false
 	facts := Facts{Failure: err.Error(), Response: &resp}
-	if len(resp.Body) > 0 {
-		resp.Complete = false
-		facts.Response = &resp
-	}
 	if snap, err = l.runner.Commit(ctx, snap, core.ResponseIncomplete{Step: s.Step, Attempt: attempt}, facts); err != nil || snap.State.Phase != core.PhaseRequestFrozen {
 		return snap, err
 	}
@@ -413,11 +366,7 @@ func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	}
 	event, facts := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.decision(resp)}, Facts{}
 	if accepted, err := s.Next(event); err == nil && accepted.Phase == core.PhaseEffectSaved {
-		req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
-		if err != nil {
-			return snap, err
-		}
-		a := NormalizeAction(accepted.Decision.Payload, req.Window != nil && req.Window.Requested, l.cfg.Reader != nil)
+		a := NormalizeAction(accepted.Decision.Payload, l.cfg.Reader != nil)
 		facts.Action = &a
 		if a.Recovery == RecoveryExternal {
 			run, err := l.journal.Run(ctx, s.RunID)

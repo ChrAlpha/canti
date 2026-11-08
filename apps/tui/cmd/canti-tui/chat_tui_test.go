@@ -199,7 +199,7 @@ func TestChatTUIContinuesAfterAnInputThatAloneDoesNotFit(t *testing.T) {
 	epoch := g.currentEpoch()
 	m := newChatTUI("session", 32768, nil, nil, nil, nil, nil, new(chatDisplay))
 	m.inputGate, m.busy = g, true
-	updated, cmd := m.Update(chatDone{code: exitUsage, err: errors.New("-context-bytes: the input needs 300000 bytes")})
+	updated, cmd := m.Update(chatDone{code: exitUsage, err: errors.New("-request-bytes: the input needs 300000 bytes")})
 	m = updated.(chatTUI)
 	if cmd != nil {
 		if _, quit := cmd().(tea.QuitMsg); quit {
@@ -209,7 +209,7 @@ func TestChatTUIContinuesAfterAnInputThatAloneDoesNotFit(t *testing.T) {
 	g.mu.Lock()
 	reopened := !g.busy && g.epoch != epoch
 	g.mu.Unlock()
-	if m.code != exitOK || m.err != nil || m.busy || !reopened || !strings.Contains(m.transcript, "error: -context-bytes: the input needs 300000 bytes") {
+	if m.code != exitOK || m.err != nil || m.busy || !reopened || !strings.Contains(m.transcript, "error: -request-bytes: the input needs 300000 bytes") {
 		t.Fatalf("after an input that alone does not fit: code=%d err=%v busy=%v reopened=%v transcript=%q", m.code, m.err, m.busy, reopened, m.transcript)
 	}
 }

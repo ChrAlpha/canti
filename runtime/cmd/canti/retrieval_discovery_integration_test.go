@@ -36,7 +36,7 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 	sourceRun := f.status().Run.ID
 	f.model = newScriptedModel(t, f.key, nil)
 	goal := "Resume Orchid deployment from run " + sourceRun + "; recover the approved wait and retry budget, accounting for revised decisions."
-	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image, "-window-steps", "9",
+	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image,
 		"-max-steps", "30", "-token-budget", "4000", "-wall-time", "3m", "-job-timeout", "10s", "-output-limit", "2048", "-output-budget", "8192")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
@@ -98,7 +98,7 @@ for file in /canti/runs/%s/steps/*/preview; do
   examined=$((examined+1))
   [ "$examined" -le 128 ] || { printf 'incomplete: file limit\n' >&2; exit 2; }
   first=$(head -n 1 "${file%%/preview}/command") || { printf 'incomplete: command unavailable\n' >&2; exit 2; }
-  case "$first" in 'canti:retrieve '*|'canti:handover '*|'# canti:discovery'*) continue ;; esac
+  case "$first" in 'canti:'*|'# canti:discovery'*) continue ;; esac
   if grep -F -q 'Orchid' "$file"; then
     found=$((found+1))
     [ "$found" -le 16 ] || { printf 'incomplete: path limit\n' >&2; exit 2; }
@@ -160,7 +160,7 @@ done`, sourceRun)
 			}
 		}
 		if page < 2 {
-			act(core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Continue deployment. Recheck original decisions in /canti/runs/" + sourceRun + "/steps before applying wait and retry settings."})
+			act(core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`})
 		} else {
 			act(core.Decision{Kind: core.Return, Payload: "scripted evidence check complete"})
 		}

@@ -311,9 +311,9 @@ func checkTask(label, goal, constraints string) error {
 		return fmt.Errorf("%s is required", label)
 	case !utf8.ValidString(goal) || !utf8.ValidString(constraints):
 		return fmt.Errorf("%s and -constraints must be valid UTF-8", label)
-	case len(g) > limits.Goal:
+	case len(goal) > limits.Goal:
 		return fmt.Errorf("%s must be at most %d bytes%s", label, limits.Goal, hint)
-	case len(strings.TrimSpace(constraints)) > limits.Constraints:
+	case len(constraints) > limits.Constraints:
 		return fmt.Errorf("-constraints must be at most %d bytes%s", limits.Constraints, hint)
 	}
 	return nil

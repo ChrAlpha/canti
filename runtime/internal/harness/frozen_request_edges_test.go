@@ -31,7 +31,7 @@ func edgeScenarios() []frozenScenario {
 			marks: map[string][]string{
 				"run1-step01-rev1.json": {"## Goal\n检查日志里的“beta”，并报告它在第几行。\n"},
 				"run1-step02-rev1.json": {"Command:\n```````\ncat <<'EOF'\n", "------…[truncated ", "Preview:\n````\nalpha\n\uFFFDbeta\n```\n", "gamma line\ngamma …[truncated "},
-				"run1-step02-rev2.json": {"## Rejected response\n", "Rejected reply:\n```\nLet me read the log first: 先看日志。", "…[truncated "},
+				"run1-step02-rev2.json": {"## Protocol repair\n", "Rejected reply:\n```\nLet me read the log first: 先看日志。", "…[truncated "},
 				"run1-step03-rev1.json": {`"error":"archive path unavailable: statat 日日`, "日…[truncated "},
 			},
 		},

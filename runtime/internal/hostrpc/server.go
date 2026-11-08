@@ -35,7 +35,7 @@ const (
 	// a complete model response of at most provider.DefaultMaxResponseBytes
 	// carried, its goal and constraints, which a request of at most
 	// maxRequest carried, and 1 MiB of every other field.
-	maxResponse    = 6*(provider.DefaultMaxResponseBytes+maxRequest) + 1<<20
+	maxResponse    = 6*(provider.DefaultMaxResponseBytes+harness.MaxRequestBytes+(16<<20)) + 1<<20
 	maxWait        = 30 * time.Second
 	defaultCleanup = 30 * time.Second
 	maxCleanup     = 10 * time.Minute

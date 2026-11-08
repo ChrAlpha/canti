@@ -502,7 +502,7 @@ func localSteps(h []entry) []entry {
 
 func TestGateCrashAtLocalActionCommits(t *testing.T) {
 	list := core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`}
-	handover := core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Counted once in count. Next: report done."}
+	handover := core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`}
 	count := core.Decision{Kind: core.Exec, Payload: "echo x >> count; echo one"}
 	done := core.Decision{Kind: core.Return, Payload: "done"}
 	local := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "performed"}
@@ -514,7 +514,7 @@ func TestGateCrashAtLocalActionCommits(t *testing.T) {
 		kinds  []string
 	}{
 		{"retrieval", map[int]core.Decision{1: list, 2: done}, nil, slices.Concat(local, stepKinds[:4]), []string{"response_loaded", "performed"}},
-		{"handover", map[int]core.Decision{1: count, 2: handover, 3: done}, []string{"-window-steps", "1"},
+		{"focus", map[int]core.Decision{1: count, 2: handover, 3: done}, nil,
 			slices.Concat(stepKinds, local, stepKinds[:4]), []string{"performed"}},
 	} {
 		for _, kind := range tc.kinds {
@@ -544,11 +544,11 @@ func TestGateCrashAtLocalActionCommits(t *testing.T) {
 					if len(performed) != 1 || performed[0].Facts.Outcome == nil || performed[0].Facts.Outcome.Status != harness.OutcomeDone {
 						t.Fatalf("performed %+v, want one done local action", performed)
 					}
-					if tc.name == "handover" {
-						if w := performed[0].Facts.Window; w == nil || w.FirstStep != 3 || w.SourceStep != 2 {
+					if tc.name == "focus" {
+						if w := performed[0].Facts.ContextState; w == nil || w.FirstStep != 1 || len(w.Focus) != 0 {
 							t.Fatalf("the handover committed the window %+v", w)
 						}
-						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.Window == nil || !last.Facts.Request.Window.Equal(*performed[0].Facts.Window) {
+						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.ContextState == nil || !last.Facts.Request.ContextState.Equal(*performed[0].Facts.ContextState) {
 							t.Fatalf("the next request renders %+v, not the committed window", last.Facts.Request)
 						}
 					}
@@ -569,10 +569,10 @@ func TestGateColdRestartAcrossLocalActions(t *testing.T) {
 	script := map[int]core.Decision{
 		1: {Kind: core.Exec, Payload: "echo x >> count; wc -l < count"},
 		2: {Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`},
-		3: {Kind: core.Exec, Payload: harness.HandoverPrefix + "Counted once in count. Next: report done."},
+		3: {Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`},
 		4: {Kind: core.Return, Payload: "done"},
 	}
-	flags := []string{"-goal", "count", "-window-steps", "2"}
+	flags := []string{"-goal", "count"}
 	cold, image := recoveryFixture(t, script)
 	processes := 0
 	for r := cold.cli(nil, "run", append([]string{"-once", "-image", image}, flags...)...); ; r = cold.cli(nil, "resume", "-once") {
@@ -601,7 +601,7 @@ func TestGateColdRestartAcrossLocalActions(t *testing.T) {
 	w := warm.history()
 	anonymous := func(e entry) string {
 		run := e.State.RunID
-		s, _ := json.Marshal([]any{e.Kind, e.From, e.To, e.Facts.Action, e.Facts.Outcome, e.Facts.Window})
+		s, _ := json.Marshal([]any{e.Kind, e.From, e.To, e.Facts.Action, e.Facts.Outcome, e.Facts.ContextState})
 		return strings.ReplaceAll(string(s), run, "run")
 	}
 	if len(h) != len(w) || !slices.Equal(kinds(h), kinds(w)) {

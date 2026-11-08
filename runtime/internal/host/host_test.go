@@ -46,7 +46,7 @@ func testHost(t *testing.T, opts Options) *Host {
 func testSpec(h *Host) Spec {
 	return Spec{
 		Config: RunConfig{Workspace: h.opts.Workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			API: APIMessages, Model: "test-model", MaxTokens: 1000, Structured: true, ContextBytes: 256 << 10, ContextVersion: ContextVersion, HandoverBytes: 2048},
+			API: APIMessages, Model: "test-model", MaxTokens: 1000, Structured: true, RequestBytes: 256 << 10, ContextVersion: ContextVersion},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 2},
 	}
 }
@@ -184,7 +184,7 @@ func TestSubmitRefusesARunItsSubmitterCannotDrive(t *testing.T) {
 		t.Fatalf("a refused submission admitted a run: %v", err)
 	}
 	spec := testSpec(h)
-	spec.Config.ContextBytes = 1024
+	spec.Config.RequestBytes = 1024
 	if _, err := h.Submit(context.Background(), Submission{Goal: "g", Spec: spec, Binding: binding("http://127.0.0.1:1")}); !errors.As(err, new(SpecError)) {
 		t.Fatalf("a run that fits no context = %v, want a SpecError", err)
 	}
@@ -1329,7 +1329,7 @@ func TestStopAndInspectedResolutionReuseTheAcceptedExecutionConfiguration(t *tes
 			url := answering(t, core.Decision{Kind: core.Exec, Payload: "echo accepted"})
 			h := testHost(t, Options{})
 			spec := testSpec(h)
-			spec.Config.ContextBytes, spec.Config.WindowSteps, spec.Config.WindowBytes, spec.Config.HandoverBytes = 96<<10, 3, 8192, 1024
+			spec.Config.RequestBytes = 96 << 10
 			spec.Config.OutputLimit = 65536
 			ack := submit(t, h, Submission{Spec: spec, Binding: binding(url)})
 			run, c, err := h.Find(context.Background(), ack.Run.ID)

@@ -68,97 +68,191 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 
 func contextRules(t *testing.T) string {
 	t.Helper()
+	spec := runSpec(t)
+	run := harness.Run{ID: "run_fixed", Goal: "Exact task\n", Constraints: "Exact restriction\n"}
+	cfg := host.ContextConfig(spec.Config, spec.Budget)
 	var b strings.Builder
-	fmt.Fprintf(&b, "context version %d\nactions: a payload beginning, after any of %q, with %q, read as %q, %q, or %q, then the end or one of those bytes\nprompt limits %+v\n",
-		host.ContextVersion, harness.ActionSpace, harness.ActionNamespace, strings.TrimSpace(harness.RetrievePrefix), strings.TrimSpace(harness.HandoverPrefix),
-		strings.TrimSpace(harness.HandoverCarryPrefix), harness.DefaultPromptLimits())
-	run := harness.Run{ID: "run_" + strings.Repeat("0", 32), Goal: "Complete the task.", Constraints: "Preserve the evidence."}
-	limits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	loop := harness.LoopConfig{Environment: "Linux", Reader: &archive.Reader{}}
-	fit, err := harness.ContextFit(loop, run, limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Fprintf(&b, "loop defaults: handover %d, total %d\n", fit.Handover, fit.Limit)
-	transports := []host.RunConfig{
-		{API: host.APIMessages, DecisionFormat: "text", Effort: "high", Structured: true, Fallbacks: true}, {API: host.APIMessages, DecisionFormat: "text"},
-		{API: host.APIMessages, DecisionFormat: "tool", Effort: "high", Fallbacks: true},
-		{API: host.APIResponses, DecisionFormat: "text", Effort: "high", Structured: true}, {API: host.APIResponses, DecisionFormat: "text"},
-		{API: host.APIResponses, DecisionFormat: "tool", Effort: "high"},
-	}
-	for _, flags := range [][2]bool{{false, false}, {true, false}, {true, true}} {
-		for _, c := range transports {
-			f := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 3,
-				RunID: run.ID, Window: &harness.Window{FirstStep: 1},
-				DecisionTool: c.DecisionFormat == "tool", RetrievalEnabled: flags[0], ImportsEnabled: flags[1], HandoverBytes: 2048}
-			p, err := f.Prompt(harness.DefaultPromptLimits())
+	defaults, _ := json.Marshal(struct {
+		Config         host.RunConfig
+		Limits         harness.PromptLimits
+		MaximumRequest int
+		MaximumFocus   int
+		ReadBytes      int
+	}{spec.Config, cfg.Limits, harness.MaxRequestBytes, harness.MaxFocus, archive.MaxBytes})
+	fmt.Fprintf(&b, "context version %d\nsemantics %d\ndefaults %s\nactions %q %q\n", host.ContextVersion, core.SemanticsVersion, defaults, harness.RetrievePrefix, harness.FocusPrefix)
+	text := "frozen original evidence"
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+	ref := harness.EvidenceRef{SourceSeq: 5, Step: 1, Source: 0, Length: len(text), SHA256: sum}
+	retrieval := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: archive.ImportsRoot + "/notes", Reason: "recover"}, Sources: []archive.SourceRange{{Path: archive.ImportsRoot + "/notes", Length: len(text), SHA256: sum}}, Evidence: []string{text}, More: true, NextOffset: int64(len(text))}
+	latest := harness.StepRecord{Seq: 5, Step: 1, Command: harness.RetrievePrefix + `{"operation":"read"}`, Outcome: &harness.Outcome{Status: harness.OutcomeDone, Retrieval: &retrieval}}
+	for _, tool := range []bool{false, true} {
+		initial := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: host.Environment(spec.Config, spec.Budget), RunID: run.ID, Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 4, DecisionTool: tool, RetrievalEnabled: true, ImportsEnabled: true, ContextState: &harness.ContextState{FirstStep: 1}}
+		frames := []harness.Frame{initial}
+		recent := initial
+		recent.Step = 2
+		recent.Receipts = []harness.StepReceipt{{Step: 1, Seq: 5, Purpose: "Inspect original", Status: "done"}}
+		recent.Latest = &latest
+		frames = append(frames, recent)
+		reset := initial
+		reset.Step = 2
+		reset.Attempt = 2
+		reset.ContextState = &harness.ContextState{AnchorSeq: 8, FirstStep: 2}
+		reset.Latest = &latest
+		frames = append(frames, reset)
+		focus := reset
+		focus.ContextState = &harness.ContextState{AnchorSeq: 8, FirstStep: 2, Focus: []harness.EvidenceRef{ref}}
+		focus.Focused = []harness.FocusedEvidence{{Ref: ref, Operation: "read", Path: retrieval.Sources[0].Path, More: true, NextOffset: int64(len(text)), Bytes: text}}
+		frames = append(frames, focus)
+		repair := focus
+		repair.Attempt = 3
+		repair.Rejected = &harness.Rejection{Error: "invalid decision", Response: `{"wrong":true}`}
+		frames = append(frames, repair)
+		for i, frame := range frames {
+			prompt, err := frame.Prompt(cfg.Limits)
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.Model, c.MaxTokens = "test-model", 16000
-			m, err := newModel(c, "https://model.test", host.Keys{AnthropicKey: "key", OpenAIKey: "key"})
-			if err != nil {
-				t.Fatal(err)
+			fmt.Fprintf(&b, "transport tool=%t frame=%d stable=%d system=%s\n", tool, i, prompt.Stable, digest(prompt.System))
+			for j, block := range prompt.Blocks {
+				fmt.Fprintf(&b, " block %d %s\n", j, digest(block))
 			}
-			req, err := m.Freeze(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintf(&b, "request, %s %s, effort %q, structured %v, fallbacks %v, retrieval %v, imports %v: system %s, %s %s %s\n", c.API, c.DecisionFormat, c.Effort, c.Structured, c.Fallbacks,
-				flags[0], flags[1], digest(p.System), req.Protocol, req.Adapter, digest(string(req.Body)))
 		}
 	}
-	page := everyBlock(run)
-	p, err := page.Prompt(harness.DefaultPromptLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Fprintf(&b, "page of every block kind: %s\n", digest(p.System+"\x00"+strings.Join(p.Blocks, "\x00")))
-	imports, previous, mapped := t.TempDir(), "", ""
-	for _, flags := range [][]string{nil, {"-handover-bytes", "1"}, {"-handover-bytes", "8192"}, {"-history-imports", imports},
-		{"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"},
-		{"-image", "\xff" + strings.Repeat("x", 2047)}, {"-image", "debian\xff"},
-		{"-api", "anthropic-messages", "-model", "test-model", "-effort", "max", "-fallbacks"},
-		{"-api", "openai-responses", "-model", "test-model", "-max-tokens", "4096", "-effort", "none", "-structured=false", "-decision-format", "tool", "-context-bytes", "131072", "-window-steps", "6", "-window-bytes", "9000"}} {
-		s := parseSpec(t, flags...)
-		loop := host.ContextConfig(s.Config, s.Budget)
-		fit, err := harness.ContextFit(loop, run, s.Limits)
-		if err != nil {
-			t.Fatal(err)
-		}
-		switch {
-		case len(flags) > 0 && flags[0] == "-history-imports":
-			flags = []string{"-history-imports", "DIR"}
-		case len(flags) > 0 && flags[0] == "-image":
-			flags = []string{"-image", fmt.Sprintf("%d bytes, %q first", len(flags[1]), flags[1][:min(len(flags[1]), 7)])}
-		}
-		fmt.Fprintf(&b, "run %q: %+v, required %d\n", flags, fit, fit.Required())
-		if env := host.Environment(s.Config, s.Budget); env != previous {
-			fmt.Fprintf(&b, "  environment %s\n", digest(env))
-			previous = env
-		}
-		c := s.Config
-		if m := fmt.Sprintf("api %q, model %q, max tokens %d, effort %q, structured %v, decision format %q, fallbacks %v, limits %+v, window steps %d, window bytes %d, imports %v",
-			c.API, c.Model, c.MaxTokens, c.Effort, c.Structured, c.DecisionFormat, c.Fallbacks, loop.Limits, loop.WindowSteps, loop.WindowBytes, loop.Reader.Imports != ""); m != mapped {
-			fmt.Fprintf(&b, "  %s\n", m)
-			mapped = m
-		}
-	}
-	b.WriteString(sessionRules(t))
+	b.WriteString(runtimeMappingRules(t))
 	b.WriteString(storedRules(t))
 	b.WriteString(corpusRules(t))
 	return b.String()
 }
 
-// storedRules records every request of a run whose model and context flags
-// all differ from their defaults but its decision format, the first frozen
-// by run -once and the next by a resume process that rebuilds the run from
-// its stored config, after the run read an imported file and its window
-// asked for a handover; the repairs of a run of the tool decision format,
-// which a resume process freezes when text answers it; a run of the text
-// decision format named explicitly, which a resume process returns; a
-// Responses run of each decision format, which a resume process returns;
-// and a run whose window outgrows a page of the journal, after 65 reads.
+func corpusRules(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v17")
+	scenarios, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, sc := range scenarios {
+		fmt.Fprintf(&b, "corpus %s: sha256 %s\n", sc.Name(), corpusDigest(t, filepath.Join(root, sc.Name())))
+	}
+	return b.String()
+}
+
+// corpusDigest digests the files of the scenario directory dir as the
+// recorded context rules do.
+func corpusDigest(t *testing.T, dir string) string {
+	t.Helper()
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	for _, f := range files {
+		data, err := os.ReadFile(filepath.Join(dir, f.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// TestEarlierVersionsKeepTheirCorpus requires that every scenario a later
+// context version renders anew keeps, under frozen-requests-v<version>, the
+// requests and journal that its earlier version froze: the files whose
+// digest that version's recorded rules hold, never rewritten.
+func TestEarlierVersionsKeepTheirCorpus(t *testing.T) {
+	root := filepath.Join("..", "..", "internal", "harness", "testdata")
+	dirs, err := filepath.Glob(filepath.Join(root, "frozen-requests-v*"))
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no retained corpus of an earlier version: %v", err)
+	}
+	dirs = append(dirs, filepath.Join(root, "frozen-requests"))
+	for _, dir := range dirs {
+		version := strings.TrimPrefix(filepath.Base(dir), "frozen-requests-v")
+		if filepath.Base(dir) == "frozen-requests" {
+			version = "16"
+		}
+		rules, err := os.ReadFile(filepath.Join("testdata", "context-v"+version+".txt"))
+		if err != nil {
+			t.Fatalf("retained corpus %s has no recorded context version: %v", dir, err)
+		}
+		scenarios, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sc := range scenarios {
+			retained := corpusDigest(t, filepath.Join(dir, sc.Name()))
+			if !strings.Contains(string(rules), fmt.Sprintf("corpus %s: sha256 %s\n", sc.Name(), retained)) {
+				t.Errorf("version %s retains %s as sha256 %s, which its recorded rules do not identify", version, sc.Name(), retained)
+			}
+		}
+	}
+}
+
+func digest(s string) string {
+	return fmt.Sprintf("%d bytes, sha256 %x", len(s), sha256.Sum256([]byte(s)))
+}
+
+// runtimeMappingRules pins actual runtime environment and model construction,
+// including both APIs, transports and non-default options. It records behavior,
+// independently of the handcrafted frames that isolate block composition.
+func runtimeMappingRules(t *testing.T) string {
+	t.Helper()
+	run := harness.Run{ID: "run_fixed", Goal: "Complete the task.\n", Constraints: "Preserve evidence.\n"}
+	var b strings.Builder
+	transports := []host.RunConfig{
+		{API: host.APIMessages, DecisionFormat: "text", Effort: "high", Structured: true, Fallbacks: true},
+		{API: host.APIMessages, DecisionFormat: "text"},
+		{API: host.APIMessages, DecisionFormat: "tool", Effort: "high", Fallbacks: true},
+		{API: host.APIResponses, DecisionFormat: "text", Effort: "high", Structured: true},
+		{API: host.APIResponses, DecisionFormat: "text"},
+		{API: host.APIResponses, DecisionFormat: "tool", Effort: "high"},
+	}
+	base := runSpec(t)
+	for _, enabled := range [][2]bool{{false, false}, {true, false}, {true, true}} {
+		for _, transport := range transports {
+			c := base.Config
+			c.API, c.DecisionFormat, c.Effort, c.Structured, c.Fallbacks = transport.API, transport.DecisionFormat, transport.Effort, transport.Structured, transport.Fallbacks
+			c.Model, c.MaxTokens = "test-model", 4096
+			loop := host.ContextConfig(c, base.Budget)
+			frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: base.Limits.MaxSteps, Attempt: 1, MaxAttempts: base.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, RetrievalEnabled: enabled[0], ImportsEnabled: enabled[1]}
+			prompt, err := frame.Prompt(loop.Limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model, err := newModel(c, "https://model.test", host.Keys{AnthropicKey: "test-key", OpenAIKey: "test-key"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := model.Freeze(prompt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "runtime transport %s %s effort=%q structured=%t fallbacks=%t retrieval=%t imports=%t: system %s; %s %s %s\n", c.API, c.DecisionFormat, c.Effort, c.Structured, c.Fallbacks, enabled[0], enabled[1], digest(prompt.System), request.Protocol, request.Adapter, digest(string(request.Body)))
+		}
+	}
+	imports := t.TempDir()
+	variants := [][]string{nil, {"-history-imports", imports}, {"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"}, {"-image", "custom-image:tag", "-output-limit", "4096", "-job-timeout", "1s"}, {"-image", strings.Repeat("x", 2047)}, {"-image", "debian\xff"}, {"-api", "anthropic-messages", "-model", "test-model", "-effort", "max", "-fallbacks"}, {"-api", "openai-responses", "-model", "test-model", "-max-tokens", "4096", "-effort", "none", "-structured=false", "-decision-format", "tool", "-request-bytes", "131072"}}
+	for _, flags := range variants {
+		spec := parseSpec(t, flags...)
+		loop := host.ContextConfig(spec.Config, spec.Budget)
+		frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: spec.Limits.MaxSteps, Attempt: 1, MaxAttempts: spec.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, RetrievalEnabled: loop.Reader != nil, ImportsEnabled: loop.Reader != nil && loop.Reader.Imports != ""}
+		prompt, err := frame.Prompt(loop.Limits)
+		label := strings.Join(flags, " ")
+		label = strings.ReplaceAll(label, imports, "DIR")
+		encoded, _ := json.Marshal(struct {
+			Limits                harness.PromptLimits
+			Core                  core.Limits
+			Tool, Reader, Imports bool
+		}{loop.Limits, spec.Limits, loop.DecisionTool, loop.Reader != nil, loop.Reader != nil && loop.Reader.Imports != ""})
+		fmt.Fprintf(&b, "runtime config %q: %s; environment %s; prompt %s; error %v\n", label, encoded, digest(host.Environment(spec.Config, spec.Budget)), digest(prompt.System+prompt.User()), err)
+	}
+	return b.String()
+}
+
+// storedRules pins actual CLI run/resume requests built from saved options,
+// including native evidence, provider reset, protocol repair and >64 receipts.
 func storedRules(t *testing.T) string {
 	t.Helper()
 	read := core.Decision{Kind: core.Exec, Payload: harness.RetrievePrefix + `{"operation":"read","path":"/canti/imports/notes.txt","reason":"Read the notes."}`}
@@ -167,8 +261,9 @@ func storedRules(t *testing.T) string {
 		t.Fatal(err)
 	}
 	f := newFixture(t, map[int]core.Decision{1: read, 2: {Kind: core.Return, Payload: "done"}})
+	f.model.answer(2, 1, reply{status: 400, body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
 	if r := f.cli(nil, "run", "-once", "-goal", "Report what the notes say.", "-model", "claude-sonnet-5", "-max-tokens", "4096", "-effort", "low", "-structured=false",
-		"-fallbacks", "-context-bytes", "131072", "-window-steps", "1", "-window-bytes", "9000", "-handover-bytes", "1000",
+		"-fallbacks", "-request-bytes", "131072",
 		"-history-imports", imports, "-memory", "1g"); r.code != exitActive {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
@@ -228,7 +323,7 @@ func storedRules(t *testing.T) string {
 	}
 	h := sha256.New()
 	io.WriteString(h, frozenRequests(t, f, "step"))
-	return b + fmt.Sprintf("long window: %d requests, sha256 %x\n", len(f.model.requests()), h.Sum(nil))
+	return b + fmt.Sprintf("long receipt history: %d requests, sha256 %x\n", len(f.model.requests()), h.Sum(nil))
 }
 
 // frozenRequests digests, one line labelled label per request, every request
@@ -241,12 +336,20 @@ func frozenRequests(t *testing.T, f *fixture, label string) string {
 	}
 	defer store.Close()
 	last, err := store.LastRun(context.Background())
-	var all []harness.Transition
-	if err == nil {
-		all, err = store.Transitions(context.Background(), last.ID, 0, 1<<20)
-	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	var all []harness.Transition
+	for after := int64(0); ; {
+		page, err := store.Transitions(context.Background(), last.ID, after, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, page...)
+		if len(page) < 64 {
+			break
+		}
+		after = page[len(page)-1].Seq
 	}
 	name := strings.NewReplacer(last.ID, "RUN").Replace
 	var b strings.Builder
@@ -261,179 +364,4 @@ func frozenRequests(t *testing.T, f *fixture, label string) string {
 		}
 	}
 	return b.String()
-}
-
-// corpusRules digests, for every scenario of the frozen-request corpus that
-// TestLoopScenariosKeepTheirCommittedRecords keeps equal to what the loop
-// commits, the body of every request it freezes and its journal: the event
-// ID and facts of every transition, which record the window and context
-// accounting of each request and the outcome of each step and stop.
-func corpusRules(t *testing.T) string {
-	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests")
-	scenarios, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var b strings.Builder
-	for _, sc := range scenarios {
-		fmt.Fprintf(&b, "corpus %s: sha256 %s\n", sc.Name(), corpusDigest(t, filepath.Join(root, sc.Name())))
-	}
-	return b.String()
-}
-
-// corpusDigest digests the files of the scenario directory dir as the
-// recorded context rules do.
-func corpusDigest(t *testing.T, dir string) string {
-	t.Helper()
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := sha256.New()
-	for _, f := range files {
-		data, err := os.ReadFile(filepath.Join(dir, f.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		fmt.Fprintf(h, "%s %d\n%s", f.Name(), len(data), data)
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// TestEarlierVersionsKeepTheirCorpus requires that every scenario a later
-// context version renders anew keeps, under frozen-requests-v<version>, the
-// requests and journal that its earlier version froze: the files whose
-// digest that version's recorded rules hold, never rewritten.
-func TestEarlierVersionsKeepTheirCorpus(t *testing.T) {
-	root := filepath.Join("..", "..", "internal", "harness", "testdata")
-	dirs, err := filepath.Glob(filepath.Join(root, "frozen-requests-v*"))
-	if err != nil || len(dirs) == 0 {
-		t.Fatalf("no retained corpus of an earlier version: %v", err)
-	}
-	for _, dir := range dirs {
-		version := strings.TrimPrefix(filepath.Base(dir), "frozen-requests-v")
-		rules, err := os.ReadFile(filepath.Join("testdata", "context-v"+version+".txt"))
-		if err != nil {
-			t.Fatalf("retained corpus %s has no recorded context version: %v", dir, err)
-		}
-		scenarios, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, sc := range scenarios {
-			retained := corpusDigest(t, filepath.Join(dir, sc.Name()))
-			if !strings.Contains(string(rules), fmt.Sprintf("corpus %s: sha256 %s\n", sc.Name(), retained)) {
-				t.Errorf("version %s retains %s as sha256 %s, which its recorded rules do not identify", version, sc.Name(), retained)
-			}
-		}
-	}
-}
-
-// sessionRules records the first request that a run of a session freezes
-// after eleven earlier runs through the CLI: the fifth stopped, the tenth
-// returned after a handover, and the eleventh stopped right after its
-// handover. It records the earlier dialogue the run selects, how it renders,
-// and the sources it records, with run IDs named by their session sequence.
-func sessionRules(t *testing.T) string {
-	t.Helper()
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "Earlier answer."}})
-	f.model.answer(1, 5, reply{text: "not a decision"})
-	for i := 1; i <= 9; i++ {
-		args, want := []string{"-session", "s", "-input", fmt.Sprintf("in%d", i), "-goal", fmt.Sprintf("Earlier goal %d.", i)}, exitOK
-		if i == 5 {
-			args, want = append(args, "-max-attempts", "1"), exitStopped
-		}
-		if r := f.cli(nil, "run", args...); r.code != want {
-			t.Fatalf("earlier session run %d: %+v", i, r)
-		}
-	}
-	decision := func(step, call int, payload string) {
-		body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: payload})
-		f.model.answer(step, call, reply{text: string(body)})
-	}
-	f.model.answer(3, 1, reply{text: `{"kind":"return","payload":"Handed over, then answered."}`})
-	for i, ending := range []struct {
-		maxSteps string
-		want     int
-	}{{"3", exitOK}, {"2", exitStopped}} {
-		args := []string{"-session", "s", "-input", fmt.Sprintf("in%d", 10+i), "-goal", fmt.Sprintf("Earlier goal %d.", 10+i), "-window-steps", "1", "-max-steps", ending.maxSteps, "-once"}
-		if r := f.cli(nil, "run", args...); r.code != exitActive {
-			t.Fatalf("earlier session run %d: %+v", 10+i, r)
-		}
-		decision(1, 10+i, `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"Look around."}`)
-		decision(2, 1+i, harness.HandoverPrefix+"Listed the runs.")
-		if r := f.cli(nil, "resume"); r.code != ending.want {
-			t.Fatalf("earlier session run %d: %+v", 10+i, r)
-		}
-	}
-	if r := f.cli(nil, "run", "-session", "s", "-input", "in12", "-goal", "Current goal.", "-once"); r.code != exitActive {
-		t.Fatalf("session run 12: %+v", r)
-	}
-	store, err := sqlite.OpenReadOnly(context.Background(), filepath.Join(f.state, "canti.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	var named []string
-	for seq := int64(1); seq <= 12; seq++ {
-		runs, err := store.SessionRuns(context.Background(), "s", seq+1, 1)
-		if err != nil || len(runs) != 1 || runs[0].SessionSeq != seq {
-			t.Fatalf("session run %d: %+v, %v", seq, runs, err)
-		}
-		named = append(named, runs[0].ID, fmt.Sprintf("RUN%d", seq))
-	}
-	name := strings.NewReplacer(named...).Replace
-	last, err := store.LastRun(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := store.Request(context.Background(), last.ID, 1, 1)
-	if err != nil || req.Context == nil {
-		t.Fatalf("frozen request of session run 12: %+v, %v", req, err)
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "session run 12 of 12: request %s, navigation %s\n", digest(name(string(req.Body))), name(req.Context.SessionNavigation))
-	for _, src := range req.Context.Session {
-		fmt.Fprintf(&b, "  earlier %s, sequence %d, %s, goal %v, handover step %d\n", name(src.RunID), src.SessionSeq, src.Status, src.IncludedGoal, src.HandoverStep)
-	}
-	return b.String()
-}
-
-// everyBlock is a page of a requested handover window after a handover,
-// with a step of every kind and a rejected response.
-func everyBlock(run harness.Run) harness.Frame {
-	exit, failed := 0, 1
-	read := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: "/canti/runs/r/steps/00000002/preview", Reason: "check", Limit: 64},
-		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000002/preview", Length: 5, SHA256: strings.Repeat("a", 64)}}, Evidence: []string{"hello"}, NextOffset: 5}
-	list := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "list", Path: "/canti/runs"}, Entries: []string{"r/"}, NextOffset: 1}
-	discover := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/r/steps", Reason: "find", Query: "FAIL"},
-		Sources: []archive.SourceRange{{Path: "/canti/runs/r/steps/00000003/preview", Length: 4, SHA256: strings.Repeat("b", 64)}}, Evidence: []string{"FAIL"}, More: true, NextCursor: "c"}
-	carriedRead := harness.CarriedEvidence{Ref: harness.EvidenceRef{SourceSeq: 5, Step: 1, Length: 5, SHA256: strings.Repeat("a", 64)},
-		Operation: "read", Path: "/canti/runs/r/steps/00000001/preview", More: true, NextOffset: 5, Bytes: "hello"}
-	carriedCandidate := harness.CarriedEvidence{Ref: harness.EvidenceRef{SourceSeq: 9, Step: 2, Source: 1, Length: 7, SHA256: strings.Repeat("b", 64)},
-		Operation: "discover", Path: "/canti/runs/r/steps/00000002/command", Offset: 12, Incomplete: true, Bytes: "``` FAIL"[:7]}
-	steps := []harness.StepRecord{
-		{Step: 3, Command: "go test ./...", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "FAIL ```",
-			Output: harness.ArtifactRef{Path: "effect_x/output", Bytes: 8, Complete: true, Available: true}}},
-		{Step: 4, Command: harness.RetrievePrefix + `{"operation":"read"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Preview: "{}", Retrieval: &read}},
-		{Step: 5, Command: harness.RetrievePrefix + `{"operation":"list"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &list}},
-		{Step: 6, Command: "sleep 1", Resolved: true, Observation: harness.Observation{Execution: core.ExecutionTimedOut, Output: harness.ArtifactRef{Detail: "resolved by operator"}}},
-		{Step: 7, Command: harness.HandoverPrefix, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &failed, Preview: "Context action failed: x"}},
-		{Step: 8, Command: harness.RetrievePrefix + `{"operation":"discover"}`, Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit, Retrieval: &discover}},
-		{Step: 9, Command: harness.HandoverPrefix + "Go on.", Observation: harness.Observation{Execution: core.ExecutionExited, ExitCode: &exit,
-			Preview: "Handover recorded; the next request starts a new context window.", Handover: &harness.Handover{RunID: "r", FirstStep: 3, Text: "Go on."}}},
-	}
-	return harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: "Linux", Step: 10, MaxSteps: 0, Attempt: 2, MaxAttempts: 3,
-		Earlier: 2, Steps: steps, RunID: run.ID,
-		Rejected: &harness.Rejection{Error: "core: decision has no kind", Response: "{}"},
-		Window: &harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Continue the tests.", Requested: true, Failures: 1,
-			Carry: []harness.EvidenceRef{carriedRead.Ref, carriedCandidate.Ref}},
-		Carried:          []harness.CarriedEvidence{carriedRead, carriedCandidate},
-		RetrievalEnabled: true, ImportsEnabled: true, HandoverBytes: 4096,
-		SessionContext: "Run run_0 (session sequence 1; source /canti/runs/run_0/goal and result; returned):\n"}
-}
-
-func digest(s string) string {
-	return fmt.Sprintf("%d bytes, sha256 %x", len(s), sha256.Sum256([]byte(s)))
 }

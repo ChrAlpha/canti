@@ -14,6 +14,7 @@ type Resolution = wire.Resolution
 type Ack = wire.Ack
 type Run = wire.Run
 type Totals = wire.Totals
+type UsageCoverage = wire.UsageCoverage
 type Budget = wire.Budget
 type Page = wire.Page
 type Item = wire.Item

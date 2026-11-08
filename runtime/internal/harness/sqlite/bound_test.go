@@ -29,7 +29,7 @@ func shortcut(s core.State) (core.Event, harness.Facts) {
 		event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}
 		return event, acceptance(s, event)
 	case core.PhaseEffectSaved:
-		a := harness.NormalizeAction(s.Decision.Payload, false, true)
+		a := harness.NormalizeAction(s.Decision.Payload, true)
 		return core.Performed{EffectID: s.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: a.Problem()}}
 	}
 	return nil, harness.Facts{}
@@ -217,7 +217,7 @@ func TestProgressSelectsNoBodyAndClipsEveryText(t *testing.T) {
 	rest := regexp.MustCompile(`substr\(CAST\(json_extract\((from_state|to_state|facts), '[^']*'\) AS BLOB\), 1, \d+\)`).ReplaceAllString(progressSQL, "")
 	for _, m := range regexp.MustCompile(`json_extract\([^)]*\)`).FindAllString(rest, -1) {
 		switch m {
-		case `json_extract(from_state, '$.Step')`, `json_extract(facts, '$.Observation.ExitCode')`, `json_extract(facts, '$.Window.FirstStep')`:
+		case `json_extract(from_state, '$.Step')`, `json_extract(facts, '$.Observation.ExitCode')`, `json_extract(facts, '$.ContextState.AnchorSeq')`:
 		default:
 			t.Errorf("progress selects %s without a cap", m)
 		}

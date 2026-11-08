@@ -11,194 +11,104 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
-	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
 var (
 	stressRound      = regexp.MustCompile(`(?m)^SESSION_STRESS_ROUND=(\d+)$`)
-	stressRun        = regexp.MustCompile(`Every completed step of this run[^\n]+/canti/runs/(run_[a-f0-9]+)/steps/`)
-	stressNavigation = regexp.MustCompile(`Browse older records through /canti/runs/(run_[a-f0-9]+)/session`)
+	stressRun        = regexp.MustCompile(`Run (run_[a-f0-9]+); anchor sequence`)
+	stressNavigation = regexp.MustCompile(`Previous run: /canti/runs/(run_[a-f0-9]+)/`)
 	stressOrigin     = regexp.MustCompile(`origin=(/canti/runs/run_[a-f0-9]+/steps/00000001/preview)`)
-	stressWindow     = regexp.MustCompile(`This window begins at step (\d+)\.`)
-	stressHandover   = regexp.MustCompile(`(?m)^SESSION_STRESS_STATE=(\{[^\n]+\})$`)
+	stressLatest     = regexp.MustCompile(`Latest completed step (\d+), sequence (\d+);`)
 	stressSession    = regexp.MustCompile(`(?m)^\{"session_id":"horizon",[^\n]+\}$`)
 )
 
-type sessionStressState struct {
-	Phase    int    `json:"phase"`
-	Previous string `json:"previous"`
-	Origin   string `json:"origin"`
-	Cursor   string `json:"cursor"`
-	Links    int    `json:"links"`
-}
-
-func sessionStressDecision(_ int, prompt string) (core.Decision, error) {
+// The policy learns history only through the native reader. Reset deliberately
+// discards its selection; the next read and focus explicitly restore evidence.
+func sessionStressDecision(step int, prompt string) (core.Decision, error) {
 	bad := func(format string, args ...any) (core.Decision, error) {
 		return core.Decision{}, fmt.Errorf(format, args...)
 	}
-	roundMatch, runMatch, windowMatch := stressRound.FindStringSubmatch(prompt), stressRun.FindStringSubmatch(prompt), stressWindow.FindStringSubmatch(prompt)
-	if len(roundMatch) == 0 || len(runMatch) == 0 || len(windowMatch) == 0 {
-		return bad("missing current goal, run, or window")
+	rm, id := stressRound.FindStringSubmatch(prompt), stressRun.FindStringSubmatch(prompt)
+	if len(rm) == 0 || len(id) == 0 {
+		return bad("missing authoritative goal or run anchor")
 	}
-	round, _ := strconv.Atoi(roundMatch[1])
-	first, _ := strconv.Atoi(windowMatch[1])
-	runID := runMatch[1]
-	s := sessionStressState{}
-	if h := stressHandover.FindStringSubmatch(prompt); len(h) > 0 {
-		if err := json.Unmarshal([]byte(h[1]), &s); err != nil {
-			return bad("invalid handover: %v", err)
-		}
-	} else if first != 1 {
-		return bad("new window lost the handover state")
-	} else if round == 1 {
-		s.Origin = "/canti/runs/" + runID + "/steps/00000001/preview"
-	} else {
+	round, _ := strconv.Atoi(rm[1])
+	runID := id[1]
+	root := "/canti/runs/" + runID
+	previous := ""
+	if round > 1 {
 		nav := stressNavigation.FindStringSubmatch(prompt)
 		if len(nav) == 0 {
 			return bad("missing previous session navigation")
 		}
-		s.Previous, s.Cursor = nav[1], nav[1]
-	}
-	for _, block := range strings.Split(prompt, "\n### Step ")[1:] {
-		if err := s.observe(round, runID, block); err != nil {
-			return bad("round %d phase %d: %v", round, s.Phase, err)
-		}
-	}
-	if strings.Contains(prompt, "## Handover required\n") {
-		state, _ := json.Marshal(s)
-		return core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "SESSION_STRESS_STATE=" + string(state)}, nil
+		previous = nav[1]
 	}
 	read := func(path string) (core.Decision, error) {
 		q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: path, Reason: "verify original session evidence", Limit: 8192})
 		return core.Decision{Kind: core.Exec, Payload: "canti:retrieve " + string(q)}, nil
 	}
-	root := "/canti/runs/" + runID
-	switch s.Phase {
-	case 0, 4, 8:
-		stage := s.Phase / 4
+	origin := root + "/steps/00000001/preview"
+	if round > 1 {
+		m := stressOrigin.FindStringSubmatch(prompt)
+		if len(m) > 0 {
+			origin = m[1]
+		} else if step >= 3 && step != 4 && step != 8 {
+			return bad("previous result lost its original evidence reference at step %d", step)
+		}
+	}
+	switch step {
+	case 1, 6, 11:
+		stage := 0
+		if step == 6 {
+			stage = 1
+		}
+		if step == 11 {
+			stage = 2
+		}
 		label := fmt.Sprintf("run-%02d:%c", round, 'A'+stage)
 		command := fmt.Sprintf("set -eu; printf '%s\\n' >> effects.txt; touch ledger.txt; test \"$(wc -l < ledger.txt)\" -eq %d; printf '%s\\n' >> ledger.txt; tail -n 1 ledger.txt", label, (round-1)*3+stage, label)
 		return core.Decision{Kind: core.Exec, Payload: command}, nil
-	case 1:
+	case 2, 4, 8:
 		if round == 1 {
 			return read(root + "/goal")
 		}
-		return read("/canti/runs/" + s.Previous + "/result")
-	case 2:
-		if round == 10 {
-			return read("/canti/runs/" + s.Cursor + "/session")
+		return read("/canti/runs/" + previous + "/result")
+	case 3, 5, 9:
+		latest := stressLatest.FindStringSubmatch(prompt)
+		if len(latest) == 0 || latest[1] != strconv.Itoa(step-1) {
+			return bad("missing preceding retrieval at step %d", step)
 		}
-		return read(root + "/session")
-	case 3, 9:
-		return read(s.Origin)
-	case 5:
-		return read(root + "/goal")
-	case 6:
-		return core.Decision{Kind: core.Exec, Payload: fmt.Sprintf("test \"$(wc -l < ledger.txt)\" -eq %d && printf 'verified run=%02d\\n'", (round-1)*3+2, round)}, nil
+		if round > 1 && !strings.Contains(prompt, fmt.Sprintf("completed run=%02d ", round-1)) {
+			return bad("prior result body missing at step %d", step)
+		}
+		return core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:focus {"sources":[{"seq":%s,"source":0}]}`, latest[2])}, nil
 	case 7:
-		return read(root + "/steps/00000001/preview")
+		return read(root + "/session")
 	case 10:
-		return core.Decision{Kind: core.Return, Payload: fmt.Sprintf("completed run=%02d origin=%s links=%d", round, s.Origin, s.Links)}, nil
+		return read(origin)
 	}
-	return bad("unknown phase %d", s.Phase)
-}
-
-func (s *sessionStressState) observe(round int, runID, block string) error {
-	require := func(want string) error {
-		if !strings.Contains(block, want) {
-			return fmt.Errorf("missing %q in current observation", want)
-		}
-		return nil
-	}
-	read := func(path string) error {
-		if err := require("Retrieved original evidence:\n"); err != nil {
-			return err
-		}
-		return require("\nPath " + path + ":\n")
-	}
-	root := "/canti/runs/" + runID
-	switch s.Phase {
-	case 0, 4, 8:
-		if err := require(fmt.Sprintf("Preview:\n```\nrun-%02d:%c\n", round, 'A'+s.Phase/4)); err != nil {
-			return err
-		}
-	case 1:
-		if round == 1 {
-			if err := read(root + "/goal"); err != nil {
-				return err
-			}
-		} else {
-			if err := read("/canti/runs/" + s.Previous + "/result"); err != nil {
-				return err
-			}
-			if err := require(fmt.Sprintf("completed run=%02d ", round-1)); err != nil {
-				return err
-			}
-			origin := stressOrigin.FindStringSubmatch(block)
-			if len(origin) == 0 {
-				return fmt.Errorf("previous result has no original evidence reference")
-			}
-			s.Origin = origin[1]
-		}
-	case 2:
-		id := runID
-		if round == 10 {
-			id = s.Cursor
-		}
-		if err := read("/canti/runs/" + id + "/session"); err != nil {
-			return err
+	links := 0
+	if round == 10 {
+		if step == 12 {
+			return read("/canti/runs/" + previous + "/session")
 		}
 		var meta struct {
 			Sequence int    `json:"sequence"`
 			Previous string `json:"previous_run_id"`
 		}
-		if err := json.Unmarshal([]byte(stressSession.FindString(block)), &meta); err != nil {
-			return err
+		if err := json.Unmarshal([]byte(stressSession.FindString(prompt)), &meta); err != nil {
+			return bad("missing explicit session navigation at step %d: %v", step, err)
 		}
-		if round == 10 {
-			if meta.Sequence != round-1-s.Links {
-				return fmt.Errorf("navigation skipped a session run: %+v", meta)
-			}
-			s.Links++
-			if meta.Previous != "" {
-				s.Cursor = meta.Previous
-				return nil
-			}
-			if meta.Sequence != 1 {
-				return fmt.Errorf("navigation ended before sequence 1")
-			}
-			s.Origin = "/canti/runs/" + id + "/steps/00000001/preview"
-		} else if meta.Sequence != round {
-			return fmt.Errorf("wrong current session metadata: %+v", meta)
+		links = step - 12
+		if meta.Sequence != round-links {
+			return bad("navigation skipped session: sequence=%d links=%d", meta.Sequence, links)
 		}
-	case 3, 9:
-		if err := read(s.Origin); err != nil {
-			return err
+		if meta.Previous != "" {
+			return read("/canti/runs/" + meta.Previous + "/session")
 		}
-		if err := require("\nrun-01:A\n"); err != nil {
-			return err
+		if links != 9 {
+			return bad("session chain ended at %d links", links)
 		}
-	case 5:
-		if err := read(root + "/goal"); err != nil {
-			return err
-		}
-		if err := require(fmt.Sprintf("SESSION_STRESS_ROUND=%d\n", round)); err != nil {
-			return err
-		}
-	case 6:
-		if err := require(fmt.Sprintf("Preview:\n```\nverified run=%02d\n", round)); err != nil {
-			return err
-		}
-	case 7:
-		if err := read(root + "/steps/00000001/preview"); err != nil {
-			return err
-		}
-		if err := require(fmt.Sprintf("\nrun-%02d:A\n", round)); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unexpected observation after phase %d", s.Phase)
 	}
-	s.Phase++
-	return nil
+	return core.Decision{Kind: core.Return, Payload: fmt.Sprintf("completed run=%02d origin=%s links=%d", round, origin, links)}, nil
 }

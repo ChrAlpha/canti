@@ -402,13 +402,6 @@ func writeFile(t *testing.T, path string) {
 	}
 }
 
-func checkFile(t *testing.T, path, want string) {
-	t.Helper()
-	if data, err := os.ReadFile(path); err != nil || string(data) != want {
-		t.Errorf("%s = %q, %v; want %q", filepath.Base(path), data, err, want)
-	}
-}
-
 // evidence logs the one-line evidence record of a gate case.
 func evidence(t *testing.T, gate, injected, image string, f *fixture, h []entry) {
 	t.Helper()

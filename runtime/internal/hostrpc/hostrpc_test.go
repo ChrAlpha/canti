@@ -41,11 +41,10 @@ func wireMessages() map[string]any {
 	code := 3
 	spec := Spec{Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
-		ContextBytes: 262144, ContextVersion: 13, HistoryImports: "/i", WindowSteps: 2, WindowBytes: 3, HandoverBytes: 2048,
-		MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, OutputBudget: 8, JobTimeout: "10m0s"}
+		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, OutputBudget: 8, JobTimeout: "10m0s"}
 	run := Run{RunID: "run_1", SessionID: "s", SessionSeq: 2, InputID: "in_1", Goal: "g", Constraints: "c", Status: StatusStopped, Phase: "stopped",
 		Step: 4, StopReason: "cancelled", Result: "r", EffectID: "effect_1", Cursor: "run_1:9", ContextVersion: 13, API: "anthropic-messages",
-		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4}, Budget: Budget{WallTime: "30m0s", Tokens: 5, OutputBytes: 6, JobTimeout: "10m0s"}}
+		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4, Coverage: UsageCoverage{Attempts: 7, InputReports: 3, OutputReports: 4, Lost: 2}}, Budget: Budget{WallTime: "30m0s", Tokens: 5, OutputBytes: 6, JobTimeout: "10m0s"}}
 	return map[string]any{
 		"request": Request{Validate: &Validation{State: "/state", Submission: Submission{SessionID: "s", Goal: "chat"}, Binding: Binding{Provider: "https://p.test"}}, Protocol: Protocol, Op: OpSubmit, RunID: "run_1", SessionID: "s", Cursor: "run_1:5", Once: true, Limit: 6, TimeoutMS: 7, CleanupMS: 8,
 			Submit:  &Submission{SessionID: "s", InputID: "in_1", Goal: "g", Constraints: "c", ExplicitConstraints: true, Spec: spec},
@@ -55,10 +54,10 @@ func wireMessages() map[string]any {
 			Hello: &Hello{Protocol: Protocol, Version: "dev", ContextVersion: 13, SemanticsVersion: 4, PID: 1, Bindings: []Pair{{API: "anthropic-messages", Provider: "https://p.test"}}},
 			Ack:   &Ack{Replayed: true, Differs: []string{"model", "limits.max_steps"}, Run: run}, Run: &run,
 			Page: &Page{Next: "run_1:9", More: true, Halted: true, Items: []Item{{Seq: 2, Step: 1, Kind: "decided",
-				Command: `canti:handover-carry {"text":"t","carry":[{"step":1}]}`, Purpose: "p", Action: "handover_carry"}, {Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
+				Command: `canti:focus {"sources":[{"seq":1,"source":0}]}`, Purpose: "p", Action: "focus"}, {Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
 				Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
-				Outcome: &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Handover: true},
-				Window:  5, StopReason: "cancelled", Failure: "f", Truncated: true}}},
+				Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Focus: true, FocusSources: 2},
+				AnchorSeq: 5, StopReason: "cancelled", Failure: "f", Truncated: true}, {Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"}}},
 			Inspection: &Inspection{RunID: "run_1", Cursor: "run_1:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
 			Wait:       &Wait{Cursor: "run_1:9", Halted: true, Driver: DriverDriving}, Constraints: new(string)},
 	}

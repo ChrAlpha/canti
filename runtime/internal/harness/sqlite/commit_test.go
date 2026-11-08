@@ -372,7 +372,8 @@ func TestUsageSettlementCoverageAndReplay(t *testing.T) {
 			if terminal {
 				d.do(core.StopRequested{Reason: core.StopUnrecoverable}, harness.Facts{Response: response, Failure: "provider failure"})
 			} else {
-				d.do(core.RequestRejected{Step: 1, Attempt: 3}, harness.Facts{Response: response, Failure: "confirmed overflow"})
+				next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
+				d.do(core.RequestRejected{Step: 1, Attempt: 3}, harness.Facts{Response: response, Failure: "confirmed overflow", ContextState: &next, Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}})
 			}
 			last := d.commits[len(d.commits)-1]
 			if err := s.Commit(ctx, last); err != nil {
@@ -413,5 +414,39 @@ func TestUsageOverflowRollsBackEntireTransition(t *testing.T) {
 	}
 	if got := totalsOf(t, s, "overflow"); got.Usage.InputTokens != math.MaxInt64 || got.Coverage.Attempts != 0 {
 		t.Fatalf("failed accounting changed totals: %+v", got)
+	}
+}
+
+func TestEveryUsageTotalOverflowRollsBackTheAttempt(t *testing.T) {
+	for _, column := range []string{"input_tokens", "output_tokens", "usage_attempts", "input_reports", "output_reports", "lost_attempts", "combined_tokens"} {
+		t.Run(column, func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "total-overflow", core.Limits{MaxAttempts: 3}))
+			d.freeze()
+			d.send()
+			query := `UPDATE runs SET ` + column + `=9223372036854775807 WHERE id='total-overflow'`
+			if column == "combined_tokens" {
+				query = `UPDATE runs SET input_tokens=9223372036854775806,output_tokens=1 WHERE id='total-overflow'`
+			}
+			if _, err := s.db.Exec(query); err != nil {
+				t.Fatal(err)
+			}
+			before, total := d.snap, totalsOf(t, s, "total-overflow")
+			var err error
+			if column == "lost_attempts" {
+				err = d.try(core.ResponseIncomplete{Step: 1, Attempt: 1}, harness.Facts{Failure: "response lost"})
+			} else {
+				err = d.try(core.ResponseSaved{Step: 1, Attempt: 1}, harness.Facts{Response: responseFor(before.State, execBody("true"), harness.Usage{InputTokens: 1, OutputTokens: 1, InputReported: true, OutputReported: true})})
+			}
+			if err == nil {
+				t.Fatal("overflowing total committed")
+			}
+			if got := latestOf(t, s, "total-overflow"); got != before {
+				t.Fatalf("head changed: %+v", got)
+			}
+			if got := totalsOf(t, s, "total-overflow"); got != total {
+				t.Fatalf("partial total update: %+v want %+v", got, total)
+			}
+		})
 	}
 }

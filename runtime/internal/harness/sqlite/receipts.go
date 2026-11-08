@@ -18,7 +18,7 @@ const receiptSQL = `WITH selected AS (
     UNION ALL SELECT seq FROM (SELECT seq FROM transitions WHERE run_id=?1 AND kind='performed' AND seq<?2 ORDER BY seq DESC LIMIT ?3)
     ORDER BY seq DESC LIMIT ?3
 ) SELECT t.seq,t.semantics,json_extract(t.from_state,'$.Step'),
-    substr(json_extract(t.from_state,'$.Decision.Purpose'),1,4096),
+    substr(json_extract(t.from_state,'$.Decision.purpose'),1,4096),
     COALESCE(json_extract(t.facts,'$.Outcome.Status'),json_extract(t.facts,'$.Observation.Execution')),
     json_extract(t.facts,'$.Observation.ExitCode'),
     COALESCE(json_extract(t.facts,'$.Resolution.Source')='operator',0)

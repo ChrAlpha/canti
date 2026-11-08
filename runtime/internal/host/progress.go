@@ -124,7 +124,8 @@ const (
 	ItemStopRequested   ItemKind = "stop_requested" // a persistent stop was recorded
 	ItemRecovered       ItemKind = "effect_recovered"
 	ItemNeedsResolution ItemKind = "needs_resolution" // an effect's outcome is unknown
-	ItemStopped         ItemKind = "stopped"          // the run stopped
+	ItemContextReset    ItemKind = "context_reset"
+	ItemStopped         ItemKind = "stopped" // the run stopped
 )
 
 // Item is one entry of a run's progress, a host projection of committed
@@ -147,7 +148,7 @@ type Item struct {
 	Preview   string
 	Detail    string
 	Outcome   *Outcome // ItemCompleted of a local action the harness performed
-	Window    int      // ItemCompleted: the first step of the window it opened, if any
+	AnchorSeq int64
 
 	Reason  core.StopReason // ItemStopRequested, ItemStopped
 	Failure string          // ItemRetrying, ItemNeedsResolution, ItemStopRequested
@@ -166,7 +167,8 @@ type Outcome struct {
 	RetrievalError string
 	Sources        int
 	Entries        int
-	Handover       bool
+	Focus          bool
+	FocusSources   int
 }
 
 // Cursor names a position in the journal of one run: after its transition
@@ -282,10 +284,16 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 	case "response_incomplete":
 		it.Kind, it.Failure = ItemRetrying, r.Failure
 		shown |= sqlite.ProgressFailure
+	case "request_rejected":
+		it.Kind, it.Failure, it.AnchorSeq = ItemRetrying, r.Failure, r.AnchorSeq
+		if r.AnchorSeq > 0 {
+			it.Kind = ItemContextReset
+		}
+		shown |= sqlite.ProgressFailure
 	case "performed":
-		it.Kind, it.Local, it.Window, it.Command = ItemCompleted, true, r.WindowFirstStep, r.Decision.Payload
+		it.Kind, it.Local, it.AnchorSeq, it.Command = ItemCompleted, true, r.AnchorSeq, r.Decision.Payload
 		it.Outcome = &Outcome{Status: harness.OutcomeStatus(r.Outcome), Detail: r.OutcomeDetail, Retrieval: r.Retrieval,
-			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, Handover: r.Handover}
+			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, Focus: r.Focus, FocusSources: r.FocusSources}
 		shown |= sqlite.ProgressPayload | sqlite.ProgressOutcomeDetail | sqlite.ProgressRetrievalError
 	case "observed", "resolved":
 		it.Kind, it.Resolved, it.Command = ItemCompleted, r.ResolutionSource == harness.ResolutionOperator, r.Decision.Payload

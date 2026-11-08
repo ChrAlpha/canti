@@ -56,7 +56,7 @@ func (l *Loop) focus(ctx context.Context, snap Snapshot, args string) (Outcome, 
 		refs = append(refs, ref)
 	}
 	slices.SortFunc(refs, compareRefs)
-	if err := validateCarry(refs, snap.State.Step); err != nil {
+	if err := validateFocus(refs, snap.State.Step); err != nil {
 		return failed(err), nil
 	}
 	return Outcome{Status: OutcomeDone, Focus: &FocusSelection{Sources: refs}}, nil

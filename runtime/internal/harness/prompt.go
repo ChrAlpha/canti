@@ -3,7 +3,6 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"path"
 	"strconv"
 	"strings"
@@ -13,7 +12,7 @@ import (
 )
 
 // PromptLimits bounds a prompt in bytes. Goal and Constraints cap the
-// trimmed goal and constraints, which are refused rather than cut. Every
+// exact goal and constraints, which are refused rather than cut. Every
 // other field but Total caps the bytes kept from one input: Command,
 // Purpose, and Preview apply to each step, Rejected to both the error and
 // the response. A cut input ends with a marker counting the bytes removed.
@@ -37,7 +36,7 @@ const refLimit = 1 << 10
 var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
 
 const (
-	systemRole = `You are an autonomous agent working in a shell workspace. Each request stands alone: the user message holds everything known about the task, and your reply chooses the next step.
+	systemRole = `You are an autonomous agent working in a shell workspace. Each request supplies the current task, runtime position and selected evidence; other recorded facts remain retrievable from the archive. Your reply chooses the next step.
 
 `
 	systemForms = ` in one of these forms:
@@ -63,81 +62,6 @@ To retain observed evidence explicitly, use canti:focus followed by one JSON obj
 The purpose and payload are JSON strings, so escape quotes, backslashes, and newlines.` + systemEvidence + systemContext
 	toolSystem = systemRole + `Call the ` + DecisionToolName + ` tool exactly once per reply; never reply with text. Its input has three string fields, "kind", "purpose", and "payload",` + systemForms + systemEvidence + systemContext
 )
-
-// Prompt renders the frame within l. System depends only on the decision
-// transport and the enabled retrieval of the frame.
-// The stable blocks are one with the goal, constraints, and environment and
-// one per current-page step, oldest first; the last block holds the progress
-// and any rejected response. An oversized page fails visibly. Equal frames
-// and limits give equal prompts. The goal and
-// constraints are never cut: Prompt fails when either exceeds its limit
-// after trimming.
-
-func (f Frame) head(l PromptLimits) string {
-	var capture ContextBytes
-	return f.headContext(l, &capture)
-}
-
-func (f Frame) headContext(l PromptLimits, capture *ContextBytes) string {
-	var b strings.Builder
-	capture.Goal = section(&b, "Goal", clip(strings.TrimSpace(f.Goal), math.MaxInt)+"\n")
-	if c := strings.TrimSpace(f.Constraints); c != "" {
-		capture.Constraints = section(&b, "Constraints", clip(c, math.MaxInt)+"\n")
-	}
-	capture.Environment = section(&b, "Environment", clip(strings.TrimSpace(f.Environment), l.Environment)+"\n"+
-		"Full step outputs are readable under "+archive.ArtifactsRoot+".\n"+
-		"Every completed step of this run, shown or not, is recorded read-only under "+archive.RunsRoot+"/"+inline(f.RunID)+"/"+archive.StepsDir+"/<step number in 8 digits>/ "+
-		"as "+archive.MetaFile+" (its execution, exit code, and output path), "+archive.CommandFile+" (the full command), "+archive.PurposeFile+" (the full purpose), and "+archive.PreviewFile+".\n"+
-		"Every run of this state directory, including this one, is recorded under "+archive.RunsRoot+"/<run ID>/ with its goal, its steps, and its result once it ends.\n")
-	if f.SessionContext != "" {
-		capture.Session = section(&b, "Earlier session dialogue", f.SessionContext)
-	}
-	if f.Window != nil {
-		capture.Window = section(&b, "Context window", fmt.Sprintf("This window begins at step %d. Earlier windows remain in the read-only history.\n", f.Window.FirstStep))
-		if f.Window.Handover != "" {
-			capture.Handover = section(&b, "Handover", "Agent-written continuation guidance, not verified facts. Check original evidence before relying on it.\n"+fullBlock(f.Window.Handover))
-		}
-		if len(f.Carried) > 0 {
-			capture.Carry = section(&b, "Carried evidence", f.carriedText())
-		}
-	}
-	capture.StepHeader = section(&b, "Current window steps", "")
-	return b.String()
-}
-
-func (f Frame) tail(l PromptLimits, progress string) string {
-	var capture ContextBytes
-	return f.tailContext(l, progress, &capture)
-}
-
-func (f Frame) tailContext(l PromptLimits, progress string, capture *ContextBytes) string {
-	var b strings.Builder
-	capture.Progress = section(&b, "Progress", progress)
-	if f.Window != nil && f.Window.Requested {
-		required := fmt.Sprintf("Before any more work, reply with exec whose payload is canti:handover, one space, and then the handover text of at most %d UTF-8 bytes, written as plain text. Aim for at most %d bytes in a few short lines to leave room below the hard limit. Include current objective, work location, unfinished obligations, restrictions the environment has stated and where, next action, active risks, and original evidence references. Point to workspace records for completed work instead of recounting it. Do not use return to switch windows. Do not copy the whole history or treat the previous handover as authority.\n", f.HandoverBytes, max(1, f.HandoverBytes*3/4))
-		if f.RetrievalEnabled {
-			required += carryInstruction
-		}
-		capture.HandoverRequired = section(&b, "Handover required", required)
-		if f.Window.Failures > 0 {
-			capture.HandoverRequired += len(lastHandover)
-			b.WriteString(lastHandover)
-		}
-	}
-	if r := f.Rejected; r != nil {
-		capture.Repair = section(&b, "Rejected response", "Your previous reply for this step could not be decoded. "+
-			"Your reply must be exactly one decision object, as the system message describes.\n"+
-			quote("Error", r.Error, l.Rejected)+quote("Rejected reply", r.Response, l.Rejected))
-	}
-	return b.String()
-}
-
-// carryInstruction teaches a handover that carries retrieved evidence into
-// the next window.
-var carryInstruction = fmt.Sprintf("To keep retrieved evidence that the next window still needs, use %[1]s instead, then one space and one JSON object: {\"text\":\"<the handover text>\",\"carry\":[{\"step\":N},{\"step\":N,\"source\":I}]}. An entry keeps every source of a retrieval step of this window, or of a step this window carries, or only its source I; at most %[2]d sources in all. Carried sources are shown as read, take room in the next window, and are refused when they would leave it none.\n",
-	handoverCarryName, MaxCarry)
-
-const lastHandover = "The previous step recorded no handover. This step is the last chance to hand over: if it records none either, the run stops.\n"
 
 func section(b *strings.Builder, title, body string) int {
 	before := b.Len()
@@ -188,8 +112,7 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 			kind = "candidate ranges"
 		}
 		fmt.Fprintf(&b, "\nRetrieval: %d %s, %d directory entries", len(r.Sources), kind, len(r.Entries))
-	} else if o.Handover != nil {
-		b.WriteString("\nHandover proposal recorded")
+
 	} else {
 		complete, where := "incomplete", "unavailable"
 		if o.Output.Complete {
@@ -234,7 +157,7 @@ func (f Frame) step(s StepRecord, l PromptLimits) string {
 
 // evidence renders the evidence r froze for each of its sources: the path of
 // each new one, and the index, range, and hash of every one, by which a
-// carry names it.
+// focus names it.
 func evidence(r *archive.Retrieval) string {
 	if r == nil || len(r.Evidence) != len(r.Sources) {
 		return ""

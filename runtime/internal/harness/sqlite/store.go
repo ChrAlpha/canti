@@ -69,6 +69,7 @@ CREATE TABLE transitions (
 );
 CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
 CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
+CREATE UNIQUE INDEX transitions_completion_step ON transitions (run_id, json_extract(from_state, '$.Step')) WHERE kind IN ('observed','resolved','performed');
 CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
 ` + performedIndex + `
 CREATE TABLE session_runs (
@@ -117,14 +118,12 @@ const (
 	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action'), json_extract(facts, '$.Execution')
 		FROM transitions WHERE run_id = ? AND seq = ?`
-	windowSQL = `SELECT semantics, json_extract(facts, '$.Request.Window') FROM transitions
-		WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
-	stepsSQL, completionSQL, savedSQL, acceptedSQL, windowSQL, progressSQL,
+	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
@@ -301,9 +300,6 @@ func (s *Store) Commit(ctx context.Context, t harness.Transition) error {
 }
 
 func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
-	if err := harness.ValidateTransition(t); err != nil {
-		return err
-	}
 	r, err := encode(t)
 	if err != nil {
 		return err
@@ -339,6 +335,9 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	}
 	if r.semantics != core.SemanticsVersion {
 		return fmt.Errorf("sqlite: a new transition of semantics version %d, want %d", r.semantics, core.SemanticsVersion)
+	}
+	if err := harness.ValidateTransition(t); err != nil {
+		return err
 	}
 	if err := s.checkContext(ctx, tx, t); err != nil {
 		return err
@@ -466,29 +465,22 @@ func (s *Store) addTotals(ctx context.Context, tx *sql.Tx, runID string, d harne
 
 // checkEffect applies harness.CheckEffect to t inside the transaction tx
 // that commits it: with the acceptance of its effect, read by the response
-// index and the primary key, and, for the acceptance itself and a
-// performance, the only transitions whose rule needs it, the window of the
-// request at its From's step and revision, extracted without decoding the
-// request body.
+// index and the primary key, and with immutable run configuration.
 func (s *Store) checkEffect(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
 	if !harness.EffectTransition(t) {
 		return nil
 	}
 	var accepted harness.Accepted
-	var window *harness.Window
 	var err error
 	_, accepting := t.Event.(core.ResponseLoaded)
 	if !accepting {
 		accepted, err = s.accepted(ctx, tx, t.From.RunID, t.From.Step, t.From.Attempt)
 	}
-	if _, performed := t.Event.(core.Performed); err == nil && (accepting || performed) {
-		window, err = s.window(ctx, tx, t.From.RunID, t.From.Step, t.From.RequestRev)
-	}
 	if err == nil {
 		var run harness.Run
 		run, err = s.run(s.stmt(ctx, tx, runSQL).QueryRowContext(ctx, t.From.RunID))
 		if err == nil {
-			err = harness.CheckEffect(t, accepted, window, run.Config)
+			err = harness.CheckEffect(t, accepted, run.Config)
 		}
 		if err != nil {
 			err = fmt.Errorf("%w: %v", harness.ErrFacts, err)

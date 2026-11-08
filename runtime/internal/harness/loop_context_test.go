@@ -16,104 +16,13 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
-
-func TestWindowHandoverRecoversAndDoesNotCarryOldEvidence(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"check source"}`),
-		execReply(harness.HandoverPrefix+"Continue at the evidence reference; verify before use."),
-		reply{err: errors.New("transport interrupted")}, returnReply("done"))
-	imported := t.TempDir()
-	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE_SENTINEL"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f.cfg.Reader = &archive.Reader{Imports: imported}
-	f.cfg.WindowSteps = 1
-	ctx := context.Background()
-	for {
-		snap, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snap.State.Intent() == core.IntentHalt {
-			break
-		}
-	}
-	if len(f.model.prompts) != 3 || len(f.model.sent) != 4 {
-		t.Fatalf("prompts=%d sends=%d", len(f.model.prompts), len(f.model.sent))
-	}
-	if !strings.Contains(f.model.prompts[1].User(), "ORIGINAL_EVIDENCE_SENTINEL") {
-		t.Fatal("retrieved evidence did not enter actual request")
-	}
-	last := f.model.prompts[2].User()
-	if strings.Contains(last, "ORIGINAL_EVIDENCE_SENTINEL") || strings.Contains(last, "### Step 1") || strings.Contains(last, "## Notes") {
-		t.Fatalf("old context leaked: %s", last)
-	}
-	if !strings.Contains(last, "Continue at the evidence reference") {
-		t.Fatal("handover missing")
-	}
-	if !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
-		t.Fatal("retry changed frozen window bytes")
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 {
-		t.Fatalf("window: %#v %v", req.Window, err)
-	}
-	if _, err := os.Stat(filepath.Join(f.cfg.History, runID, "steps", "00000002", "preview")); err != nil {
-		t.Fatal("last old-page step not published", err)
-	}
-}
-
-func TestHandoverTakesTheTextAfterItsPrefixVerbatim(t *testing.T) {
-	text := "  Objective: deploy \"gateway\" for <service> {stage 3}.\nNext: run C:\\tools\\check; 继续核对。\n" +
-		"Evidence: /canti/artifacts/effect_" + strings.Repeat("a", 64) + "/output.\n\n"
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("true"), execReply(harness.HandoverPrefix+text), returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	s, err := f.loop().Run(ctx, runID)
-	if err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 || req.Window.Handover != text {
-		t.Fatalf("window=%+v err=%v", req.Window, err)
-	}
-	steps, err := f.store.Recent(ctx, runID, 0, 1)
-	if err != nil || len(steps) != 1 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	if o := steps[0].Outcome; o == nil || o.Status != harness.OutcomeDone || o.Handover == nil || !reflect.DeepEqual(*o.Handover, harness.Handover{RunID: runID, FirstStep: 1, Text: text}) {
-		t.Fatalf("recorded outcome %+v", o)
-	}
-	if w := steps[0].Window; w == nil || !w.Equal(harness.Window{FirstStep: 3, SourceStep: 2, Handover: text}) {
-		t.Fatalf("the handover committed the window %+v", w)
-	}
-	if !strings.Contains(f.model.prompts[2].User(), text) {
-		t.Fatal("the next window does not quote the handover text")
-	}
-}
-
-func TestHandoverFollowsItsNameAfterAnyWhitespace(t *testing.T) {
-	for _, separator := range []string{"\n", "\t", "\r", " "} {
-		f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-			execReply("true"), execReply("canti:handover"+separator+"Next: verify the build.\n"), returnReply("done"))
-		f.cfg.WindowSteps = 1
-		s, err := f.loop().Run(f.bounded(), runID)
-		if err != nil || s.State.Phase != core.PhaseReturned {
-			t.Fatalf("separator %q: run=%+v err=%v", separator, s.State, err)
-		}
-		req, err := f.store.LatestRequest(f.bounded(), runID)
-		if err != nil || req.Window == nil || req.Window.Handover != "Next: verify the build.\n" {
-			t.Fatalf("separator %q: window=%+v err=%v", separator, req.Window, err)
-		}
-	}
-}
 
 func TestALongerActionNameIsNotAHandover(t *testing.T) {
 	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
 		execReply("true"), execReply("canti:handovers Next: verify."), execReply("canti:handoverNext: verify."))
-	f.cfg.WindowSteps = 1
 	s, err := f.loop().Run(f.bounded(), runID)
 	if err != nil || s.State.Reason != core.StopUnrecoverable {
 		t.Fatalf("run=%+v err=%v", s.State, err)
@@ -123,29 +32,8 @@ func TestALongerActionNameIsNotAHandover(t *testing.T) {
 		t.Fatalf("steps=%+v err=%v", steps, err)
 	}
 	for _, step := range steps {
-		if o := step.Outcome; o == nil || o.Status != harness.OutcomeRefused || o.Handover != nil {
+		if o := step.Outcome; o == nil || o.Status != harness.OutcomeFailed {
 			t.Fatalf("step %d outcome %+v; want refused work", step.Step, o)
-		}
-	}
-}
-
-func TestUnrequestedHandoverNeverRunsAsACommand(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 3}, harness.Budget{},
-		execReply("canti:handover\ntouch ran; next: report"), execReply("canti:handover"), returnReply("done"))
-	if _, err := f.loop().Run(f.bounded(), runID); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.exec.jobs) != 0 {
-		t.Fatalf("a handover reached the executor: %v", f.exec.calls)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 2)
-	if err != nil || len(steps) != 2 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	for _, s := range steps {
-		if o := s.Outcome; o == nil || o.Status != harness.OutcomeFailed || o.Handover != nil || s.Window != nil ||
-			!strings.Contains(o.Detail, "handover was not requested for this step") {
-			t.Fatalf("step %d outcome %+v, window %+v", s.Step, o, s.Window)
 		}
 	}
 }
@@ -161,7 +49,6 @@ func TestDiscoverySkipsABareHandoverName(t *testing.T) {
 		execReply("echo canti:handover"), execReply("canti:handover"), execReply("canti:handover Continue."),
 		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"canti:handover","reason":"find the step"}`),
 		returnReply("done"))
-	f.cfg.WindowSteps = 1
 	artifacts := t.TempDir()
 	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
 	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
@@ -184,132 +71,6 @@ func TestDiscoverySkipsABareHandoverName(t *testing.T) {
 
 // finishWithArtifact finishes a started job at its first inspection and
 // writes its output where the archive reads artifacts.
-func finishWithArtifact(x *fakeExec, artifacts string) func(string) (harness.Job, bool, error) {
-	return func(effectID string) (harness.Job, bool, error) {
-		j := x.jobs[effectID]
-		if j == nil {
-			return harness.Job{}, false, nil
-		}
-		if j.Status == harness.JobRunning {
-			x.finish(j, harness.JobSucceeded)
-			if err := os.WriteFile(filepath.Join(artifacts, j.Output.Path), []byte(j.Preview), 0o600); err != nil {
-				return harness.Job{}, false, err
-			}
-		}
-		return j.Job, true, nil
-	}
-}
-
-func discoverPastHandover(t *testing.T, separator string) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("echo needle"), execReply("canti:handover"+separator+"Find the needle again."),
-		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"needle","reason":"find the step"}`),
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	artifacts := t.TempDir()
-	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
-	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
-	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
-	if err != nil || len(steps) != 1 || steps[0].Outcome == nil || steps[0].Outcome.Retrieval == nil {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	var found []string
-	for _, source := range steps[0].Outcome.Retrieval.Sources {
-		found = append(found, source.Path)
-	}
-	if len(found) == 0 || slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") }) {
-		t.Fatalf("discovery found %v; want step 1 and not the handover of step 2", found)
-	}
-}
-
-func TestWindowRefusesRepeatedInvalidHandover(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"),
-		execReply("canti:handover"),
-		execReply(harness.HandoverPrefix+strings.Repeat("界", 683)))
-	f.cfg.WindowSteps = 1
-	s, err := f.loop().Run(context.Background(), runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.State.Reason != core.StopUnrecoverable {
-		t.Fatalf("state %#v", s.State)
-	}
-	req, err := f.store.LatestRequest(context.Background(), runID)
-	if err != nil || req.Window.FirstStep != 1 {
-		t.Fatalf("discarded old page: %#v %v", req.Window, err)
-	}
-	steps, err := f.store.Recent(context.Background(), runID, 0, 2)
-	if err != nil || len(steps) != 2 {
-		t.Fatalf("steps=%+v err=%v", steps, err)
-	}
-	for i, want := range []string{"handover text must not be empty", "2049 UTF-8 bytes; maximum 2048"} {
-		if o := steps[i].Outcome; o == nil || o.Handover != nil || !strings.Contains(o.Detail, want) {
-			t.Fatalf("step %d outcome %+v, want %q", steps[i].Step, o, want)
-		}
-		if w := steps[i].Window; w == nil || w.FirstStep != 1 || !w.Requested || w.Failures != i+1 {
-			t.Fatalf("step %d committed the window %+v, want the active window with %d failures", steps[i].Step, w, i+1)
-		}
-	}
-}
-
-func TestZeroTriggersRequestAndAdvanceHandoverAtCapacity(t *testing.T) {
-	var replies []reply
-	for i := 0; i < 24; i++ {
-		replies = append(replies, execReply("echo CAPACITY_PAGE_MARKER "+strings.Repeat("x", 1800)))
-	}
-	f := newFixture(t, core.Limits{MaxSteps: 30, MaxAttempts: 3}, harness.Budget{}, replies...)
-	f.cfg.Limits = harness.DefaultPromptLimits()
-	f.cfg.Limits.Total = 96 << 10
-	if f.cfg.WindowSteps != 0 || f.cfg.WindowBytes != 0 {
-		t.Fatalf("default triggers = %d steps, %d bytes", f.cfg.WindowSteps, f.cfg.WindowBytes)
-	}
-	ctx := f.bounded()
-	var handoverStep int
-	for i := 0; i < 250; i++ {
-		snap, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snap.State.Phase != core.PhaseRequestFrozen {
-			continue
-		}
-		req, err := f.store.Request(ctx, runID, snap.State.Step, snap.State.RequestRev)
-		if err != nil || req.Window == nil {
-			t.Fatalf("frozen request has no window: %+v %v", req, err)
-		}
-		if req.Window.Requested {
-			handoverStep = snap.State.Step
-			if !strings.Contains(string(req.Body), "Handover required") || !strings.Contains(string(req.Body), "### Step 1") {
-				t.Fatal("capacity trigger dropped current-page history before handover")
-			}
-			break
-		}
-	}
-	if handoverStep < 2 {
-		t.Fatal("automatic capacity trigger did not request a handover")
-	}
-	f.model.mu.Lock()
-	f.model.replies = []reply{
-		execReply(harness.HandoverPrefix + "Continue on the next page; inspect the old record if needed."),
-		returnReply("done"),
-	}
-	f.model.mu.Unlock()
-	snap, err := f.fresh().Run(ctx, runID)
-	if err != nil || snap.State.Phase != core.PhaseReturned {
-		t.Fatalf("run = %+v, %v", snap.State, err)
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != handoverStep+1 || req.Window.SourceStep != handoverStep {
-		t.Fatalf("advanced window = %+v, %v", req.Window, err)
-	}
-	if strings.Contains(string(req.Body), "CAPACITY_PAGE_MARKER") || !strings.Contains(string(req.Body), "Continue on the next page") {
-		t.Fatal("new page inherited old steps or lost handover")
-	}
-}
-
 func TestDirectorySearchCursorAndEvidenceReachFrozenRequest(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{}, execReply(`canti:retrieve {"operation":"search","path":"/canti/imports","query":"needle","limit":6,"reason":"locate original evidence"}`), returnReply("done"))
 	root := t.TempDir()
@@ -355,116 +116,6 @@ func TestRetrievalSearchContinuationSurvivesPromptPreviewLimit(t *testing.T) {
 	request := string(f.model.sent[1])
 	if !strings.Contains(request, `"next_offset":8192`) || !strings.Contains(request, `"more":true`) {
 		t.Fatal("search continuation metadata was truncated before reaching the model")
-	}
-}
-
-func TestRevisitingRetrievalAfterHandoverDoesNotExpandItsEvidence(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"verify original"}`),
-		execReply(harness.HandoverPrefix+"Inspect step 1 access metadata."),
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/runs/run-1/steps/00000001/preview","reason":"inspect prior access"}`),
-		execReply(harness.HandoverPrefix+"Finish."),
-		returnReply("done"))
-	imported := t.TempDir()
-	const original = "UNIQUE_ORIGINAL_EVIDENCE_NOT_METADATA"
-	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte(original), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			break
-		}
-	}
-	if len(f.model.sent) != 5 {
-		t.Fatalf("sent %d requests", len(f.model.sent))
-	}
-	if !strings.Contains(string(f.model.sent[1]), original) {
-		t.Fatal("initial retrieval evidence missing")
-	}
-	for _, request := range f.model.sent[2:] {
-		if strings.Contains(string(request), original) {
-			t.Fatal("original evidence recursively reappeared after handover")
-		}
-	}
-	if !strings.Contains(string(f.model.sent[3]), "verify original") || !strings.Contains(string(f.model.sent[3]), "/canti/imports/evidence") {
-		t.Fatal("revisited access did not expose original reason and source")
-	}
-}
-
-func TestHandoverProtocolRepairPreservesFailureCountAndWindow(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-		execReply("true"),
-		execReply(harness.HandoverPrefix),
-		reply{body: "not a decision", usage: usage},
-		execReply(harness.HandoverPrefix+"Continue from the verified source."),
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentHalt {
-			if s.State.Phase != core.PhaseReturned {
-				t.Fatalf("unexpected halt: %+v", s.State)
-			}
-			break
-		}
-	}
-	const last = "This step is the last chance to hand over"
-	if req, err := f.store.Request(ctx, runID, 2, 1); err != nil || strings.Contains(string(req.Body), last) {
-		t.Fatalf("the first handover request says it is the last: %v", err)
-	}
-	for _, revision := range []int{1, 2} {
-		req, err := f.store.Request(ctx, runID, 3, revision)
-		if err != nil || req.Window == nil || req.Window.FirstStep != 1 || req.Window.Failures != 1 || !req.Window.Requested {
-			t.Fatalf("revision %d window=%+v err=%v", revision, req.Window, err)
-		}
-		if !strings.Contains(string(req.Body), last) {
-			t.Fatalf("revision %d of the retry does not say it is the last chance", revision)
-		}
-	}
-	req, err := f.store.LatestRequest(ctx, runID)
-	if err != nil || req.Window == nil || req.Window.FirstStep != 4 || req.Window.SourceStep != 3 || req.Window.Failures != 0 {
-		t.Fatalf("new window=%+v err=%v", req.Window, err)
-	}
-}
-
-func TestHandoverPagePreservesRetryAndRepair(t *testing.T) {
-	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{},
-		execReply("echo first-window-marker"),
-		execReply(harness.HandoverPrefix+"Continue after marker; verify source."),
-		reply{err: errors.New("transport interruption")},
-		reply{body: "invalid decision", usage: usage},
-		returnReply("done"))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	s, err := f.fresh().Run(ctx, runID)
-	if err != nil || s.State.Phase != core.PhaseReturned {
-		t.Fatalf("run=%+v err=%v", s.State, err)
-	}
-	if len(f.model.sent) != 5 || !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
-		t.Fatal("transport retry changed frozen request")
-	}
-	for _, revision := range []int{1, 2} {
-		req, err := f.store.Request(ctx, runID, 3, revision)
-		if err != nil || req.Window == nil || req.Window.FirstStep != 3 || req.Window.SourceStep != 2 || req.Window.Handover == "" {
-			t.Fatalf("revision %d window=%+v err=%v", revision, req.Window, err)
-		}
-		if strings.Contains(string(req.Body), "first-window-marker") || !strings.Contains(string(req.Body), "Continue after marker") {
-			t.Fatalf("revision %d leaks old page or loses handover", revision)
-		}
-	}
-	if !strings.Contains(string(f.model.sent[4]), "Rejected response") {
-		t.Fatal("protocol repair missing")
 	}
 }
 
@@ -515,10 +166,6 @@ func TestSuccessfulRetrievalDoesNotReportMissingIncompleteOutput(t *testing.T) {
 	}
 }
 
-type missingLatestWindowRequest struct {
-	harness.Journal
-}
-
 func TestDirectorySearchGeneratedCursorCanAlwaysBeResumed(t *testing.T) {
 	for _, tc := range []struct{ label, name string }{
 		{"html", strings.Repeat("<", 255)},
@@ -527,175 +174,6 @@ func TestDirectorySearchGeneratedCursorCanAlwaysBeResumed(t *testing.T) {
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			testDirectorySearchGeneratedCursor(t, tc.name)
-		})
-	}
-}
-
-func testDirectorySearchGeneratedCursor(t *testing.T, name string) {
-	imported := t.TempDir()
-	if err := os.WriteFile(filepath.Join(imported, name), []byte("needle needle"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	r := archive.Reader{Imports: imported}
-	q := archive.RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "needle", Reason: "locate evidence", Limit: 6}
-	first, err := r.Retrieve(context.Background(), q)
-	if err != nil || first.Error != "" || !first.More || first.NextCursor == "" {
-		t.Fatalf("first page: %+v %v", first, err)
-	}
-	q.Cursor = first.NextCursor
-	second, err := r.Retrieve(context.Background(), q)
-	if err != nil || second.Error != "" || second.More || len(second.Sources) != 1 {
-		t.Fatalf("generated %d-byte cursor cannot resume: error=%q more=%v sources=%d err=%v", len(q.Cursor), second.Error, second.More, len(second.Sources), err)
-	}
-}
-
-func (j missingLatestWindowRequest) LatestRequest(context.Context, string) (harness.Request, error) {
-	return harness.Request{}, harness.ErrNotFound
-}
-
-func TestWindowRecoveryRejectsMissingDurableRequestAfterProgress(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{},
-		execReply("echo old-window-marker"),
-		execReply(harness.HandoverPrefix+"Continue with the next operation."))
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Step == 3 {
-			break
-		}
-	}
-	before := len(f.model.prompts)
-	s, err := f.loopOn(missingLatestWindowRequest{f.open()}).Step(ctx, runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.State.Phase != core.PhaseStopped || s.State.Reason != core.StopUnrecoverable || len(f.model.prompts) != before {
-		t.Fatalf("missing durable window silently rebuilt context: state=%+v new_prompts=%d", s.State, len(f.model.prompts)-before)
-	}
-}
-
-func TestWindowProtocolRepairRejectsMissingInitialFrozenRequest(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, reply{body: "invalid decision", usage: usage})
-	f.cfg.WindowSteps = 1
-	ctx := f.bounded()
-	for {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Intent() == core.IntentPrepareRequest && s.State.RequestRev > 0 {
-			break
-		}
-	}
-	before := len(f.model.prompts)
-	s, err := f.loopOn(missingLatestWindowRequest{f.open()}).Step(ctx, runID)
-	if err != nil || s.State.Phase != core.PhaseStopped || s.State.Reason != core.StopUnrecoverable || len(f.model.prompts) != before {
-		t.Fatalf("protocol repair recreated missing initial request: state=%+v new_prompts=%d err=%v", s.State, len(f.model.prompts)-before, err)
-	}
-}
-
-// capturing records the first transition of kind handed to its journal.
-type capturing struct {
-	harness.Journal
-	kind string
-	got  *harness.Transition
-}
-
-func (j capturing) Commit(ctx context.Context, tr harness.Transition) error {
-	if tr.Event.Kind() == j.kind && j.got.Event == nil {
-		*j.got = tr
-	}
-	return j.Journal.Commit(ctx, tr)
-}
-
-// TestHandoverAcknowledgementLossCommitsOneIdenticalTransition requires that
-// when the performed commit of a handover lands without its acknowledgement
-// the next step keeps it, and that when it never landed the handover is
-// performed again into the identical transition: its outcome, window, and
-// progress, as a local change computed from committed facts.
-func TestHandoverAcknowledgementLossCommitsOneIdenticalTransition(t *testing.T) {
-	for _, landed := range []bool{true, false} {
-		t.Run(map[bool]string{true: "landed", false: "lost"}[landed], func(t *testing.T) {
-			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
-				execReply("true"), execReply(harness.HandoverPrefix+"Next: report."), returnReply("done"))
-			f.cfg.WindowSteps = 1
-			ctx := f.bounded()
-			f.stepUntil(ctx, core.PhaseIdle)
-			f.stepUntil(ctx, core.PhaseEffectSaved)
-			var first, committed harness.Transition
-			var failed bool
-			if _, err := f.loopOn(capturing{failingCommit{f.store, "performed", landed, &failed}, "performed", &first}).Step(ctx, runID); err == nil {
-				t.Fatal("the lost acknowledgement was not surfaced")
-			}
-			wantState(t, f.run(f.loopOn(capturing{f.open(), "performed", &committed})), core.PhaseReturned, "")
-			performed := slices.DeleteFunc(f.transitions(), func(tr harness.Transition) bool { return tr.Event.Kind() != "performed" })
-			if len(performed) != 1 || !reflect.DeepEqual(performed[0].Facts, first.Facts) || performed[0].To != first.To {
-				t.Fatalf("committed %+v, first attempted %+v", performed, first)
-			}
-			if !landed && !reflect.DeepEqual(committed.Facts, first.Facts) {
-				t.Fatalf("the handover performed again into %+v, not %+v", committed.Facts, first.Facts)
-			}
-			if w := performed[0].Facts.Window; w == nil || !w.Equal(harness.Window{FirstStep: 3, SourceStep: 2, Handover: "Next: report."}) {
-				t.Fatalf("window %+v", w)
-			}
-		})
-	}
-}
-
-// tamperedWindow reports the window of the latest completed step as want.
-type tamperedWindow struct {
-	harness.Journal
-	want *harness.Window
-}
-
-func (j tamperedWindow) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
-	steps, err := j.Journal.Recent(ctx, runID, before, limit)
-	if err == nil && len(steps) > 0 {
-		steps[len(steps)-1].Window = j.want
-	}
-	return steps, err
-}
-
-// TestPreparationRefusesAWindowItsRequestDoesNotExplain requires that a
-// preparation that reads a completion whose committed window does not follow
-// from the window of its request, or that lacks the window a request
-// requiring a handover implies, stops the run unrecoverably without a
-// request.
-func TestPreparationRefusesAWindowItsRequestDoesNotExplain(t *testing.T) {
-	for name, tc := range map[string]struct {
-		requested bool
-		window    *harness.Window
-	}{
-		"window without a handover":    {false, &harness.Window{FirstStep: 2, SourceStep: 1, Handover: "forged"}},
-		"failure without a request":    {false, &harness.Window{FirstStep: 1, Requested: true, Failures: 1}},
-		"requested without its window": {true, nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			second := execReply("echo next")
-			if tc.requested {
-				second = execReply("echo refused")
-			}
-			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"), second, returnReply("done"))
-			if tc.requested {
-				f.cfg.WindowSteps = 1
-			}
-			ctx := f.bounded()
-			f.stepUntil(ctx, core.PhaseIdle)
-			if tc.requested {
-				f.stepUntil(ctx, core.PhaseIdle)
-			}
-			s, err := f.loopOn(tamperedWindow{f.store, tc.window}).Step(ctx, runID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantState(t, s, core.PhaseStopped, core.StopUnrecoverable)
-			if last := f.last(); !strings.Contains(last.Facts.Failure, "does not follow from its request") {
-				t.Fatalf("stop failure %q", last.Facts.Failure)
-			}
 		})
 	}
 }
@@ -802,7 +280,7 @@ func TestConfirmedOverflowResetsSameStepAndNeverExecutesPartialDecision(t *testi
 		t.Fatalf("preparation reasons=%v", prepare)
 	}
 	totals, err := f.store.Totals(context.Background(), runID)
-	if err != nil || totals.Coverage.Attempts != 4 || totals.Coverage.InputReports != 1 || totals.Usage.InputTokens != 207 {
+	if err != nil || totals.Coverage.Attempts != 4 || totals.Coverage.InputReports != 3 || totals.Usage.InputTokens != 207 {
 		t.Fatalf("usage=%+v error=%v", totals, err)
 	}
 }
@@ -835,12 +313,222 @@ func TestLatestRetrievalSurvivesSameStepRetryAndRepairThenExpires(t *testing.T) 
 	}
 }
 
-func TestInitialRejectionAndFreshOrientationOverflowAreBounded(t *testing.T) {
+func TestInitialOrientationOverflowPreservesEvidenceAndUsage(t *testing.T) {
 	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{}, reply{body: `{}`, err: signal}, reply{body: `{}`, err: signal})
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{}, reply{body: `{"error":{"code":"context_length_exceeded"}}`, err: signal, usage: harness.Usage{InputTokens: 9, InputReported: true}})
 	snap := f.run(f.loop())
-	if snap.State.Step != 1 || snap.State.Reason != core.StopUnrecoverable {
-		t.Fatalf("orientation overflow=%+v", snap)
+	if snap.State.Step != 1 || snap.State.Reason != core.StopUnrecoverable || len(f.model.sent) != 1 {
+		t.Fatalf("irreducible orientation: %+v sends=%d", snap, len(f.model.sent))
+	}
+	for _, tr := range f.transitions() {
+		if tr.Event.Kind() == "request_rejected" || tr.Facts.ContextState != nil {
+			t.Fatal("irreducible orientation opened an empty context")
+		}
+	}
+	if last := f.last(); last.Facts.Rejection == nil || last.Facts.Response == nil {
+		t.Fatal("terminal rejection lost evidence")
+	}
+	totals, err := f.store.Totals(context.Background(), runID)
+	if err != nil || totals.Usage.InputTokens != 9 || totals.Coverage.Attempts != 1 || totals.Coverage.InputReports != 1 {
+		t.Fatalf("terminal usage=%+v %v", totals, err)
+	}
+}
+
+func finishWithArtifact(x *fakeExec, artifacts string) func(string) (harness.Job, bool, error) {
+	return func(effectID string) (harness.Job, bool, error) {
+		j := x.jobs[effectID]
+		if j == nil {
+			return harness.Job{}, false, nil
+		}
+		if j.Status == harness.JobRunning {
+			x.finish(j, harness.JobSucceeded)
+			if err := os.WriteFile(filepath.Join(artifacts, j.Output.Path), []byte(j.Preview), 0o600); err != nil {
+				return harness.Job{}, false, err
+			}
+		}
+		return j.Job, true, nil
+	}
+}
+
+func discoverPastHandover(t *testing.T, separator string) {
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
+		execReply("echo needle"), execReply("canti:handover"+separator+"Find the needle again."),
+		execReply(`canti:retrieve {"operation":"discover","path":"/canti/runs/run-1/steps","query":"needle","reason":"find the step"}`),
+		returnReply("done"))
+	artifacts := t.TempDir()
+	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Artifacts: artifacts}
+	f.exec.inspect = finishWithArtifact(f.exec, artifacts)
+	if s, err := f.loop().Run(f.bounded(), runID); err != nil || s.State.Phase != core.PhaseReturned {
+		t.Fatalf("run=%+v err=%v", s.State, err)
+	}
+	steps, err := f.store.Recent(f.bounded(), runID, 0, 1)
+	if err != nil || len(steps) != 1 || steps[0].Outcome == nil || steps[0].Outcome.Retrieval == nil {
+		t.Fatalf("steps=%+v err=%v", steps, err)
+	}
+	var found []string
+	for _, source := range steps[0].Outcome.Retrieval.Sources {
+		found = append(found, source.Path)
+	}
+	if len(found) == 0 || slices.ContainsFunc(found, func(p string) bool { return strings.Contains(p, "/00000002/") }) {
+		t.Fatalf("discovery found %v; want step 1 and not the handover of step 2", found)
+	}
+}
+
+func testDirectorySearchGeneratedCursor(t *testing.T, name string) {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, name), []byte("needle needle"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := archive.Reader{Imports: imported}
+	q := archive.RetrievalQuery{Operation: "search", Path: "/canti/imports", Query: "needle", Reason: "locate evidence", Limit: 6}
+	first, err := r.Retrieve(context.Background(), q)
+	if err != nil || first.Error != "" || !first.More || first.NextCursor == "" {
+		t.Fatalf("first page: %+v %v", first, err)
+	}
+	q.Cursor = first.NextCursor
+	second, err := r.Retrieve(context.Background(), q)
+	if err != nil || second.Error != "" || second.More || len(second.Sources) != 1 {
+		t.Fatalf("generated %d-byte cursor cannot resume: error=%q more=%v sources=%d err=%v", len(q.Cursor), second.Error, second.More, len(second.Sources), err)
+	}
+}
+
+type nativeSnapshotReadJournal struct {
+	*sqlite.Store
+	recentReads, receiptReads int
+}
+
+func (j *nativeSnapshotReadJournal) Recent(context.Context, string, int64, int) ([]harness.StepRecord, error) {
+	j.recentReads++
+	return nil, errors.New("native snapshot repair must not scan completion history")
+}
+
+func (j *nativeSnapshotReadJournal) Receipts(context.Context, string, int64, int) ([]harness.StepReceipt, error) {
+	j.receiptReads++
+	return nil, errors.New("native snapshot repair must not scan receipt history")
+}
+
+func TestNativeHistoricalSnapshotReadRepairsOnlyRequestedFrozenStep(t *testing.T) {
+	for _, damage := range []string{"evidence", "manifest", "both", "same-size-conflict", "uncommitted-source", "cancelled"} {
+		t.Run(damage, func(t *testing.T) {
+			imported := t.TempDir()
+			original := filepath.Join(imported, "source")
+			text := "ORIGINAL_HISTORICAL_FROZEN_BYTES"
+			if err := os.WriteFile(original, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`), execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`)}
+			const unrelated = 8
+			for range unrelated {
+				replies = append(replies, execReply("canti:unrelated"))
+			}
+			replies = append(replies, reply{body: `{}`, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}})
+			sourceID := 0
+			if damage == "uncommitted-source" {
+				sourceID = 1
+			}
+			targetPath := fmt.Sprintf("/canti/runs/%s/steps/00000001/evidence/%04d", runID, sourceID)
+			replies = append(replies, execReply(fmt.Sprintf(`canti:retrieve {"operation":"read","path":%q,"reason":"recover original snapshot"}`, targetPath)), returnReply("done"))
+			f := newFixture(t, core.Limits{MaxSteps: 20, MaxAttempts: 4}, harness.Budget{}, replies...)
+			f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
+			loop := f.loop()
+			// Complete unrelated later work, reset, and accept the native historical
+			// read before damage. The repair must occur in the action, not preparation.
+			f.steps(loop, 4*(2+unrelated)+2)
+			if f.last().Event.Kind() != "request_rejected" {
+				t.Fatal("reset boundary not reached")
+			}
+			f.steps(f.fresh(), 3)
+			before := focusSnapshot(t, f)
+			if before.State.Phase != core.PhaseEffectSaved {
+				t.Fatal("native read not accepted")
+			}
+			if err := os.Remove(original); err != nil {
+				t.Fatal(err)
+			}
+			step := filepath.Join(f.cfg.History, runID, "steps", "00000001")
+			evidence := filepath.Join(step, archive.EvidencePath(0))
+			manifest := filepath.Join(step, archive.EvidenceFile)
+			switch damage {
+			case "evidence", "cancelled":
+				if err := os.Remove(evidence); err != nil {
+					t.Fatal(err)
+				}
+			case "manifest":
+				if err := os.Remove(manifest); err != nil {
+					t.Fatal(err)
+				}
+			case "both":
+				for _, file := range []string{evidence, manifest} {
+					if err := os.Remove(file); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "same-size-conflict":
+				if err := os.WriteFile(evidence, []byte(strings.Repeat("X", len(text))), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "uncommitted-source":
+				if err := os.WriteFile(filepath.Join(step, archive.EvidencePath(1)), []byte("NOT_COMMITTED"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			journal := &nativeSnapshotReadJournal{Store: f.open()}
+			resumed := f.loopOn(journal)
+			if damage == "cancelled" {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, err := resumed.Step(ctx, runID); !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled read: %v", err)
+				}
+				if got := focusSnapshot(t, f); got != before {
+					t.Fatal("cancelled read committed")
+				}
+				if _, err := os.Stat(evidence); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("cancelled read restored files: %v", err)
+				}
+				return
+			}
+			after, err := resumed.Step(f.bounded(), runID)
+			if err != nil {
+				t.Fatalf("native snapshot read: %v", err)
+			}
+			if journal.recentReads != 0 || journal.receiptReads != 0 {
+				t.Fatalf("repair scanned unrelated history: recent=%d receipts=%d", journal.recentReads, journal.receiptReads)
+			}
+			last := f.last()
+			outcome := last.Facts.Outcome
+			if damage == "same-size-conflict" || damage == "uncommitted-source" {
+				failed := outcome != nil && outcome.Status == harness.OutcomeFailed || after.State.Phase == core.PhaseStopped && after.State.Reason == core.StopUnrecoverable && last.Facts.Failure != ""
+				if !failed {
+					t.Fatalf("invalid historical evidence accepted: %+v", last.Facts)
+				}
+				if damage == "same-size-conflict" {
+					if got, err := os.ReadFile(evidence); err != nil || string(got) != strings.Repeat("X", len(text)) {
+						t.Fatalf("conflict overwritten: %q %v", got, err)
+					}
+				}
+				return
+			}
+			if outcome == nil || outcome.Status != harness.OutcomeDone || outcome.Retrieval == nil || !slices.Equal(outcome.Retrieval.Evidence, []string{text}) {
+				t.Fatalf("old frozen bytes not recovered: %+v", outcome)
+			}
+			for _, file := range []string{evidence, manifest} {
+				if _, err := os.Stat(file); err != nil {
+					t.Fatalf("derived snapshot not repaired: %s %v", file, err)
+				}
+			}
+			if got, err := os.ReadFile(evidence); err != nil || string(got) != text {
+				t.Fatalf("repaired bytes: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestInitialOrientationOverflowStopsWithoutEmptyReset(t *testing.T) {
+	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 4}, harness.Budget{}, reply{body: `{}`, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}})
+	got := f.run(f.loop())
+	if got.State.Phase != core.PhaseStopped || got.State.Reason != core.StopUnrecoverable {
+		t.Fatalf("orientation overflow did not stop: %+v", got)
 	}
 	resets := 0
 	for _, tr := range f.transitions() {
@@ -848,11 +536,123 @@ func TestInitialRejectionAndFreshOrientationOverflowAreBounded(t *testing.T) {
 			resets++
 		}
 	}
-	if resets != 1 || len(f.model.sent) != 2 {
-		t.Fatalf("resets=%d sends=%d", resets, len(f.model.sent))
+	if len(f.model.sent) != 1 || resets != 0 {
+		t.Fatalf("irreducible first orientation opened an empty epoch: sends=%d resets=%d", len(f.model.sent), resets)
+	}
+}
+
+func TestFocusRetainsFrozenBytesAcrossRepairAndResendUntilReset(t *testing.T) {
+	imported := t.TempDir()
+	text := "FOCUS_EVIDENCE_LIFETIME"
+	if err := os.WriteFile(filepath.Join(imported, "source"), []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 5}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
+		execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`), execReply("canti:unrelated"),
+		reply{err: errors.New("transport interrupted")}, reply{body: `{"wrong":"shape"}`},
+		reply{body: `{}`, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	f.run(f.loop())
+	for _, position := range [][2]int{{3, 1}, {4, 1}, {4, 2}} {
+		if !bytes.Contains(f.frozen(position[0], position[1]), []byte(text)) {
+			t.Fatalf("focus vanished at step/rev %v", position)
+		}
+	}
+	if bytes.Contains(f.frozen(4, 3), []byte(text)) {
+		t.Fatal("reset retained old focus body")
+	}
+	if !bytes.Equal(f.model.sent[3], f.model.sent[4]) {
+		t.Fatal("same-step resend changed bytes")
+	}
+	p3, p4, repair := f.model.prompts[2], f.model.prompts[3], f.model.prompts[4]
+	prefix3, prefix4 := strings.Join(p3.Blocks[:p3.Stable], ""), strings.Join(p4.Blocks[:p4.Stable], "")
+	if !strings.HasPrefix(prefix4, prefix3) || prefix4 != strings.Join(repair.Blocks[:repair.Stable], "") {
+		t.Fatal("receipts did not append or repair changed stable prefix")
+	}
+	if strings.Contains(prefix4, text) {
+		t.Fatal("replaceable focus entered stable prefix")
+	}
+	current, err := f.store.Context(context.Background(), focusSnapshot(t, f))
+	if err != nil || current.AnchorSeq == 0 || len(current.Focus) != 0 {
+		t.Fatalf("reset did not release focus: %+v %v", current, err)
+	}
+}
+
+func TestLoopExhaustedOverflowSettlesUsageWithoutNewAnchor(t *testing.T) {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "source"), []byte("latest body"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 1}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
+		reply{body: `{}`, usage: harness.Usage{InputTokens: 7, InputReported: true, OutputReported: true}, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}})
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	got := f.run(f.loop())
+	if got.State.Step != 2 || got.State.Reason != core.StopAttemptsExhausted {
+		t.Fatalf("exhausted overflow: %+v", got)
 	}
 	last := f.last()
-	if last.Facts.Rejection == nil || last.Facts.Response == nil {
-		t.Fatal("terminal orientation overflow lost provider evidence")
+	if last.Event.Kind() != "request_rejected" || last.Facts.ContextState != nil || last.Facts.Response == nil || last.Facts.Response.Usage.InputTokens != 7 {
+		t.Fatalf("exhaustion lost settlement or opened context: %+v", last)
+	}
+	current, err := f.store.Context(context.Background(), got)
+	if err != nil || !current.Equal(harness.InitialContext()) {
+		t.Fatalf("exhaustion changed anchor: %+v %v", current, err)
+	}
+}
+
+type freezeOnlyModel struct {
+	harness.Model
+	sends int
+}
+
+func (m *freezeOnlyModel) Complete(context.Context, harness.Request) (harness.Response, error) {
+	m.sends++
+	return harness.Response{}, errors.New("offline cap probe forbids sends")
+}
+
+func TestRequestResourceCapsStopLocallyBeforeProviderSend(t *testing.T) {
+	for _, capKind := range []string{"rendered", "serialized"} {
+		t.Run(capKind, func(t *testing.T) {
+			f := newFixture(t, limits, harness.Budget{})
+			cfg := f.cfg
+			cfg.Limits = harness.DefaultPromptLimits()
+			cfg.Environment = strings.Repeat(`"`, 2000)
+			frame := harness.Frame{Goal: "Count the Go files.", Constraints: "Do not modify files.", Environment: cfg.Environment, RunID: runID, ContextState: &harness.ContextState{FirstStep: 1}, Step: 1, MaxSteps: limits.MaxSteps, Attempt: 1, MaxAttempts: limits.MaxAttempts}
+			prompt, err := frame.Prompt(cfg.Limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rendered := len(prompt.System) + len(prompt.User())
+			model, err := anthropic.New(anthropic.Config{BaseURL: "https://unused.test", APIKey: "offline-fixture", Model: "offline-fixture-model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := model.Freeze(prompt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(frozen.Body) <= rendered {
+				t.Fatal("probe did not produce serialization overhead")
+			}
+			cfg.Limits.Total = rendered
+			if capKind == "rendered" {
+				cfg.Limits.Total = rendered - 1
+			}
+			guarded := &freezeOnlyModel{Model: model}
+			loop, err := harness.NewLoop(f.store, f.exec, guarded, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := f.run(loop)
+			if got.State.Reason != core.StopUnrecoverable || guarded.sends != 0 {
+				t.Fatalf("resource cap did not fail locally: %+v sends=%d", got, guarded.sends)
+			}
+			last := f.last()
+			if last.Event.Kind() != "stop_requested" || !strings.Contains(last.Facts.Failure, "resource cap") || last.Facts.Rejection != nil {
+				t.Fatalf("local resource cap became provider rejection: %+v", last)
+			}
+		})
 	}
 }

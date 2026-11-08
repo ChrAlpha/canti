@@ -98,7 +98,7 @@ func TestRetrievalCommitsItsEvidenceWithItsOutcome(t *testing.T) {
 // reader, cancels it in process: no executor call, and the effect observed
 // cancelled without a job.
 func TestLocalActionStopNeverCallsTheExecutor(t *testing.T) {
-	for _, payload := range []string{readEvidence, harness.HandoverPrefix + "Next: report."} {
+	for _, payload := range []string{readEvidence, harness.FocusPrefix + `{"sources":[]}`} {
 		for _, disabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reader disabled %v", payload[:14], disabled), func(t *testing.T) {
 				f := newFixture(t, limits, harness.Budget{}, execReply(payload))
@@ -114,7 +114,7 @@ func TestLocalActionStopNeverCallsTheExecutor(t *testing.T) {
 				}
 				last := f.last()
 				if obs := last.Facts.Observation; last.Event.Kind() != "observed" || obs == nil || obs.Execution != core.ExecutionCancelled ||
-					obs.ExitCode != nil || obs.Output.Available || last.Facts.Receipt != nil || last.Facts.Window != nil {
+					obs.ExitCode != nil || obs.Output.Available || last.Facts.Receipt != nil || last.Facts.ContextState != nil {
 					t.Fatalf("cancellation %+v", last)
 				}
 			})
@@ -234,8 +234,7 @@ func (j racingStop) Commit(ctx context.Context, tr harness.Transition) error {
 // handover's commit makes that commit stale, opens no window, and cancels
 // the handover in process.
 func TestStopRacingAPerformanceWins(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"), execReply(harness.HandoverPrefix+"Next: report."))
-	f.cfg.WindowSteps = 1
+	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"), execReply(harness.FocusPrefix+`{"sources":[]}`))
 	ctx := f.bounded()
 	f.stepUntil(ctx, core.PhaseIdle)
 	f.stepUntil(ctx, core.PhaseEffectSaved)
@@ -246,7 +245,7 @@ func TestStopRacingAPerformanceWins(t *testing.T) {
 	}
 	wantState(t, f.run(f.fresh()), core.PhaseStopped, core.StopCancelled)
 	for _, tr := range f.transitions() {
-		if tr.Facts.Window != nil || tr.Event.Kind() == "performed" {
+		if tr.Facts.ContextState != nil || tr.Event.Kind() == "performed" {
 			t.Fatalf("a window or performance survived the stop: %+v", tr)
 		}
 	}

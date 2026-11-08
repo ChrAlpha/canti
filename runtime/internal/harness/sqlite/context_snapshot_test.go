@@ -5,11 +5,14 @@ import (
 	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	modernc "modernc.org/sqlite"
 )
@@ -159,5 +162,251 @@ func TestExhaustedRejectionDoesNotOpenContext(t *testing.T) {
 	d.do(core.RequestRejected{Step: 1, Attempt: 1}, facts)
 	if c, err := s.Context(ctx, d.snap); err != nil || !c.Equal(harness.InitialContext()) {
 		t.Fatalf("exhausted context=%+v %v", c, err)
+	}
+}
+
+func TestContextHeadAndUsageOverflowRollBackTogether(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "reset-overflow", core.Limits{MaxAttempts: 3}))
+	d.freeze()
+	d.send()
+	before := d.snap
+	if _, err := s.db.Exec(`UPDATE runs SET input_tokens=? WHERE id=?`, int64(9223372036854775807), before.State.RunID); err != nil {
+		t.Fatal(err)
+	}
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{"error":{"code":"context_length_exceeded"}}`), Usage: harness.Usage{InputTokens: 1, InputReported: true}}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+	if err := d.try(core.RequestRejected{Step: 1, Attempt: 1}, facts); err == nil {
+		t.Fatal("overflowing reset committed")
+	}
+	if got := latestOf(t, s, before.State.RunID); got != before {
+		t.Fatalf("reset changed state: %+v", got)
+	}
+	if got, err := s.Context(ctx, before); err != nil || !got.Equal(harness.InitialContext()) {
+		t.Fatalf("reset changed context: %+v %v", got, err)
+	}
+	var pointer int64
+	if err := s.db.QueryRow(`SELECT context_seq FROM runs WHERE id=?`, before.State.RunID).Scan(&pointer); err != nil || pointer != 0 {
+		t.Fatalf("reset changed pointer: %d %v", pointer, err)
+	}
+	if got := totalsOf(t, s, before.State.RunID); got.Usage.InputTokens != 9223372036854775807 || got.Coverage.Attempts != 0 {
+		t.Fatalf("partial usage commit: %+v", got)
+	}
+}
+
+func TestContextHeadRejectsInvalidPointerAndCancelledRead(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "head-pointers", core.Limits{MaxAttempts: 3}))
+	d.freeze()
+	d.send()
+	for _, pointer := range []int64{-1, d.snap.Seq + 1, 1} {
+		if _, err := s.db.Exec(`UPDATE runs SET context_seq=? WHERE id=?`, pointer, d.snap.State.RunID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Context(ctx, d.snap); !errors.Is(err, ErrIncompatible) {
+			t.Errorf("pointer %d accepted: %v", pointer, err)
+		}
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.Context(cancelled, d.snap); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled read: %v", err)
+	}
+}
+
+func TestContextHeadReadKeepsSnapshotWhenResetCommitsDuringPointerRead(t *testing.T) {
+	ctx := context.Background()
+	file := tempPath(t)
+	w := open(t, file)
+	d := newDriver(t, w, createRun(t, w, "head-race", core.Limits{MaxAttempts: 3}))
+	d.freeze()
+	d.send()
+	before := d.snap
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+	transition := derive(t, before, core.RequestRejected{Step: 1, Attempt: 1}, facts)
+	var armed, committed atomic.Bool
+	name := fmt.Sprintf("head_snapshot_%d", contextSnapshotFunctions.Add(1))
+	if err := modernc.RegisterDeterministicScalarFunction(name, 1, func(_ *modernc.FunctionContext, args []sqldriver.Value) (sqldriver.Value, error) {
+		if armed.CompareAndSwap(true, false) {
+			// A generated pointer column lets this callback run precisely between
+			// the production reader's head query and context dereference.
+			// Publish a valid derived transition with its stored pointer in
+			// one real SQLite transaction; production commit is covered above.
+			encoded, err := encode(transition)
+			if err != nil {
+				return nil, err
+			}
+			tx, err := w.db.BeginTx(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
+			defer tx.Rollback()
+			if _, err = tx.ExecContext(ctx, insertSQL, encoded.run, transition.Seq, transition.EventID, encoded.kind, encoded.semantics, encoded.event, encoded.from, encoded.to, encoded.facts, transition.To.Step, transition.To.Attempt, transition.To.RequestRev); err != nil {
+				return nil, err
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE runs SET stored_context_seq=? WHERE id=?`, transition.Seq, encoded.run); err != nil {
+				return nil, err
+			}
+			if err = w.addTotals(ctx, tx, encoded.run, delta(transition)); err != nil {
+				return nil, err
+			}
+			if err = tx.Commit(); err != nil {
+				return nil, err
+			}
+			committed.Store(true)
+		}
+		return args[0], nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.db.Exec(`ALTER TABLE runs RENAME COLUMN context_seq TO stored_context_seq; ALTER TABLE runs ADD COLUMN context_seq INTEGER GENERATED ALWAYS AS (` + name + `(stored_context_seq)) VIRTUAL`); err != nil {
+		t.Fatal(err)
+	}
+	w.db.SetMaxIdleConns(0)
+	r := readOnly(t, file)
+	armed.Store(true)
+	got, err := r.Context(ctx, before)
+	if err != nil || !committed.Load() || !got.Equal(harness.InitialContext()) {
+		t.Fatalf("mixed context snapshot: %+v %v committed=%v", got, err, committed.Load())
+	}
+	if _, err := r.Context(ctx, before); !errors.Is(err, harness.ErrStaleSnapshot) {
+		t.Fatalf("old snapshot accepted: %v", err)
+	}
+}
+
+func TestFocusSelectsBeforeAnchorAndCommitsReplacementWithProgress(t *testing.T) {
+	ctx := context.Background()
+	file := tempPath(t)
+	s := open(t, file)
+	d := newDriver(t, s, createRun(t, s, "prior-anchor-focus", core.Limits{MaxSteps: 10, MaxAttempts: 3}))
+	imported := t.TempDir()
+	original := filepath.Join(imported, "source")
+	if err := os.WriteFile(original, []byte("EXACT_EARLIER_BYTES"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	retrieval, err := (archive.Reader{Imports: imported}).Retrieve(ctx, archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/source", Reason: "freeze earlier evidence"})
+	if err != nil || retrieval.Error != "" {
+		t.Fatalf("retrieval: %+v %v", retrieval, err)
+	}
+	d.decide(execBody(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`), harness.Usage{})
+	d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Retrieval: &retrieval}})
+	sourceSeq := d.snap.Seq
+	d.freeze()
+	d.send()
+	anchor := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 2}
+	d.do(core.RequestRejected{Step: 2, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &anchor})
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	d.decide(execBody(fmt.Sprintf(`canti:focus {"sources":[{"seq":%d,"source":0}]}`, sourceSeq)), harness.Usage{})
+	source := retrieval.Sources[0]
+	ref := harness.EvidenceRef{SourceSeq: sourceSeq, Step: 1, Source: 0, Length: source.Length, SHA256: source.SHA256}
+	selected := anchor
+	selected.Focus = []harness.EvidenceRef{ref}
+	outcome := &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{Sources: selected.Focus}}
+	before := d.snap
+	if err := d.try(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: outcome}); err == nil {
+		t.Fatal("focus outcome without context committed")
+	}
+	if got := latestOf(t, s, before.State.RunID); got != before {
+		t.Fatal("invalid focus advanced progress")
+	}
+	d.do(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: outcome, ContextState: &selected})
+	saved := d.commits[len(d.commits)-1]
+	if err := s.Commit(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+	reopened := open(t, file)
+	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(selected) {
+		t.Fatalf("prior-anchor focus after reopen: %+v %v", got, err)
+	}
+	if got := totalsOf(t, reopened, before.State.RunID); got.Steps != 2 {
+		t.Fatalf("focus progress counted twice: %+v", got)
+	}
+	d.decide(execBody(`canti:focus {"sources":[]}`), harness.Usage{})
+	d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{}}, ContextState: &anchor})
+	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(anchor) {
+		t.Fatalf("release lost anchor or retained selection: %+v %v", got, err)
+	}
+}
+
+func TestContextHeadRequiresSuccessfulFocusAndRealAnchorProvenance(t *testing.T) {
+	for _, damage := range []string{"unrelated-performed", "missing-focus", "failed-focus", "fabricated-anchor"} {
+		t.Run(damage, func(t *testing.T) {
+			ctx := context.Background()
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "head-provenance", core.Limits{MaxSteps: 5, MaxAttempts: 3}))
+			if damage == "unrelated-performed" {
+				d.decide(execBody("canti:unknown"), harness.Usage{})
+				d.perform()
+				if _, err := s.db.Exec(`UPDATE transitions SET facts=json_set(facts,'$.ContextState',json('{"AnchorSeq":0,"FirstStep":1}')) WHERE run_id=? AND seq=?`, d.snap.State.RunID, d.snap.Seq); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				d.decide(execBody(`canti:focus {"sources":[]}`), harness.Usage{})
+				initial := harness.InitialContext()
+				d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{}}, ContextState: &initial})
+				var mutation string
+				switch damage {
+				case "missing-focus":
+					mutation = `json_remove(facts,'$.Outcome.Focus')`
+				case "failed-focus":
+					mutation = `json_set(facts,'$.Outcome.Status','failed')`
+				case "fabricated-anchor":
+					mutation = `json_set(facts,'$.ContextState.AnchorSeq',3)`
+				}
+				if _, err := s.db.Exec(`UPDATE transitions SET facts=`+mutation+` WHERE run_id=? AND seq=?`, d.snap.State.RunID, d.snap.Seq); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.db.Exec(`UPDATE runs SET context_seq=? WHERE id=?`, d.snap.Seq, d.snap.State.RunID); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.Context(ctx, d.snap); err == nil {
+				t.Fatalf("corrupt %s context head accepted: %+v", damage, got)
+			}
+		})
+	}
+}
+
+func TestAutomaticRejectionRequiresRecordedSignalEvidence(t *testing.T) {
+	for _, mode := range []string{"reset", "exhausted", "terminal"} {
+		for _, shape := range []string{"empty", "status-only", "discriminator-only"} {
+			t.Run(mode+"/"+shape, func(t *testing.T) {
+				s := open(t, tempPath(t))
+				attempts := 3
+				if mode == "exhausted" {
+					attempts = 1
+				}
+				d := newDriver(t, s, createRun(t, s, "signal-evidence", core.Limits{MaxAttempts: attempts}))
+				d.freeze()
+				d.send()
+				var signal harness.ContextLimitError
+				if shape == "status-only" {
+					signal.Status = 400
+				}
+				if shape == "discriminator-only" {
+					signal.Code = "context_length_exceeded"
+				}
+				facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "automatic overflow reset", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: signal}}
+				var event core.Event = core.RequestRejected{Step: 1, Attempt: 1}
+				if mode == "reset" {
+					facts.ContextState = &harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
+				}
+				if mode == "terminal" {
+					event = core.StopRequested{Reason: core.StopUnrecoverable}
+				}
+				before := d.snap
+				if err := d.try(event, facts); err == nil {
+					t.Fatalf("automatic %s accepted missing signal evidence: %+v", mode, signal)
+				}
+				if got := latestOf(t, s, before.State.RunID); got != before {
+					t.Fatal("invalid rejection changed progress")
+				}
+			})
+		}
 	}
 }

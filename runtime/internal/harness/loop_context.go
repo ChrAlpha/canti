@@ -48,27 +48,32 @@ func (l *Loop) completion(ctx context.Context, snap Snapshot) (*StepRecord, erro
 
 func (l *Loop) frame(run Run, s core.State) Frame {
 	return Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
-		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts, RunID: s.RunID,
+		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts, RunID: s.RunID, ContextState: &ContextState{FirstStep: 1},
 		DecisionTool: l.cfg.DecisionTool, RetrievalEnabled: l.cfg.Reader != nil, ImportsEnabled: l.cfg.Reader != nil && l.cfg.Reader.Imports != ""}
 }
 
-// ContextFit checks only the actual authoritative orientation, with no
+// CheckOrientation checks only the actual authoritative orientation, with no
 // reservation for future work, summaries, or hypothetical failure growth.
-func ContextFit(cfg LoopConfig, run Run, limits core.Limits) (Fit, error) {
+func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 	cfg, err := normalize(cfg)
 	if err != nil {
-		return Fit{}, err
+		return err
 	}
 	state, err := core.NewState(run.ID, limits)
 	if err != nil {
-		return Fit{}, err
+		return err
 	}
 	f := (&Loop{cfg: cfg}).frame(run, state)
+	limit := cfg.Limits.Total
+	cfg.Limits.Total = MaxRequestBytes
 	p, err := f.Prompt(cfg.Limits)
 	if err != nil {
-		return Fit{}, err
+		return err
 	}
-	return Fit{Limit: cfg.Limits.Total, Page: len(p.System) + len(p.User())}, nil
+	if size := len(p.System) + len(p.User()); size > limit {
+		return fmt.Errorf("authoritative orientation needs at least %d bytes; resource cap is %d", size, limit)
+	}
+	return nil
 }
 
 func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
@@ -101,7 +106,7 @@ func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, 
 	if err := l.sessionContext(ctx, run, &f); err != nil {
 		return f, err
 	}
-	if f.Carried, err = l.carriedEvidence(ctx, run.ID, current.Focus, nil); err != nil {
+	if f.Focused, err = l.focusedEvidence(ctx, run.ID, current.Focus, nil); err != nil {
 		return f, err
 	}
 	if f.Receipts, err = l.epochReceipts(ctx, snap, f); err != nil {
@@ -134,6 +139,19 @@ func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, 
 	f.capture = &ContextCapture{Anchor: current, Focus: current.Focus, Preparation: reason, SessionNavigation: f.sessionNavigation}
 	if f.Latest != nil {
 		f.capture.LatestStep, f.capture.LatestSeq = f.Latest.Step, f.Latest.Seq
+	}
+	for _, selected := range f.Focused {
+		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: selected.Ref.SourceSeq, Step: selected.Ref.Step, Index: selected.Ref.Source, Source: archive.SourceRange{Path: selected.Path, Offset: selected.Offset, Length: selected.Ref.Length, SHA256: selected.Ref.SHA256}, Selected: true})
+	}
+	if f.Latest != nil && f.Latest.Seq > current.AnchorSeq {
+		if retrieval := f.Latest.retrieval(); retrieval != nil {
+			captured := ContextRetrieval{Seq: f.Latest.Seq, Step: f.Latest.Step, Operation: retrieval.Query.Operation, More: retrieval.More, Incomplete: retrieval.Incomplete, Error: clip(retrieval.Error, 512)}
+			captured.Operation = captured.OperationName()
+			f.capture.Retrievals = append(f.capture.Retrievals, captured)
+			for i, source := range retrieval.Sources {
+				f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: f.Latest.Seq, Step: f.Latest.Step, Index: i, Source: source})
+			}
+		}
 	}
 	f.capture.OrientationOnly = len(f.Receipts) == 0 && len(current.Focus) == 0 && f.Rejected == nil && (f.Latest == nil || f.Latest.Seq <= current.AnchorSeq)
 	var latest []StepRecord
@@ -188,7 +206,7 @@ func (l *Loop) reject(ctx context.Context, snap Snapshot, request Request, respo
 		return snap, contextError{errors.New("harness: rejected request context differs from current head")}
 	}
 	rejection := &ContextRejection{Previous: current, Signal: *signal}
-	if current.AnchorSeq > 0 && request.Context != nil && request.Context.OrientationOnly {
+	if request.Context != nil && request.Context.OrientationOnly {
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Response: &response, Failure: "provider rejected authoritative orientation in fresh context: " + signal.Error(), Rejection: rejection})
 	}
 	event := core.RequestRejected{Step: snap.State.Step, Attempt: snap.State.Attempt}

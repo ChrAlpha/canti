@@ -221,7 +221,7 @@ func (c *chatSession) line(ctx context.Context, goal string) (int, error, bool) 
 		if noFit != nil {
 			return code, noFit, true
 		}
-		fmt.Fprintf(a.stderr, "canti-tui: the input does not fit -context-bytes (%s)\n", strings.TrimPrefix(err.Error(), "-context-bytes: "))
+		fmt.Fprintf(a.stderr, "canti-tui: the input does not fit -request-bytes (%s)\n", strings.TrimPrefix(err.Error(), "-request-bytes: "))
 	case err != nil || code != exitOK && code != exitStopped:
 		return code, err, true
 	}

@@ -25,12 +25,13 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.cli(nil, "run", "-once", "-goal", "Continue deployment using the approved wait", "-image", image,
-		"-window-steps", "3", "-max-steps", "12", "-token-budget", "2000", "-wall-time", "3m", "-job-timeout", "10s")
+		"-max-steps", "12", "-token-budget", "2000", "-wall-time", "3m", "-job-timeout", "10s")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
 	run, step := f.status().Run.ID, 1
 	deadline := time.Now().Add(150 * time.Second)
+	nextCall := 1
 	act := func(command string) {
 		t.Helper()
 		d := core.Decision{Kind: core.Exec, Payload: command}
@@ -38,7 +39,8 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 			d.Kind = core.Return
 		}
 		body, _ := json.Marshal(d)
-		f.model.answer(step, 1, reply{text: string(body)})
+		f.model.answer(step, nextCall, reply{text: string(body)})
+		nextCall = 1
 		for n := 0; n < 100 && time.Now().Before(deadline); n++ {
 			r := f.cli(nil, "resume", "-once")
 			if r.code != exitActive && r.code != exitOK {
@@ -64,7 +66,22 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 	}
 	handover := func(first int) {
 		t.Helper()
-		act(harness.HandoverPrefix + "Continue deployment. Recheck original approvals before applying settings.")
+		f.model.answer(step, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+		for n := 0; n < 10; n++ {
+			r := f.cli(nil, "resume", "-once")
+			if r.code != exitActive {
+				t.Fatalf("reset: %+v", r)
+			}
+			h := f.history()
+			if h[len(h)-1].Kind == "request_rejected" {
+				break
+			}
+			if n == 9 {
+				t.Fatal("reset did not commit")
+			}
+		}
+		nextCall = 2
+		act(harness.FocusPrefix + `{"sources":[]}`)
 	}
 	act("cat input; rm input")
 	original := observe()
@@ -112,7 +129,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 			t.Fatal("original artifact evidence missing or retrieval echo included in frozen request")
 		}
 	}
-	if f.status().Phase != core.PhaseReturned || len(f.model.requests()) != 10 {
+	if f.status().Phase != core.PhaseReturned || len(f.model.requests()) != 12 {
 		t.Fatalf("unexpected final phase/calls: %+v, %d", f.status(), len(f.model.requests()))
 	}
 	t.Log("SCRIPTED_NATIVE_DISCOVERY windows=3 model_calls=10 discover_calls=2; same growing run, real CLI/SQLite/Docker and restarts; scripted decisions, no autonomous task score")

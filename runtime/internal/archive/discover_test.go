@@ -605,3 +605,57 @@ func TestDiscoverySearchesOriginalPurposeAndContinuesItsField(t *testing.T) {
 		t.Fatal("invalid cursor field accepted")
 	}
 }
+
+func TestPurposeDiscoveryContinuationRetainsSkippedCoverageAndLimits(t *testing.T) {
+	r := discoveryFixture(t)
+	for step := 1; step <= 4; step++ {
+		discoveryStep(t, r, step, "original command", "unrelated preview", "unrelated retained output", true)
+		body := strings.Repeat(fmt.Sprintf("needle-purpose-%d ", step), 60)
+		if step == 2 {
+			body = "binary\x00purpose"
+		}
+		if err := os.WriteFile(filepath.Join(r.History, "run", "steps", StepDir(step), PurposeFile), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := discoveryQuery()
+	q.Limit = 512
+	seen := map[string]bool{}
+	pages := 0
+	for {
+		pages++
+		if pages > 16 {
+			t.Fatal("purpose continuation did not terminate")
+		}
+		got := retrieveOK(t, r, q)
+		bytes := 0
+		for i, source := range got.Sources {
+			bytes += len(got.Evidence[i])
+			if strings.HasSuffix(source.Path, "/purpose") {
+				seen[source.Path] = true
+			}
+		}
+		if bytes > q.Limit || len(got.Sources) > MaxSources {
+			t.Fatalf("unbounded page: %+v", got)
+		}
+		if !got.More {
+			if !got.Incomplete || got.SkippedCount != 1 || len(got.Skipped) != 1 || got.Skipped[0].Field != "purpose" || got.Skipped[0].Reason != "nul" {
+				t.Fatalf("purpose skip coverage lost: %+v", got)
+			}
+			break
+		}
+		if got.NextCursor == "" || got.NextCursor == q.Cursor {
+			t.Fatal("nonadvancing cursor")
+		}
+		q.Cursor = got.NextCursor
+	}
+	if pages < 2 || len(seen) != 3 {
+		t.Fatalf("pages=%d purposes=%v", pages, seen)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := r.Retrieve(cancelled, discoveryQuery())
+	if err != context.Canceled || len(got.Evidence) != 0 || len(got.Sources) != 0 {
+		t.Fatalf("cancelled discovery returned evidence: %+v %v", got, err)
+	}
+}

@@ -1,5 +1,6 @@
-# Provider-driven, reader-controlled context recovery
+# Provider-driven, reader-controlled context recovery (baseline 2026-11-08)
 
+This document records the inspected pre-refactor baseline. Paths, tests and policy descriptions below refer to that baseline; current behavior is documented in architecture.md and the accepted recovery plan.
 Research date: 2026-11-08. This document separates observed implementation facts
 from implications for canti. It records source inspection and offline probes,
 not live provider or recovery validation.

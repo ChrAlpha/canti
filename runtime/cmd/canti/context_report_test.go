@@ -36,19 +36,15 @@ func TestContextTextUsesBoundedRetrievalOperation(t *testing.T) {
 	}
 }
 
-func TestContextTextNamesTheHandoverStepOfEarlierDialogue(t *testing.T) {
-	report := contextReport{RunID: "current", Request: harness.ContextRequest{Capture: &harness.ContextCapture{Session: []harness.ContextSessionSource{
-		{RunID: "r1", SessionSeq: 1, Status: "returned", IncludedGoal: true},
-		{RunID: "r2", SessionSeq: 2, Status: "stopped", HandoverStep: 7},
-	}}}}
+func TestContextTextNamesAnchorAndPreparation(t *testing.T) {
+	report := contextReport{RunID: "current", Request: harness.ContextRequest{Anchor: &harness.ContextState{AnchorSeq: 17, FirstStep: 3}, Capture: &harness.ContextCapture{Preparation: "request_rejected", LatestSeq: 14, LatestStep: 2}}}
 	var out bytes.Buffer
 	if err := report.writeText(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"Earlier dialogue: run r1 sequence 1, returned, goal included true\n",
-		"Earlier dialogue: run r2 sequence 2, stopped, goal included false, latest handover step 7\n"} {
-		if !strings.Contains(out.String(), line) {
-			t.Fatalf("report lacks %q:\n%s", line, out.String())
+	for _, text := range []string{"Anchor sequence 17; first step 3", "Preparation: request_rejected; latest step 2 sequence 14"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("missing %s: %s", text, &out)
 		}
 	}
 }
@@ -131,7 +127,7 @@ func TestContextRetryRepairAndPagination(t *testing.T) {
 	if err := json.Unmarshal([]byte(last.stdout), &page); last.code != exitOK || err != nil {
 		t.Fatalf("last: %+v, %v", last, err)
 	}
-	if page.Request.Revision != 2 || page.Previous == nil || page.Previous.Revision != 1 || page.Delta == nil || page.Delta.PromptBytes == nil || page.Delta.WindowChanged == nil || *page.Delta.WindowChanged || page.Events[0].Attempt != 3 || page.Request.Capture.Handover.Status != "request_revision" {
+	if page.Request.Revision != 2 || page.Previous == nil || page.Previous.Revision != 1 || page.Delta == nil || page.Delta.PromptBytes == nil || page.Delta.AnchorChanged == nil || *page.Delta.AnchorChanged || page.Events[0].Attempt != 3 || page.Request.Capture.Preparation != "protocol_repair" {
 		t.Fatalf("revision report: %+v", page)
 	}
 }

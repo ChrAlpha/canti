@@ -190,7 +190,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		}
 	}
 
-	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, RunID: "run_x", Window: &harness.Window{FirstStep: 1}}
+	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, RunID: "run_x", ContextState: &harness.ContextState{FirstStep: 1}}
 	for n := 1; n <= 3; n++ {
 		f.Step = n
 		p, err := f.Prompt(harness.DefaultPromptLimits())
@@ -226,7 +226,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		if c, want := bytes.Count(req.Body, []byte("cache_control")), min(2, p.Stable); c != want {
 			t.Errorf("step %d: %d cache breakpoints, want %d", n, c, want)
 		}
-		f.Steps = append(f.Steps, harness.StepRecord{Step: n, Command: "true", Observation: harness.Observation{Execution: core.ExecutionExited}})
+		f.Receipts = append(f.Receipts, harness.StepReceipt{Seq: int64(n * 5), Step: n, Status: "exited"})
 	}
 }
 
@@ -759,5 +759,24 @@ func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.
 				}
 			})
 		}
+	}
+}
+
+func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		t.Run(format, func(t *testing.T) {
+			body := `{"usage":{"input_tokens":3,"output_tokens":0},"stop_reason":"model_context_window_exceeded"}`
+			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Length", "4096")
+				io.WriteString(w, body)
+			})
+			m := newModel(t, server.URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+			response, err := m.Complete(context.Background(), freeze(t, m))
+			var limit *harness.ContextLimitError
+			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true, OutputReported: true}) {
+				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
+			}
+		})
 	}
 }

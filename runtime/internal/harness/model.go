@@ -26,7 +26,7 @@ type Model interface {
 
 // Prompt is the provider-neutral input built from a Frame: a system prompt
 // and a user message in non-empty blocks. Blocks[:Stable] is the stable
-// prefix, which the next prompt of the same context window extends byte for
+// prefix, which the next prompt of the same context anchor extends byte for
 // byte as steps complete. The blocks after it change with every request.
 type Prompt struct {
 	System string
@@ -45,7 +45,6 @@ type Request struct {
 	Protocol     string
 	Adapter      string
 	ContextState *ContextState   `json:",omitempty"`
-	Window       *Window         `json:",omitempty"`
 	Context      *ContextCapture `json:",omitempty"`
 }
 
@@ -108,4 +107,16 @@ type ContextLimitError struct {
 
 func (e *ContextLimitError) Error() string {
 	return fmt.Sprintf("provider context limit: status=%d type=%s code=%s stop_reason=%s request_id=%s", e.Status, e.Type, e.Code, e.StopReason, e.RequestID)
+}
+
+// Confirmed reports whether the recorded signal has one of the adapter-tested
+// context-limit shapes. It does not infer a rejection from free-form errors.
+func (e ContextLimitError) Confirmed() bool {
+	if e.Status == 200 && e.StopReason == "model_context_window_exceeded" && e.Code == "" && e.Type == "" {
+		return true
+	}
+	if e.Status == 400 && e.Type == "invalid_request_error" && e.Code == "prompt_too_long" && e.StopReason == "" {
+		return true
+	}
+	return (e.Status == 200 || e.Status == 400) && e.Code == "context_length_exceeded" && e.StopReason == ""
 }

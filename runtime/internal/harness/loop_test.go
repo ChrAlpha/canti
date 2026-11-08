@@ -87,6 +87,7 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	}
 	want := harness.Totals{
 		Usage:       harness.Usage{InputTokens: 300, OutputTokens: 30},
+		Coverage:    harness.UsageCoverage{Attempts: 3, InputReports: 3, OutputReports: 3},
 		OutputBytes: int64(len("ran: ls -la /workspace") + len("ran: find . -name '*.go' | wc -l")),
 		Steps:       2,
 	}
@@ -125,17 +126,21 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 		}
 		whole := harness.Frame{
 			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
-			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Steps: all,
-			RunID: runID, Window: &harness.Window{FirstStep: 1},
+			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Latest: &all[len(all)-1],
+			RunID: runID, ContextState: &harness.ContextState{FirstStep: 1},
+		}
+		whole.Receipts, err = f.store.Receipts(ctx, runID, 0, n)
+		if err != nil {
+			t.Fatal(err)
 		}
 		want, err := whole.Prompt(f.cfg.Limits)
 		got := f.model.prompts[len(f.model.prompts)-1]
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User())
 		}
-		shown := strings.Count(got.User(), "\n### Step ")
+		shown := got.Stable - 1
 		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)
-		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n-shown+1)) {
+		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d (sequence ", n-shown+1)) {
 			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
 		}
 		if p.pages != tc.pages+1 || p.records != min(n, tc.pages*historyPage)+1 {
@@ -144,7 +149,7 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	}
 
 	prompts, _ := f.model.calls()
-	if _, err := f.loopOn(&failingRecent{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
+	if _, err := f.loopOn(&failingReceiptPage{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
 		t.Fatalf("Step() with a failing second page = %v, want %v", err, errRecent)
 	}
 	if after, _ := f.model.calls(); after != prompts || len(f.transitions()) != 5*n {
@@ -160,11 +165,23 @@ type failingRecent struct {
 	reads int
 }
 
-func (j *failingRecent) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
+func (j *failingRecent) Recent(ctx context.Context, id string, before int64, limit int) ([]harness.StepRecord, error) {
 	if j.reads++; j.reads > 1 {
 		return nil, errRecent
 	}
-	return j.Store.Recent(ctx, runID, before, limit)
+	return j.Store.Recent(ctx, id, before, limit)
+}
+
+type failingReceiptPage struct {
+	*sqlite.Store
+	reads int
+}
+
+func (j *failingReceiptPage) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
+	if j.reads++; j.reads > 1 {
+		return nil, errRecent
+	}
+	return j.Store.Receipts(ctx, id, before, limit)
 }
 
 func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {
@@ -235,7 +252,7 @@ func TestLoopLogsTheFailureOfACommitTheStoreRefused(t *testing.T) {
 }
 
 func TestLoopResendsFrozenBytesAfterTransportFailure(t *testing.T) {
-	partial := harness.Usage{InputTokens: 40, OutputTokens: 2}
+	partial := harness.Usage{InputTokens: 40, OutputTokens: 2, InputReported: true, OutputReported: true}
 	f := newFixture(t, limits, harness.Budget{}, reply{body: `{"kind":"ret`, usage: partial, err: errors.New("stream reset"), flip: true}, returnReply("done"))
 	f.cfg.Backoff = 5 * time.Millisecond
 	begin := time.Now()
@@ -306,7 +323,7 @@ func TestLoopRecordsAnUnconfirmedSuccessAsIncomplete(t *testing.T) {
 		want  *harness.Response
 	}{
 		{"incomplete", unconfirmed, &harness.Response{Body: []byte(unconfirmed.body), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: usage}},
-		{"empty", reply{usage: usage}, nil},
+		{"empty", reply{usage: usage}, &harness.Response{Body: []byte{}, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: usage}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, tt.reply, returnReply("done"))
@@ -326,7 +343,7 @@ func TestLoopRejectsAnEmptyDecision(t *testing.T) {
 	f.model.empty = true
 	wantState(t, f.run(f.loop()), core.PhaseReturned, "")
 	f.wantKinds(closing, closing)
-	wantContains(t, f.model.prompts[1].User(), "## Rejected response", "<html>busy</html>")
+	wantContains(t, f.model.prompts[1].User(), "## Protocol repair", "<html>busy</html>")
 }
 
 func TestLoopBackoffIsCancellable(t *testing.T) {
@@ -345,8 +362,8 @@ func TestLoopBackoffIsCancellable(t *testing.T) {
 	}
 	wantState(t, snap, core.PhaseRequestFrozen, "")
 	f.wantKinds([]string{"request_frozen", "attempt_started", "response_incomplete"})
-	if got := f.last().Facts; got != (harness.Facts{Failure: "connection refused"}) || snap.State.Attempt != 2 {
-		t.Fatalf("facts = %+v at attempt %d; want the failure alone before attempt 2", got, snap.State.Attempt)
+	if got := f.last().Facts; got.Failure != "connection refused" || got.Response == nil || got.Response.Complete || got.Response.Usage != (harness.Usage{}) || snap.State.Attempt != 2 {
+		t.Fatalf("facts = %+v at attempt %d; want failure and received response before attempt 2", got, snap.State.Attempt)
 	}
 }
 
@@ -356,7 +373,7 @@ func TestLoopStopsOnModelStopError(t *testing.T) {
 			f := newFixture(t, limits, harness.Budget{}, reply{err: &harness.StopError{Reason: reason, Err: errors.New("provider refused")}})
 			wantState(t, f.run(f.loop()), core.PhaseStopped, reason)
 			f.wantKinds([]string{"request_frozen", "attempt_started", "stop_requested"})
-			if got := f.last().Facts; got != (harness.Facts{Failure: string(reason) + ": provider refused"}) {
+			if got := f.last().Facts; got.Failure != string(reason)+": provider refused" || got.Response == nil || got.Response.Usage != (harness.Usage{}) {
 				t.Fatalf("stop facts = %+v", got)
 			}
 		})
@@ -370,9 +387,9 @@ func TestLoopStopsWhenRequestCannotBeBuilt(t *testing.T) {
 		failure string
 	}{
 		{"freeze", func(f *fixture) { f.model.freezeErr = errors.New("request too large") }, "request too large"},
-		{"prompt", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Total = 64 }, "fixed context leaves no room for work and handover reserve"},
+		{"prompt", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Total = 64 }, "request exceeds 64-byte resource cap"},
 		{"goal", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Goal = 8 }, "goal exceeds its 8-byte limit"},
-		{"constraints", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Constraints = 8 }, "constraints exceed their 8-byte limit"},
+		{"constraints", func(f *fixture) { f.cfg.Limits = harness.DefaultPromptLimits(); f.cfg.Limits.Constraints = 8 }, "constraints exceeds its 8-byte limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -396,7 +413,7 @@ func TestLoopRepairsAnUndecodableResponse(t *testing.T) {
 	if repair := f.transitions()[4]; repair.To.RequestRev != 2 || repair.To.Attempt != 2 {
 		t.Fatalf("repair froze %+v, want revision 2 at attempt 2", repair.To)
 	}
-	wantContains(t, f.model.prompts[1].User(), "## Rejected response", "Sure! Here is the plan.", "invalid decision", "attempt 2 of 3")
+	wantContains(t, f.model.prompts[1].User(), "## Protocol repair", "Sure! Here is the plan.", "invalid decision", "attempt 2 of 3")
 	if strings.Contains(f.model.prompts[0].User(), "Rejected") {
 		t.Errorf("first prompt carries a rejection:\n%s", f.model.prompts[0].User())
 	}
@@ -492,5 +509,62 @@ func TestLoopToleratesUnreadableNotes(t *testing.T) {
 	}
 	if w := h.find("notes unreadable"); len(w) != 0 {
 		t.Fatalf("notes warnings = %v, want none", w)
+	}
+}
+
+func TestLoopSettlesReportedUsageWithTerminalProviderFailure(t *testing.T) {
+	report := harness.Usage{InputTokens: 3, OutputTokens: 7, InputReported: true, OutputReported: true}
+	f := newFixture(t, limits, harness.Budget{}, reply{body: `{"error":"provider failure","usage":{"input_tokens":3,"output_tokens":7}}`, usage: report, err: &harness.StopError{Reason: core.StopUnrecoverable, Err: errors.New("provider failure")}})
+	wantState(t, f.run(f.loop()), core.PhaseStopped, core.StopUnrecoverable)
+	last := f.last()
+	if last.Event.Kind() != "stop_requested" || last.Facts.Response == nil || last.Facts.Response.Usage != report || last.Facts.Failure == "" {
+		t.Fatalf("terminal usage not attached atomically: %+v", last)
+	}
+	got, err := f.store.Totals(context.Background(), runID)
+	if err != nil || got.Usage.InputTokens != 3 || got.Usage.OutputTokens != 7 || got.Coverage != (harness.UsageCoverage{Attempts: 1, InputReports: 1, OutputReports: 1}) {
+		t.Fatalf("terminal totals: %+v %v", got, err)
+	}
+	if err := f.store.Commit(context.Background(), last); err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.store.Totals(context.Background(), runID)
+	if err != nil || again != got {
+		t.Fatalf("terminal replay double counted: %+v %v", again, err)
+	}
+}
+
+func TestLoopCancellationKeepsLostAttemptDistinctFromReportedZero(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := returnReply("interrupted")
+	first.hook = cancel
+	zero := returnReply("done")
+	zero.usage = harness.Usage{InputReported: true, OutputReported: true}
+	f := newFixture(t, limits, harness.Budget{}, first, zero)
+	loop := f.loop()
+	if _, err := loop.Step(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Step(ctx, runID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled send: %v", err)
+	}
+	before, err := f.store.Latest(context.Background(), runID)
+	if err != nil || before.State.Phase != core.PhaseRequestSent {
+		t.Fatalf("cancelled send settled unexpectedly: %+v %v", before, err)
+	}
+	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
+	totals, err := f.store.Totals(context.Background(), runID)
+	if err != nil || totals.Usage.InputTokens != 0 || totals.Usage.OutputTokens != 0 || totals.Coverage != (harness.UsageCoverage{Attempts: 2, InputReports: 1, OutputReports: 1, Lost: 1}) {
+		t.Fatalf("lost/zero conflated: %+v %v", totals, err)
+	}
+}
+
+func TestLoopReportedBudgetStopsAfterPartialUsageOvershoot(t *testing.T) {
+	f := newFixture(t, limits, harness.Budget{Tokens: 3}, reply{body: `{"usage":{"output_tokens":4}}`, usage: harness.Usage{OutputTokens: 4, OutputReported: true}, err: errors.New("incomplete compatible-provider response")}, returnReply("must not be sent"))
+	wantState(t, f.run(f.loop()), core.PhaseStopped, core.StopBudgetExhausted)
+	_, sent := f.model.calls()
+	totals, err := f.store.Totals(context.Background(), runID)
+	if sent != 1 || err != nil || totals.Usage.OutputTokens != 4 || totals.Coverage != (harness.UsageCoverage{Attempts: 1, OutputReports: 1}) {
+		t.Fatalf("reported overshoot/coverage: calls=%d totals=%+v %v", sent, totals, err)
 	}
 }

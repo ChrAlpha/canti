@@ -29,12 +29,12 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 	}
 	started := time.Now()
 	metrics := struct {
-		Runs, Completed, Steps, Windows, Handovers, Requests, Retries, Crashes int
-		Effects, Duplicates, Containers, CandidateBoundaries, NavigationLinks  int
-		BusinessEntries                                                        int
-		Failed                                                                 bool
-		MaxPromptBytes                                                         int
-		DBBytes, RuntimeMS                                                     int64
+		Runs, Completed, Steps, Anchors, FocusChanges, Requests, Retries, Crashes int
+		Effects, Duplicates, Containers, NavigationBoundaries, NavigationLinks    int
+		BusinessEntries                                                           int
+		Failed                                                                    bool
+		MaxPromptBytes                                                            int
+		DBBytes, RuntimeMS                                                        int64
 	}{Runs: runs}
 	f, image := recoveryFixture(t, nil)
 	f.model.decideWith(func(step int, prompt string) (core.Decision, error) {
@@ -81,7 +81,7 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		goal := fmt.Sprintf("SESSION_STRESS_ROUND=%d\nAppend this round's A, B, C once; verify earlier original evidence before continuing.", round)
 		args := []string{"-session", "horizon", "-input", fmt.Sprintf("round-%02d", round), "-goal", goal,
 			"-constraints", "Keep every earlier ledger entry and verify original evidence.", "-image", image,
-			"-context-bytes", "98304", "-window-steps", "4", "-max-steps", "32", "-max-attempts", "3",
+			"-request-bytes", "98304", "-max-steps", "32", "-max-attempts", "3",
 			"-wall-time", "90s", "-job-timeout", "10s", "-token-budget", "10000", "-output-budget", "1048576"}
 		inputs = append(inputs, args)
 		if r := f.cli(nil, "run", append(append([]string{}, args...), "-once")...); r.code != exitActive {
@@ -103,8 +103,11 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		assertStressReplay(t, f, args, exitActive)
 		f.model.mu.Lock()
 		retryCall := f.model.sent[6] + 1
+		reset4, reset8 := f.model.sent[4]+1, f.model.sent[8]+1
 		f.model.mu.Unlock()
 		f.model.answer(6, retryCall, reply{status: 503, body: "bounded session stress transport failure"})
+		f.model.answer(4, reset4, reply{status: 400, body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+		f.model.answer(8, reset8, reply{status: 400, body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
 		beforeCalls := len(f.model.requests())
 		if round == runs-1 {
 			if r := f.cli([]string{"CANTI_TEST_CRASH=after:observed"}, "resume"); r.code != -1 {
@@ -162,8 +165,8 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 		}
 		metrics.Retries++
 		history := f.history("-run", admitted.Run.ID)
-		windows := map[int]bool{}
-		handovers, frozen := 0, 0
+		anchors := map[int64]bool{}
+		focusChanges, resets, frozen := 0, 0, 0
 		for _, e := range history {
 			if !strings.HasPrefix(e.State.Decision.Payload, "canti:") {
 				executed = append(executed, e)
@@ -177,16 +180,19 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 				if o.Status != harness.OutcomeDone {
 					t.Fatalf("round %d local action failed: %+v", round, o)
 				}
-				if o.Handover != nil {
-					handovers++
+				if o.Focus != nil {
+					focusChanges++
 				}
+			}
+			if e.Facts.Rejection != nil {
+				resets++
 			}
 			if req := e.Facts.Request; req != nil {
 				frozen++
-				if req.Window == nil || req.Context == nil {
-					t.Fatal("frozen request lost window or capture")
+				if req.ContextState == nil || req.Context == nil {
+					t.Fatal("frozen request lost anchor or capture")
 				}
-				windows[req.Window.FirstStep] = true
+				anchors[req.ContextState.AnchorSeq] = true
 				var envelope struct{ System string }
 				_, prompt, err := promptOf(req.Body)
 				if err != nil {
@@ -200,37 +206,35 @@ func TestSessionMultiRunWindowStress(t *testing.T) {
 					t.Fatalf("round %d prompt bytes %d vs %+v", round, promptBytes, req.Context.Bytes)
 				}
 				metrics.MaxPromptBytes = max(metrics.MaxPromptBytes, promptBytes)
-				prior := req.Context.Session
-				if len(prior) != min(round-1, 8) {
-					t.Fatalf("round %d prior candidates: %+v", round, prior)
+				prior := req.Context.SessionNavigation
+				want := ""
+				if round > 1 {
+					want = ids[round-2]
 				}
-				for i, source := range prior {
-					seq := max(1, round-8) + i
-					if source.SessionSeq != int64(seq) || source.RunID != ids[seq-1] || !source.IncludedGoal {
-						t.Fatalf("round %d prior source: %+v", round, source)
-					}
+				if prior != want {
+					t.Fatalf("round %d previous session navigation: %q, want %q", round, prior, want)
 				}
 				if e.State.Step == 1 && (round == 9 || round == 10) {
-					metrics.CandidateBoundaries++
+					metrics.NavigationBoundaries++
 				}
 			}
 		}
-		if handovers < 2 || len(windows) != handovers+1 || frozen+1 != len(requests) {
-			t.Fatalf("round %d continuity: windows=%v handovers=%d frozen=%d calls=%d", round, windows, handovers, frozen, len(requests))
+		if focusChanges != 3 || resets != 2 || len(anchors) != 3 || frozen+1 != len(requests) {
+			t.Fatalf("round %d continuity: anchors=%v focus=%d frozen=%d calls=%d", round, anchors, focusChanges, frozen, len(requests))
 		}
 		metrics.Steps += final.Totals.Steps
-		metrics.Windows += len(windows)
-		metrics.Handovers += handovers
+		metrics.Anchors += len(anchors)
+		metrics.FocusChanges += focusChanges
 		metrics.Containers = len(effectContainers(t, f.state))
 		if metrics.Containers != 0 {
 			t.Fatalf("round %d left %d containers", round, metrics.Containers)
 		}
 		metrics.Completed++
-		t.Logf("SESSION_ROUND round=%d run=%s steps=%d windows=%d prompt_max=%d elapsed_ms=%d", round, admitted.Run.ID, final.Totals.Steps, len(windows), metrics.MaxPromptBytes, time.Since(started).Milliseconds())
+		t.Logf("SESSION_ROUND round=%d run=%s steps=%d anchors=%d prompt_max=%d elapsed_ms=%d", round, admitted.Run.ID, final.Totals.Steps, len(anchors), metrics.MaxPromptBytes, time.Since(started).Milliseconds())
 	}
 	checkReleased(t, f, executed)
-	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.Handovers < runs*2 ||
-		runs >= 10 && (metrics.CandidateBoundaries != 2 || metrics.NavigationLinks != 9) {
+	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.FocusChanges != runs*3 ||
+		runs >= 10 && (metrics.NavigationBoundaries != 2 || metrics.NavigationLinks != 9) {
 		t.Fatalf("incomplete stress coverage: %+v", metrics)
 	}
 }

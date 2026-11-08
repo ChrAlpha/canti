@@ -37,9 +37,10 @@ func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
 			}
 			f := testFrame()
 			f.Step = 2
-			f.Steps = []StepRecord{{Step: 1, Command: "canti:retrieve", Observation: Observation{
+			f.Receipts = []StepReceipt{{Step: 1, Seq: 5, Status: "done"}}
+			f.Latest = &StepRecord{Seq: 5, Step: 1, Command: "canti:retrieve", Observation: Observation{
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &result,
-			}}}
+			}}
 			prompt := mustPrompt(t, f, DefaultPromptLimits())
 			_, after, ok := strings.Cut(prompt.User(), "Entries: ")
 			if !ok {
@@ -72,17 +73,6 @@ func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
 	}
 }
 
-func TestAcceptedHandoverPreservedWithInnerFence(t *testing.T) {
-	handover := "Current work:\n```sh\ngo test ./...\n```\nEvidence: /canti/runs/R/steps/00000041/meta"
-	f := testFrame()
-	f.Step, f.Earlier = 2, 1
-	f.Window = &Window{FirstStep: 2, SourceStep: 1, Handover: handover}
-	p := mustPrompt(t, f, DefaultPromptLimits())
-	if !strings.Contains(p.User(), "````\n"+handover+"\n````") || strings.Contains(p.User(), "[truncated") {
-		t.Fatalf("handover changed in new request:\n%s", p.User())
-	}
-}
-
 func TestEmptyListEncodingFitsLimit(t *testing.T) {
 	r := archive.Reader{Imports: t.TempDir()}
 	q := archive.RetrievalQuery{Operation: "list", Path: "/canti/imports", Reason: "check empty directory", Limit: 2}
@@ -110,7 +100,7 @@ func retrieveOK(t *testing.T, r archive.Reader, q archive.RetrievalQuery) archiv
 func TestStepRendersDiscoveryCoverage(t *testing.T) {
 	r := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "discover", Path: "/canti/runs/run/steps", Query: "needle", Reason: "recover"},
 		Incomplete: true, SkippedCount: 2, Skipped: []archive.Skip{{Step: 257, Field: "artifact", Reason: "nul"}, {Step: 2, Field: "preview", Reason: "utf8"}}}
-	rendered := budgetFrame().step(StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: &r}}, DefaultPromptLimits())
+	rendered := testFrame().step(StepRecord{Step: 1, Command: "canti:retrieve {}", Observation: Observation{Retrieval: &r}}, DefaultPromptLimits())
 	for _, want := range []string{`"skipped_count":2`, `"field":"preview"`, "candidate ranges", `"incomplete":true`, `"more":false`} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("coverage lacks %s:\n%s", want, rendered)
@@ -169,5 +159,43 @@ func TestPublishedEvidenceUsesFrozenBytesAndRepairsMissingFiles(t *testing.T) {
 	}
 	if err := putStep(dir, steps, record); err == nil {
 		t.Fatal("conflict accepted")
+	}
+}
+
+func TestPublishedEvidenceRejectsSameSizeConflictAfterSourceRemoval(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "original")
+	text := "EXACT_IMMUTABLE_EVIDENCE"
+	if err := os.WriteFile(original, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	retrieval := retrieveOK(t, archive.Reader{Imports: root}, archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/original", Reason: "freeze"})
+	record := StepRecord{Seq: 9, Step: 1, Command: `canti:retrieve {}`, Outcome: &Outcome{Status: OutcomeDone, Retrieval: &retrieval}}
+	dir := t.TempDir()
+	steps := filepath.Join(dir, archive.StepsDir)
+	if err := os.Mkdir(steps, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := putStep(dir, steps, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	evidence := filepath.Join(steps, archive.StepDir(1), archive.EvidencePath(0))
+	conflict := strings.Repeat("X", len(text))
+	if err := os.WriteFile(evidence, []byte(conflict), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := putStep(dir, steps, record); err == nil {
+		t.Fatal("same-size evidence corruption accepted")
+	}
+	if got, err := os.ReadFile(evidence); err != nil || string(got) != conflict {
+		t.Fatalf("conflict silently overwritten: %q %v", got, err)
+	}
+	// Journal evidence with a matching length but stale hash is rejected too.
+	retrieval.Evidence[0] = conflict
+	if err := putStep(dir, steps, record); err == nil {
+		t.Fatal("journal evidence with stale hash accepted")
 	}
 }

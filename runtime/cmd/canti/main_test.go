@@ -211,7 +211,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run", "-goal", "g"}, exitUsage, "", "-api must be anthropic-messages or openai-responses"},
 		{[]string{"run", "-goal", "g", "-api", "openai-completions", "-model", "m"}, exitUsage, "", "-api openai-completions is not supported"},
 		{[]string{"run", "-goal", "g", "-api", "anthropic-messages"}, exitUsage, "", "-model is required"},
-		{[]string{"run", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-context-bytes", "65535"}, exitUsage, "", "canti run: -context-bytes: harness: fixed context leaves no room for work and handover reserve: it needs a total of at least "},
+		{[]string{"run", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-request-bytes", "1"}, exitUsage, "", "canti run: -request-bytes: authoritative orientation needs at least "},
 		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -269,8 +269,8 @@ func TestRunRefusesAGoalOrConstraintsOverTheirLimit(t *testing.T) {
 	if len(f.model.requests()) != 0 {
 		t.Error("the model was called")
 	}
-	goal, constraints := strings.Repeat("g", l.Goal), strings.Repeat("c", l.Constraints)
-	if r := f.cli(nil, "run", "-goal", "\n"+goal+" ", "-constraints", constraints+"\t"); r.code != exitOK {
+	goal, constraints := "\n"+strings.Repeat("g", l.Goal-2)+" ", strings.Repeat("c", l.Constraints-1)+"\t"
+	if r := f.cli(nil, "run", "-goal", goal, "-constraints", constraints); r.code != exitOK {
 		t.Fatalf("run at the limits = %d\nstderr: %s", r.code, r.stderr)
 	}
 	if p := f.model.prompts(1); len(p) != 1 || !strings.Contains(p[0], "## Goal\n"+goal+"\n\n## Constraints\n"+constraints+"\n\n") {
@@ -432,7 +432,7 @@ func TestRefusedSessionInputsTouchNothing(t *testing.T) {
 	}{
 		{[]string{"-session", "s s", "-input", "i"}, exitUsage, "-session and -input must be"},
 		{[]string{"-session", "s", "-input", "i/i"}, exitUsage, "-session and -input must be"},
-		{[]string{"-session", "s", "-input", "i", "-context-bytes", "65535"}, exitUsage, "-context-bytes: "},
+		{[]string{"-session", "s", "-input", "i", "-request-bytes", "1"}, exitUsage, "-request-bytes: "},
 		{[]string{"-session", "s", "-input", "i", "-model-url", "ftp://model"}, exitError, "BaseURL"},
 	} {
 		f := newFixture(t, nil)
@@ -922,12 +922,12 @@ func TestAStopWaitsForTheResolutionOfAnUnknownOutcome(t *testing.T) {
 	}
 }
 
-func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
+func TestTheRequestBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 	const steps = 6
 	for _, tc := range []struct {
 		args  []string
 		shown bool
-	}{{[]string{"-context-bytes", "65536"}, false}, {nil, true}} {
+	}{{[]string{"-request-bytes", "50000"}, false}, {nil, true}} {
 		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
 			script := map[int]core.Decision{steps + 1: {Kind: core.Return, Payload: "done"}}
 			for i := 1; i <= steps; i++ {
@@ -938,7 +938,7 @@ func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 			args := append([]string{"-goal", strings.Repeat("g", 32<<10), "-constraints", strings.Repeat("c", 16<<10)}, tc.args...)
 			r := f.cli(noDocker, "run", args...)
 			if !tc.shown {
-				if r.code == exitOK || len(f.model.requests()) != 0 || !strings.Contains(r.stderr, "handover") {
+				if r.code == exitOK || len(f.model.requests()) != 0 || !strings.Contains(r.stderr, "resource cap") {
 					t.Fatalf("oversized fixed context should fail before calling model: %d, %s", r.code, r.stderr)
 				}
 				return
@@ -960,8 +960,8 @@ func TestTheContextBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 				t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 			}
 			p := f.model.prompts(steps + 1)
-			if len(p) != 1 || strings.Contains(p[0], "\n### Step 1\n") != tc.shown {
-				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "\n### Step 1\n"), tc.shown, p)
+			if len(p) != 1 || strings.Contains(p[0], "### Step 1 (sequence ") != tc.shown {
+				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "### Step 1 (sequence "), tc.shown, p)
 			}
 		})
 	}
@@ -1069,7 +1069,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 	s := parseSpec(t)
 	want := host.Spec{
 		Config: host.RunConfig{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
-			MaxTokens: 16000, Structured: true, ContextBytes: 256 << 10, ContextVersion: host.ContextVersion, HandoverBytes: 2048},
+			MaxTokens: 16000, Structured: true, RequestBytes: 8 << 20, ContextVersion: host.ContextVersion},
 		Budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 	}
@@ -1077,7 +1077,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 		t.Errorf("defaults = %+v\nwant %+v", s, want)
 	}
 	l := harness.DefaultPromptLimits()
-	l.Total = 256 << 10
+	l.Total = 8 << 20
 	if got := host.PromptLimits(s.Config); got != l {
 		t.Errorf("prompt limits = %+v\nwant %+v", got, l)
 	}
@@ -1086,7 +1086,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-api", "anthropic-messages", "-model", "claude-test", "-max-tokens", "900", "-effort", "medium", "-structured=false", "-fallbacks=false",
-		"-context-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-request-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.Config.Workspace = "/work"
 	s.Config.Provider = "http://127.0.0.1:1"

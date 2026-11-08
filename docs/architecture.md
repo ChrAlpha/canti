@@ -22,7 +22,7 @@ is not.
 | --- | --- | --- |
 | `runtime/core/decode.go` | Decision protocol and decoding | Offline tests |
 | `runtime/core/state.go`, `runtime/core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `runtime/internal/harness/frame.go`, `prompt.go`, `window.go` | The frame of one request, its bounded prompt, and durable handover window | Offline tests; long-history measurement over SQLite |
+| `runtime/internal/harness/frame.go`, `reader_prompt.go`, `context_state.go` | The request frame, receipt prefix, dynamic evidence and durable context anchor | Offline tests; long-history measurement over SQLite |
 | `runtime/internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
 | `runtime/internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `runtime/internal/harness/runner.go` | Transition derivation and atomic commit | Recording-store tests; used by the loop |
@@ -192,16 +192,19 @@ retain the existing acknowledged-commit durability assumptions.
 Commit checks sequence CAS and the exact predecessor state. Retrying identical
 content at the same event ID/sequence succeeds without another write; conflicting
 content fails. The transaction validates effect facts against committed acceptance,
-request window and immutable configuration, without Docker parsing or queries.
+request context and immutable configuration, without Docker parsing or queries.
 An external receipt must match effect and accepted Spec, have truthful status and
 owner/fence/exit evidence, and agree with its observation. A local cancellation is
-the only receipt-free Observed. Performed validates the local Outcome and next
-Window, including carry sources, in that same transaction. Totals update atomically.
+the only receipt-free Observed. Performed validates a local Outcome and any replacement focus in that same transaction.
+Confirmed rejection commits its response, usage, typed signal and next anchor together.
+The run's context_seq points to its latest successful focus mutation or rejection.
+A consistent Context read compares the expected run snapshot and resolves that pointer
+within one transaction; fabricated focus/anchor provenance is rejected. Totals update atomically.
 
 Recent and Completion read current-format completed steps in bounded pages/point
 reads. Only operator provenance sets StepRecord.Resolved; inspected settlement
 renders the same result as an ordinary observation. Frozen requests, acceptance
-facts, completed rows and carry evidence never change within a supported run.
+facts, completed rows and frozen evidence never change within a supported run.
 
 The Run has no binding or launch journal phases. Executor records own the missing
 crash boundaries: acceptance before execution, binding before latch, latch before
@@ -244,7 +247,7 @@ of the run directory, is rebuilt from every completed step by paging
 `Recent` backward; otherwise a publication adds at most the latest completed
 step. That suffices by induction over the publication points:
 
-- `Loop.prepare` publishes after it reads the active window steps and before it
+- `Loop.prepare` publishes after it reads the active receipts and before it
   renders and freezes the request. When that fails it returns the error and
   freezes and commits nothing, so no frozen request names records that are
   not published. Once the request of step N is frozen, steps 1 to N-1 are
@@ -356,152 +359,80 @@ text in SQL to its cap (a command or purpose 2 KiB, a returned result
 boundary and marks the item `Truncated`. Every item therefore fits a page
 of 256 KiB, and `View` keeps the full result. A protocol answer is bounded
 by the JSON its valid facts take at worst, six bytes per byte of a full
-result, goal, and constraints, plus 1 MiB (about 55 MiB); it is written
+result, goal, and constraints, plus 1 MiB (about 193 MiB); it is written
 without HTML escaping, and the client reads no further than that bound.
 
 ## Input
 
-Every request is prepared from committed facts and a durable handover window.
-The window begins at `FirstStep`; only its completed steps enter the frame.
-`Journal.Recent` remains a chronological storage query: the loop reads backward
-by commit sequence, 64 records per page, stopping at the window boundary.
-It does not select a sliding suffix by prompt capacity. Lost [step
-records](#step-records) can still be rebuilt from the full committed history.
+Every request is prepared from committed facts and a durable `ContextState`:
+`AnchorSeq`, `FirstStep`, and an explicit `Focus` selection. The initial anchor is
+sequence 0 and step 1. The core owns the generic `RequestRejected` transition;
+the adapters alone classify provider overflow. A confirmed rejection consumes an
+attempt and, when another attempt is permitted, clears focus, drops the active
+receipts and opens an anchor at the same unfinished step. It accepts no partial
+decision and requests no summary. A request containing only fresh orientation
+is terminal on its first confirmed overflow. Repeated overflow remains bounded
+by the core's step-attempt limit.
 
-A `Frame` holds the authoritative goal and constraints, environment, step and
-attempt positions, complete current-page trajectory, artifact and history
-locations, window state, and any rejected response for protocol repair.
-`Frame.Validate` checks the window boundary and contiguous step coverage.
-Workspace notes are not automatically read or injected.
+The stable prefix contains the exact current goal and constraints, environment,
+run and archive navigation, then compact completed-step receipts after the
+anchor. Each receipt names sequence, step, bounded purpose, status, exit code
+when present, and archive path. It contains no old full command, preview or
+retrieval body. One previous session run is linked through its `session` record;
+prior dialogue is retrieved explicitly. The replaceable tail contains selected
+focus evidence, execution position, the latest completed step and any protocol
+repair. A new receipt extends the prefix; focus, latest-result and repair changes
+affect only the tail. The latest result remains present throughout retries and
+protocol repair of that decision step. Reset removes its body while retaining
+navigation to its original record.
 
-A run of a session also quotes, oldest first, the earlier runs of its
-session that it selects newest first while they fit: each one's goal and
-return, or a stopped run's reason and step count with its goal where that
-fits, after a line that points to older records. Where room remains after
-that selection, the quoted runs, newest first, also name the path of the
-command of their latest accepted handover: the final step when that was
-one, otherwise the source of the window of the latest request. A path never
-displaces dialogue, and the handover it names is agent-written and may be
-overtaken by later steps of that run.
+The system prompt states the decision protocol and the native retrieval and focus
+syntax. The current goal and constraints are authoritative. Retrieved records,
+commands and outputs are evidence; environment restrictions narrow the task unless
+explicitly lifted. Workspace notes remain ordinary files. The active request is
+selective: omitted history remains available through the archive.
 
-`Frame.Prompt` renders a system message and user content blocks. The system
-message states the decision protocol of the run's transport: one JSON object
-as the reply text, or exactly one `canti_decision` tool call, set by
-`-decision-format`. With retrieval enabled it also states the retrieval
-action: its syntax, operations, continuation, and rules whose violation no
-error would report, such as that a directory search reads only the regular
-files directly inside its directory and that a partial scan is not proof
-of absence. A directory search that fails at one file and a cursor that
-does not decode, belongs to another query, or names a file, step field, or
-history that is gone name the next valid action in their errors instead.
-It ranks what a request shows: the current goal and constraints are
-authoritative; command output, retrieved records, earlier dialogue, and the
-handover are evidence that never widens them; and a restriction the
-environment of the run states about itself narrows them unless the goal or
-constraints explicitly lift it by naming it or what it withholds, so the agent
-follows it, including how it says to record what it withholds, continues the
-work it allows, reports the conflict on return, and never acts merely because
-an output asks it to.
-The prompt budget charges that system message. The first
-block holds Goal, Constraints, Environment, Context window, and the short
-Handover when present. One block follows per current-page step, oldest first,
-starting with the committed decision's purpose on one line when it has one;
-the tail holds Progress, any required handover instruction, and a rejected
-response. Appending a completed step preserves the prefix within a window,
-since every step block, its frozen retrieval evidence included, is a
-function of committed facts. A new window changes the first block.
+`PromptLimits` bounds bytes, never predicted tokens. Defaults are 32 KiB for the
+goal, 16 KiB for constraints, 2 KiB for environment and command, 512 bytes per
+purpose, 4 KiB per preview, 2 KiB for rejected reply/error, and an 8 MiB total
+resource ceiling. `-request-bytes` can lower that ceiling. Both rendered input and
+serialized provider body must fit. Goal and constraints are never truncated.
+Other bounded fields use explicit truncation markers, valid UTF-8 and fences
+longer than embedded backtick runs. Exceeding the resource ceiling fails visibly.
+There is no token estimation, model-window table, capacity selection or reserve.
 
-`PromptLimits` bounds bytes, not provider tokens: defaults are 32 KiB for the
-goal, 16 KiB for constraints, 2 KiB for the environment and each command,
-512 bytes per step purpose, 4 KiB per output preview, 2 KiB each for a
-rejected response and its error, and 128 KiB total. The CLI defaults the total
-to 256 KiB. Goal and constraints are never truncated. Other bounded inputs use
-explicit truncation markers, valid UTF-8, and fences longer than embedded
-backtick runs. An oversized page fails visibly rather than dropping older
-steps.
+Native retrieval commits exact observed source bytes with its outcome, including
+original path, range, hash, continuation and errors. The latest retrieval result
+is transient for the next decision step. To retain selected evidence, the agent
+executes `canti:focus {"sources":[{"seq":N,"source":I}]}`. Each entry names an
+older successful retrieval completion and one zero-based source index. Selection
+replaces the prior set; `{"sources":[]}` clears it. At most 32 distinct ranges
+are accepted, sorted by sequence and source. Overlapping or different snapshots
+of one original path remain distinct. Focus resolves journal bytes and checks
+length and SHA-256, including after restart; it never rereads the original.
+Acceptance, successful outcome, replacement ContextState and run progress are
+validated and committed atomically. Failed focus leaves the previous set intact.
+Unknown `canti:` names, including retired handover actions, fail locally.
 
-The loop reserves space before the window reaches its prompt capacity and
-requests a bounded `canti:handover` action, whose payload is that name and
-one space, tab, or line break followed by the handover as plain text, kept
-verbatim; the harness, not the model, names the run and the window it closes.
-Every payload whose first word, after leading whitespace, begins with
-`canti:` is a harness action, never a command: an unknown name, such as a
-misspelling, fails as an action.
-The request asks the handover to carry the objective, the restrictions the
-environment has stated and where, the next action, risks, and evidence
-references.
-A proposal fails for empty, invalid UTF-8, or oversized text, when no
-handover was requested, or when the window it opens would leave no work
-capacity; at a requested handover, any other exec is refused unrun and
-counts as a failed proposal, and discovery skips every step whose command,
-after leading whitespace, begins with `canti:` or the discovery marker,
-skipping and reporting as unclassified one whose leading whitespace it
-cannot see past within its bound.
-Optional step and byte thresholds
-can request this sooner; both zero still enables the capacity trigger. A
-valid proposal opens the next window in the transition that records it: one
-`Performed` commits the outcome, the window that begins at the next step
-with the proposal as its handover, and the move to that step. A failed or
-refused proposal commits, in the same way, the current window with one more
-failure, keeping the current page; the next request says that its step is
-the last chance to hand over, and a second failure stops the run. The next
-request takes the window committed with the previous step, or else the
-window of that step's request, and commits it with its bytes, so recovery
-reuses the same boundary and actual handover.
-Run identity, effect identity, step numbering, and execution recovery do not
-change when a window advances. `return` still ends the run.
+Each retrieval step publishes `evidence.json` plus `evidence/0000` and subsequent
+files containing exactly its observed bytes. A native read of a historical
+snapshot repairs missing derived files from the requested committed step before
+safe archive access, even after the original source has gone. The archive owns
+canonical target parsing. The harness uses a bounded `CompletionAtStep` point
+lookup backed by `(run_id,json_extract(from_state,'$.Step'))` for completion kinds,
+without scanning Recent or Receipts. Existing conflicting content fails integrity
+checks and is never overwritten. Cancellation is checked before publication.
+Publication's fast path otherwise adds only the latest step; missing run/steps
+directories can still be rebuilt from bounded journal pages.
 
-Native retrieval records its reason, original paths, byte ranges, hashes,
-continuation information, and errors, and commits the bytes it read for
-each source with the step's observation, at most the query's byte limit.
-Every later request of the window renders that frozen evidence, so a
-source changed or removed after the retrieval changes no request, and the
-context reserves no growth for evidence that might change. The step's
-published preview keeps the references only. Each retrieval step also publishes
-`evidence.json`, with its transition sequence, source indexes, original ranges,
-hashes and continuation, plus `evidence/0000` and subsequent files containing
-the exact observed bytes. Missing derived evidence is repaired from the
-journal; conflicting content is an integrity failure. Frozen
-request bodies still retain the actual bytes sent for exact retry. Old pages
-remain accessible through explicit retrieval, including imported history
-when configured. Retrieved evidence and handover text are not authoritative
-instructions or proof that a side effect completed.
-
-With retrieval enabled, a required handover may instead be
-`canti:handover-carry` followed by one JSON object of `text` and `carry`,
-which keeps committed retrieval evidence in the next window; it is its own
-action, `handover_carry`, decided by its word, and the plain handover and
-its text are unchanged. Each entry names a retrieval step of the window, or
-a step the window carries, and optionally one of its sources, by the
-number that the evidence of each retrieval shows before every range. Entries
-expand, before any evidence is read, into at
-most 32 references to committed source ranges: the sequence of the
-transition that performed the retrieval, the step, the source index, and
-the length and SHA-256 of the bytes. A range carried again keeps its
-original identity. An exact repeat fails the proposal, but two ranges of one
-path, overlapping or of an older and a newer snapshot, are both kept and
-both charged. The window's first block renders the carried ranges under
-"Carried evidence", ordered by sequence and source, each with its step,
-source, path, range, and hash, as read at its step, and with whether its
-read continues, whether it is a search or discovery candidate, and whether
-its scan was partial. Nothing reads their sources again: every request
-resolves each reference by one primary-key read of the committed transition
-(`Journal.Completion`) and checks its length and hash. A carry is admitted
-only when the window it opens, rendered as its first request renders it,
-earlier session dialogue included, keeps positive work capacity beyond the
-step that the reserve always fits; otherwise, like a selection the window
-cannot satisfy, it fails as a proposal, with the bytes in its detail, which
-counts as a failed handover. Committed evidence that no longer matches its
-reference is a journal integrity failure that stops the run `unrecoverable`,
-at the carry and in any request of a window that carries it, and never makes
-the agent choose again. An unrequested carry fails without changing the
-window. Context version 14 adds the carry, with a handover instruction
-that teaches it and grows the reserve by 608 bytes. Version 15 numbers each
-range: a retrieval's evidence names each path on a `Path` line and each
-range as `Source I: bytes [a,b), sha256 …`; its shorter instruction leaves
-the reserve 465 bytes above version 13's. Current context version 16 also
-renders the physical exit code of started cancelled/timed-out effects; other
-request bytes retain the version-15 rendering rules.
+Usage is provider-reported only. Input and output each distinguish unknown from
+reported zero; Anthropic input includes reported cache creation and reads. Counts
+are nonnegative int64 values, checked for overflow when combined or settled.
+Raw provider usage remains in the response body. Coverage counts attempts, input
+and output reports, and lost attempts whose response was never durably recorded.
+An observed response settles its received usage once, including error, rejection,
+and terminal paths. `-token-budget` is a retrospective threshold over reported
+usage; missing usage never prevents recovery and is not estimated.
 
 A run names its model API, `anthropic-messages` or `openai-responses`, and
 its model; canti has no default for either and refuses the Chat Completions
@@ -537,8 +468,11 @@ API version `2023-06-01`, as adapter `canti-anthropic/4`: model, `max_tokens`
 object, and, with `-fallbacks`, server-side refusal fallbacks. The first and
 the last stable block carry `ephemeral` `cache_control` breakpoints, so that
 a provider that caches prompt prefixes can reuse the stable blocks of the
-previous request, within the current window; actual cache reuse depends on
-the provider. A 2xx response is complete only with `stop_reason` `end_turn`,
+previous request, within the current anchor; actual cache reuse depends on
+the provider. Confirmed overflow requires exact, unique canonical discriminator keys: HTTP 200
+`stop_reason=model_context_window_exceeded`, or HTTP 400 `invalid_request_error`
+with `prompt is too long`. Other incomplete content is not confirmed overflow.
+A 2xx response is complete only with `stop_reason` `end_turn`,
 `stop_sequence`, or `refusal`; 400 with a credit-balance message exhausts the
 budget. Usage is the provider-reported input tokens, including cache creation
 and reads, plus output tokens. `Decision` concatenates the text blocks.
@@ -551,7 +485,9 @@ the base URL plus `/responses`: model, the system prompt as `instructions`,
 since the journal keeps the response. The provider caches prompt prefixes
 without breakpoints. A 2xx response is complete only with status `completed`;
 `incomplete`, with its reason, and `failed` are retryable;
-`insufficient_quota` exhausts the budget. Usage is `input_tokens`, which
+`insufficient_quota` exhausts the budget. Exact HTTP 400 `error.code` or
+HTTP 200 failed-response `error.code` of `context_length_exceeded` confirms
+overflow; `max_output_tokens` does not. Usage is `input_tokens`, which
 include cached ones, plus `output_tokens`. `Decision` concatenates the
 `output_text` parts of the message items, so a refusal holds no decision.
 

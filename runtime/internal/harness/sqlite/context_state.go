@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
@@ -44,13 +45,17 @@ func (s *Store) contextState(ctx context.Context, tx *sql.Tx, expected harness.S
 	if pointer < 0 || pointer > expected.Seq {
 		return harness.ContextState{}, fmt.Errorf("%w: invalid context head %d", ErrIncompatible, pointer)
 	}
-	return readContextState(ctx, tx, expected, pointer)
+	return s.readContextState(ctx, tx, expected, pointer)
 }
 
-func readContextState(ctx context.Context, tx *sql.Tx, expected harness.Snapshot, pointer int64) (harness.ContextState, error) {
-	var kind, data, from, to string
+func (s *Store) readContextState(ctx context.Context, tx *sql.Tx, expected harness.Snapshot, pointer int64) (harness.ContextState, error) {
+	var kind, data, from, to, event string
+	var outcome, rejection sql.NullString
 	var semantics int
-	err := tx.QueryRowContext(ctx, `SELECT kind,semantics,from_state,to_state,json_extract(facts,'$.ContextState') FROM transitions WHERE run_id=? AND seq=?`, expected.State.RunID, pointer).Scan(&kind, &semantics, &from, &to, &data)
+	var hasRejectionResponse bool
+	err := tx.QueryRowContext(ctx, `SELECT kind,semantics,from_state,to_state,event,json_extract(facts,'$.ContextState'),
+        json_extract(facts,'$.Outcome'),json_extract(facts,'$.Rejection'),
+        COALESCE(json_type(facts,'$.Response')='object' AND length(json_extract(facts,'$.Failure'))>0,0) FROM transitions WHERE run_id=? AND seq=?`, expected.State.RunID, pointer).Scan(&kind, &semantics, &from, &to, &event, &data, &outcome, &rejection, &hasRejectionResponse)
 	if err != nil {
 		return harness.ContextState{}, fmt.Errorf("%w: context head: %v", ErrIncompatible, err)
 	}
@@ -65,8 +70,35 @@ func readContextState(ctx context.Context, tx *sql.Tx, expected harness.Snapshot
 	if err := strict(data, &state); err != nil {
 		return state, err
 	}
-	valid := kind == "request_rejected" && after.Phase == core.PhaseIdle && state.AnchorSeq == pointer && state.FirstStep == before.Step && len(state.Focus) == 0 || kind == "performed"
-	if !valid || before.RunID != expected.State.RunID || after.RunID != expected.State.RunID {
+	e, err := decodeEvent(kind, event, semantics)
+	if err != nil {
+		return state, err
+	}
+	next, err := before.Next(e)
+	if err != nil || next != after || before.RunID != expected.State.RunID || after.RunID != expected.State.RunID {
+		return state, fmt.Errorf("%w: invalid context transition", ErrIncompatible)
+	}
+	facts := harness.Facts{ContextState: &state}
+	switch kind {
+	case "request_rejected":
+		if !rejection.Valid || !hasRejectionResponse {
+			return state, fmt.Errorf("%w: missing context rejection", ErrIncompatible)
+		}
+		facts.Rejection = new(harness.ContextRejection)
+		if err := strict(rejection.String, facts.Rejection); err != nil {
+			return state, err
+		}
+		if err := facts.Rejection.Previous.Validate(before.Step, pointer-1); err != nil {
+			return state, fmt.Errorf("%w: invalid previous context", ErrIncompatible)
+		}
+		if err := harness.CheckContextMutation(harness.Transition{Seq: pointer, From: before, To: after, Event: e, Facts: facts}, facts.Rejection.Previous); err != nil {
+			return state, fmt.Errorf("%w: %v", ErrIncompatible, err)
+		}
+	case "performed":
+		if err := s.checkFocusHead(ctx, tx, expected, pointer, before, state, outcome); err != nil {
+			return state, err
+		}
+	default:
 		return state, fmt.Errorf("%w: invalid context provenance", ErrIncompatible)
 	}
 	if err := state.Validate(expected.State.Step, pointer); err != nil {
@@ -75,12 +107,44 @@ func readContextState(ctx context.Context, tx *sql.Tx, expected harness.Snapshot
 	return state, nil
 }
 
-func (s *Store) checkContext(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
-	// Requests without context are accepted only while adding the contract;
-	// the reader-driven loop installs it on every request at the policy switch.
-	if t.Facts.ContextState == nil && t.Facts.Rejection == nil && (t.Facts.Request == nil || t.Facts.Request.ContextState == nil) {
-		return nil
+func (s *Store) checkFocusHead(ctx context.Context, tx *sql.Tx, expected harness.Snapshot, pointer int64, before core.State, state harness.ContextState, outcome sql.NullString) error {
+	accepted, err := s.accepted(ctx, tx, before.RunID, before.Step, before.Attempt)
+	if err != nil {
+		return err
 	}
+	if accepted.Action.Name != harness.ActionFocus || accepted.Action.Recovery != harness.RecoveryLocal || !outcome.Valid {
+		return fmt.Errorf("%w: context head is not a focus completion", ErrIncompatible)
+	}
+	focusOutcome := new(harness.Outcome)
+	if err := strict(outcome.String, focusOutcome); err != nil {
+		return err
+	}
+	if err := focusOutcome.Validate(); err != nil || focusOutcome.Focus == nil {
+		return fmt.Errorf("%w: invalid focus head", ErrIncompatible)
+	}
+	if err := accepted.Action.Matches(before.Decision.Payload); err != nil {
+		return fmt.Errorf("%w: invalid focus acceptance", ErrIncompatible)
+	}
+	if state.AnchorSeq > 0 {
+		if state.AnchorSeq >= pointer {
+			return fmt.Errorf("%w: focus anchor is not prior", ErrIncompatible)
+		}
+		var anchorKind string
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM transitions WHERE run_id=? AND seq=?`, expected.State.RunID, state.AnchorSeq).Scan(&anchorKind); err != nil || anchorKind != "request_rejected" {
+			return fmt.Errorf("%w: focus anchor is not a rejection", ErrIncompatible)
+		}
+		anchor, err := s.readContextState(ctx, tx, expected, state.AnchorSeq)
+		if err != nil || anchor.AnchorSeq != state.AnchorSeq || anchor.FirstStep != state.FirstStep || len(anchor.Focus) != 0 {
+			return fmt.Errorf("%w: focus names no rejection anchor", ErrIncompatible)
+		}
+	}
+	if !slices.Equal(state.Focus, focusOutcome.Focus.Sources) {
+		return fmt.Errorf("%w: focus head differs from outcome", ErrIncompatible)
+	}
+	return nil
+}
+
+func (s *Store) checkContext(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
 	current, err := s.contextState(ctx, tx, harness.Snapshot{Seq: t.Seq - 1, State: t.From})
 	if err != nil {
 		return err

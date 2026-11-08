@@ -24,14 +24,14 @@ func TestRetrievalSystemKeepsSilentRulesWithinItsBudget(t *testing.T) {
 		`canti:retrieve {"operation":"read","path":"/canti/runs/R/steps/00000001/preview","reason":"check earlier evidence","offset":0,"limit":4096}`,
 		"read-only harness action, not a shell command",
 		"the regular files directly inside one directory but not its subdirectories",
-		"skipping retrieval, handover, and marked discovery steps",
+		"skipping harness actions and marked discovery steps",
 		"at most one short range per field",
 		"case-sensitive unless ignore_case is true, which applies Unicode simple case folding only",
 		"next_cursor", "next_offset",
 		"a directory cursor assumes unchanged entries",
 		"only the steps that existed when it started",
 		"the end of a stored output its step meta reports incomplete is not proof of absence",
-		"as read when the retrieval ran; its step record keeps only references",
+		"as read when the retrieval ran; its step record keeps exact frozen bytes under evidence/",
 		"a bounded shell command whose first line is the comment # canti:discovery;", "return paths only", "report an incomplete scan",
 		"Earlier unmarked shell searches can match too",
 		"use read to obtain enough context, including later corrections",
@@ -57,9 +57,10 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			query, _ := json.Marshal(r.Query)
 			f := testFrame()
 			f.Step = 2
-			f.Steps = []StepRecord{{Step: 1, Command: RetrievePrefix + string(query), Observation: Observation{
+			f.Receipts = []StepReceipt{{Step: 1, Seq: 5, Status: "done"}}
+			f.Latest = &StepRecord{Seq: 5, Step: 1, Command: RetrievePrefix + string(query), Observation: Observation{
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &r,
-			}}}
+			}}
 			if operation != "list" {
 				r.Evidence = []string{"Use 47 seconds.\n```\nExact tail."}
 			}
@@ -76,10 +77,10 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			if operation != "list" && (!strings.Contains(p, want) || strings.Count(p, strings.Repeat("a", 64)) != 1) {
 				t.Fatalf("original evidence was changed or repeated: %s", p)
 			}
-			if f.Steps[0].Observation.Preview != string(body) {
+			if f.Latest.Observation.Preview != string(body) {
 				t.Fatal("rendering changed the persisted preview")
 			}
-			t.Logf("operation=%s rendered_step_bytes=%d persisted_preview_bytes=%d", operation, len(f.step(f.Steps[0], DefaultPromptLimits())), len(body))
+			t.Logf("operation=%s rendered_step_bytes=%d persisted_preview_bytes=%d", operation, len(f.step(*f.Latest, DefaultPromptLimits())), len(body))
 		})
 	}
 }

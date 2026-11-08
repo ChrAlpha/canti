@@ -204,12 +204,13 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	resp := harness.Response{Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter}
 	reply, err := m.endpoint.Post(ctx, req.Body, header)
 	resp.Body = reply.Body
+	usage, _, usageErr := provider.Usage(resp.Body, true)
+	resp.Usage = usage
 	if err != nil {
 		return resp, err
 	}
-	resp.Usage, _, err = provider.Usage(resp.Body, true)
-	if err != nil {
-		return resp, err
+	if usageErr != nil {
+		return resp, usageErr
 	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
@@ -229,6 +230,9 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	msg.StopReason = provider.Discriminator(fields, "stop_reason")
 	switch msg.StopReason {
 	case "model_context_window_exceeded":
+		if reply.Status != 200 {
+			return resp, errors.New("anthropic: context stop reason outside documented status")
+		}
 		return resp, &harness.ContextLimitError{Status: reply.Status, StopReason: msg.StopReason, RequestID: reply.Header.Get("request-id")}
 	case "end_turn", "stop_sequence", "refusal":
 		resp.Complete = true

@@ -35,7 +35,7 @@ observable.
 - `runtime/internal/harness` builds each request from committed facts within byte
   limits, commits one transition per fact, reads each accepted decision once
   into an action whose recovery contract it commits with it, and drives
-  committed intents to a halt with step, attempt, wall-time, token,
+  committed intents to a halt with step, attempt, wall-time, reported-token,
   output-byte, and job-time budgets.
 - `runtime/internal/archive` reads the step records, artifacts, and imported history
   that jobs see, for the harness's retrieval action, without following a
@@ -101,6 +101,12 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
 Same-version restarts preserve committed facts and exact frozen request bytes.
+Requests use a stable receipt prefix and selected frozen evidence. Confirmed
+provider overflow resets the active context at the same unfinished step, retaining
+the exact goal, constraints and archive navigation. `canti:focus` replaces the
+selected evidence; historical snapshots remain retrievable. `-request-bytes` is
+a resource ceiling, and `-token-budget` uses only reported usage. Status and TUI
+reports distinguish unknown usage, reported zero and lost attempts.
 An unknown outcome requires explicit inspection or operator resolution and never
 authorizes rerunning the command.
 

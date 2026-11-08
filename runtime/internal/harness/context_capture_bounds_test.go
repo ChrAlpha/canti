@@ -43,14 +43,13 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(encoded)),
 					reply{body: "invalid decision"},
 					execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover with valid input","limit":8}`),
-					execReply(harness.HandoverPrefix+"Original evidence verified; retrieval recovered."),
+					execReply(`canti:focus {"sources":[]}`),
 					returnReply("Original evidence verified; retrieval recovered."))
 				imported := t.TempDir()
 				if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				f.cfg.Reader = &archive.Reader{Imports: imported}
-				f.cfg.WindowSteps = 2
 				// The deadline is a fixture watchdog; byte and transition bounds below are the contract.
 				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 				defer cancel()
@@ -65,7 +64,7 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					if s.State.Intent() == core.IntentHalt {
 						wantState(t, s, core.PhaseReturned, "")
 						if s.State.Step != 4 || s.State.Decision.Payload != "Original evidence verified; retrieval recovered." {
-							t.Fatalf("next window did not complete: %+v", s.State)
+							t.Fatalf("recovery did not complete: %+v", s.State)
 						}
 						break
 					}
@@ -121,16 +120,16 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					}
 				}
 				first, repair := capturedRequest(t, f, 2, 1), capturedRequest(t, f, 2, 2)
-				if !reflect.DeepEqual(first.Context.Retrievals, repair.Context.Retrievals) || repair.Context.Bytes.Repair == 0 || repair.Context.Handover.Status != "request_revision" {
+				if !reflect.DeepEqual(first.Context.Retrievals, repair.Context.Retrievals) || repair.Context.Bytes.Repair == 0 || repair.Context.Preparation != "protocol_repair" {
 					t.Fatal("protocol repair lost the original capture identity")
 				}
 				trigger := capturedRequest(t, f, 3, 1)
-				if !trigger.Window.Requested || len(trigger.Context.Retrievals) != 2 || !trigger.Context.Retrievals[1].More || len(trigger.Context.Sources) != 0 || !strings.Contains(string(trigger.Body), "ORIGINAL") {
-					t.Fatal("valid retrieval did not progress into the handover request")
+				if len(trigger.Context.Retrievals) != 1 || !trigger.Context.Retrievals[0].More || len(trigger.Context.Sources) != 1 || !strings.Contains(string(trigger.Body), "ORIGINAL") {
+					t.Fatal("valid retrieval did not reach the next decision")
 				}
 				next := capturedRequest(t, f, 4, 1)
-				if next.Window.FirstStep != 4 || next.Window.SourceStep != 3 || len(next.Context.Retrievals) != 0 || !strings.Contains(string(next.Body), "Original evidence verified; retrieval recovered.") {
-					t.Fatal("handover did not release the rejected query and preserve next-step progress")
+				if next.ContextState.AnchorSeq != 0 || len(next.ContextState.Focus) != 0 || len(next.Context.Retrievals) != 0 || strings.Contains(string(next.Body), "ORIGINAL") {
+					t.Fatal("completed focus did not release transient evidence and preserve next-step progress")
 				}
 			})
 		}

@@ -38,7 +38,7 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
 			"seq": snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
 			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID,
-			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps},
+			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps, "coverage": t.Coverage},
 		}
 		return exitOK, a.encoder().Encode(out)
 	}

@@ -25,7 +25,7 @@ func TestContextRequestSelectsOnlyFrozenRevision(t *testing.T) {
 func TestContextRequestIsolatesSelectedRecord(t *testing.T) {
 	s, d := contextHistory(t)
 	w := d.store.(*Store)
-	if _, err := w.db.Exec(`UPDATE transitions SET facts = '{', event = '{', from_state = '{', to_state = '{', semantics = 999 WHERE seq != 5;
+	if _, err := w.db.Exec(`UPDATE transitions SET facts = '{', event = '{', from_state = CASE WHEN kind IN ('observed','resolved','performed') THEN json_set(from_state,'$.Step',9999) ELSE '{' END, to_state = '{', semantics = 999 WHERE seq != 5;
 		UPDATE runs SET run = '{', semantics = 999`); err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Frame is the input assembled by the harness for one model request:
@@ -11,25 +12,18 @@ import (
 // one independent, bounded Prompt. The core never receives a Frame or any
 // other history representation.
 type Frame struct {
-	Goal, Constraints, Environment       string
-	Step, MaxSteps, Attempt, MaxAttempts int
-	Earlier                              int          // completed steps before Steps that the prompt does not show
-	Steps                                []StepRecord // most recent completed steps, oldest first
-	RunID                                string       // the run, whose step records are under archive.RunsRoot/RunID
-	Rejected                             *Rejection   // set when the previous response of this step failed to decode
-	ContextState                         *ContextState
-	Receipts                             []StepReceipt
-	Latest                               *StepRecord
-	Window                               *Window
-	DecisionTool                         bool // decisions arrive as canti_decision tool input instead of reply text
-	RetrievalEnabled                     bool
-	ImportsEnabled                       bool
-	HandoverBytes                        int
-	SessionContext                       string
-	Carried                              []CarriedEvidence // the evidence Window.Carry names, in its order
-	capture                              *ContextCapture
-	sessionSources                       []ContextSessionSource
-	sessionNavigation                    string
+	Goal, Constraints, Environment                 string
+	Step, MaxSteps, Attempt, MaxAttempts           int
+	RunID                                          string
+	Rejected                                       *Rejection
+	ContextState                                   *ContextState
+	Receipts                                       []StepReceipt
+	Latest                                         *StepRecord
+	DecisionTool, RetrievalEnabled, ImportsEnabled bool
+	SessionContext                                 string
+	Focused                                        []FocusedEvidence
+	capture                                        *ContextCapture
+	sessionNavigation                              string
 }
 
 // Rejection is a response of the current step that failed to decode, with
@@ -37,17 +31,22 @@ type Frame struct {
 type Rejection struct{ Error, Response string }
 
 // Validate checks the minimum information needed to construct a model input
-// and that Earlier and Steps account for exactly the steps before Step,
-// oldest first, as every completed step is observed or resolved.
+// and that receipts account for every completed step since the anchor.
 func (f Frame) Validate() error {
 	if strings.TrimSpace(f.Goal) == "" || strings.TrimSpace(f.Environment) == "" || strings.TrimSpace(f.RunID) == "" {
 		return errors.New("harness: frame goal, environment and run ID are required")
+	}
+	if !utf8.ValidString(f.Goal) || !utf8.ValidString(f.Constraints) || !utf8.ValidString(f.Environment) {
+		return errors.New("harness: authoritative orientation must be valid UTF-8")
 	}
 	if f.MaxSteps < 0 || f.Step < 1 || f.MaxSteps > 0 && f.Step > f.MaxSteps || f.Attempt < 1 || f.Attempt > f.MaxAttempts {
 		return errors.New("harness: invalid frame execution position")
 	}
 	if f.Rejected != nil && f.Attempt < 2 {
 		return errors.New("harness: repair requires a prior attempt")
+	}
+	if f.ContextState == nil {
+		return errors.New("harness: frame context state is required")
 	}
 	c := f.contextState()
 	if c.FirstStep < 1 || c.FirstStep > f.Step {
@@ -68,8 +67,5 @@ func (f Frame) Validate() error {
 }
 
 func (f Frame) contextState() ContextState {
-	if f.ContextState == nil {
-		return InitialContext()
-	}
 	return *f.ContextState
 }
