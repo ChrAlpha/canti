@@ -89,10 +89,27 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 		t.Fatalf("%d step 1 requests", len(p))
 	}
 	c := p[2]
-	first, answer, interrupted := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request")
-	if first < 0 || !(first < answer && answer < interrupted) || strings.Contains(c, "sleep 60") ||
-		!strings.Contains(c, s.Run.ID+"/goal, steps, and result): stopped, reason cancelled, recorded steps 1; no assistant return.") {
-		t.Fatalf("the input after an interrupted command lost the dialogue:\n%s", c)
+	current := f.status().Run
+	checkSessionLink(t, f, c, current.ID, s.Run.ID, "third request", 3)
+	if strings.Contains(c, "sleep 60") {
+		t.Fatal("prior command replayed inline")
 	}
+	interrupted := archiveSession(t, f, s.Run.ID)
+	if interrupted.PreviousRunID == "" || interrupted.Sequence != 2 {
+		t.Fatalf("missing earlier dialogue: %+v", interrupted)
+	}
+	first := interrupted.PreviousRunID
+	if link := archiveSession(t, f, first); link.Sequence != 1 || link.PreviousRunID != "" || link.InputID == interrupted.InputID {
+		t.Fatalf("first session link: %+v", link)
+	}
+	for path, want := range map[string]string{
+		first + "/goal": "first request", first + "/result": "phase: returned\n\nfirst answer",
+		s.Run.ID + "/goal": "interrupted request", s.Run.ID + "/result": "phase: stopped\nreason: cancelled\n",
+	} {
+		if got := archiveText(t, f, "/canti/runs/"+path); got != want {
+			t.Fatalf("archive %s=%q, want %q", path, got, want)
+		}
+	}
+
 	checkReleased(t, f, f.history("-run", s.Run.ID))
 }

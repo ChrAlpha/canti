@@ -15,7 +15,7 @@ import (
 
 func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	f, image := recoveryFixture(t, nil)
-	const identity = "canti-anthropic/3-tool"
+	const identity = "canti-anthropic/4-tool"
 	const protocol = "anthropic-messages/2023-06-01"
 	answer := func(step, call int, body string) {
 		f.model.answer(step, call, reply{status: http.StatusOK, body: body})
@@ -74,8 +74,15 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 		t.Fatalf("transport retry changed frozen bytes or request count: %d", len(wire))
 	}
 	_, prompt, err := promptOf(wire[4])
-	if err != nil || !strings.Contains(prompt, "first-done") || !strings.Contains(prompt, firstID) {
+	if err != nil {
 		t.Fatalf("second run lost prior session answer: %v", err)
+	}
+	checkSessionLink(t, f, prompt, secondID, firstID, "repair and write second", 2)
+	if got := archiveText(t, f, "/canti/runs/"+firstID+"/goal"); got != "write first" {
+		t.Fatalf("prior goal: %q", got)
+	}
+	if got := archiveText(t, f, "/canti/runs/"+firstID+"/result"); got != "phase: returned\n\nfirst-done" {
+		t.Fatalf("prior answer: %q", got)
 	}
 	var frozenBodies [][]byte
 	rejected, incomplete, savedInvalid := 0, 0, false

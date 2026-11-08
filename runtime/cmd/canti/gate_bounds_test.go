@@ -160,7 +160,7 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 				!bytes.Equal(sent[2], h[7].Facts.Request.Body) {
 				t.Fatalf("%d requests do not replay the frozen bytes %+v", len(sent), frozen)
 			}
-			if frozen.Model != "fixture-model" || frozen.Adapter != "canti-anthropic/2" || !strings.HasPrefix(frozen.Protocol, "anthropic-messages/2023-06-01") {
+			if frozen.Model != "fixture-model" || frozen.Adapter != "canti-anthropic/4" || !strings.HasPrefix(frozen.Protocol, "anthropic-messages/2023-06-01") {
 				t.Errorf("request provenance = %+v", frozen)
 			}
 			for i, a := range map[int]core.AttemptStarted{1: {Step: 1, Attempt: 1}, 3: {Step: 1, Attempt: 2}} {

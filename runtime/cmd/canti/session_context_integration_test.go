@@ -152,19 +152,31 @@ func TestOversizedPreviousAnswerKeepsSessionNavigation(t *testing.T) {
 	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "new request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("navigation-only linked run: %+v", r)
 	}
+	secondID := f.status().Run.ID
 	if r := f.cli(nil, "run", "-session", "s", "-input", "third", "-goal", "third request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("projected linked run: %+v", r)
 	}
+	thirdID := f.status().Run.ID
 	if r := f.cli(nil, "run", "-goal", "standalone request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("standalone: %+v", r)
 	}
 	prompts := f.model.prompts(1)
-	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) || !strings.Contains(prompts[1], priorID+"/session") ||
-		strings.Contains(prompts[1], "short confirmed answer") || !strings.Contains(prompts[2], "short confirmed answer") ||
-		strings.Contains(prompts[2], strings.Repeat("X", 100)) || strings.Contains(prompts[3], "short confirmed answer") ||
-		strings.Contains(prompts[3], "/session") {
-		t.Fatal("oversized navigation, projected dialogue, and standalone inputs were not distinct")
+	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) || strings.Contains(prompts[2], strings.Repeat("X", 100)) ||
+		strings.Contains(prompts[3], "short confirmed answer") || strings.Contains(prompts[3], "/session") {
+		t.Fatal("oversized history or session navigation contaminated current/standalone input")
 	}
+	checkSessionLink(t, f, prompts[1], secondID, priorID, "new request", 2)
+	checkSessionLink(t, f, prompts[2], thirdID, secondID, "third request", 3)
+	if got := archiveText(t, f, "/canti/runs/"+priorID+"/result"); got != "phase: returned\n\n"+strings.Repeat("X", 70000) {
+		t.Fatalf("oversized prior result lost exact bytes: %d bytes", len(got))
+	}
+	if got := archiveText(t, f, "/canti/runs/"+priorID+"/goal"); got != "historical request" {
+		t.Fatalf("prior goal=%q", got)
+	}
+	if got := archiveText(t, f, "/canti/runs/"+secondID+"/result"); got != "phase: returned\n\nshort confirmed answer" {
+		t.Fatalf("recent prior result=%q", got)
+	}
+
 	for _, body := range f.model.requests() {
 		_, prompt, err := promptOf(body)
 		if err != nil {
