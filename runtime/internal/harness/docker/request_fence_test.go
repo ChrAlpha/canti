@@ -172,3 +172,29 @@ func TestAnAcknowledgementCannotBeCopiedBetweenIdenticalRequests(t *testing.T) {
 		t.Fatal("copied ack settled a distinct HTTP request")
 	}
 }
+
+func TestExecStartRejectsContainerLifecycleSuccessCodes(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusNotModified} {
+		request := fencedRequest("exec_start")
+		request.TargetID = "exec"
+		dir, err := beginRequest(t.TempDir(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = acknowledgeRequest(dir, request, status, false); err == nil {
+			t.Fatalf("accepted exec_start HTTP%d", status)
+		}
+	}
+	request := fencedRequest("exec_start")
+	request.TargetID = "exec"
+	dir, err := beginRequest(t.TempDir(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = acknowledgeRequest(dir, request, http.StatusOK, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = acknowledgeRequest(dir, request, http.StatusOK, false); err != nil {
+		t.Fatalf("ack replay resent or changed the request: %v", err)
+	}
+}

@@ -26,6 +26,7 @@ type requestAcknowledgement struct {
 	Format        int
 	RequestDigest string
 	Proof         string
+	Status        int `json:",omitempty"`
 	ConfirmedAt   time.Time
 }
 
@@ -85,7 +86,7 @@ func acknowledgeRequest(dir string, request requestFence, response int, execStar
 	switch {
 	case execStarted && request.Kind == "exec_start":
 		proof = "exec_started"
-	case !execStarted && (response == http.StatusNoContent || response == http.StatusNotModified || request.Kind == "exec_start" && response == http.StatusOK):
+	case !execStarted && responseAcknowledges(request.Kind, response):
 		proof = "http_success"
 	default:
 		return errors.New("docker: mutation has no definitive acknowledgement; keep environment quarantined")
@@ -94,7 +95,10 @@ func acknowledgeRequest(dir string, request requestFence, response int, execStar
 	if err != nil {
 		return err
 	}
-	ack := requestAcknowledgement{Format: 1, RequestDigest: digest, Proof: proof, ConfirmedAt: time.Now().UTC()}
+	if settled, err := requestSettled(dir, request); err != nil || settled {
+		return err
+	}
+	ack := requestAcknowledgement{Format: 1, RequestDigest: digest, Proof: proof, Status: response, ConfirmedAt: time.Now().UTC()}
 	data, err := json.Marshal(ack)
 	if err != nil {
 		return err
@@ -116,6 +120,9 @@ func requestSettled(dir string, request requestFence) (bool, error) {
 	}
 	if ack.Format != 1 || ack.RequestDigest != digest || ack.ConfirmedAt.IsZero() || ack.Proof != "http_success" && (ack.Proof != "exec_started" || request.Kind != "exec_start") {
 		return false, errors.New("docker: acknowledgement contradicts its request fence")
+	}
+	if ack.Proof == "http_success" && !responseAcknowledges(request.Kind, ack.Status) {
+		return false, errors.New("docker: unexpected endpoint acknowledgement status")
 	}
 	// A failed publication can have made the name visible before directory sync.
 	if err = syncDir(dir); err != nil {
@@ -141,4 +148,14 @@ func requestIdentity(dir string, request requestFence) (string, error) {
 		return "", err
 	}
 	return harness.ConfigDigest(append([]byte(filepath.Base(dir)+"\x00"), data...)), nil
+}
+
+func responseAcknowledges(kind string, status int) bool {
+	switch kind {
+	case "exec_start":
+		return status == http.StatusOK
+	case "environment_stop", "environment_start":
+		return status == http.StatusNoContent || status == http.StatusNotModified
+	}
+	return false
 }

@@ -33,6 +33,7 @@ type engine struct {
 	client  *http.Client
 	gate    chan struct{}
 	version string
+	single  bool
 }
 
 var engines sync.Map
@@ -53,7 +54,9 @@ func endpointEngine(path, endpoint string) *engine {
 	if e, ok := engines.Load(key); ok {
 		return e.(*engine)
 	}
-	e, _ := engines.LoadOrStore(key, newEngine(func(ctx context.Context) (net.Conn, error) { return dialDocker(ctx, path, endpoint) }))
+	candidate := newEngine(func(ctx context.Context) (net.Conn, error) { return dialDocker(ctx, path, endpoint) })
+	candidate.single = true
+	e, _ := engines.LoadOrStore(key, candidate)
 	return e.(*engine)
 }
 
@@ -103,7 +106,7 @@ func (x *Executor) api(ctx context.Context, op, method, path string, body any, h
 	}
 	call, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	err := x.engine.do(call, method, path, body, op != "start" && op != "stop", handle)
+	err := x.engine.do(call, method, path, body, !x.engine.single && op != "start" && op != "stop", handle)
 	switch {
 	case err == nil:
 		return nil
@@ -178,7 +181,7 @@ func (e *engine) negotiate(ctx context.Context) (string, error) {
 	if e.version != "" {
 		return e.version, nil
 	}
-	res, err := e.send(ctx, http.MethodGet, "/version", nil, true)
+	res, err := e.send(ctx, http.MethodGet, "/version", nil, !e.single)
 	if err != nil {
 		return "", err
 	}
