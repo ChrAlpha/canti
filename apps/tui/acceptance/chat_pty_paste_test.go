@@ -53,6 +53,7 @@ func TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal(t *testing.T) {
 }
 
 func TestChatPTYPasteSpansCompletionAndRequiresManualSend(t *testing.T) {
+	t.Setenv("TERM", "dumb")
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second answer"}`})
 	entered := make(chan struct{}, 1)

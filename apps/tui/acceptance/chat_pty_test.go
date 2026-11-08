@@ -20,12 +20,19 @@ import (
 	"testing"
 	"time"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
+
+// The PTY's output is interpreted by x/vt, not by the invoking terminal.
+// Advertise its xterm-style controls: TERM=dumb selects UV's ANSI insert-mode
+// fallback, which x/vt does not implement. Parent TERM must not change the
+// virtual terminal contract of these tests.
+const screenTerm = "xterm-256color"
 
 type ptyChat struct {
 	cmd      *exec.Cmd
@@ -100,7 +107,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	cmd.Env = append(cmd.Env, "CANTI_TEST_MAIN=1", "ANTHROPIC_API_KEY="+f.key, "GORACE=atexit_sleep_ms=0")
+	cmd.Env = append(cmd.Env, "TERM="+screenTerm, "CANTI_TEST_MAIN=1", "ANTHROPIC_API_KEY="+f.key, "GORACE=atexit_sleep_ms=0")
 	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if stderr != nil {
@@ -461,6 +468,9 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 }
 
 func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
+	// A noninteractive parent may supply TERM=dumb. The actual test terminal
+	// is our x/vt emulator and must advertise its own capabilities.
+	t.Setenv("TERM", "dumb")
 	for _, interrupted := range []bool{false, true} {
 		name := "returned"
 		if interrupted {
@@ -773,5 +783,42 @@ func TestScreenObserverRequiresExactStatusAndFreshFrame(t *testing.T) {
 	}
 	if next != 3 {
 		t.Fatalf("frame sequence depended on raw or stripped byte offsets: %d", next)
+	}
+}
+
+// Feed real renderer deltas through the observer, including byte boundaries
+// inside UTF-8 and control sequences. Replacing a long phase with ready must
+// preserve the complete status row, not just a prefix matched by the waiter.
+func TestScreenObserverRendersStatusTransitions(t *testing.T) {
+	for _, chunk := range []int{1, 4096} {
+		t.Run(fmt.Sprintf("chunk=%d", chunk), func(t *testing.T) {
+			var output bytes.Buffer
+			renderer := uv.NewTerminalRenderer(&output, []string{"TERM=" + screenTerm})
+			renderer.SetFullscreen(true)
+			renderer.Resize(100, 24)
+			buffer := uv.NewScreenBuffer(100, 24)
+			p := &ptyChat{screen: newScreen(100)}
+			defer p.screen.Close()
+			for _, phase := range []string{"ready", "submitting · draft editable", "running · draft editable", "stopping · waiting for cleanup · draft editable", "ready"} {
+				row := phase + " · current launch flags apply to each new input"
+				buffer.Clear()
+				uv.NewStyledString("canti-tui · session pty\n"+row+"\n› retained draft").Draw(buffer, buffer.Bounds())
+				renderer.Render(buffer.RenderBuffer)
+				if err := renderer.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				raw := append([]byte(nil), output.Bytes()...)
+				output.Reset()
+				for len(raw) > 0 {
+					n := min(chunk, len(raw))
+					p.record(raw[:n])
+					raw = raw[n:]
+				}
+				lines := strings.Split(p.screen.String(), "\n")
+				if lines[0] != "canti-tui · session pty" || lines[1] != row || lines[2] != "› retained draft" {
+					t.Fatalf("phase %q reconstructed incorrectly: %q", phase, p.screen.String())
+				}
+			}
+		})
 	}
 }
