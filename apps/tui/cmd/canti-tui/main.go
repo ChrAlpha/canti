@@ -54,6 +54,7 @@ type app struct {
 	goalLimit, constraintsLimit int
 	child                       *exec.Cmd
 	childDone                   chan error
+	starting                    <-chan struct{}
 	hostMode                    string
 	hostWait                    time.Duration
 	detach                      chan struct{} // closed by a chat that ends attached to a host process

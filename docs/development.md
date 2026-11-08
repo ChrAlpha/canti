@@ -207,8 +207,10 @@ embedded operational commands and owned TUI clients unless a test names auto.
 A client that finds no host and an unlocked
 state directory starts `canti host` in a session of
 its own, with no credential in its environment and logging to `host.log` in
-the state directory, and waits up to `-host-wait` (10 s) for it to serve; it
-refuses a host of another protocol version, naming its process and how to
+the state directory, and waits up to `-host-wait` (10 s) for it to serve.
+Each client waits for its launched process to exit before launching a
+replacement, even before that process holds the state lock. It refuses a host
+of another protocol version, naming its process and how to
 stop it, the canti that started it or SIGTERM, since it is never replaced
 while it may drive a run, and exits with status 6 when an
 embedded command holds the state directory. An autostarted host exits after

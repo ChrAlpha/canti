@@ -168,10 +168,10 @@ func awaitSignal(marker string) {
 	signal.Stop(sig)
 }
 
-// awaitRemoval creates marker and returns once it has been removed: a pause
-// that, unlike awaitSignal, leaves the process's own signal handling alone.
+// awaitRemoval records this process's PID in marker and waits for removal.
+// Unlike awaitSignal, it leaves the process's own signal handling alone.
 func awaitRemoval(marker string) {
-	os.WriteFile(marker, nil, 0o600)
+	os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	for {
 		if _, err := os.Stat(marker); os.IsNotExist(err) {
 			return

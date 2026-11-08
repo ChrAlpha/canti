@@ -721,3 +721,82 @@ func TestAReplayNamesTheSettingsItIgnoresInEveryMode(t *testing.T) {
 		}
 	}
 }
+
+// A slow child is still this client's outstanding startup attempt even before
+// it acquires the state lock. A sibling must not outlive and replace it later.
+func TestAnAutoClientWaitsForItsStartingHost(t *testing.T) {
+	for _, command := range []string{"run", "chat"} {
+		t.Run(command, func(t *testing.T) {
+			f := newFixture(t, nil)
+			f.autoHost()
+			marker := filepath.Join(t.TempDir(), "starting")
+			t.Cleanup(func() { os.Remove(marker) })
+			args := []string{"-host", "auto", "-host-wait", "200ms"}
+			if command == "run" {
+				args = append(args, "-goal", "g")
+			}
+			_, wait := f.start([]string{"CANTI_TEST_SETUP=point:host.starting", "CANTI_TEST_BLOCKED=" + marker}, command, args...)
+			waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+			if r := wait(); r.code != exitError {
+				t.Fatalf("startup deadline: %+v", r)
+			}
+			pids := f.hostProcesses()
+			if len(pids) != 1 {
+				t.Fatalf("one client left %d pending startup processes: %v", len(pids), pids)
+			}
+			if err := os.Remove(marker); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, func() bool {
+				h, err := (&hostrpc.Client{Path: f.socket()}).Hello(context.Background())
+				return err == nil && h.PID == pids[0]
+			})
+			if r := f.cli(nil, "status"); r.code != exitError || !strings.Contains(r.stderr, "no runs") {
+				t.Fatalf("startup admitted an input: %+v", r)
+			}
+		})
+	}
+}
+
+// Reaping a pending child must release its startup slot. The same client then
+// reaches a fresh host and admits its input once, without inheriting a sibling.
+func TestAnAutoClientReplacesItsExitedStartingHost(t *testing.T) {
+	for _, command := range []string{"run", "chat"} {
+		t.Run(command, func(t *testing.T) {
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+			f.autoHost()
+			marker := filepath.Join(t.TempDir(), "starting")
+			t.Cleanup(func() { os.Remove(marker) })
+			args := []string{"-host", "auto"}
+			var input io.Reader
+			if command == "run" {
+				args = append(args, "-goal", "g")
+			} else {
+				input = strings.NewReader("g\n")
+			}
+			_, wait := f.startWith(input, []string{"CANTI_TEST_SETUP=point:host.starting", "CANTI_TEST_BLOCKED=" + marker}, command, args...)
+			markedPID := func() int { data, _ := os.ReadFile(marker); pid, _ := strconv.Atoi(string(data)); return pid }
+			var first, second int
+			waitFor(t, func() bool { first = markedPID(); return first > 0 })
+			if err := syscall.Kill(first, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, func() bool { second = markedPID(); return second > 0 && second != first })
+			if err := os.Remove(marker); err != nil {
+				t.Fatal(err)
+			}
+			if r := wait(); r.code != exitOK || r.stdout != "done\n" {
+				t.Fatalf("replacement startup: %+v", r)
+			}
+			if pids := f.hostProcesses(); len(pids) != 1 || pids[0] != second {
+				t.Fatalf("replacement hosts=%v, want only %d", pids, second)
+			}
+			if pids := f.hostPIDs(); len(pids) != 1 || pids[0] != second {
+				t.Fatalf("serving hosts=%v, want only %d", pids, second)
+			}
+			if got := f.status(); got.Phase != core.PhaseReturned || len(f.model.requests()) != 1 {
+				t.Fatalf("replacement admitted unexpected work: %+v", got)
+			}
+		})
+	}
+}

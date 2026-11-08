@@ -155,12 +155,14 @@ func (a *app) startHost() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	done := make(chan struct{})
+	a.starting = done
 	if a.hostMode == hostOwned {
-		a.child = cmd
-		a.childDone = make(chan error, 1)
-		go func() { a.childDone <- cmd.Wait() }()
+		exited := make(chan error, 1)
+		a.child, a.childDone = cmd, exited
+		go func() { exited <- cmd.Wait(); close(done) }()
 	} else {
-		go cmd.Wait()
+		go func() { cmd.Wait(); close(done) }()
 	}
 	return nil
 }
@@ -350,9 +352,17 @@ func (a *app) remoteReport(r hostrpc.Run, err error) (int, error) {
 	return a.report(r, err)
 }
 
-// An owned host must either serve or exit before another can be launched.
-// Otherwise concurrent startup could leave the winning process unowned.
+// A live child is an outstanding startup attempt in either mode, even
+// before it holds the lock. Owned mode also retires its exited child handle.
 func (a *app) canStartHost() bool {
+	if a.starting != nil {
+		select {
+		case <-a.starting:
+			a.starting = nil
+		default:
+			return false
+		}
+	}
 	if a.child == nil {
 		return true
 	}

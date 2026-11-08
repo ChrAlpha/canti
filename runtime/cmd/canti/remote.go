@@ -118,7 +118,7 @@ func (a *app) connect(ctx context.Context) (*hostrpc.Client, error) {
 		switch {
 		case err == nil || !hostrpc.Unavailable(err) && !leaving(err):
 			return c, err
-		case hostrpc.Unavailable(err) && starts < maxStarts && !locked(a.state):
+		case hostrpc.Unavailable(err) && starts < maxStarts && !locked(a.state) && a.canStartHost():
 			// The host that held the state directory, or the one this client
 			// started, has exited without serving: one that was shutting down
 			// as this client arrived, or one that lost the lock to it. Start
@@ -189,7 +189,9 @@ func (a *app) startHost() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go cmd.Wait()
+	done := make(chan struct{})
+	a.starting = done
+	go func() { cmd.Wait(); close(done) }()
 	return nil
 }
 
@@ -427,4 +429,19 @@ func (a *app) remoteResume(ctx context.Context, c *hostrpc.Client, r hostrpc.Run
 		return exitError, err
 	}
 	return a.attachRun(ctx, r)
+}
+
+// A live child is an outstanding startup attempt even before it owns the
+// state lock. Starting a sibling could let stale startup settings win later.
+func (a *app) canStartHost() bool {
+	if a.starting == nil {
+		return true
+	}
+	select {
+	case <-a.starting:
+		a.starting = nil
+		return true
+	default:
+		return false
+	}
 }

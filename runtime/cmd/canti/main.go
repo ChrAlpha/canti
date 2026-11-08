@@ -102,7 +102,8 @@ type app struct {
 	bound            map[host.Pair]host.Keys // the credentials a foreground host binds
 	hostMode         string
 	hostWait         time.Duration
-	detach           chan struct{} // closed by a chat that ends attached to a host process
+	starting         <-chan struct{} // closes when this client's launched host exits
+	detach           chan struct{}   // closed by a chat that ends attached to a host process
 }
 
 func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {

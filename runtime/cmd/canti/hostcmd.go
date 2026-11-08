@@ -21,6 +21,7 @@ import (
 // The points the host command reports to checkpoint.
 const (
 	pointHostWaiting = "host.waiting"   // the first Hello failed, before waiting for a host
+	pointStarting    = "host.starting"  // the host has started, before acquiring the state lock
 	pointLocked      = "host.locked"    // the host holds the lock, before it listens
 	pointListening   = "host.listening" // the host listens, before it serves
 )
@@ -67,6 +68,7 @@ func (a *app) serve(ctx context.Context, path string, idle, shutdown time.Durati
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
+	checkpoint(pointStarting)
 	h, err := a.openHost(ctx, true)
 	if err != nil {
 		return exitError, err
