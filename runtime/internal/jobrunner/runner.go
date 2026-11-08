@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const Protocol = 1
@@ -43,7 +44,7 @@ type Record struct {
 }
 
 func (c Config) validate() error {
-	if !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Workdir) || c.EffectID == "" || c.Generation == 0 || c.OutputLimit < 1 || c.PreviewLimit < 64 || c.PreviewLimit > 4096 {
+	if !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Workdir) || c.EffectID == "" || len(c.EffectID) > 128 || !utf8.ValidString(c.EffectID) || c.Generation == 0 || c.OutputLimit < 1 || c.PreviewLimit < 64 || c.PreviewLimit > 4096 {
 		return errors.New("job runner: invalid identity, directory or capture limits")
 	}
 	b, err := hex.DecodeString(c.Spec)
@@ -67,7 +68,7 @@ func Run(c Config) (Record, error) {
 		return Record{}, err
 	}
 	defer root.Close()
-	out, err := root.OpenFile("output", os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	out, err := root.OpenFile("output", os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return Record{}, err
 	}
@@ -97,7 +98,10 @@ func Run(c Config) (Record, error) {
 	go func() { captured <- collect(reader, out, c.OutputLimit, c.PreviewLimit) }()
 	waitErr := cmd.Wait()
 	rec.FinishedAt = time.Now().UTC()
-	code := exitCode(waitErr)
+	code, statusErr := exitCode(waitErr)
+	if statusErr != nil {
+		return rec, statusErr
+	}
 	rec.ExitCode = &code
 	var got capture
 	select {
@@ -115,39 +119,41 @@ func Run(c Config) (Record, error) {
 	if err := out.Sync(); err != nil {
 		return rec, fmt.Errorf("job runner: sync output: %w", err)
 	}
-	if err := out.Close(); err != nil {
-		return rec, err
-	}
-	// Hash only the bounded retained file, after capture is quiescent.
-	f, err := root.OpenFile("output", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
+	// Keep the descriptor of the file we created. An editable pathname must
+	// not redirect hashing into a FIFO, device, or replacement file.
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return rec, err
 	}
 	hash := sha256.New()
-	_, err = io.Copy(hash, io.LimitReader(f, c.OutputLimit+1))
-	err = errors.Join(err, f.Close())
+	n, err := io.Copy(hash, io.LimitReader(out, c.OutputLimit+1))
 	if err != nil {
 		return rec, err
 	}
+	if n != rec.Stored {
+		return rec, errors.New("job runner: output changed during capture")
+	}
 	rec.Digest = hex.EncodeToString(hash.Sum(nil))
-	if err := publish(root, rec); err != nil {
+	if err := publish(root, &rec); err != nil {
 		return rec, err
 	}
 	return rec, nil
 }
 
-func exitCode(err error) int {
+func exitCode(err error) (int, error) {
 	if err == nil {
-		return 0
+		return 0, nil
 	}
 	var exited *exec.ExitError
 	if errors.As(err, &exited) {
 		if status, ok := exited.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return 128 + int(status.Signal())
+			return 128 + int(status.Signal()), nil
 		}
-		return exited.ExitCode()
+		if code := exited.ExitCode(); code >= 0 {
+			return code, nil
+		}
+		return 0, errors.New("job runner: unavailable child status")
 	}
-	return 125
+	return 0, fmt.Errorf("job runner: wait did not establish child status: %w", err)
 }
 
 func forwardSignals(pid int) func() {
@@ -169,7 +175,17 @@ func forwardSignals(pid int) func() {
 	return func() { signal.Stop(signals); close(done) }
 }
 
-func publish(root *os.Root, rec Record) error {
+func publish(root *os.Root, rec *Record) error {
+	// UTF-8 validity and JSON expansion have independent bounds. Compute the
+	// exact space available for the preview rather than losing a valid result
+	// because control bytes expand to six-byte JSON escapes.
+	preview := rec.Preview
+	rec.Preview = ""
+	base, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	rec.Preview = jsonBoundedPreview(preview, MetadataLimit-len(base))
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -239,9 +255,33 @@ func (c *capture) write(w io.Writer, p []byte, limit int64) {
 }
 func (c capture) preview() string {
 	if c.total <= int64(c.limit) {
-		return strings.ToValidUTF8(string(c.head), "�")
+		return utf8Prefix(strings.ToValidUTF8(string(c.head), "�"), c.limit)
 	}
-	marker := fmt.Sprintf("\n... %d bytes total ...\n", c.total)
+	marker := fmt.Sprintf("\n... %d observed bytes ...\n", c.total)
 	n := (c.limit - len(marker)) / 2
-	return strings.ToValidUTF8(string(c.head[:n]), "�") + marker + strings.ToValidUTF8(string(c.tail[len(c.tail)-n:]), "�")
+	head := utf8Prefix(strings.ToValidUTF8(string(c.head), "�"), n)
+	tail := utf8Prefix(strings.ToValidUTF8(string(c.tail[len(c.tail)-n:]), "�"), n)
+	return head + marker + tail
+}
+
+func utf8Prefix(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:max(0, limit)]
+}
+
+func jsonBoundedPreview(s string, limit int) string {
+	used := 0
+	for i, r := range s {
+		data, _ := json.Marshal(string(r))
+		used += len(data) - 2
+		if used > limit {
+			return s[:i]
+		}
+	}
+	return s
 }

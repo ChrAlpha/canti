@@ -1,13 +1,16 @@
 package jobrunner
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func config(t *testing.T, command string) Config {
@@ -119,5 +122,101 @@ func TestSignalExitRetainsTheShellStatus(t *testing.T) {
 	}
 	if *rec.ExitCode != 143 {
 		t.Fatalf("exit=%d", *rec.ExitCode)
+	}
+}
+
+func TestArbitraryBytePreviewRespectsTheFinalUTF8ByteLimit(t *testing.T) {
+	data := make([]byte, 0, 4096)
+	for i := 0; i < 4096; i++ {
+		data = append(data, byte(i%256))
+	}
+	for _, size := range []int{64, 128, 4096} {
+		got := collect(bytes.NewReader(data), io.Discard, 4096, size).preview()
+		if !utf8.ValidString(got) || len(got) > size {
+			t.Fatalf("limit=%d bytes=%d valid=%v", size, len(got), utf8.ValidString(got))
+		}
+	}
+}
+
+func TestControlByteOutputCannotOverflowCompletionMetadata(t *testing.T) {
+	c := config(t, "printf '"+strings.Repeat("\\001", 4096)+"'")
+	c.OutputLimit = 4096
+	c.PreviewLimit = 4096
+	rec, err := Run(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *rec.ExitCode != 0 || rec.Bytes != 4096 || rec.Stored != 4096 || len(rec.Preview) > 4096 {
+		t.Fatalf("record=%+v", rec)
+	}
+	data, err := os.ReadFile(filepath.Join(c.Directory, "completion.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > MetadataLimit {
+		t.Fatalf("metadata=%d", len(data))
+	}
+	var saved Record
+	if err = json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Preview != rec.Preview || saved.Digest != rec.Digest {
+		t.Fatal("returned and published records disagree")
+	}
+}
+
+func TestAnUnknownWaitFailureIsNotCommandExit125(t *testing.T) {
+	if _, err := exitCode(errors.New("wait status unavailable")); err == nil {
+		t.Fatal("wait error became command exit")
+	}
+	c := config(t, "exit 125")
+	rec, err := Run(c)
+	if err != nil || rec.ExitCode == nil || *rec.ExitCode != 125 {
+		t.Fatalf("real exit125 = %+v: %v", rec, err)
+	}
+}
+
+func TestReplacingOutputWithAFIFOCannotBlockCompletionOrEvidenceRead(t *testing.T) {
+	c := config(t, "rm output; mkfifo output; printf captured")
+	c.Workdir = c.Directory
+	began := time.Now()
+	rec, err := Run(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(began) > time.Second || *rec.ExitCode != 0 || rec.Preview != "captured" {
+		t.Fatalf("completion=%+v elapsed=%v", rec, time.Since(began))
+	}
+	root, err := os.OpenRoot(c.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	began = time.Now()
+	if _, err = ReadEvidence(root, "output", c.OutputLimit); err == nil {
+		t.Fatal("accepted FIFO evidence")
+	}
+	if time.Since(began) > time.Second {
+		t.Fatal("evidence read blocked on FIFO")
+	}
+}
+
+func TestEvidenceRejectsLinksOversizeAndEscape(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err = os.WriteFile(filepath.Join(dir, "large"), []byte("oversized"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink("large", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"link", "large", "../outside", "."} {
+		if _, err = ReadEvidence(root, name, 4); err == nil {
+			t.Fatalf("accepted %s", name)
+		}
 	}
 }

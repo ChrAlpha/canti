@@ -619,13 +619,19 @@ func TestCancellationWithoutAnExitCodeRequiresMatchingCessation(t *testing.T) {
 	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
 	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
 	binding := harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 2}
-	witness := harness.Cessation{EnvironmentID: "container", StartEpoch: "epoch", Generation: 2, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}
+	witness := harness.Cessation{BackendID: "daemon", Incarnation: 1, EffectID: e.ID, Spec: e.Spec, OwnerID: "exec", StopIntent: strings.Repeat("b", 64), EnvironmentID: "container", StartEpoch: "epoch", Generation: 2, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}
 	good := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobCancelled, Fenced: true, DispatchedAt: at, Binding: &binding, Cessation: &witness}
 	if err := good.Validate(e); err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*harness.Job){
 		"missing witness":    func(j *harness.Job) { j.Cessation = nil },
+		"wrong daemon":       func(j *harness.Job) { j.Cessation.BackendID = "other" },
+		"wrong incarnation":  func(j *harness.Job) { j.Cessation.Incarnation++ },
+		"wrong owner":        func(j *harness.Job) { j.Cessation.OwnerID = "other" },
+		"wrong effect":       func(j *harness.Job) { j.Cessation.EffectID = "other" },
+		"wrong spec":         func(j *harness.Job) { j.Cessation.Spec = strings.Repeat("c", 64) },
+		"no stop intent":     func(j *harness.Job) { j.Cessation.StopIntent = "" },
 		"wrong environment":  func(j *harness.Job) { j.Cessation.EnvironmentID = "other" },
 		"wrong epoch":        func(j *harness.Job) { j.Cessation.StartEpoch = "new" },
 		"stale generation":   func(j *harness.Job) { j.Cessation.Generation++ },
@@ -657,5 +663,13 @@ func TestRunningEnvironmentCommandKeepsDispatchSeparateFromProcessTime(t *testin
 	}
 	if !j.StartedAt.IsZero() {
 		t.Fatal("dispatch time became process start time")
+	}
+}
+
+func TestPendingReceiptCannotHaveConsumedItsDispatchLatch(t *testing.T) {
+	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
+	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobPending, DispatchedAt: created, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
+	if err := j.Validate(e); err == nil {
+		t.Fatal("post-dispatch evidence was accepted as indefinitely pending")
 	}
 }

@@ -198,7 +198,9 @@ request context and immutable configuration, without Docker parsing or queries.
 An external receipt must match effect and accepted Spec, have truthful status and
 owner/fence/exit evidence, and agree with its observation. A cancelled command
 may omit its exit code only with a typed cessation witness matching its
-environment binding and command generation. The witness confirmation time is
+environment binding, daemon, attachment incarnation, effect/specification, owner,
+command generation and durable stop-intent identity. A stopped-but-quarantined
+witness does not authorize environment reuse. The witness confirmation time is
 not an actual command exit time; unknown process timestamps remain unset. A local cancellation is
 the only receipt-free Observed. Performed validates a local Outcome and any replacement focus in that same transaction.
 Confirmed rejection commits its response, usage, typed signal and next anchor together.
