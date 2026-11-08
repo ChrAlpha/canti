@@ -81,6 +81,7 @@ decision, not a loop.
 
 ```sh
 go build -o bin/canti ./runtime/cmd/canti
+go build -o bin/canti-job ./runtime/cmd/canti-job
 go build -o bin/canti-tui ./apps/tui/cmd/canti-tui
 ./bin/canti -version
 ./bin/canti -h
@@ -92,6 +93,25 @@ status 0. `-h` writes usage to standard output and exits with status 0.
 Invoking the binary with no arguments writes usage to standard error and exits
 with status 2. `go run` itself reports a non-zero wrapper status for a failing
 program, so use the binary to inspect its exact exit code.
+
+`canti environment init -environment DIRECTORY` prepares private controller state,
+a read-only helper tree, and a writable spool, without creating a run journal.
+Its JSON result supplies `authority_id`. Provision Docker/Compose/Dev Containers
+with labels `io.canti.control=<canonical directory>` and
+`io.canti.authority=<authority_id>`, and separate mounts of `DIRECTORY/public` at
+`/canti:ro` and `DIRECTORY/spool` at `/var/lib/canti/jobs:rw`. Mount selected
+workspaces separately; keep run state and model credentials outside every mount.
+`environment attach -environment DIRECTORY -container NAME` pins the real ID and
+selected local Unix Docker endpoint. `inspect`, `stop`, `start` and `detach` use
+that same directory. Stop affects services as well as the foreground command.
+
+An ambiguous lifecycle request keeps the environment quarantined. `environment
+retire` closes admission and tells the operator to remove the exact old container
+with existing provisioning tools; retry retirement after its absence is confirmed,
+then explicitly attach the replacement. A new container loses manual system-layer
+installations; only designated volumes survive. Neither elapsed time nor a stopped
+sample clears an old unacknowledged request. `canti-job` must be packaged beside
+`canti`, or named explicitly with `environment init -helper PATH`.
 
 | Exit status | Meaning |
 | --- | --- |

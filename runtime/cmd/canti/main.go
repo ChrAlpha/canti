@@ -65,6 +65,8 @@ Usage:
   canti status [-run ID]                            print the state of a run as JSON
   canti history [-run ID]                           print the transitions of a run as JSON Lines
   canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
+  canti environment init|attach|inspect|stop|start|detach|retire -environment DIRECTORY
+                                                    manage a prepared development environment
   canti version                                     print the version
 
 Run "canti COMMAND -h" for the flags of a command. A run names its model API
@@ -107,6 +109,9 @@ type app struct {
 }
 
 func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "environment" {
+		return environmentCLI(ctx, args[1:], stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "preflight" {
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "canti preflight takes one JSON request on stdin and no flags")

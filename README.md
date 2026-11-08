@@ -96,6 +96,7 @@ that contains the default state root, such as `$HOME`, needs `-state`.
 | `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Recover an inspected effect, or record an operator assertion with `-note` and, for exited/timed-out work, `-owner` |
+| `canti environment init/attach/inspect/stop/start/detach/retire` | Prepare and control an explicitly provisioned development environment; see the development guide |
 | `canti host` | Serve the state directory to the commands that drive runs, which start one on demand unless an operational command uses `-host embedded` or the TUI uses `-host owned`, until a signal or `canti host -stop` |
 
 Only the current schema, semantics, executor record and context versions are
