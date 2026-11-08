@@ -2,18 +2,20 @@
 
 ## Start here
 
-This is an independent Go module, even when checked out inside Memoh. Run all
-commands from this repository. No Memoh services, UI, or parent workspace tools
+This is an independent monorepo, even when checked out inside Memoh. The
+`runtime/`, `sdk/go/`, and `apps/tui/` projects are separate Go modules joined
+by root `go.work`. Run root checks from this repository; each module also
+builds with `GOWORK=off` using its relative SDK replacement. No Memoh services, UI, or parent workspace tools
 are required. Read `README.md` for current scope and `CONTRIBUTING.md` for the
 contribution workflow.
 
-Inspect `git status --short`, relevant code, tests, and `go.mod` before editing.
+Inspect `git status --short`, relevant code, tests, and the affected module `go.mod` files before editing.
 Preserve unrelated changes. State the affected boundary, expected files, and
 verification before a non-trivial change. Keep one coherent intent per commit.
 
 ## Ownership and complexity
 
-- `core/` owns the stateless run semantics: decoding an `exec` or `return`
+- `runtime/core/` owns the stateless run semantics: decoding an `exec` or `return`
   decision, the `State` projection, and the pure `Next`/`Intent` transition
   rules. It holds no per-run state between calls and must not acquire model
   I/O, history, storage, clocks, execution, or dependencies outside the
@@ -22,7 +24,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   rule, and a new event kind needs a recovery semantic that no existing
   event expresses. The core never interprets an exec payload, an archive
   query, or a context window.
-- `internal/harness/` owns durable facts, input construction, model calls,
+- `runtime/internal/harness/` owns durable facts, input construction, model calls,
   persistence, execution, and the interpretation of intents. It must not
   restate transition rules that `core.State.Next` defines. It reads an
   accepted exec decision once into a normalized action with the recovery
@@ -35,12 +37,12 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   execution, and provider guarantees require the integration evidence
   recorded in `docs/v1-acceptance.md`. Model APIs are peers: no default
   API, provider, or model, and no Chat Completions adapter.
-- `internal/archive/` owns read-only access to the archive that jobs see:
+- `runtime/internal/archive/` owns read-only access to the archive that jobs see:
   path safety, the retrieval operations, their continuations, and the
   layout and meta encoding of published step records. It imports only the
   standard library and knows no action protocol; the harness supplies what
   discovery skips.
-- `internal/host/` owns the runtime host of one state directory: its lock
+- `runtime/internal/host/` owns the runtime host of one state directory: its lock
   and journal for the host's lifetime, admission and input identity, the
   drives of runs, stop, resolution, shutdown, and the progress projection
   that readers page and wait on. It holds no run fact of its own, and what it
@@ -49,20 +51,20 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   version, and the construction of its loop, model adapter, and executor. It
   reads no environment: a credential is given to each drive, or to a
   foreground host for an exact model API and provider, and never stored.
-- `internal/hostrpc/` owns the host protocol: the Unix socket, the wire
-  messages, which embed no journal, core, or host type and are pinned per
-  protocol version in `testdata/v<N>`, and the bounds of a connection. A
-  change to a message needs the next `Protocol` and its own record, which
-  `-record-wire` writes once and never rewrites; the records of earlier
-  versions stay as recorded. The protocol's words for host enumerations are
-  its own tables, and its sample messages use fixed version values, so a
-  context or semantics version change moves no wire record.
-- `cmd/canti/` owns flags, exit codes, process signals, the terminal, the
-  environment, and the composition of the packages. Run rules, admission, and context fit belong
-  to `core` and `internal/harness`. A command checks its flags, the layout of
-  the workspace and state directories, and the credential before it creates
-  the state directory.
-- Keep one module. Add interfaces at external boundaries; start other behavior
+- `sdk/go/hostrpc/` owns public protocol types and the Unix client. It imports
+  no runtime implementation, and exposes protocol errors, progress projections,
+  and opaque cursors. A message change needs the next `Protocol` and a new
+  append-only wire record in `runtime/internal/hostrpc/testdata/v<N>`.
+- `runtime/internal/hostrpc/` owns server dispatch, peer and connection bounds,
+  and all conversions between protocol and runtime facts. Frozen wire samples
+  use fixed context and semantics versions.
+- `runtime/cmd/canti/` owns operational flags, exit codes, signals, environment,
+  and composition. Its `preflight` executable surface validates a chat before
+  state creation through runtime-owned admission policy.
+- `apps/tui/` owns terminal and pipe chat, presentation, and runtime executable
+  selection. It imports the SDK, never runtime internals or journal types.
+  It launches the separate `canti` executable, never itself.
+- Keep runtime, SDK, and TUI as independent modules. Add interfaces at external boundaries; start other behavior
   with concrete types. No plugin registry, generic workflow engine, or Memoh
   internal package dependency is needed for this experiment.
 
@@ -73,7 +75,7 @@ them there with a transition-table test. A harness policy, such as a budget,
 the context window, or handover, ends a run only by committing
 `StopRequested` with its reason and a `Failure` that names the cause. The
 transitions a bounded exploration from `core.NewState` reaches are recorded
-per semantics version in `core/testdata/semantics-v<N>.txt`, so a change to
+per semantics version in `runtime/core/testdata/semantics-v<N>.txt`, so a change to
 any of them fails until `core.SemanticsVersion` is bumped and its
 transitions are recorded with `-record-semantics`; a rule outside the
 explored limits needs its own test. Before changing a harness boundary,
@@ -86,7 +88,7 @@ change of harness state it causes, such as the context window, in one
 commits are sequenced: changing either identity scheme is a semantics change
 and must bump `core.SemanticsVersion`.
 
-The context version (`ContextVersion` in `internal/host/config.go`) names the
+The context version (`ContextVersion` in `runtime/internal/host/config.go`) names the
 rules that render and account for a request. Give the next one when, for the
 same committed facts, a rendered byte, a reserve, a cap, an admission floor,
 the window or session selection, or the evidence a request shows changes;
@@ -114,7 +116,7 @@ Use focused tests while iterating. Before delivery, run:
 
 ```sh
 make check lint
-go test -count=1 -race ./...
+go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...
 git diff --check
 make commits BASE=<branch base>
 ```

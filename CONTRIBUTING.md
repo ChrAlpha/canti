@@ -12,9 +12,9 @@ checkout; `make integration` needs a Docker daemon.
 
 ```sh
 make check
-go test -count=1 -race ./...
+go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...
 make integration
-go run ./cmd/canti -version
+go run ./runtime/cmd/canti -version
 ```
 
 `make check` validates formatting, runs `go vet`, and runs the unit tests.
@@ -33,7 +33,7 @@ dependencies should have a concrete purpose and a compatible license.
    tests must be deterministic. Harness tests should exercise affected commit,
    cancellation, unknown-result, and restart boundaries.
 3. Format changed Go files with `gofmt -w`. Run relevant tests during iteration,
-   then `make check lint`, `go test -count=1 -race ./...`, `git diff --check`,
+   then `make check lint`, `go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...`, `git diff --check`,
    and `make commits BASE=main` for delivery, plus `make integration` for
    storage, execution, adapter, or CLI changes.
 4. Inspect the diff and use a Conventional Commit subject such as
