@@ -716,3 +716,48 @@ func TestUsagePresenceAndNumericContract(t *testing.T) {
 		})
 	}
 }
+
+func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"duplicate-stop-forward", 200, `{"stop_reason":"end_turn","stop_reason":"model_context_window_exceeded"}`},
+			{"duplicate-stop-reverse", 200, `{"stop_reason":"model_context_window_exceeded","stop_reason":"end_turn"}`},
+			{"duplicate-overflow-stop", 200, `{"stop_reason":"model_context_window_exceeded","stop_reason":"model_context_window_exceeded"}`},
+			{"uppercase-stop-only", 200, `{"Stop_Reason":"model_context_window_exceeded"}`},
+			{"case-stop-override-forward", 200, `{"stop_reason":"end_turn","Stop_Reason":"model_context_window_exceeded"}`},
+			{"case-stop-override-reverse", 200, `{"Stop_Reason":"model_context_window_exceeded","stop_reason":"end_turn"}`},
+			{"wrong-status-413", 413, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"wrong-status-429", 429, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"wrong-status-500", 500, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-type-forward", 400, `{"error":{"type":"server_error","type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-type-reverse", 400, `{"error":{"type":"invalid_request_error","type":"server_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-type-override-forward", 400, `{"error":{"type":"server_error","Type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-type-override-reverse", 400, `{"error":{"Type":"invalid_request_error","type":"server_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"uppercase-error-type-only", 400, `{"error":{"Type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-message-forward", 400, `{"error":{"type":"invalid_request_error","message":"ordinary validation","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-message-reverse", 400, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum","message":"ordinary validation"}}`},
+			{"case-error-message-override-forward", 400, `{"error":{"type":"invalid_request_error","message":"ordinary validation","Message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-message-override-reverse", 400, `{"error":{"type":"invalid_request_error","Message":"prompt is too long: 200001 tokens > 200000 maximum","message":"ordinary validation"}}`},
+			{"uppercase-error-message-only", 400, `{"error":{"type":"invalid_request_error","Message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-root-error-override-forward", 400, `{"error":{"type":"server_error","message":"ordinary validation"},"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-root-error-override-reverse", 400, `{"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"},"error":{"type":"server_error","message":"ordinary validation"}}`},
+			{"uppercase-root-error-only", 400, `{"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				m := newModel(t, serve(t, reply(tc.status, tc.body)).URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) {
+					t.Errorf("ambiguous/noncanonical envelope established overflow: %+v; body=%s", limit, tc.body)
+				}
+				if string(resp.Body) != tc.body {
+					t.Errorf("lost original response: got %s want %s", resp.Body, tc.body)
+				}
+			})
+		}
+	}
+}

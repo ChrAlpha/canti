@@ -368,3 +368,60 @@ func TestUsagePresenceAndNumericContract(t *testing.T) {
 		})
 	}
 }
+
+func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"http200-duplicate-code-forward", 200, `{"status":"failed","error":{"code":"server_error","code":"context_length_exceeded"}}`},
+			{"http200-duplicate-code-reverse", 200, `{"status":"failed","error":{"code":"context_length_exceeded","code":"server_error"}}`},
+			{"http200-duplicate-overflow-code", 200, `{"status":"failed","error":{"code":"context_length_exceeded","code":"context_length_exceeded"}}`},
+			{"http200-case-code-override-forward", 200, `{"status":"failed","error":{"code":"server_error","Code":"context_length_exceeded"}}`},
+			{"http200-case-code-override-reverse", 200, `{"status":"failed","error":{"Code":"context_length_exceeded","code":"server_error"}}`},
+			{"http200-uppercase-code-only", 200, `{"status":"failed","error":{"Code":"context_length_exceeded"}}`},
+			{"http200-case-error-override-forward", 200, `{"status":"failed","error":{"code":"server_error"},"Error":{"code":"context_length_exceeded"}}`},
+			{"http200-case-error-override-reverse", 200, `{"status":"failed","Error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http200-uppercase-error-only", 200, `{"status":"failed","Error":{"code":"context_length_exceeded"}}`},
+			{"http200-uppercase-error-and-code", 200, `{"status":"failed","Error":{"Code":"context_length_exceeded"}}`},
+			{"http200-duplicate-error-forward", 200, `{"status":"failed","error":{"code":"server_error"},"error":{"code":"context_length_exceeded"}}`},
+			{"http200-duplicate-error-reverse", 200, `{"status":"failed","error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http400-duplicate-code-forward", 400, `{"error":{"code":"server_error","code":"context_length_exceeded"}}`},
+			{"http400-duplicate-code-reverse", 400, `{"error":{"code":"context_length_exceeded","code":"server_error"}}`},
+			{"http400-duplicate-overflow-code", 400, `{"error":{"code":"context_length_exceeded","code":"context_length_exceeded"}}`},
+			{"http400-case-code-override-forward", 400, `{"error":{"code":"server_error","Code":"context_length_exceeded"}}`},
+			{"http400-case-code-override-reverse", 400, `{"error":{"Code":"context_length_exceeded","code":"server_error"}}`},
+			{"http400-uppercase-code-only", 400, `{"error":{"Code":"context_length_exceeded"}}`},
+			{"http400-case-error-override-forward", 400, `{"error":{"code":"server_error"},"Error":{"code":"context_length_exceeded"}}`},
+			{"http400-case-error-override-reverse", 400, `{"Error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http400-uppercase-error-only", 400, `{"Error":{"code":"context_length_exceeded"}}`},
+			{"http400-uppercase-error-and-code", 400, `{"Error":{"Code":"context_length_exceeded"}}`},
+			{"http400-duplicate-error-forward", 400, `{"error":{"code":"server_error"},"error":{"code":"context_length_exceeded"}}`},
+			{"http400-duplicate-error-reverse", 400, `{"error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"wrong-status-413", 413, `{"error":{"code":"context_length_exceeded"}}`},
+			{"wrong-status-429", 429, `{"error":{"code":"context_length_exceeded"}}`},
+			{"wrong-status-500", 500, `{"error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-completed", 200, `{"status":"completed","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-incomplete", 200, `{"status":"incomplete","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-in_progress", 200, `{"status":"in_progress","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-cancelled", 200, `{"status":"cancelled","error":{"code":"context_length_exceeded"}}`},
+			{"uppercase-status", 200, `{"Status":"failed","error":{"code":"context_length_exceeded"}}`},
+			{"case-status-override-forward", 200, `{"status":"incomplete","Status":"failed","error":{"code":"context_length_exceeded"}}`},
+			{"case-status-override-reverse", 200, `{"Status":"failed","status":"incomplete","error":{"code":"context_length_exceeded"}}`},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				m := newModel(t, serve(t, reply(tc.status, tc.body)).URL, func(c *Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) {
+					t.Errorf("ambiguous/noncanonical envelope established overflow: %+v; body=%s", limit, tc.body)
+				}
+				if string(resp.Body) != tc.body {
+					t.Errorf("lost original response: got %s want %s", resp.Body, tc.body)
+				}
+			})
+		}
+	}
+}
