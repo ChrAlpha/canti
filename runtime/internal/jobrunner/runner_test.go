@@ -160,6 +160,9 @@ func TestControlByteOutputCannotOverflowCompletionMetadata(t *testing.T) {
 	if err = json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(rec.Preview, "preview shortened for metadata") {
+		t.Fatal("metadata truncation was silent")
+	}
 	if saved.Preview != rec.Preview || saved.Digest != rec.Digest {
 		t.Fatal("returned and published records disagree")
 	}

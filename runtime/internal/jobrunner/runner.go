@@ -97,12 +97,12 @@ func Run(c Config) (Record, error) {
 	captured := make(chan capture, 1)
 	go func() { captured <- collect(reader, out, c.OutputLimit, c.PreviewLimit) }()
 	waitErr := cmd.Wait()
-	rec.FinishedAt = time.Now().UTC()
 	code, statusErr := exitCode(waitErr)
 	if statusErr != nil {
 		return rec, statusErr
 	}
 	rec.ExitCode = &code
+	rec.FinishedAt = time.Now().UTC()
 	var got capture
 	select {
 	case got = <-captured:
@@ -185,7 +185,7 @@ func publish(root *os.Root, rec *Record) error {
 	if err != nil {
 		return err
 	}
-	rec.Preview = jsonBoundedPreview(preview, MetadataLimit-len(base))
+	rec.Preview = metadataPreview(preview, MetadataLimit-len(base))
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -254,12 +254,13 @@ func (c *capture) write(w io.Writer, p []byte, limit int64) {
 	}
 }
 func (c capture) preview() string {
-	if c.total <= int64(c.limit) {
-		return utf8Prefix(strings.ToValidUTF8(string(c.head), "�"), c.limit)
+	validHead := strings.ToValidUTF8(string(c.head), "�")
+	if c.total <= int64(c.limit) && len(validHead) <= c.limit {
+		return validHead
 	}
 	marker := fmt.Sprintf("\n... %d observed bytes ...\n", c.total)
 	n := (c.limit - len(marker)) / 2
-	head := utf8Prefix(strings.ToValidUTF8(string(c.head), "�"), n)
+	head := utf8Prefix(validHead, n)
 	tail := utf8Prefix(strings.ToValidUTF8(string(c.tail[len(c.tail)-n:]), "�"), n)
 	return head + marker + tail
 }
@@ -284,4 +285,18 @@ func jsonBoundedPreview(s string, limit int) string {
 		}
 	}
 	return s
+}
+
+func metadataPreview(s string, limit int) string {
+	prefix := jsonBoundedPreview(s, limit)
+	if len(prefix) == len(s) {
+		return s
+	}
+	marker := "\n... preview shortened for metadata ...\n"
+	encoded, _ := json.Marshal(marker)
+	cost := len(encoded) - 2
+	if cost > limit {
+		return prefix
+	}
+	return jsonBoundedPreview(s, limit-cost) + marker
 }
