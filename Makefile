@@ -1,4 +1,4 @@
-.PHONY: build check ci-integration ci-long ci-pty ci-unit commits fmt graph integration lint race smoke test test-names vet
+.PHONY: build build-smoke check ci-integration ci-long ci-pty ci-unit commits fmt graph integration lint race smoke test test-names vet
 
 empty :=
 space := $(empty) $(empty)
@@ -49,7 +49,7 @@ PTY_TESTS = \
 LONG = $(call anchored,$(LONG_TESTS))
 PTY = $(call anchored,$(PTY_TESTS))
 MODULES = scripts/run-modules.sh
-CI_TEST = $(CURDIR)/scripts/test-report.sh go test -json -count=1 -race
+CI_TEST = python3 $(CURDIR)/scripts/ci-shard.py $(CURDIR)/scripts/test-report.sh go test -json -count=1 -race
 GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
 check: fmt graph vet test-names test
@@ -62,6 +62,9 @@ graph:
 
 build:
 	scripts/build-modules.sh
+
+build-smoke:
+	scripts/build-modules.sh --smoke
 
 smoke:
 	scripts/smoke-executables.sh

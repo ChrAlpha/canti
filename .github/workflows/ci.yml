@@ -9,133 +9,231 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR updates supersede each other; each main run has its own pending slot.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
-  check:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.paths.outputs.code }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify CI policy
+        run: python3 scripts/test-ci-policy.py
+      - name: Select checks
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/ci-policy.py changes "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: ./.github/actions/setup-go
         with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            runtime/go.sum
-            sdk/go/go.sum
-            apps/tui/go.sum
-            go.work.sum
-      - name: Check formatting, module boundaries and vet
-        run: make fmt graph vet
-      - name: Check test names
+          scope: standard
+      - name: Check test names and documentation references
         run: make test-names
-      - name: Check function complexity
-        run: make lint
-      - name: Run race-enabled unit tests
-        run: make ci-unit
+      - name: Check formatting, module boundaries and vet
+        if: needs.changes.outputs.code == 'true'
+        run: make fmt graph vet
       - name: Build modules and smoke-test both executables
-        run: make build smoke
+        if: needs.changes.outputs.code == 'true'
+        run: make build-smoke
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          scope: standard
+      - name: Install verified prebuilt linter
+        run: sh scripts/install-ci-lint.sh "$RUNNER_TEMP/lint"
+      - name: Check function complexity
+        run: make lint GOLANGCI_LINT="$RUNNER_TEMP/lint/golangci-lint"
 
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: ./.github/actions/setup-go
         with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            runtime/go.sum
-            sdk/go/go.sum
-            apps/tui/go.sum
-            go.work.sum
+          scope: standard
       - name: Build and vet every commit
         env:
           BASE: origin/${{ github.base_ref }}
         run: scripts/check-commits.sh "$BASE"
 
-  integration:
+  unit:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CI_SHARD_COUNT: '4'
+      CI_SHARD_INDEX: ${{ matrix.shard }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: ./.github/actions/setup-go
         with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            runtime/go.sum
-            sdk/go/go.sum
-            apps/tui/go.sum
-            go.work.sum
+          scope: race
+      - name: Run ci-unit
+        run: make ci-unit
+
+  integration-shards:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CI_SHARD_COUNT: '4'
+      CI_SHARD_INDEX: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          scope: integration
       - name: Pull test image
         run: docker pull alpine:3.23
-      - name: Run Docker-backed integration tests
+      - name: Run ci-integration
         run: make ci-integration
       - name: Report leftover containers
         if: always()
         run: test -z "$(docker ps -aq --filter label=canti.effect)"
 
-  long:
+  long-shards:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CI_SHARD_COUNT: '4'
+      CI_SHARD_INDEX: ${{ matrix.shard }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: ./.github/actions/setup-go
         with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            runtime/go.sum
-            sdk/go/go.sum
-            apps/tui/go.sum
-            go.work.sum
+          scope: integration
       - name: Pull test image
         run: docker pull alpine:3.23
-      - name: Run long acceptance tests
+      - name: Run ci-long
         run: make ci-long
       - name: Report leftover containers
         if: always()
         run: test -z "$(docker ps -aq --filter label=canti.effect)"
 
   pty:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: ./.github/actions/setup-go
         with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            runtime/go.sum
-            sdk/go/go.sum
-            apps/tui/go.sum
-            go.work.sum
+          scope: pty
       - name: Pull test image
         run: docker pull alpine:3.23
-      - name: Run pseudo-terminal tests serially
+      - name: Run ci-pty
         run: make ci-pty
       - name: Report leftover containers
         if: always()
         run: test -z "$(docker ps -aq --filter label=canti.effect)"
+
+  integration:
+    if: always()
+    needs: [changes, integration-shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all integration shards
+        env:
+          PLAN: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULT: ${{ needs.integration-shards.result }}
+        run: |
+          test "$PLAN" = success
+          case "$CODE:$RESULT" in
+            true:success|false:skipped) ;;
+            *) exit 1 ;;
+          esac
+
+  long:
+    if: always()
+    needs: [changes, long-shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all long shards
+        env:
+          PLAN: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULT: ${{ needs.long-shards.result }}
+        run: |
+          test "$PLAN" = success
+          case "$CODE:$RESULT" in
+            true:success|false:skipped) ;;
+            *) exit 1 ;;
+          esac
+
+  check:
+    if: always()
+    needs: [changes, quality, lint, unit, integration, long, pty, commits]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require complete CI results
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+          CI_EVENT: ${{ github.event_name }}
+        run: python3 scripts/ci-policy.py gate
