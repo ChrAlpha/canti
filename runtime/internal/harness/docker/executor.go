@@ -185,9 +185,13 @@ func New(cfg Config) (*Executor, error) {
 // overlap and a state whose resolved path has a colon, which cannot be
 // mounted, before the state directory exists and without touching the
 // filesystem: the state, a clean absolute path, resolves as its nearest
-// existing ancestor followed by the missing components. A state below a
-// file or a dangling link is refused.
+// existing ancestor followed by the missing components. A state that is a
+// file, or is below a file or a dangling link, is refused.
 func CheckLayout(workspace, state string) error {
+	return checkLayout(workspace, state, os.Lstat)
+}
+
+func checkLayout(workspace, state string, lstat func(string) (os.FileInfo, error)) error {
 	ws, err := resolve(workspace)
 	if err != nil {
 		return err
@@ -196,13 +200,22 @@ func CheckLayout(workspace, state string) error {
 		return fmt.Errorf("docker: state %q is not a clean absolute path", state)
 	}
 	dir, rest := state, ""
-	p, err := filepath.EvalSymlinks(dir)
-	for err != nil {
-		if _, missing := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) || !errors.Is(missing, fs.ErrNotExist) || filepath.Dir(dir) == dir {
+	for {
+		_, err := lstat(dir)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) || filepath.Dir(dir) == dir {
 			return fmt.Errorf("docker: state %s: %w", state, err)
 		}
 		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
-		p, err = filepath.EvalSymlinks(dir)
+	}
+	// Resolve the entry actually found, including any link target. A sibling
+	// may have created it while we walked the missing parents; an earlier
+	// EvalSymlinks ENOENT must not override that successful observation.
+	p, err := resolve(dir)
+	if err != nil {
+		return fmt.Errorf("docker: state %s: %w", state, err)
 	}
 	if p = filepath.Join(p, rest); within(ws, p) || within(p, ws) {
 		return fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)
