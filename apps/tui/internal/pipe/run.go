@@ -73,19 +73,21 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 	}
 	events, closeEvents := turnEvents(turn)
 	defer closeEvents()
-	interrupted := false
+	interrupted, explicitStop := false, false
 	var displayErr error
 	for {
 		select {
 		case sig := <-signals:
 			interrupted = true
+			explicitStop = explicitStop || sig != syscall.SIGHUP
 			signalTurn(turn, sig)
 		case e := <-failures:
 			displayErr = e
 			turn.InputLost()
 		case e := <-events:
 			if e.Result != nil {
-				return finishInput(*e.Result, turn.Snapshot.InputID, c.ID(), out, diagnostic, displayErr, interrupted)
+				code, err, stop := finishInput(*e.Result, turn.Snapshot.InputID, c.ID(), out, diagnostic, displayErr, explicitStop)
+				return code, err, stop || interrupted
 			}
 			if displayErr == nil {
 				displayErr = show(diagnostic, e)
@@ -96,23 +98,32 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 		}
 	}
 }
-func finishInput(result session.Result, inputID, sessionID string, out, diagnostic io.Writer, displayErr error, interrupted bool) (int, error, bool) {
+func finishInput(result session.Result, inputID, sessionID string, out, diagnostic io.Writer, displayErr error, explicitStop bool) (int, error, bool) {
 	answer, note := present.Result(result)
 	if result.Uncertain {
 		note += present.Reconciliation(inputID, sessionID)
 	}
 	_, err := io.WriteString(out, answer)
-	if err == nil {
-		_, err = io.WriteString(diagnostic, note)
-	}
-	if displayErr != nil {
-		return session.Error, displayErr, true
-	}
 	if err != nil {
 		return session.Error, err, true
 	}
-	stop := interrupted || result.NoInputFits || result.Code != session.OK && result.Code != session.Stopped && !(result.Rejected && result.Code == session.Usage)
+	_, err = io.WriteString(diagnostic, note)
+	if err = errors.Join(displayErr, err); err != nil {
+		// A confirmed explicit cancellation is still Stopped when its diagnostic
+		// cannot be displayed. Keep the error for the caller, but preserve the
+		// durable outcome. Answers and unresolved recovery output must succeed.
+		if explicitStop && confirmedCancellation(result) {
+			return session.Stopped, err, true
+		}
+		return session.Error, err, true
+	}
+	stop := explicitStop || result.NoInputFits || result.Code != session.OK && result.Code != session.Stopped && !(result.Rejected && result.Code == session.Usage)
 	return result.Code, nil, stop
+}
+
+func confirmedCancellation(result session.Result) bool {
+	return result.Code == session.Stopped && result.Run.StopReason == "cancelled" &&
+		result.Err == nil && !result.Uncertain && !result.Interrupted
 }
 func turnEvents(turn *session.Turn) (<-chan session.Event, func()) {
 	events := make(chan session.Event)
