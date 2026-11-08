@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
@@ -543,18 +545,69 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the model did not answer the first run")
 			}
+			firstRun := f.status().Run
 			p.send(t, "second request\r")
 			p.await(t, "second answer", pos)
 			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != core.PhaseReturned {
 				t.Fatalf("explicit input did not finish: %+v", s)
 			}
+			secondRun := f.status().Run
 			prompts := f.model.prompts(1)
-			if len(prompts) != 2 || !strings.Contains(prompts[1], "first request") || !strings.Contains(prompts[1], "second request") || strings.Contains(prompts[1], "discard this") {
-				t.Fatalf("wrong session history: %q", prompts)
+			if len(prompts) != 2 || !strings.Contains(prompts[1], "## Goal\nsecond request\n") ||
+				!strings.Contains(prompts[1], "Session pty, sequence 2.") ||
+				!strings.Contains(prompts[1], "/canti/runs/"+secondRun.ID+"/session") ||
+				!strings.Contains(prompts[1], "Previous run: /canti/runs/"+firstRun.ID+"/.") || strings.Contains(prompts[1], "discard this") {
+				t.Fatalf("wrong session navigation or current goal: %q", prompts)
 			}
-			if interrupted && !strings.Contains(prompts[1], "stopped, reason cancelled") {
-				t.Fatalf("stopped run missing from context: %q", prompts[1])
+			reader := archive.Reader{History: filepath.Join(f.state, "history")}
+			read := func(runID, file string) string {
+				t.Helper()
+				r, err := reader.Retrieve(context.Background(), archive.RetrievalQuery{
+					Operation: "read", Path: "/canti/runs/" + runID + "/" + file, Reason: "Follow the committed session history.",
+				})
+				if err != nil || r.Error != "" || r.More || r.Incomplete || len(r.Evidence) != 1 {
+					t.Fatalf("archive %s/%s: %+v, %v", runID, file, r, err)
+				}
+				return r.Evidence[0]
 			}
+			var session struct {
+				SessionID     string `json:"session_id"`
+				Sequence      int64  `json:"sequence"`
+				InputID       string `json:"input_id"`
+				PreviousRunID string `json:"previous_run_id"`
+			}
+			if err := json.Unmarshal([]byte(read(secondRun.ID, "session")), &session); err != nil ||
+				session.SessionID != "pty" || session.Sequence != 2 || session.InputID != secondRun.InputID || session.PreviousRunID != firstRun.ID {
+				t.Fatalf("second session link: %+v, %v", session, err)
+			}
+			if got := read(session.PreviousRunID, "goal"); got != "first request" {
+				t.Fatalf("previous goal: %q", got)
+			}
+			wantResult := "phase: returned\n\nfirst answer"
+			if interrupted {
+				wantResult = "phase: stopped\nreason: cancelled\n"
+			}
+			if got := read(session.PreviousRunID, "result"); got != wantResult {
+				t.Fatalf("previous result: %q, want %q", got, wantResult)
+			}
+			session.PreviousRunID = ""
+			if err := json.Unmarshal([]byte(read(firstRun.ID, "session")), &session); err != nil ||
+				session.SessionID != "pty" || session.Sequence != 1 || session.InputID != firstRun.InputID || session.PreviousRunID != "" ||
+				firstRun.InputID == "" || firstRun.InputID == secondRun.InputID {
+				t.Fatalf("first session link or distinct inputs: %+v, %v", session, err)
+			}
+			entries, err := os.ReadDir(reader.History)
+			if err != nil || len(entries) != 2 {
+				t.Fatalf("persisted session must contain exactly two inputs: %v, %v", entries, err)
+			}
+			for _, entry := range entries {
+				goal := read(entry.Name(), "goal")
+				if !entry.IsDir() || (entry.Name() != firstRun.ID && entry.Name() != secondRun.ID) ||
+					(goal != "first request" && goal != "second request") || strings.Contains(goal, "discard this") {
+					t.Fatalf("unexpected persisted input %s: %q", entry.Name(), goal)
+				}
+			}
+
 			p.send(t, "\x03")
 			p.finish(t, exitOK)
 		})
