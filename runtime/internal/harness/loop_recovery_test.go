@@ -614,3 +614,48 @@ func TestStopNeverDecodesASavedResponse(t *testing.T) {
 		t.Fatalf("stop = %+v, %v after %v", s.State, err, f.kinds())
 	}
 }
+
+func TestCancellationWithoutAnExitCodeRequiresMatchingCessation(t *testing.T) {
+	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
+	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	binding := harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 2}
+	witness := harness.Cessation{EnvironmentID: "container", StartEpoch: "epoch", Generation: 2, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}
+	good := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobCancelled, Fenced: true, DispatchedAt: at, Binding: &binding, Cessation: &witness}
+	if err := good.Validate(e); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*harness.Job){
+		"missing witness":    func(j *harness.Job) { j.Cessation = nil },
+		"wrong environment":  func(j *harness.Job) { j.Cessation.EnvironmentID = "other" },
+		"wrong epoch":        func(j *harness.Job) { j.Cessation.StartEpoch = "new" },
+		"stale generation":   func(j *harness.Job) { j.Cessation.Generation++ },
+		"unconfirmed":        func(j *harness.Job) { j.Cessation.ConfirmedAt = time.Time{} },
+		"invented exit time": func(j *harness.Job) { j.FinishedAt = at },
+		"no fence":           func(j *harness.Job) { j.Fenced = false },
+		"no binding":         func(j *harness.Job) { j.Binding = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			j := good
+			w := witness
+			j.Cessation = &w
+			mutate(&j)
+			if err := j.Validate(e); err == nil {
+				t.Fatalf("accepted invalid receipt: %+v", j)
+			}
+		})
+	}
+	if !good.StartedAt.IsZero() || !good.FinishedAt.IsZero() {
+		t.Fatal("cessation manufactured process timestamps")
+	}
+}
+
+func TestRunningEnvironmentCommandKeepsDispatchSeparateFromProcessTime(t *testing.T) {
+	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
+	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobRunning, DispatchedAt: created, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
+	if err := j.Validate(e); err != nil {
+		t.Fatal(err)
+	}
+	if !j.StartedAt.IsZero() {
+		t.Fatal("dispatch time became process start time")
+	}
+}

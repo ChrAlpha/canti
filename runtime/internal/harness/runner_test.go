@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
@@ -487,5 +488,19 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 	if _, err := newRunner(t, rec).Commit(ctx, performed, core.Performed{EffectID: effect.EffectID},
 		Facts{Outcome: done, ContextState: &ContextState{FirstStep: 1}}); err != nil {
 		t.Fatalf("a performed handover: %v", err)
+	}
+}
+
+func TestCessationUsesDispatchBudgetWithoutProcessTimestamps(t *testing.T) {
+	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	job := Job{Status: JobCancelled, DispatchedAt: at, Cessation: &Cessation{ConfirmedAt: at.Add(11 * time.Second)}}
+	if got := resultExecution(job, 10*time.Second, false); got != core.ExecutionTimedOut {
+		t.Fatalf("execution=%s", got)
+	}
+	if got := resultExecution(job, 10*time.Second, true); got != core.ExecutionCancelled {
+		t.Fatalf("explicit stop=%s", got)
+	}
+	if !job.StartedAt.IsZero() || !job.FinishedAt.IsZero() {
+		t.Fatal("budget classification invented process timestamps")
 	}
 }

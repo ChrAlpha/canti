@@ -495,7 +495,7 @@ func (w *effectWatch) failed(ctx context.Context, cause error) (Snapshot, bool, 
 
 func (w *effectWatch) pending(ctx context.Context, job Job) (Snapshot, bool, error) {
 	timeout := w.run.Budget.JobTimeout
-	if !w.stopping && !w.timeoutRequested && job.Status == JobRunning && timeout > 0 && !job.StartedAt.IsZero() && w.cfg.Now().Sub(job.StartedAt) >= timeout {
+	if !w.stopping && !w.timeoutRequested && job.Status == JobRunning && timeout > 0 && !job.budgetOrigin().IsZero() && w.cfg.Now().Sub(job.budgetOrigin()) >= timeout {
 		var err error
 		job, err = w.executor.Cancel(ctx, w.effect)
 		if err != nil {
@@ -524,8 +524,8 @@ func (w *effectWatch) waitLimit(job Job, limit time.Duration) time.Duration {
 	if d := w.run.Budget.WallTime; d > 0 {
 		limit = min(limit, d-w.cfg.Now().Sub(w.run.Created))
 	}
-	if d := w.run.Budget.JobTimeout; d > 0 && !job.Fenced && !job.StartedAt.IsZero() {
-		limit = min(limit, d-w.cfg.Now().Sub(job.StartedAt))
+	if d := w.run.Budget.JobTimeout; d > 0 && !job.Fenced && !job.budgetOrigin().IsZero() {
+		limit = min(limit, d-w.cfg.Now().Sub(job.budgetOrigin()))
 	}
 	return limit
 }
@@ -563,7 +563,7 @@ func resultExecution(job Job, timeout time.Duration, stopping bool) core.Executi
 	case JobFailedToStart:
 		return core.ExecutionFailedToStart
 	case JobCancelled:
-		if !stopping && timeout > 0 && !job.StartedAt.IsZero() && !job.FinishedAt.IsZero() && job.FinishedAt.Sub(job.StartedAt) >= timeout {
+		if !stopping && timeout > 0 && !job.budgetOrigin().IsZero() && !job.budgetEnd().IsZero() && job.budgetEnd().Sub(job.budgetOrigin()) >= timeout {
 			return core.ExecutionTimedOut
 		}
 		return core.ExecutionCancelled

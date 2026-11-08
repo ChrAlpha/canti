@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -599,6 +600,37 @@ func TestLocalCancellationRejectsPhysicalExecutionClaims(t *testing.T) {
 			}
 			if err := d.try(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionCancelled}, facts); !errors.Is(err, harness.ErrFacts) {
 				t.Fatalf("local physical claim accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommitPersistsConfirmedCessationWithoutInventingAnExit(t *testing.T) {
+	for _, bad := range []bool{false, true} {
+		t.Run(fmt.Sprintf("invalid=%v", bad), func(t *testing.T) {
+			s := open(t, tempPath(t))
+			d := newDriver(t, s, createRun(t, s, "run-1", limits))
+			d.decide(execBody("sleep 10"), harness.Usage{})
+			at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+			j := harness.Job{EffectID: d.snap.State.EffectID, Spec: receipt(d.snap.State, harness.Observation{}).Spec, ID: "exec", Fenced: true, Status: harness.JobCancelled, DispatchedAt: at, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}, Cessation: &harness.Cessation{EnvironmentID: "container", StartEpoch: "epoch", Generation: 1, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}}
+			if bad {
+				j.Cessation.Generation++
+			}
+			obs := harness.Observation{Execution: core.ExecutionTimedOut}
+			err := d.try(core.Observed{EffectID: d.snap.State.EffectID, Execution: core.ExecutionTimedOut}, harness.Facts{Observation: &obs, Receipt: &j})
+			if bad {
+				if !errors.Is(err, harness.ErrFacts) {
+					t.Fatalf("bad witness commit = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := history(t, s, "run-1")
+			got := rows[len(rows)-1].Facts.Receipt
+			if got == nil || got.ExitCode != nil || !got.StartedAt.IsZero() || !got.FinishedAt.IsZero() || got.Cessation == nil || got.Cessation.Generation != 1 {
+				t.Fatalf("stored = %+v", got)
 			}
 		})
 	}

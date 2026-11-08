@@ -173,7 +173,8 @@ remaining wall budget and caller deadline. Caller shutdown returns without a Run
 stop; expiry of the harness wall deadline commits StopRequested with its cause.
 After latch publication the executor finishes bounded launch work synchronously,
 so Host ownership cannot be released while that work acts. Job timeout uses
-backend start/finish times and the configured duration; clock assumptions and
+backend start/finish times, or a separately recorded dispatch time when the
+backend cannot supply process timestamps, and the configured duration; clock assumptions and
 restart classification are explicit in the C2 contract.
 
 Inspect and Cancel never create or launch work. Every operation returns the same
@@ -195,7 +196,10 @@ content at the same event ID/sequence succeeds without another write; conflictin
 content fails. The transaction validates effect facts against committed acceptance,
 request context and immutable configuration, without Docker parsing or queries.
 An external receipt must match effect and accepted Spec, have truthful status and
-owner/fence/exit evidence, and agree with its observation. A local cancellation is
+owner/fence/exit evidence, and agree with its observation. A cancelled command
+may omit its exit code only with a typed cessation witness matching its
+environment binding and command generation. The witness confirmation time is
+not an actual command exit time; unknown process timestamps remain unset. A local cancellation is
 the only receipt-free Observed. Performed validates a local Outcome and any replacement focus in that same transaction.
 Confirmed rejection commits its response, usage, typed signal and next anchor together.
 The run's context_seq points to its latest successful focus mutation or rejection.
@@ -592,10 +596,11 @@ except decoding a response already paid for, bounds each model request by the
 remaining wall time, and checks the wall time while it waits on a running
 job. The job timeout stops the job, not the run: while inspecting, the loop
 cancels a job once the host clock is `Budget.JobTimeout` past the start time
-the Docker daemon reports, observes it as `timed_out`, and continues with the
+the backend reports (or its separate durable dispatch time), observes it as `timed_out`, and continues with the
 next step. A restarted controller that finds a cancelled job observes it as
-`timed_out` when the daemon's start and finish times span the timeout. Both
-assume the daemon shares the host clock. Tokens
+`timed_out` when its budget origin and completion or cessation confirmation span the timeout.
+Backend timestamps assume the backend shares the host clock; dispatch and
+cessation observations use the controller clock. Tokens
 are the provider-reported usage of saved and incomplete responses, so a run
 can end up to one response over its token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between
