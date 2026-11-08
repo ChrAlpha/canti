@@ -1786,3 +1786,84 @@ func TestPersistentAcceptancePinsTheStoredPhysicalExecutionContract(t *testing.T
 		t.Fatalf("acceptance touched unavailable environment: %v", err)
 	}
 }
+
+// stopFailure injects a real stop failure after the deterministic handoff gate.
+type stopFailure struct {
+	harness.Journal
+	err error
+}
+
+func (f stopFailure) Commit(ctx context.Context, tr harness.Transition) error {
+	if tr.Event.Kind() == "stop_requested" && f.err != nil {
+		return f.err
+	}
+	return f.Journal.Commit(ctx, tr)
+}
+
+func TestStopOwnsProgressThroughDriveHandoff(t *testing.T) {
+	failure := errors.New("stop commit unavailable")
+	for _, outcome := range []struct {
+		name string
+		err  error
+	}{{"stopped", nil}, {"failed", failure}, {"cancelled", context.Canceled}} {
+		t.Run(outcome.name, func(t *testing.T) {
+			url := answering(t, core.Decision{Kind: core.Return, Payload: "uncommitted answer"})
+			prior := gate{kinds: map[string]bool{"response_saved": true}, reached: make(chan string, 1)}
+			stop := blocking{kind: "stop_requested", reached: make(chan struct{}), release: make(chan struct{})}
+			h := testHost(t, Options{WrapJournal: func(j harness.Journal) harness.Journal {
+				prior.Journal = j
+				stop.Journal = stopFailure{Journal: prior, err: outcome.err}
+				return stop
+			}})
+			id := submit(t, h, Submission{Binding: binding(url)}).Run.ID
+			d, err := h.Drive(t.Context(), id, binding(url), DriveOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-prior.reached
+			finished := make(chan error, 1)
+			stopCtx, stopCancel := context.WithCancel(t.Context())
+			defer stopCancel()
+			target := id
+			if outcome.name == "stopped" {
+				target = ""
+			}
+			var release sync.Once
+			finish := func() { release.Do(func() { close(stop.release) }) }
+			defer finish()
+			go func() { _, err := h.Stop(stopCtx, target); finished <- err }()
+			<-stop.reached
+			if _, err := d.Result(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("interrupted drive lost its actual error: %v", err)
+			}
+			view, err := h.View(t.Context(), id)
+			if err != nil || !view.Driving || !view.Drivable || view.Why != "" || h.DriveError(id) != nil {
+				t.Fatalf("active stop: phase=%s driving=%t drivable=%t why=%q; view error=%v, drive error=%v", view.Snapshot.State.Phase, view.Driving, view.Drivable, view.Why, err, h.DriveError(id))
+			}
+			waitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+			waited, err := h.Wait(waitCtx, view.Cursor())
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) || !waited.Driving || waited.Halted {
+				t.Fatalf("wait abandoned owned stop: %+v, %v", waited, err)
+			}
+			if outcome.name == "cancelled" {
+				stopCancel()
+			} else {
+				finish()
+			}
+			if err := <-finished; !errors.Is(err, outcome.err) {
+				t.Fatalf("stop result=%v,want %v", err, outcome.err)
+			}
+			view, err = h.View(t.Context(), id)
+			if err != nil || view.Driving || !errors.Is(h.DriveError(id), outcome.err) {
+				t.Fatalf("finished stop projection=%+v,%v,error=%v", view, err, h.DriveError(id))
+			}
+			if outcome.err == nil && view.Snapshot.State.Phase != core.PhaseStopped {
+				t.Fatalf("successful stop did not stop: %+v", view.Snapshot)
+			}
+			if outcome.err != nil && view.Snapshot.State.Phase != core.PhaseRequestSent {
+				t.Fatalf("failed stop invented a run fact: %+v", view.Snapshot)
+			}
+		})
+	}
+}

@@ -188,7 +188,7 @@ type Ack struct {
 // Run is the state of a run. Status is active, needs_resolution, returned,
 // or stopped; Phase names its committed phase, for display. Cursor is the
 // position of this state: following the run from it misses and repeats
-// nothing. Driver is driving while the host drives the run and idle
+// nothing. Driver is driving while a drive or stop owns work for the run and idle
 // otherwise; Drivable reports that the host drives it or could continue it
 // without a client's credential, and Why says what is missing otherwise.
 type Run struct {

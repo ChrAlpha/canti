@@ -74,7 +74,7 @@ type Host struct {
 	admission chan struct{}
 
 	mu       sync.Mutex
-	changed  chan struct{} // closed and replaced whenever the host commits or a drive ends
+	changed  chan struct{} // closed and replaced whenever progress or operational ownership changes
 	drivers  map[string]*driver
 	runs     map[string]*runLock
 	ended    ended

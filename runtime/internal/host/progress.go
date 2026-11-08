@@ -11,8 +11,8 @@ import (
 )
 
 // View is the state of a run as the host reports it: the run, its stored
-// config, the committed snapshot with its totals, whether the host drives
-// it, and whether the host could drive it by itself, with why not.
+// config, the committed snapshot with its totals, whether a drive or stop owns
+// its work, and whether the host could drive it by itself, with why not.
 type View struct {
 	Run      harness.Run
 	Config   RunConfig
@@ -319,7 +319,7 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 }
 
 // WaitResult is what a Wait observed: the cursor of the latest transition
-// of the run, whether the run has halted, and whether the host drives it.
+// of the run, whether the run has halted, and whether a drive or stop owns work.
 type WaitResult struct {
 	Cursor  Cursor
 	Halted  bool
@@ -339,7 +339,7 @@ func (h *Host) Wait(ctx context.Context, after Cursor) (WaitResult, error) {
 	}
 	for {
 		h.mu.Lock()
-		changed, driving, closing := h.changed, h.drivers[after.RunID] != nil, h.closing
+		changed, driving, closing := h.changed, h.workingLocked(after.RunID), h.closing
 		h.mu.Unlock()
 		h.checkpoint(PointWaiting)
 		snap, err := h.store.Latest(ctx, after.RunID)

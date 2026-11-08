@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
@@ -28,11 +31,16 @@ import (
 // directory's lock all along and its socket always answers or is gone with
 // the lock held, so the client never starts a host process of its own.
 func inProcessHost(t *testing.T, f *fixture, steps io.Writer, listen func(path string) net.Listener) (*app, *host.Host) {
+	return inProcessHostOptions(t, f, steps, listen, host.Options{})
+}
+
+func inProcessHostOptions(t *testing.T, f *fixture, steps io.Writer, listen func(path string) net.Listener, opts host.Options) (*app, *host.Host) {
 	t.Helper()
 	if err := os.MkdirAll(f.state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h, err := host.Open(context.Background(), host.Options{Workspace: f.workspace, State: f.state}, true)
+	opts.Workspace, opts.State = f.workspace, f.state
+	h, err := host.Open(context.Background(), opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,3 +232,84 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *syncBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
+
+// stopCommitBarrier leaves the run unchanged while an actual public stop owns
+// the handoff; releasing it permits the ordinary durable stop to finish.
+type stopCommitBarrier struct {
+	harness.Journal
+	reached, release chan struct{}
+}
+
+func (b stopCommitBarrier) Commit(ctx context.Context, tr harness.Transition) error {
+	if tr.Event.Kind() == "stop_requested" {
+		close(b.reached)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-b.release:
+		}
+	}
+	return b.Journal.Commit(ctx, tr)
+}
+
+func TestExternalStopKeepsOwnerAttached(t *testing.T) {
+	f := newFixture(t, nil)
+	entered := make(chan struct{})
+	var once sync.Once
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		once.Do(func() { close(entered) })
+		<-r.Context().Done()
+	}))
+	t.Cleanup(provider.Close)
+	barrier := stopCommitBarrier{reached: make(chan struct{}), release: make(chan struct{})}
+	_, h := inProcessHostOptions(t, f, io.Discard, listenAt(t), host.Options{WrapJournal: func(j harness.Journal) harness.Journal { barrier.Journal = j; return barrier }})
+	var release sync.Once
+	finish := func() { release.Do(func() { close(barrier.release) }) }
+	defer finish()
+	owner, waitOwner := f.start(nil, "run", "-host", "auto", "-model-url", provider.URL, "-goal", "hold model request")
+	defer func() {
+		if owner.ProcessState == nil {
+			owner.Process.Kill()
+			waitOwner()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	stopper, waitStop := f.start(nil, "stop", "-host", "auto")
+	defer func() {
+		if stopper.ProcessState == nil {
+			stopper.Process.Kill()
+			finish()
+			waitStop()
+		}
+	}()
+	select {
+	case <-barrier.reached:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	view, err := h.View(ctx, "")
+	if err != nil || !view.Driving || h.DriveError(view.Run.ID) != nil {
+		t.Fatalf("stop handoff exposed idle/error: driving=%t error=%v view=%v", view.Driving, h.DriveError(view.Run.ID), err)
+	}
+	path, err := hostrpc.SocketPath(f.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&hostrpc.Client{Path: path}).Call(ctx, hostrpc.Request{Op: hostrpc.OpWait, RunID: view.Run.ID, Cursor: hostserver.CursorOf(view.Cursor()), TimeoutMS: 30})
+	if err != nil || response.Wait == nil || response.Wait.Driver != hostrpc.DriverDriving || response.Wait.Halted {
+		t.Fatalf("public wait abandoned stop: %+v,%v", response.Wait, err)
+	}
+	finish()
+	stopped := waitStop()
+	owned := waitOwner()
+	if stopped.code != exitStopped || owned.code != exitStopped || !strings.Contains(owned.stderr, "stopped: cancelled") || strings.Contains(owned.stderr, "context canceled") || strings.Contains(owned.stderr, "client must give a credential") {
+		t.Fatalf("stopper=%+v; original owner=%+v", stopped, owned)
+	}
+}
