@@ -316,7 +316,7 @@ func (x *Attached) activeOwner(ctx context.Context, s environmentState) (*Attach
 	if err != nil || !found {
 		return nil, r, errors.Join(err, errors.New("docker: invalid active command authority"))
 	}
-	if _, err = EnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
+	if _, _, err = observedEnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
 		return nil, r, err
 	}
 	return owner, r, nil
@@ -391,7 +391,7 @@ func validateAttachedTerminal(r attachedRecord) error {
 
 func (x *Attached) prepareSlot(ctx context.Context, e harness.Effect, s *environmentState) error {
 	var err error
-	if _, err = EnvironmentWorkdir(ctx, x.cfg.Attachment, x.cfg.Workspace, x.cfg.State, x.cfg.Workdir); err != nil {
+	if _, _, err = observedEnvironmentWorkdir(ctx, x.cfg.Attachment, x.cfg.Workspace, x.cfg.State, x.cfg.Workdir); err != nil {
 		return err
 	}
 	if err = x.backend.checkAttachment(ctx, x.cfg.Attachment); err != nil {

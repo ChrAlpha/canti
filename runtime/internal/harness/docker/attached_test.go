@@ -28,6 +28,7 @@ type attachedFake struct {
 	mu                                  sync.Mutex
 	dir, workspace, endpoint, container string
 	running, exists                     bool
+	paused, restarting                  bool
 	epoch                               time.Time
 	next, starts, stops                 int
 	execs                               map[string]execMetadata
@@ -135,7 +136,7 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 		c.Config.User = "1000:1000"
 		c.Config.Env = []string{"HOME=/home/dev", "PATH=/usr/local/bin:/usr/bin:/bin"}
 		c.Config.Labels = map[string]string{controlLabel: f.dir, authorityLabel: f.labelIdentity}
-		c.State.Running = f.running
+		c.State.Running, c.State.Paused, c.State.Restarting = f.running, f.paused, f.restarting
 		c.State.StartedAt = f.epoch
 		c.Mounts = append(c.Mounts, struct {
 			Type, Source, Destination string
@@ -1066,5 +1067,105 @@ func TestAttachedDoesNotTraverseNamedVolumeSources(t *testing.T) {
 	x := f.executor(t)
 	if _, err := x.Drive(t.Context(), effectFor(x, "named_volume", "true")); err != nil {
 		t.Fatalf("named volume dispatch: %v", err)
+	}
+}
+
+func TestEnvironmentAdmissionRequiresUsableStateWithoutMutation(t *testing.T) {
+	cases := []struct {
+		name, gate                           string
+		running, paused, restarting, allowed bool
+	}{
+		{"open", "open", true, false, false, true},
+		{"stopped-container", "open", false, false, false, false},
+		{"paused-container", "open", true, true, false, false},
+		{"restarting-container", "open", true, false, true, false},
+	}
+	for _, gate := range []string{"unattached", "quarantined", "stopped", "starting", "stopping", "detached", "retiring", "retired"} {
+		cases = append(cases, struct {
+			name, gate                           string
+			running, paused, restarting, allowed bool
+		}{gate, gate, true, false, false, false})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			_, s, err := readEnvironment(f.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Gate = tc.gate
+			if err = saveEnvironmentState(f.dir, s); err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			f.running, f.paused, f.restarting = tc.running, tc.paused, tc.restarting
+			f.mu.Unlock()
+			before, err := os.ReadFile(filepath.Join(f.dir, "authority", "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(t.TempDir(), "uncreated-run")
+			cwd, err := EnvironmentWorkdir(t.Context(), x.cfg.Attachment, f.workspace, state, "")
+			if (err == nil) != tc.allowed || tc.allowed && cwd != "/workspace" {
+				t.Fatalf("cwd=%q allowed=%v: %v", cwd, tc.allowed, err)
+			}
+			after, readErr := os.ReadFile(filepath.Join(f.dir, "authority", "state.json"))
+			if readErr != nil || string(before) != string(after) {
+				t.Fatalf("admission mutated authority: %v", readErr)
+			}
+			if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("admission created run state: %v", err)
+			}
+			if f.starts != 0 || f.stops != 0 {
+				t.Fatal("admission mutated Docker")
+			}
+		})
+	}
+}
+
+func TestEnvironmentAdmissionDoesNotRecoverPendingOrUnsettledRequests(t *testing.T) {
+	for _, mode := range []string{"unsettled", "settled", "pending-acknowledged"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			a := x.cfg.Attachment
+			request := requestFence{Format: 1, Kind: "environment_stop", AuthorityID: a.AuthorityID, BackendID: a.DaemonID, EnvironmentID: a.ContainerID, TargetID: a.ContainerID, Incarnation: a.Incarnation, Generation: 1}
+			dir, err := beginRequest(x.authority(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, s, err := readEnvironment(f.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Requests = []string{filepath.Base(dir)}
+			if mode != "unsettled" {
+				if err = acknowledgeRequest(dir, request, http.StatusNoContent, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "pending-acknowledged" {
+				s.Pending = filepath.Base(dir)
+			}
+			if err = saveEnvironmentState(f.dir, s); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(f.dir, "authority", "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = EnvironmentWorkdir(t.Context(), a, f.workspace, x.cfg.State, "")
+			if (err == nil) != (mode == "settled") {
+				t.Fatalf("mode=%s: %v", mode, err)
+			}
+			after, readErr := os.ReadFile(filepath.Join(f.dir, "authority", "state.json"))
+			if readErr != nil || string(before) != string(after) {
+				t.Fatalf("admission recovered control state: %v", readErr)
+			}
+			if f.starts != 0 || f.stops != 0 {
+				t.Fatal("admission mutated Docker")
+			}
+		})
 	}
 }

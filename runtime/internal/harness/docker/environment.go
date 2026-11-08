@@ -459,22 +459,57 @@ func (x *Executor) mountChallenge(ctx context.Context, a Attachment) error {
 	return nil
 }
 
-// EnvironmentWorkdir returns the unique writable bind mapping of this host
-// workspace. It also excludes the current journal from all environment mounts.
+// EnvironmentWorkdir validates a read-only admission snapshot and returns the
+// unique writable workspace bind mapping. It never recovers control state,
+// acquires the foreground slot, or creates the run state directory. Dispatch
+// must recheck because admission reserves nothing.
 func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, requested string) (string, error) {
-	x := environmentEngine(a.Endpoint)
-	if err := x.checkAttachment(ctx, a); err != nil {
-		return "", err
-	}
-	c, err := x.inspectPrepared(ctx, a.ContainerID)
+	cwd, c, err := observedEnvironmentWorkdir(ctx, a, workspace, state, requested)
 	if err != nil {
 		return "", err
 	}
-	mounts := mountProjection(c)
-	if err := checkEnvironmentMounts(a.Directory, mounts); err != nil {
+	_, control, err := readEnvironment(a.Directory)
+	if err != nil {
 		return "", err
 	}
-	return pinnedEnvironmentWorkdir(Attachment{Mounts: mounts}, workspace, state, requested)
+	if control.Gate != "open" {
+		return "", gateError(control.Gate)
+	}
+	if control.Pending != "" {
+		return "", gateError("quarantined")
+	}
+	// Check exact acknowledgements in memory; read-only admission must not prune
+	// their durable references or reopen a closed/quarantined gate.
+	owner := &Attached{cfg: AttachedConfig{Attachment: a}}
+	if err = owner.pruneRequests(&control); err != nil {
+		return "", err
+	}
+	if len(control.Requests) > 0 {
+		return "", gateError("quarantined")
+	}
+	if !c.State.Running || c.State.Paused || c.State.Restarting {
+		return "", errors.New("docker: environment must be running and ready before admission; inspect or start it explicitly")
+	}
+	return cwd, nil
+}
+
+// Recovery checks the same physical mapping even when admission is closed: it
+// must remain possible to reconcile old work in a stopped/quarantined environment.
+func observedEnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, requested string) (string, preparedContainer, error) {
+	x := environmentEngine(a.Endpoint)
+	if err := x.checkAttachment(ctx, a); err != nil {
+		return "", preparedContainer{}, err
+	}
+	c, err := x.inspectPrepared(ctx, a.ContainerID)
+	if err != nil {
+		return "", c, err
+	}
+	mounts := mountProjection(c)
+	if err := checkEnvironmentMounts(a.Directory, mounts); err != nil {
+		return "", c, err
+	}
+	cwd, err := pinnedEnvironmentWorkdir(Attachment{Mounts: mounts}, workspace, state, requested)
+	return cwd, c, err
 }
 func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) (string, error) {
 	var candidates []string
