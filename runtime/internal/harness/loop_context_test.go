@@ -656,3 +656,62 @@ func TestRequestResourceCapsStopLocallyBeforeProviderSend(t *testing.T) {
 		})
 	}
 }
+
+type cancelAfterSnapshotLookup struct {
+	*nativeSnapshotReadJournal
+	cancel  context.CancelFunc
+	lookups int
+}
+
+func (j *cancelAfterSnapshotLookup) CompletionAtStep(ctx context.Context, run string, step int) (harness.StepRecord, error) {
+	record, err := j.Store.CompletionAtStep(ctx, run, step)
+	if err == nil {
+		j.lookups++
+		j.cancel()
+	}
+	return record, err
+}
+
+func TestNativeSnapshotCancellationAfterLookupPreventsPublicationAndProgress(t *testing.T) {
+	imported := t.TempDir()
+	original := filepath.Join(imported, "source")
+	if err := os.WriteFile(original, []byte("ORIGINAL_FROZEN_CANCELLATION_EVIDENCE"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := fmt.Sprintf("/canti/runs/%s/steps/00000001/evidence/0000", runID)
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
+		execReply("canti:unrelated"), execReply(fmt.Sprintf(`canti:retrieve {"operation":"read","path":%q,"reason":"recover exact snapshot"}`, target)), returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
+	f.steps(f.loop(), 11)
+	before := focusSnapshot(t, f)
+	if before.State.Phase != core.PhaseEffectSaved {
+		t.Fatal("historical read not accepted")
+	}
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	stepDir := filepath.Join(f.cfg.History, runID, "steps", "00000001")
+	for _, name := range []string{archive.EvidencePath(0), archive.EvidenceFile} {
+		if err := os.Remove(filepath.Join(stepDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	priorFiles := tree(t, stepDir)
+	ctx, cancel := context.WithCancel(f.bounded())
+	defer cancel()
+	journal := &cancelAfterSnapshotLookup{nativeSnapshotReadJournal: &nativeSnapshotReadJournal{Store: f.open()}, cancel: cancel}
+	_, err := f.loopOn(journal).Step(ctx, runID)
+	if !errors.Is(err, context.Canceled) || ctx.Err() != context.Canceled || journal.lookups != 1 {
+		t.Fatalf("interleaved cancellation: error=%v context=%v lookups=%d", err, ctx.Err(), journal.lookups)
+	}
+	if got := focusSnapshot(t, f); got != before {
+		t.Fatalf("cancelled repair committed progress: %+v", got)
+	}
+	if after := tree(t, stepDir); !reflect.DeepEqual(priorFiles, after) {
+		t.Fatalf("cancelled repair published files: before=%v after=%v", priorFiles, after)
+	}
+	if journal.recentReads != 0 || journal.receiptReads != 0 {
+		t.Fatal("cancelled repair scanned unrelated history")
+	}
+}

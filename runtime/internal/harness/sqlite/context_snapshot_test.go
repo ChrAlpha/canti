@@ -2,9 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -408,5 +410,98 @@ func TestAutomaticRejectionRequiresRecordedSignalEvidence(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type completionQueryDriver struct {
+	inner  sqldriver.Driver
+	record func(string)
+}
+
+func (d completionQueryDriver) Open(name string) (sqldriver.Conn, error) {
+	conn, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &completionQueryConn{Conn: conn, record: d.record}, nil
+}
+
+type completionQueryConn struct {
+	sqldriver.Conn
+	record func(string)
+}
+
+func (c *completionQueryConn) QueryContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
+	c.record(query)
+	underlying, ok := c.Conn.(sqldriver.QueryerContext)
+	if !ok {
+		return nil, sqldriver.ErrSkip
+	}
+	return underlying.QueryContext(ctx, query, args)
+}
+
+func TestCompletionAtStepUsesUniqueTargetIndexWithUnrelatedHistory(t *testing.T) {
+	ctx := context.Background()
+	file := tempPath(t)
+	s := open(t, file)
+	seed(t, s, "lookup-target", 128)
+	seed(t, s, "unrelated-run", 96)
+	original := s.db
+	t.Cleanup(func() { original.Close() })
+	var captured []string
+	name := fmt.Sprintf("completion_query_%d", contextSnapshotFunctions.Add(1))
+	sql.Register(name, completionQueryDriver{inner: original.Driver(), record: func(query string) { captured = append(captured, query) }})
+	wrapped, err := sql.Open(name, (&url.URL{Scheme: "file", OmitHost: true, Path: file, RawQuery: "mode=ro"}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db = wrapped
+	for _, target := range []struct {
+		run  string
+		step int
+	}{{"lookup-target", 1}, {"lookup-target", 128}, {"unrelated-run", 64}} {
+		got, err := s.CompletionAtStep(ctx, target.run, target.step)
+		if err != nil || got.Step != target.step {
+			t.Fatalf("target %+v: %+v %v", target, got, err)
+		}
+	}
+	if len(captured) != 3 {
+		t.Fatalf("lookup query count=%d want3", len(captured))
+	}
+	for i, query := range captured {
+		if query != captured[0] {
+			t.Fatal("target changes changed lookup SQL")
+		}
+		details := plan(t, s, query, []any{"lookup-target", 1}...)
+		// plan invokes the production query captured above, not a mirrored SQL
+		// literal. The expression target and run must both be indexed searches.
+		if !strings.Contains(details, "SEARCH transitions USING INDEX transitions_completion_step (run_id=? AND <expr>=?)") || strings.Contains(details, "SCAN") || strings.Contains(details, "TEMP B-TREE") {
+			t.Fatalf("lookup%d query plan=%s", i, details)
+		}
+	}
+	rows, err := original.QueryContext(ctx, `PRAGMA index_list('transitions')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var seq, unique, partial int
+		var index, origin string
+		if err := rows.Scan(&seq, &index, &unique, &origin, &partial); err != nil {
+			t.Fatal(err)
+		}
+		if index == "transitions_completion_step" {
+			found = true
+			if unique != 1 || partial != 1 {
+				t.Fatalf("completion target index is not unique/partial: %d %d", unique, partial)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("completion target index absent")
 	}
 }
