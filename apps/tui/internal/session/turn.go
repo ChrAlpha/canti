@@ -15,19 +15,22 @@ const progressEntries = 128
 // Event contains one typed runtime fact or an omission notice. Acceptance and
 // completion have dedicated slots and cannot be evicted by progress volume.
 type Event struct {
-	Ack     *hostrpc.Ack
-	Item    *hostrpc.Item
-	Result  *Result
-	Omitted int
+	Ack        *hostrpc.Ack
+	Item       *hostrpc.Item
+	Result     *Result
+	Omitted    int
+	Diagnostic string
 }
 
 type Turn struct {
 	Snapshot       Snapshot
+	reconcile      bool
 	owned          bool
 	cancel         context.CancelFunc
 	stop           chan struct{}
 	done           chan struct{}
 	notify         chan struct{}
+	diagnostics    []string
 	mu             sync.Mutex
 	lost           bool
 	interrupts     int
@@ -49,6 +52,14 @@ func (t *Turn) wake() {
 	}
 }
 func (t *Turn) accept(a hostrpc.Ack) { t.mu.Lock(); t.ack = &a; t.mu.Unlock(); t.wake() }
+func (t *Turn) diagnostic(note string) {
+	t.mu.Lock()
+	if len(t.diagnostics) < 8 {
+		t.diagnostics = append(t.diagnostics, note[:min(len(note), 4096)])
+	}
+	t.mu.Unlock()
+	t.wake()
+}
 func (t *Turn) progress(item hostrpc.Item) {
 	data, _ := json.Marshal(item)
 	size := len(data)
@@ -142,6 +153,11 @@ func (t *Turn) pop() (Event, bool) {
 		a := t.ack
 		t.ack = nil
 		return Event{Ack: a}, true
+	}
+	if len(t.diagnostics) > 0 {
+		s := t.diagnostics[0]
+		t.diagnostics = t.diagnostics[1:]
+		return Event{Diagnostic: s}, true
 	}
 	if t.omitted > 0 {
 		n := t.omitted

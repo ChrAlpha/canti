@@ -2,9 +2,10 @@ package present
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/ChrAlpha/canti/apps/tui/internal/session"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
-	"strings"
 )
 
 // Result keeps the answer separate from diagnostic and recovery text.
@@ -15,7 +16,11 @@ func Result(out session.Result) (answer, diagnostic string) {
 		fmt.Fprintf(&b, "canti: detached from run %s, which the host keeps driving; follow it with \"canti resume -host auto -run %[1]s\".\n", r.RunID)
 	}
 	if out.Err != nil {
-		fmt.Fprintf(&b, "canti-tui: %v\n", out.Err)
+		if out.Rejected && !out.NoInputFits && strings.HasPrefix(out.Err.Error(), "-context-bytes:") {
+			fmt.Fprintf(&b, "canti-tui: the input does not fit -context-bytes (%s)\n", strings.TrimPrefix(out.Err.Error(), "-context-bytes: "))
+		} else {
+			fmt.Fprintf(&b, "canti-tui: %v\n", out.Err)
+		}
 	}
 	if r.Why != "" && r.Status == hostrpc.StatusActive && !r.Drivable {
 		fmt.Fprintf(&b, "canti: the host cannot continue run %s by itself: %s\n", r.RunID, r.Why)

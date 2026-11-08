@@ -5,6 +5,7 @@ package terminal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -481,5 +482,103 @@ func TestOverflowResyncWithDelayedPasteTerminator(t *testing.T) {
 		case <-deadline:
 			t.Fatal("overflow did not resynchronize after delayed closing delimiter")
 		}
+	}
+}
+
+func TestNativeOverflowEndsOnEOFOrCancellation(t *testing.T) {
+	for _, eof := range []bool{false, true} {
+		t.Run(fmt.Sprint(eof), func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			cr, err := uv.NewCancelReader(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cr.Close()
+			reader := uv.NewTerminalReader(cr, "xterm")
+			reader.MaxPasteBytes = 8
+			reader.ReportEOF = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			events := make(chan uv.Event, 8)
+			done := make(chan error, 1)
+			go func() { done <- reader.StreamEvents(ctx, events) }()
+			io.WriteString(w, "\x1b[200~123456789")
+			// scanEvents has processed the complete chunk before publishing PasteStart.
+			select {
+			case e := <-events:
+				if _, ok := e.(uv.PasteStartEvent); !ok {
+					t.Fatal(e)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("paste was not decoded")
+			}
+			if eof {
+				w.Close()
+			} else {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if eof && !errors.Is(err, io.ErrUnexpectedEOF) || !eof && err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("overflow shutdown did not join")
+			}
+			for len(events) > 0 {
+				e := <-events
+				if _, ok := e.(uv.PasteEvent); ok {
+					t.Fatalf("overflow emitted partial paste: %#v", e)
+				}
+			}
+		})
+	}
+}
+func TestNativeSplitUTF8SurvivesEscapeTimeout(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	cr, err := uv.NewCancelReader(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cr.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan uv.Event, 8)
+	done := make(chan error, 1)
+	go func() { done <- uv.NewTerminalReader(cr, "xterm").StreamEvents(ctx, events) }()
+	for i, part := range []string{"\xe6", "\x97", "\xa5"} {
+		io.WriteString(w, part)
+		if i < 2 {
+			select {
+			case e := <-events:
+				t.Fatalf("partial UTF-8 emitted %#v", e)
+			case <-time.After(70 * time.Millisecond):
+			}
+		}
+	}
+	select {
+	case e := <-events:
+		k, ok := e.(uv.KeyPressEvent)
+		if !ok || k.Text != "日" {
+			t.Fatalf("decoded %#v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing complete codepoint")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not join")
 	}
 }

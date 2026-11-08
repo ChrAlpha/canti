@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -199,5 +200,43 @@ func TestOwnedHostRejectsAnotherServingHost(t *testing.T) {
 				t.Fatalf("owned connect to another host = %v, want locked", err)
 			}
 		})
+	}
+}
+
+func TestOwnedRuntimeReapingObservesForceCancellation(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; echo ready; exec sleep 60")
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	if line, err := bufio.NewReader(output).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("child readiness: %q %v", line, err)
+	}
+	r := &runtimeClient{child: cmd, childDone: exited}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.closeHost(ctx); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("child unexpectedly accepted TERM")
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+		if r.child != nil {
+			t.Fatal("child handle not retired")
+		}
+	case <-time.After(time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("force cancellation did not escape reaping")
 	}
 }

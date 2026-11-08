@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -59,15 +60,9 @@ func Run(ctx context.Context, c *session.Controller, input *os.File, output io.W
 		updated, _ := m.complete(out)
 		m = updated.(Model)
 	}
-	if s := m.transcript(); s != "" {
-		if _, err := io.WriteString(output, s); runErr == nil {
-			runErr = err
-		}
+	if err := writeExit(output, m, c.ID()); runErr == nil {
+		runErr = err
 	}
-	if m.final != "" && !stringsContainsFinal(m.transcript(), m.final) {
-		_, _ = io.WriteString(output, m.final)
-	}
-	_, _ = fmt.Fprintf(output, "canti: continue session with \"canti-tui -session %s\"; new runs use the current launch flags.\n", c.ID())
 	if runErr != nil && !errors.Is(runErr, tea.ErrProgramKilled) {
 		return session.Error, runErr
 	}
@@ -76,6 +71,18 @@ func Run(ctx context.Context, c *session.Controller, input *os.File, output io.W
 	}
 	return m.code, runErr
 }
-func stringsContainsFinal(transcript, final string) bool {
-	return len(final) <= len(transcript) && transcript[len(transcript)-len(final):] == final
+func writeExit(output io.Writer, m Model, id string) error {
+	transcript := m.transcript()
+	if transcript != "" {
+		if _, err := io.WriteString(output, transcript); err != nil {
+			return err
+		}
+	}
+	if m.final != "" && !strings.HasSuffix(transcript, m.final) {
+		if _, err := io.WriteString(output, m.final); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintf(output, "canti: continue session with \"canti-tui -session %s\"; new runs use the current launch flags.\n", id)
+	return err
 }

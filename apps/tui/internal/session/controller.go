@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -35,7 +34,7 @@ type Config struct {
 	ExplicitConstraints                                bool
 	Binding                                            hostrpc.Binding
 	Environment                                        []string
-	Logger                                             *slog.Logger
+	LogLevel                                           slog.Level
 }
 
 // Snapshot names one immutable submission, including retries after a lost ACK.
@@ -75,20 +74,17 @@ func result(r hostrpc.Run, err error) Result {
 // Controller serializes turns. Runtime process fields are used only by Setup
 // or its single active worker. UI drafts are never retained here.
 type Controller struct {
-	cfg              Config
-	runtime          runtimeClient
-	GoalLimit        int
-	constraintsLimit int
-	fixed            string
-	mu               sync.Mutex
-	current          *Turn
+	cfg            Config
+	runtime        runtimeClient
+	GoalLimit      int
+	mu             sync.Mutex
+	current        *Turn
+	uncertainInput string
 }
 
 func New(cfg Config) *Controller {
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	}
-	return &Controller{cfg: cfg, runtime: runtimeClient{workspace: cfg.Workspace, state: cfg.State, runtimePath: cfg.RuntimePath, hostMode: cfg.HostMode, hostWait: cfg.HostWait, env: cfg.Environment, log: cfg.Logger}}
+
+	return &Controller{cfg: cfg, runtime: runtimeClient{workspace: cfg.Workspace, state: cfg.State, runtimePath: cfg.RuntimePath, hostMode: cfg.HostMode, hostWait: cfg.HostWait, env: cfg.Environment, logLevel: cfg.LogLevel.String()}}
 }
 func (c *Controller) ID() string  { return c.cfg.SessionID }
 func (c *Controller) Owned() bool { return c.cfg.HostMode == Owned }
@@ -104,12 +100,12 @@ func (c *Controller) Setup(ctx context.Context) error {
 		return err
 	}
 	c.cfg.Spec = v.Spec
-	c.fixed = v.Constraints
+
 	c.GoalLimit = v.GoalLimit
-	c.constraintsLimit = v.ConstraintsLimit
+
 	_, err = c.runtime.connect(ctx)
 	if c.Owned() {
-		c.runtime.closeHost()
+		c.runtime.closeHost(ctx)
 	}
 	return err
 }
@@ -118,7 +114,7 @@ func (c *Controller) Check(goal string) error {
 	case strings.TrimSpace(goal) == "":
 		return errors.New("input is required")
 	case !utf8.ValidString(goal):
-		return errors.New("input must be valid UTF-8")
+		return errors.New("input and -constraints must be valid UTF-8")
 	case len(goal) > c.GoalLimit:
 		return fmt.Errorf("input must be at most %d bytes; put a long specification in a workspace file and reference it from the goal", c.GoalLimit)
 	}
@@ -140,18 +136,21 @@ func (c *Controller) Start(ctx context.Context, s Snapshot) (*Turn, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	t := newTurn(s, c.Owned(), cancel)
+	t.reconcile = c.uncertainInput == s.InputID
 	c.current = t
 	go func() {
 		out := c.run(ctx, t)
 		if c.Owned() {
-			if ctx.Err() != nil && c.runtime.child != nil {
-				_ = c.runtime.child.Process.Kill()
-			}
-			c.runtime.closeHost()
+			c.runtime.closeHost(ctx)
 		}
 		cancel()
 		c.mu.Lock()
 		c.current = nil
+		if out.Uncertain {
+			c.uncertainInput = s.InputID
+		} else if c.uncertainInput == s.InputID {
+			c.uncertainInput = ""
+		}
 		c.mu.Unlock()
 		t.finish(out)
 	}()
@@ -162,11 +161,14 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 	sub := c.submission(t.Snapshot)
 	var ack hostrpc.Ack
 	var client *hostrpc.Client
-	lost := false
+	lost := t.reconcile
 	err := c.runtime.retry(ctx, func(cl *hostrpc.Client) (err error) {
 		client = cl
 		ack, err = cl.Submit(ctx, sub, c.cfg.Binding, false)
 		lost = lost || hostrpc.Lost(err)
+		if err != nil && (hostrpc.Lost(err) || hostrpc.Unavailable(err)) && c.cfg.LogLevel <= slog.LevelWarn {
+			t.diagnostic(fmt.Sprintf("Host connection interrupted; reconciling input %s", t.Snapshot.InputID))
+		}
 		return err
 	})
 	if err != nil {
@@ -202,44 +204,53 @@ type rpcRun interface {
 func (c *Controller) follow(ctx context.Context, client rpcRun, t *Turn, id string) Result {
 	followCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	finished := make(chan Result, 1)
+	finished := make(chan followed, 1)
 	go func() { finished <- follow(followCtx, client, id, t.progress) }()
-	var stopDone <-chan error
-	for {
-		select {
-		case out := <-finished:
-			if ctx.Err() != nil {
-				out = c.detached(id, ctx.Err())
-			}
-			if stopDone != nil { // Join the stop operation; it has the same cancel context.
-				cancel()
-				err := <-stopDone
-				if err != nil && !errors.Is(err, context.Canceled) && out.Err == nil {
-					out.Err = err
-					out.Code = Error
-				}
-			}
-			return out
-		case <-t.stop:
-			if stopDone == nil {
-				ch := make(chan error, 1)
-				stopDone = ch
-				go func() { _, err := client.Stop(followCtx, id, stopCleanup); ch <- err }()
-			}
-		case err := <-stopDone:
-			stopDone = nil
-			if err != nil {
-				cancel()
-				<-finished
-				return result(hostrpc.Run{RunID: id}, fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\"", id, err))
-			}
-		case <-ctx.Done():
-			cancel()
-			<-finished
-			if stopDone != nil {
-				<-stopDone
-			}
+	select {
+	case out := <-finished:
+		if ctx.Err() != nil {
 			return c.detached(id, ctx.Err())
+		}
+		select {
+		case <-t.stop:
+			return c.stop(ctx, client, t, id, out.Cursor)
+		default:
+			return out.Result
+		}
+	case <-t.stop:
+		// Stop first interrupts the host driver. Join our follow producer before
+		// issuing it, then await its own acknowledgement before final drain/View.
+		cancel()
+		out := <-finished
+		return c.stop(ctx, client, t, id, out.Cursor)
+	case <-ctx.Done():
+		cancel()
+		<-finished
+		return c.detached(id, ctx.Err())
+	}
+}
+func (c *Controller) stop(ctx context.Context, client rpcRun, t *Turn, id, cursor string) Result {
+	if _, err := client.Stop(ctx, id, stopCleanup); err != nil {
+		if ctx.Err() != nil {
+			return c.detached(id, ctx.Err())
+		}
+		return result(hostrpc.Run{RunID: id}, fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\"", id, err))
+	}
+	return drain(ctx, client, id, cursor, t.progress)
+}
+func drain(ctx context.Context, src rpcRun, id, cursor string, emit func(hostrpc.Item)) Result {
+	for {
+		page, err := src.Progress(ctx, id, cursor, 64)
+		if err != nil {
+			return result(hostrpc.Run{RunID: id}, err)
+		}
+		for _, item := range page.Items {
+			emit(item)
+		}
+		cursor = page.Next
+		if !page.More {
+			r, err := src.View(ctx, id)
+			return result(r, err)
 		}
 	}
 }
@@ -253,13 +264,19 @@ func (c *Controller) detached(id string, err error) Result {
 
 // follow is the only Progress/Wait producer. A final page is drained before
 // View and completion, including commits that raced a terminal Wait response.
-func follow(ctx context.Context, src rpcRun, id string, emit func(hostrpc.Item)) Result {
+type followed struct {
+	Result
+	Cursor string
+}
+
+func follow(ctx context.Context, src rpcRun, id string, emit func(hostrpc.Item)) (out followed) {
 	cursor := ""
+	defer func() { out.Cursor = cursor }()
 	final := false
 	for {
 		page, err := src.Progress(ctx, id, cursor, 64)
 		if err != nil {
-			return result(hostrpc.Run{RunID: id}, fmt.Errorf("reading progress of run %s: %w; continue with \"canti resume -run %[1]s\"", id, err))
+			return followed{Result: result(hostrpc.Run{RunID: id}, fmt.Errorf("reading progress of run %s: %w; continue with \"canti resume -run %[1]s\"", id, err))}
 		}
 		for _, item := range page.Items {
 			emit(item)
@@ -270,11 +287,11 @@ func follow(ctx context.Context, src rpcRun, id string, emit func(hostrpc.Item))
 		}
 		if final || page.Halted {
 			r, err := src.View(ctx, id)
-			return result(r, err)
+			return followed{Result: result(r, err)}
 		}
 		w, err := src.Wait(ctx, id, cursor)
 		if err != nil {
-			return result(hostrpc.Run{RunID: id}, fmt.Errorf("the host went away while it drove run %s: %w; continue with \"canti resume -host auto -run %[1]s\"", id, err))
+			return followed{Result: result(hostrpc.Run{RunID: id}, fmt.Errorf("the host went away while it drove run %s: %w; continue with \"canti resume -host auto -run %[1]s\"", id, err))}
 		}
 		final = w.Halted || w.Driver != hostrpc.DriverDriving
 	}

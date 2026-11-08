@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
 const (
@@ -35,7 +35,7 @@ type runtimeClient struct {
 	workspace, state, runtimePath, hostMode string
 	hostWait                                time.Duration
 	env                                     []string
-	log                                     *slog.Logger
+	logLevel                                string
 	child                                   *exec.Cmd
 	childDone                               chan error
 	starting                                <-chan struct{}
@@ -127,7 +127,7 @@ func (a *runtimeClient) startHost() error {
 		return err
 	}
 	defer logFile.Close()
-	cmd := exec.Command(exe, "host", "-workspace", a.workspace, "-state", a.state, "-idle", autoIdle.String(), "-log-level", "warn")
+	cmd := exec.Command(exe, "host", "-workspace", a.workspace, "-state", a.state, "-idle", autoIdle.String(), "-log-level", strings.ToLower(a.logLevel))
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if a.hostMode == hostOwned {
@@ -175,7 +175,6 @@ func (a *runtimeClient) retry(ctx context.Context, op func(*hostrpc.Client) erro
 		if err = op(c); err == nil || !hostrpc.Lost(err) && !hostrpc.Unavailable(err) && !errors.Is(err, hostrpc.ErrClosing) {
 			return err
 		}
-		a.log.Warn("the host connection broke; sending the request again", "error", err)
 	}
 	return err
 }
@@ -252,7 +251,7 @@ func (a *runtimeClient) validate(ctx context.Context, sub hostrpc.Submission, b 
 	return decodeValidation(output, b)
 }
 
-func (a *runtimeClient) closeHost() {
+func (a *runtimeClient) closeHost(ctx context.Context) {
 	if a.child == nil {
 		return
 	}
@@ -260,10 +259,12 @@ func (a *runtimeClient) closeHost() {
 	_ = a.child.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-a.childDone:
+		return
+	case <-ctx.Done():
 	case <-time.After(stopCleanup):
-		_ = a.child.Process.Kill()
-		<-a.childDone
 	}
+	_ = a.child.Process.Kill()
+	<-a.childDone
 }
 
 func validateServing(ctx context.Context, c *hostrpc.Client, v hostrpc.Validation) (hostrpc.Validated, error) {

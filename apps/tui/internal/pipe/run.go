@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/ChrAlpha/canti/apps/tui/internal/present"
 	"github.com/ChrAlpha/canti/apps/tui/internal/session"
@@ -72,8 +73,14 @@ func Run(ctx context.Context, c *session.Controller, in *os.File, out, diagnosti
 			return session.Error, ctx.Err()
 		}
 		var opener *openerError
-		if errors.As(entry.err, &opener) {
-			fmt.Fprintf(diagnostic, "canti-tui: %v\n", entry.err)
+		var overflow *overflowError
+		if errors.As(entry.err, &opener) || errors.As(entry.err, &overflow) {
+			if _, e := fmt.Fprintf(diagnostic, "canti-tui: %v\n", entry.err); e != nil {
+				return session.Error, e
+			}
+			if errors.Is(entry.err, io.EOF) {
+				return session.OK, nil
+			}
 			continue
 		}
 		if entry.text != "" {
@@ -124,9 +131,9 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 	var displayErr error
 	for {
 		select {
-		case <-signals:
+		case sig := <-signals:
 			interrupted = true
-			turn.Interrupt()
+			signalTurn(turn, sig)
 		case e := <-failures:
 			displayErr = e
 			turn.InputLost()
@@ -157,6 +164,9 @@ func runInput(ctx context.Context, c *session.Controller, goal string, out, diag
 }
 func show(w io.Writer, e session.Event) error {
 	var b strings.Builder
+	if e.Diagnostic != "" {
+		fmt.Fprintln(&b, present.Clean(e.Diagnostic))
+	}
 	if e.Item != nil {
 		present.Item(&b, *e.Item)
 	}
@@ -168,4 +178,12 @@ func show(w io.Writer, e session.Event) error {
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+func signalTurn(turn *session.Turn, sig os.Signal) {
+	if sig == syscall.SIGHUP {
+		turn.InputLost()
+	} else {
+		turn.Interrupt()
+	}
 }

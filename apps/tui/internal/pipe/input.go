@@ -25,32 +25,42 @@ func validDelimiter(s string) bool {
 	return true
 }
 
-// line retains at most limit+1 bytes while consuming one pipe line. The caller
-// can reject an oversized input without losing the next line or block boundary.
-func line(in *bufio.Reader, limit int) (string, error) {
+type overflowError struct{ limit int }
+
+func (e *overflowError) Error() string {
+	return fmt.Sprintf("input must be at most %d bytes; oversized input was not submitted", e.limit)
+}
+
+// line consumes one complete line while retaining a bounded prefix. Overflow
+// is a separate fact: whitespace normalization must never hide missing bytes.
+func line(in *bufio.Reader, limit int) (text string, overflow bool, err error) {
 	var b strings.Builder
 	for {
-		part, err := in.ReadSlice('\n')
-		if n := min(len(part), max(0, limit+1-b.Len())); n > 0 {
-			b.Write(part[:n])
-		}
-		if !errors.Is(err, bufio.ErrBufferFull) {
-			return b.String(), err
+		part, e := in.ReadSlice('\n')
+		n := min(len(part), max(0, limit+2-b.Len()))
+		b.Write(part[:n])
+		overflow = overflow || n < len(part)
+		if !errors.Is(e, bufio.ErrBufferFull) {
+			return b.String(), overflow, e
 		}
 	}
 }
 func readInput(in *bufio.Reader, prompt io.Writer, limit int) (string, error) {
-	first, err := line(in, limit)
+	first, overflow, err := line(in, max(limit, 132))
 	rest, ok := strings.CutPrefix(strings.TrimSpace(first), "<<")
 	if !ok {
-		return strings.TrimSpace(first), err
+		text := strings.TrimSpace(first)
+		if overflow || len(text) > limit {
+			return "", errors.Join(&overflowError{limit}, err)
+		}
+		return text, err
 	}
 	rest, tabs := strings.CutPrefix(rest, "-")
 	word := strings.TrimSpace(rest)
 	if len(word) > 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
 		word = word[1 : len(word)-1]
 	}
-	if !validDelimiter(word) {
+	if overflow || !validDelimiter(word) {
 		return "", &openerError{}
 	}
 	var b strings.Builder
@@ -59,19 +69,24 @@ func readInput(in *bufio.Reader, prompt io.Writer, limit int) (string, error) {
 			return "", fmt.Errorf("showing chat prompt: %w", e)
 		}
 		var text string
-		text, err = line(in, max(limit, 130))
+		var clipped bool
+		text, clipped, err = line(in, max(limit, 132))
 		if tabs {
 			text = strings.TrimLeft(text, "\t")
 		}
-		if strings.TrimRight(text, "\r\n") == word {
-			return strings.TrimSpace(b.String()), nil
+		if !clipped && strings.TrimRight(text, "\r\n") == word {
+			goal := strings.TrimSpace(b.String())
+			if overflow || len(goal) > limit {
+				return "", &overflowError{limit}
+			}
+			return goal, nil
 		}
-		if n := min(len(text), max(0, limit+1-b.Len())); n > 0 {
-			b.WriteString(text[:n])
-		}
+		n := min(len(text), max(0, limit+2-b.Len()))
+		b.WriteString(text[:n])
+		overflow = overflow || clipped || n < len(text)
 	}
 	if errors.Is(err, io.EOF) {
-		err = fmt.Errorf("input ended before block delimiter %s", word)
+		err = fmt.Errorf("input ended inside <<%s; it was not submitted", word)
 	}
 	return "", err
 }

@@ -196,6 +196,8 @@ func (m Model) fact(f fact) (tea.Model, tea.Cmd) {
 		if len(e.Ack.Differs) > 0 {
 			m.add("Input replay keeps its original settings: " + strings.Join(e.Ack.Differs, ", ") + "\n")
 		}
+	case e.Diagnostic != "":
+		m.add(e.Diagnostic + "\n")
 	case e.Item != nil:
 		var b strings.Builder
 		present.Item(&b, *e.Item)

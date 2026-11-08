@@ -64,7 +64,7 @@ func runPreflight(ctx context.Context, exe string, body []byte, b hostrpc.Bindin
 	diagnostic := &preflightOutput{limit: preflightDiagnosticLimit, cancel: cancel}
 	cmd := exec.CommandContext(ctx, exe, "preflight")
 	cmd.Stdin = bytes.NewReader(body)
-	cmd.Env = env
+	cmd.Env = append([]string{}, env...)
 	cmd.Stdout, cmd.Stderr = output, diagnostic
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = preflightWaitDelay

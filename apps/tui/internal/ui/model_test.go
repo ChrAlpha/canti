@@ -145,3 +145,30 @@ func TestEditorBoundsUTF8BytesAndKeepsControlBytesInPasteInert(t *testing.T) {
 		t.Fatal("UTF-8 byte cap not enforced")
 	}
 }
+
+type failAfterWrites struct {
+	remaining int
+	err       error
+}
+
+func (w *failAfterWrites) Write(p []byte) (int, error) {
+	if w.remaining == 0 {
+		return 0, w.err
+	}
+	w.remaining--
+	return len(p), nil
+}
+func TestExitOutputErrorsIncludeFinalFallbackAndContinuationHint(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		m := model()
+		m.add("transcript\n")
+		if fallback {
+			m.final = "full final answer\n"
+		}
+		failure := errors.New("output lost")
+		w := &failAfterWrites{remaining: 1, err: failure}
+		if err := writeExit(w, m, "s"); !errors.Is(err, failure) {
+			t.Fatalf("fallback=%v err=%v", fallback, err)
+		}
+	}
+}
