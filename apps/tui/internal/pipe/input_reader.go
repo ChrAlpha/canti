@@ -47,6 +47,9 @@ func (r *inputReader) read(prompt io.Writer, limit int) {
 }
 func (r *inputReader) Close() { close(r.closing); r.reader.Cancel(); <-r.done; r.reader.Close() }
 func (r *inputReader) Next(ctx context.Context, signals <-chan os.Signal, failures <-chan error) (input, int, error) {
+	if pendingSignal(signals) {
+		return input{}, session.Stopped, nil
+	}
 	select {
 	case r.requests <- struct{}{}:
 	case <-ctx.Done():
@@ -54,6 +57,9 @@ func (r *inputReader) Next(ctx context.Context, signals <-chan os.Signal, failur
 	}
 	select {
 	case entry := <-r.inputs:
+		if pendingSignal(signals) {
+			return input{}, session.Stopped, nil
+		}
 		return entry, session.OK, nil
 	case <-signals:
 		return input{}, session.Stopped, nil
@@ -61,5 +67,14 @@ func (r *inputReader) Next(ctx context.Context, signals <-chan os.Signal, failur
 		return input{}, session.Error, err
 	case <-ctx.Done():
 		return input{}, session.Error, ctx.Err()
+	}
+}
+
+func pendingSignal(signals <-chan os.Signal) bool {
+	select {
+	case <-signals:
+		return true
+	default:
+		return false
 	}
 }

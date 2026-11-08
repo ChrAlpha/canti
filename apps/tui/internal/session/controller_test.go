@@ -314,3 +314,249 @@ func TestFirstOwnedInputLossRequestsStopAndAwaitsCleanup(t *testing.T) {
 		t.Fatal("cleanup did not finish")
 	}
 }
+
+func protocolHost(t *testing.T, handle func(hostrpc.Request) (hostrpc.Response, bool)) string {
+	t.Helper()
+	state, err := os.MkdirTemp("", "canti-protocol-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(state, hostrpc.SocketName))
+	if err != nil {
+		os.RemoveAll(state)
+		t.Fatal(err)
+	}
+	var workers sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				defer conn.Close()
+				conn.SetDeadline(time.Now().Add(3 * time.Second))
+				var req hostrpc.Request
+				if json.NewDecoder(conn).Decode(&req) != nil {
+					return
+				}
+				response, drop := handle(req)
+				if drop {
+					return
+				}
+				response.Protocol = hostrpc.Protocol
+				json.NewEncoder(conn).Encode(response)
+			}()
+		}
+	}()
+	t.Cleanup(func() { listener.Close(); <-done; workers.Wait(); os.RemoveAll(state) })
+	return state
+}
+func TestAdmissionUncertaintySurvivesFailedAndLaterRefusedReplies(t *testing.T) {
+	for _, mode := range []string{"failed after admission", "lost then closing", "lost then spec refusal"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls atomic.Int32
+			var recover atomic.Bool
+			var drives atomic.Int32
+			var mu sync.Mutex
+			var ids []string
+			state := protocolHost(t, func(req hostrpc.Request) (resp hostrpc.Response, drop bool) {
+				switch req.Op {
+				case hostrpc.OpHello:
+					resp.Hello = &hostrpc.Hello{Protocol: hostrpc.Protocol}
+				case hostrpc.OpSubmit:
+					mu.Lock()
+					ids = append(ids, req.Submit.InputID)
+					mu.Unlock()
+					n := calls.Add(1)
+					if recover.Load() {
+						resp.Ack = &hostrpc.Ack{Replayed: true, Run: hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusActive, Driver: hostrpc.DriverIdle}}
+						break
+					}
+					if mode != "failed after admission" && n == 1 {
+						return resp, true
+					}
+					code := hostrpc.CodeFailed
+					if mode == "lost then closing" {
+						code = hostrpc.CodeClosing
+					}
+					if mode == "lost then spec refusal" {
+						code = hostrpc.CodeSpec
+					}
+					resp.Error = &hostrpc.Error{Code: code, Message: "request refused after an earlier durable admission"}
+				case hostrpc.OpDrive:
+					drives.Add(1)
+					resp.Run = &hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusReturned}
+				case hostrpc.OpProgress:
+					resp.Page = &hostrpc.Page{Halted: true}
+				case hostrpc.OpView:
+					resp.Run = &hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusReturned}
+				}
+				return resp, false
+			})
+			c := New(Config{State: state, HostMode: Auto, HostWait: time.Second})
+			c.GoalLimit = 100
+			snapshot := NewSnapshot("goal")
+			turn, err := c.Start(t.Context(), snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out := turn.Outcome(); !out.Uncertain || out.Rejected {
+				t.Fatalf("admission certainty changed: %+v", out)
+			}
+			if _, err = c.Start(t.Context(), NewSnapshot("goal")); err == nil {
+				t.Fatal("fresh identity enabled after possible admission")
+			}
+			recover.Store(true)
+			turn, err = c.Start(t.Context(), snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out := turn.Outcome(); out.Code != OK || drives.Load() != 1 {
+				t.Fatalf("reconcile=%+v drives=%d", out, drives.Load())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, id := range ids {
+				if id != snapshot.InputID {
+					t.Fatal("changed identity")
+				}
+			}
+		})
+	}
+}
+func TestPendingStopPrecedesReplayDrive(t *testing.T) {
+	for _, inputLoss := range []bool{false, true} {
+		t.Run(fmt.Sprint(inputLoss), func(t *testing.T) {
+			var calls, drives, stops atomic.Int32
+			pending := make(chan struct{})
+			release := make(chan struct{})
+			state := protocolHost(t, func(req hostrpc.Request) (resp hostrpc.Response, drop bool) {
+				switch req.Op {
+				case hostrpc.OpHello:
+					resp.Hello = &hostrpc.Hello{Protocol: hostrpc.Protocol}
+				case hostrpc.OpSubmit:
+					if calls.Add(1) == 1 {
+						return resp, true
+					}
+					close(pending)
+					select {
+					case <-release:
+					case <-t.Context().Done():
+						return resp, true
+					}
+					resp.Ack = &hostrpc.Ack{Replayed: true, Run: hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusActive, Driver: hostrpc.DriverIdle}}
+				case hostrpc.OpDrive:
+					drives.Add(1)
+					resp.Error = &hostrpc.Error{Code: hostrpc.CodeFailed, Message: "Drive must not precede pending stop"}
+				case hostrpc.OpStop:
+					stops.Add(1)
+					resp.Run = &hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusStopped}
+				case hostrpc.OpProgress:
+					resp.Page = &hostrpc.Page{Halted: true}
+				case hostrpc.OpView:
+					resp.Run = &hostrpc.Run{RunID: "admitted", Status: hostrpc.StatusStopped}
+				}
+				return resp, false
+			})
+			c := New(Config{State: state, HostMode: Auto, HostWait: time.Second})
+			c.GoalLimit = 100
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			turn := newTurn(NewSnapshot("goal"), true, cancel)
+			done := make(chan Result, 1)
+			go func() { done <- c.run(ctx, turn) }()
+			<-pending
+			if inputLoss {
+				turn.InputLost()
+			} else {
+				turn.Interrupt()
+			}
+			close(release)
+			select {
+			case out := <-done:
+				if out.Code != Stopped || stops.Load() != 1 || drives.Load() != 0 {
+					t.Fatalf("out=%+v stops=%d drives=%d", out, stops.Load(), drives.Load())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("pending stop did not finish")
+			}
+		})
+	}
+}
+
+func TestFirstExplicitInterruptAfterInputLossStillAwaitsStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	turn := newTurn(Snapshot{}, true, cancel)
+	rpc := &stopRace{waiting: make(chan struct{}), stopping: make(chan struct{}), release: make(chan struct{})}
+	c := New(Config{HostMode: Owned})
+	done := make(chan Result, 1)
+	go func() { done <- c.follow(ctx, rpc, turn, "run") }()
+	<-rpc.waiting
+	turn.InputLost()
+	<-rpc.stopping
+	turn.Interrupt()
+	select {
+	case out := <-done:
+		t.Fatalf("first explicit interrupt escalated automatic stop: %+v", out)
+	case <-time.After(20 * time.Millisecond):
+	}
+	turn.Interrupt()
+	select {
+	case out := <-done:
+		if out.Code != Error || !errors.Is(out.Err, context.Canceled) {
+			t.Fatal(out)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second explicit interrupt did not abandon")
+	}
+}
+
+func TestStopDuringReplayDriveIsHonoredAfterDriveError(t *testing.T) {
+	driving, release := make(chan struct{}), make(chan struct{})
+	var submits, stops atomic.Int32
+	state := protocolHost(t, func(req hostrpc.Request) (resp hostrpc.Response, drop bool) {
+		switch req.Op {
+		case hostrpc.OpHello:
+			resp.Hello = &hostrpc.Hello{Protocol: hostrpc.Protocol}
+		case hostrpc.OpSubmit:
+			if submits.Add(1) == 1 {
+				return resp, true
+			}
+			resp.Ack = &hostrpc.Ack{Replayed: true, Run: hostrpc.Run{RunID: "r", Status: hostrpc.StatusActive, Driver: hostrpc.DriverIdle}}
+		case hostrpc.OpDrive:
+			close(driving)
+			select {
+			case <-release:
+			case <-t.Context().Done():
+				return resp, true
+			}
+			resp.Error = &hostrpc.Error{Code: hostrpc.CodeFailed, Message: "drive failed"}
+		case hostrpc.OpStop:
+			stops.Add(1)
+			resp.Run = &hostrpc.Run{RunID: "r", Status: hostrpc.StatusStopped}
+		case hostrpc.OpProgress:
+			resp.Page = &hostrpc.Page{Halted: true}
+		case hostrpc.OpView:
+			resp.Run = &hostrpc.Run{RunID: "r", Status: hostrpc.StatusStopped}
+		}
+		return resp, false
+	})
+	c := New(Config{State: state, HostMode: Auto, HostWait: time.Second})
+	c.GoalLimit = 100
+	turn, err := c.Start(t.Context(), NewSnapshot("goal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-driving
+	turn.Interrupt()
+	close(release)
+	if out := turn.Outcome(); out.Code != Stopped || stops.Load() != 1 {
+		t.Fatalf("stop lost after Drive error: %+v stops=%d", out, stops.Load())
+	}
+}

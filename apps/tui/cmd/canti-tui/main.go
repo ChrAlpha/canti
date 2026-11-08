@@ -137,9 +137,9 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	c := session.New(o.cfg)
-	if err = c.Setup(ctx); err != nil {
+	if code, err = setup(ctx, c, signals); err != nil {
 		fmt.Fprintf(diagnostic, "canti-tui: %v\n", err)
-		return errorCode(err)
+		return code
 	}
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		code, err = ui.Run(ctx, c, os.Stdin, diagnostic, signals, failures)
@@ -148,6 +148,13 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(diagnostic, "canti-tui: %v\n", err)
+		if code == session.Usage {
+			var help strings.Builder
+			_, _, _ = parse([]string{"-h"}, &help)
+			if _, writeErr := io.WriteString(diagnostic, help.String()); writeErr != nil {
+				return session.Error
+			}
+		}
 		if code == session.OK {
 			code = errorCode(err)
 		}

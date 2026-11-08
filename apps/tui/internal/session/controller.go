@@ -43,10 +43,10 @@ type Snapshot struct{ InputID, Goal string }
 func NewSnapshot(goal string) Snapshot { return Snapshot{"in_" + strings.ToLower(rand.Text()), goal} }
 
 type Result struct {
-	Run                                        hostrpc.Run
-	Err                                        error
-	Code                                       int
-	Rejected, Uncertain, NoInputFits, Detached bool
+	Run                                                     hostrpc.Run
+	Err                                                     error
+	Code                                                    int
+	Rejected, Uncertain, NoInputFits, Detached, Interrupted bool
 }
 
 func result(r hostrpc.Run, err error) Result {
@@ -74,12 +74,13 @@ func result(r hostrpc.Run, err error) Result {
 // Controller serializes turns. Runtime process fields are used only by Setup
 // or its single active worker. UI drafts are never retained here.
 type Controller struct {
-	cfg       Config
-	runtime   runtimeClient
-	GoalLimit int
-	mu        sync.Mutex
-	current   *Turn
-	uncertain *Snapshot
+	cfg           Config
+	runtime       runtimeClient
+	GoalLimit     int
+	mu            sync.Mutex
+	current       *Turn
+	uncertain     *Snapshot
+	uncertainStop bool
 }
 
 func New(cfg Config) *Controller {
@@ -90,7 +91,7 @@ func (c *Controller) Owned() bool { return c.cfg.HostMode == Owned }
 func (c *Controller) submission(s Snapshot) hostrpc.Submission {
 	return hostrpc.Submission{SessionID: c.cfg.SessionID, InputID: s.InputID, Goal: s.Goal, Constraints: c.cfg.Constraints, ExplicitConstraints: c.cfg.ExplicitConstraints, Spec: c.cfg.Spec}
 }
-func (c *Controller) Setup(ctx context.Context) error {
+func (c *Controller) Setup(ctx, shutdown context.Context) error {
 	if err := c.runtime.checkHostMode(); err != nil {
 		return hostrpc.SpecError{Err: err}
 	}
@@ -102,7 +103,10 @@ func (c *Controller) Setup(ctx context.Context) error {
 	c.GoalLimit = v.GoalLimit
 	_, err = c.runtime.connect(ctx)
 	if c.Owned() {
-		c.runtime.closeHost(ctx)
+		c.runtime.closeHost(shutdown)
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return err
 }
@@ -137,11 +141,23 @@ func (c *Controller) Start(ctx context.Context, s Snapshot) (*Turn, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	t := newTurn(s, c.Owned(), cancel)
 	t.reconcile = c.uncertain != nil
+	if c.uncertainStop {
+		t.requestStop()
+	}
 	c.current = t
 	go func() {
 		out := c.run(ctx, t)
 		if c.Owned() {
 			c.runtime.closeHost(ctx)
+		}
+		if ctx.Err() != nil {
+			out.Interrupted = true
+			if c.Owned() {
+				out.Code = Error
+				if out.Err == nil {
+					out.Err = fmt.Errorf("owned runtime cleanup interrupted: %w", ctx.Err())
+				}
+			}
 		}
 		cancel()
 		c.mu.Lock()
@@ -149,8 +165,10 @@ func (c *Controller) Start(ctx context.Context, s Snapshot) (*Turn, error) {
 		if out.Uncertain {
 			saved := s
 			c.uncertain = &saved
+			c.uncertainStop = t.stopRequested()
 		} else {
 			c.uncertain = nil
+			c.uncertainStop = false
 		}
 		c.mu.Unlock()
 		t.finish(out)
@@ -166,7 +184,7 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 	err := c.runtime.retry(ctx, func(cl *hostrpc.Client) (err error) {
 		client = cl
 		ack, err = cl.Submit(ctx, sub, c.cfg.Binding, false)
-		lost = lost || hostrpc.Lost(err)
+		lost = lost || err != nil && !hostrpc.Unavailable(err) && !nonAdmission(err)
 		if err != nil && (hostrpc.Lost(err) || hostrpc.Unavailable(err)) && c.cfg.LogLevel <= slog.LevelWarn {
 			t.diagnostic(fmt.Sprintf("Host connection interrupted; reconciling input %s", t.Snapshot.InputID))
 		}
@@ -174,12 +192,8 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 	})
 	if err != nil {
 		out := Result{Err: err, Code: Error, Uncertain: lost}
-		var refusal *hostrpc.RemoteError
-		if errors.As(err, &refusal) {
-			out.Rejected = true
-			out.Uncertain = false
-		}
-		if errors.As(err, new(hostrpc.SpecError)) {
+		out.Rejected = !lost && nonAdmission(err)
+		if !lost && errors.As(err, new(hostrpc.SpecError)) {
 			out.Code = Usage
 			out.Rejected = true
 			out.Uncertain = false
@@ -189,14 +203,30 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 		return out
 	}
 	t.accept(ack)
-	if ack.Replayed && lost && ack.Run.Status == hostrpc.StatusActive && ack.Run.Driver != hostrpc.DriverDriving {
-		if _, err = client.Drive(ctx, ack.Run.RunID, c.cfg.Binding, false); err != nil && !errors.Is(err, hostrpc.ErrDriving) {
-			return result(ack.Run, err)
-		}
+	return c.accepted(ctx, client, t, ack, lost)
+}
+
+// A refused attempt proves nothing about an earlier ambiguous one. CodeFailed
+// and malformed replies may follow durable admission and must keep the ID.
+func nonAdmission(err error) bool {
+	return errors.As(err, new(hostrpc.SpecError)) || errors.Is(err, hostrpc.ErrClosing) || errors.Is(err, hostrpc.ErrConflict) || errors.Is(err, hostrpc.ErrProtocol)
+}
+func (c *Controller) accepted(ctx context.Context, client *hostrpc.Client, t *Turn, ack hostrpc.Ack, reconcile bool) Result {
+	id := ack.Run.RunID
+	if t.takeStop() {
+		return c.stop(ctx, client, t, id, "")
 	}
-	// The same snapshot may be explicitly retried after an earlier ambiguous
-	// result. Always project its complete progress; it never admits a second run.
-	return c.follow(ctx, client, t, ack.Run.RunID)
+	var err error
+	if ack.Replayed && reconcile && ack.Run.Status == hostrpc.StatusActive && ack.Run.Driver != hostrpc.DriverDriving {
+		_, err = client.Drive(ctx, id, c.cfg.Binding, false)
+	}
+	if t.takeStop() {
+		return c.stop(ctx, client, t, id, "")
+	}
+	if err != nil && !errors.Is(err, hostrpc.ErrDriving) {
+		return result(ack.Run, err)
+	}
+	return c.follow(ctx, client, t, id)
 }
 
 // rpcRun is the external seam for following and stopping a runtime run.

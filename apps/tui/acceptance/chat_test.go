@@ -234,13 +234,17 @@ func TestChatSignals(t *testing.T) {
 	}
 	t.Run("interrupt at the prompt", func(t *testing.T) {
 		f := newFixture(t, nil)
-		in, w := io.Pipe()
+		in, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer in.Close()
+		defer w.Close()
 		cmd, wait := f.startWith(in, nil, tuiCommand)
 		waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
 			t.Fatal(err)
 		}
-		w.Close()
 		if r := wait(); r.code != exitStopped {
 			t.Fatalf("chat: %+v", r)
 		}

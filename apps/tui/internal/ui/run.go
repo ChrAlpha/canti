@@ -62,14 +62,18 @@ func Run(ctx context.Context, c *session.Controller, input *os.File, output io.W
 	if err := writeExit(output, m, c.ID()); runErr == nil {
 		runErr = err
 	}
+	return m.result(runErr)
+}
+func (m Model) result(runErr error) (int, error) {
 	if runErr != nil {
 		return session.Error, runErr
 	}
 	if m.err != nil {
-		return session.Error, m.err
+		return max(m.code, session.Error), m.err
 	}
-	return m.code, runErr
+	return m.code, nil
 }
+
 func writeExit(output io.Writer, m Model, id string) error {
 	transcript := m.transcript()
 	if transcript != "" {
@@ -81,6 +85,10 @@ func writeExit(output io.Writer, m Model, id string) error {
 		if _, err := io.WriteString(output, m.final); err != nil {
 			return err
 		}
+	}
+	if m.pending != nil {
+		_, err := fmt.Fprintf(output, "canti: acceptance of input %s is unknown; reconcile with \"canti run -session %s -input %[1]s\" and the original goal and launch flags before starting new input.\n", m.pending.InputID, id)
+		return err
 	}
 	_, err := fmt.Fprintf(output, "canti: continue session with \"canti-tui -session %s\"; new runs use the current launch flags.\n", id)
 	return err

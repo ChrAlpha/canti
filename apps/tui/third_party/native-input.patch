@@ -71,12 +71,13 @@
 +		p.Send(InputClosedMsg{Err: err})
 --- /dev/null
 +++ b/uv/input_limits_test.go
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,287 @@
 +package uv
 +
 +import (
 +	"context"
 +	"errors"
++	"fmt"
 +	"io"
 +	"os"
 +	"strings"
@@ -305,6 +306,59 @@
 +		}
 +	}
 +}
++
++func TestContinuousInputCannotExtendAbsoluteRecoveryDeadline(t *testing.T) {
++	for _, initial := range []string{"\x1b[200~123456789", "\x1b]11;"} {
++		t.Run(fmt.Sprintf("%q", initial), func(t *testing.T) {
++			r, w := io.Pipe()
++			defer r.Close()
++			defer w.Close()
++			reader := NewTerminalReader(r, "xterm")
++			reader.MaxPasteBytes = 8
++			reader.IncompleteTimeout = DefaultInputTimeout
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			done := make(chan error, 1)
++			events := make(chan Event, 8)
++			start := time.Now()
++			go func() { done <- reader.StreamEvents(ctx, events) }()
++			sent := make(chan struct{})
++			go func() {
++				defer close(sent)
++				if _, err := io.WriteString(w, initial); err != nil {
++					return
++				}
++				tick := time.NewTicker(10 * time.Millisecond)
++				defer tick.Stop()
++				for {
++					select {
++					case <-ctx.Done():
++						return
++					case <-tick.C:
++						if _, err := io.WriteString(w, "x"); err != nil {
++							return
++						}
++					}
++				}
++			}()
++			select {
++			case err := <-done:
++				if !errors.Is(err, ErrInputTimeout) {
++					t.Fatal(err)
++				}
++			case <-time.After(3 * time.Second):
++				t.Fatal("arriving bytes extended absolute deadline")
++			}
++			if elapsed := time.Since(start); elapsed < DefaultInputTimeout || elapsed > DefaultInputTimeout+500*time.Millisecond {
++				t.Fatalf("recovery ended after %v", elapsed)
++			}
++			cancel()
++			r.Close()
++			w.Close()
++			<-sent
++		})
++	}
++}
 --- a/uv/terminal_reader.go
 +++ b/uv/terminal_reader.go
 @@ -11 +10,0 @@
@@ -348,7 +402,7 @@
 +			case readc <- readBuf[:n]:
 +			}
 +		}
-@@ -126,3 +161,45 @@
+@@ -126,3 +161,61 @@
 -			return err //nolint:wrapcheck
 -		}
 -
@@ -396,8 +450,24 @@
 +	}
 +	tick := time.NewTimer(interval)
 +	defer tick.Stop()
++	limitTimer := time.NewTimer(DefaultInputTimeout)
++	defer limitTimer.Stop()
 +	for {
-@@ -132,35 +208,0 @@
++		if ctx.Err() != nil {
++			return nil
++		}
++		var limitc <-chan time.Time
++		if deadline := d.inputDeadline(pendingSince, lastRead); !deadline.IsZero() {
++			remaining := time.Until(deadline)
++			if remaining <= 0 {
++				return ErrInputTimeout
++			}
++			limitTimer.Reset(remaining)
++			limitc = limitTimer.C
++		} else {
++			limitTimer.Stop()
++		}
+@@ -132,35 +224,0 @@
 -		case readc <- readBuf[:n]:
 -		}
 -	}
@@ -433,7 +503,7 @@
 -			d.sendEvents(eventc, buf.Bytes(), true)
 -			wg.Wait()
 -			return nil
-@@ -168,15 +210,40 @@
+@@ -168,15 +226,36 @@
 -			d.sendEvents(eventc, buf.Bytes(), true)
 -			wg.Wait()
 -			return err // return the first error encountered
@@ -460,16 +530,12 @@
 +				return nil
 +			}
 +			return err
++		case <-limitc:
++			if ctx.Err() != nil {
++				return nil
++			}
++			return ErrInputTimeout
 +		case now := <-tick.C:
-+			if d.eventScanner.pasteOverflow && now.Sub(d.eventScanner.overflowAt) >= DefaultInputTimeout {
-+				return ErrInputTimeout
-+			}
-+			if d.IncompleteTimeout > 0 && !pendingSince.IsZero() && now.Sub(pendingSince) >= d.IncompleteTimeout {
-+				return ErrInputTimeout
-+			}
-+			if d.eventScanner.paste != nil && now.Sub(lastRead) >= DefaultInputTimeout {
-+				return ErrInputTimeout
-+			}
 +			if buf.Len() > 0 && now.Sub(lastRead) >= interval && (d.IncompleteTimeout <= 0 || !pendingControl(buf.Bytes())) && d.eventScanner.paste == nil {
 +				buf.Next(d.sendEvents(ctx, eventc, buf.Bytes(), true))
 +				if buf.Len() == 0 {
@@ -489,7 +555,7 @@
 +				buf.Write(read[:take])
 +				read = read[take:]
 +				n := d.sendEvents(ctx, eventc, buf.Bytes(), false)
-@@ -184,39 +251,29 @@
+@@ -184,39 +263,51 @@
 -			}
 -
 -			if buf.Len() > 0 {
@@ -545,6 +611,28 @@
 +	}
 +}
 +
++// Resource deadlines are absolute and independent of escape-key ambiguity.
++// New bytes may restart an idle-paste timeout, never overflow or sequence time.
++func (d *TerminalReader) inputDeadline(pendingSince, lastRead time.Time) time.Time {
++	var deadlines []time.Time
++	if d.eventScanner.pasteOverflow {
++		deadlines = append(deadlines, d.eventScanner.overflowAt.Add(DefaultInputTimeout))
++	}
++	if d.IncompleteTimeout > 0 && !pendingSince.IsZero() {
++		deadlines = append(deadlines, pendingSince.Add(d.IncompleteTimeout))
++	}
++	if d.eventScanner.paste != nil && !lastRead.IsZero() {
++		deadlines = append(deadlines, lastRead.Add(DefaultInputTimeout))
++	}
++	var first time.Time
++	for _, deadline := range deadlines {
++		if first.IsZero() || deadline.Before(first) {
++			first = deadline
++		}
++	}
++	return first
++}
++
 +// A control string or partial CSI is never converted to editable text merely
 +// because the escape-key ambiguity timer expired.
 +func pendingControl(b []byte) bool {
@@ -558,17 +646,17 @@
 +		return len(b) > 2
 +	}
 +	return false
-@@ -231 +288 @@
+@@ -231 +322 @@
 -func (d *TerminalReader) sendEvents(eventc chan<- Event, buf []byte, expired bool) int {
 +func (d *TerminalReader) sendEvents(ctx context.Context, eventc chan<- Event, buf []byte, expired bool) int {
-@@ -234 +291,5 @@
+@@ -234 +325,5 @@
 -		eventc <- event
 +		select {
 +		case eventc <- event:
 +		case <-ctx.Done():
 +			return n
 +		}
-@@ -243,7 +304,12 @@
+@@ -243,7 +338,12 @@
 -	utf16Half   [2]bool    // 0 key up, 1 key down
 -	utf16Buf    [2][2]rune // 0 key up, 1 key down
 -	graphemeBuf [2][]rune  // 0 key up, 1 key down
@@ -588,10 +676,10 @@
 +	table         map[string]Key
 +	lookup        bool
 +	logger        Logger
-@@ -254 +320 @@
+@@ -254 +354 @@
 -	return &eventScanner{}
 +	return &eventScanner{maxPasteBytes: DefaultInputLimit}
-@@ -285,0 +352,20 @@
+@@ -285,0 +386,20 @@
 +		if d.limitErr != nil {
 +			return total, events
 +		}
@@ -612,28 +700,28 @@
 +		if d.paste != nil && len(buf) < len("\x1b[201~") && bytes.HasPrefix([]byte("\x1b[201~"), buf) {
 +			return total, events
 +		}
-@@ -295 +381 @@
+@@ -295 +415 @@
 -						d.paste = append(d.paste, event.Text...)
 +						d.appendPaste(event.Text)
-@@ -305 +391 @@
+@@ -305 +425 @@
 -							d.paste = append(d.paste, '\n')
 +							d.appendPaste("\n")
-@@ -308 +394 @@
+@@ -308 +428 @@
 -							d.paste = append(d.paste, string(event.Code)...)
 +							d.appendPaste(string(event.Code))
-@@ -317 +403 @@
+@@ -317 +437 @@
 -							d.paste = append(d.paste, seq...)
 +							d.appendPaste(seq)
-@@ -354,0 +441 @@
+@@ -354,0 +475 @@
 +			d.pasteOverflow = false
-@@ -355,0 +443,6 @@
+@@ -355,0 +477,6 @@
 +			if d.pasteOverflow {
 +				d.paste = nil
 +				d.pasteOverflow = false
 +				events = append(events, PasteOverflowEvent{Limit: d.maxPasteBytes})
 +				break
 +			}
-@@ -387,0 +481,44 @@
+@@ -387,0 +515,44 @@
 +}
 +
 +func (d *eventScanner) appendPaste(text string) {

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 )
 
@@ -44,10 +43,10 @@ func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 			defer server.Close()
 			defer unblock()
 			p := startPTYChatWithMode(t, f, nil, nil, tc.canonical, "-model-url", server.URL)
-			pos := p.await(t, "ready", 0)
+			pos := p.awaitStatus(t, "ready", 0)
 			p.awaitRaw(t)
 			p.send(t, "first\rread ahead\r")
-			pos = p.await(t, "running", pos)
+			pos = p.awaitStatus(t, "running", pos)
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
@@ -66,7 +65,7 @@ func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 				}
 			}
 			unblock()
-			pos = p.await(t, "ready", pos)
+			pos = p.awaitStatus(t, "ready", pos)
 			time.Sleep(150 * time.Millisecond)
 			wantRequests := 1
 			if tc.interrupted {
@@ -148,8 +147,8 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	var initial bytes.Buffer
 	var chunk [4096]byte
 	until := time.Now().Add(5 * time.Second)
-	for !strings.Contains(screenText(initial.Bytes()), "ready") {
-		n, readErr := unix.Read(readFD, chunk[:])
+	for p.status() != "ready" {
+		n, readErr := readPTYOutput(p, readFD, chunk[:])
 		if n > 0 {
 			initial.Write(chunk[:n])
 		}
@@ -164,7 +163,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 	}
 	for {
-		n, readErr := unix.Read(readFD, chunk[:])
+		n, readErr := readPTYOutput(p, readFD, chunk[:])
 		if readErr == unix.EAGAIN {
 			break
 		}
@@ -184,8 +183,8 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 
 	initial.Reset()
 	until = time.Now().Add(5 * time.Second)
-	for !strings.Contains(screenText(initial.Bytes()), "running") {
-		n, readErr := unix.Read(readFD, chunk[:])
+	for p.status() != "running" {
+		n, readErr := readPTYOutput(p, readFD, chunk[:])
 		if n > 0 {
 			initial.Write(chunk[:n])
 		}
@@ -200,7 +199,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 	}
 	for {
-		n, readErr := unix.Read(readFD, chunk[:])
+		n, readErr := readPTYOutput(p, readFD, chunk[:])
 		if readErr == unix.EAGAIN {
 			break
 		}
@@ -225,16 +224,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	go func() {
 		defer close(drained)
 		for {
-			n, readErr := unix.Read(readFD, chunk[:])
-			if n > 0 {
-				p.mu.Lock()
-				p.record(chunk[:n])
-				p.mu.Unlock()
-				select {
-				case p.wake <- struct{}{}:
-				default:
-				}
-			}
+			n, readErr := readPTYOutput(p, readFD, chunk[:])
 			if readErr == nil && n == 0 || readErr != nil && readErr != unix.EAGAIN {
 				return
 			}
@@ -248,7 +238,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		<-drained
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(ansi.Strip(p.text()), "ready") {
+	for p.status() != "ready" {
 		if time.Now().After(deadline) {
 			err := p.cmd.Process.Signal(syscall.Signal(0))
 			t.Fatalf("TUI did not redraw ready after stderr recovered: child signal(0)=%v, output tail=%q", err, p.text()[max(0, len(p.text())-500):])
@@ -263,9 +253,9 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	}
 	// A committed return precedes the final session event. Observe the second running/ready
 	// cycle before sending the idle quit key, rather than racing that delivery.
-	pos := len(ansi.Strip(p.text()))
+	pos := p.mark()
 	p.send(t, "\r")
-	pos = p.await(t, "running", pos)
+	pos = p.awaitStatus(t, "running", pos)
 	unblockLater()
 	deadline = time.Now().Add(5 * time.Second)
 	for {
@@ -281,7 +271,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	p.await(t, "ready", pos)
+	p.awaitStatus(t, "ready", pos)
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
 	w.Close()
@@ -337,8 +327,8 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 		var output []byte
 		var chunk [4096]byte
 		deadline := time.Now().Add(5 * time.Second)
-		for !bytes.Contains([]byte(screenText(output)), []byte(needle)) {
-			n, readErr := unix.Read(readFD, chunk[:])
+		for p.status() != needle {
+			n, readErr := readPTYOutput(p, readFD, chunk[:])
 			if n > 0 {
 				output = append(output, chunk[:n]...)
 			}
@@ -353,7 +343,7 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 			}
 		}
 		for {
-			n, readErr := unix.Read(readFD, chunk[:])
+			n, readErr := readPTYOutput(p, readFD, chunk[:])
 			if readErr == unix.EAGAIN {
 				return
 			}

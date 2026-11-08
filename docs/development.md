@@ -211,7 +211,9 @@ admission or input identity; Submit rechecks everything under the host lock.
 Preflight requires exactly one JSON request of at most 1 MiB. The client caps
 stdout at 1 MiB and stderr at 16 KiB, kills the process group on overflow or
 cancellation, limits total time to 30 seconds and inherited-pipe cleanup to one
-second, and rejects trailing/unknown response fields. Test fixtures select
+second, and rejects trailing/unknown response fields. During startup, the first
+signal cancels preflight or connection setup, and a second signal forces owned
+child cleanup. Test fixtures select
 embedded operational commands and owned TUI clients unless a test names auto.
 
 A client that finds no host and an unlocked

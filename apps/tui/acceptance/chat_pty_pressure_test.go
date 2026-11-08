@@ -21,7 +21,7 @@ func TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded(t *test
 		f.model.answer(1, i, reply{text: string(decision)})
 	}
 	p := startPTYChatWithDeadline(t, f, nil, nil, true, 120*time.Second)
-	pos := p.await(t, "ready", 0)
+	pos := p.awaitStatus(t, "ready", 0)
 	baseline := ptyFDCount(t, p.cmd.Process.Pid)
 	for i := 1; i <= 32; i++ {
 		p.send(t, fmt.Sprintf("round %02d\r", i))

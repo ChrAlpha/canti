@@ -155,9 +155,9 @@ func TestOwnedHostRefusesAlreadyLockedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	a := &runtimeClient{state: state, hostMode: hostOwned, hostWait: time.Second}
+	a := &runtimeClient{state: state, hostMode: Owned, hostWait: time.Second}
 	_, err = a.connect(context.Background())
-	if !errors.Is(err, errLocked) || a.child != nil {
+	if !errors.Is(err, ErrLocked) || a.child != nil {
 		t.Fatalf("owned connect = %v, child %v; want locked without launch", err, a.child)
 	}
 	if _, statErr := os.Stat(filepath.Join(state, "host.log")); !errors.Is(statErr, os.ErrNotExist) {
@@ -191,12 +191,12 @@ func TestOwnedHostRejectsAnotherServingHost(t *testing.T) {
 					_ = json.NewEncoder(conn).Encode(hostrpc.Response{Protocol: hostrpc.Protocol, Hello: &hostrpc.Hello{PID: os.Getpid()}})
 				}
 			}()
-			a := &runtimeClient{state: state, hostMode: hostOwned, hostWait: time.Second}
+			a := &runtimeClient{state: state, hostMode: Owned, hostWait: time.Second}
 			if tc.child {
 				a.child = &exec.Cmd{Process: &os.Process{Pid: os.Getpid() + 1}}
 			}
 			_, err = a.connect(context.Background())
-			if !errors.Is(err, errLocked) {
+			if !errors.Is(err, ErrLocked) {
 				t.Fatalf("owned connect to another host = %v, want locked", err)
 			}
 		})

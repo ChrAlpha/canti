@@ -21,25 +21,27 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
 
 type ptyChat struct {
-	cmd     *exec.Cmd
-	master  *os.File
-	slave   *os.File
-	slaveFD int
-	base    *unix.Termios
-	flags   int
-	mu      sync.Mutex
-	output  bytes.Buffer
-	screen  *vt.Emulator
-	frames  []screenFrame
-	wake    chan struct{}
-	done    chan struct{}
-	waited  bool
+	cmd      *exec.Cmd
+	master   *os.File
+	slave    *os.File
+	slaveFD  int
+	base     *unix.Termios
+	flags    int
+	mu       sync.Mutex
+	output   bytes.Buffer
+	screen   *vt.Emulator
+	frames   []screenFrame
+	frameSeq frameCursor
+	wake     chan struct{}
+	done     chan struct{}
+	waited   bool
 }
 
 func startPTYChat(t *testing.T, f *fixture, stderr *os.File, args ...string) *ptyChat {
@@ -105,7 +107,11 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 		cmd.Stderr = stderr
 	}
 	cmd.SysProcAttr = attr
-	p := &ptyChat{screen: newScreen(), cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
+	p := &ptyChat{screen: newScreen(100), cmd: cmd, master: master, slave: slave, slaveFD: slaveFD, base: base, flags: descriptionFlags(t, slaveFD), wake: make(chan struct{}, 1), done: make(chan struct{})}
+	if stderr != nil && !term.IsTerminal(stderr.Fd()) {
+		p.screen.Close()
+		p.screen = newScreen(80)
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		master.Close()
@@ -156,13 +162,15 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 	return p
 }
 
+type frameCursor int
+
 type screenFrame struct {
-	offset int
-	text   string
+	sequence frameCursor
+	text     string
 }
 
-func newScreen() *vt.Emulator {
-	screen := vt.NewEmulator(100, 24)
+func newScreen(width int) *vt.Emulator {
+	screen := vt.NewEmulator(width, 24)
 	// This observer consumes rendering only; terminal query replies are not
 	// injected as user input. Closing the response pipe keeps parsing nonblocking.
 	_ = screen.InputPipe().(io.Closer).Close()
@@ -173,18 +181,12 @@ func newScreen() *vt.Emulator {
 func (p *ptyChat) record(data []byte) {
 	p.output.Write(data)
 	_, _ = p.screen.Write(data)
-	offset := len(ansi.Strip(p.output.String()))
-	p.frames = append(p.frames, screenFrame{offset, p.screen.String()})
+	p.frameSeq++
+	p.frames = append(p.frames, screenFrame{p.frameSeq, p.screen.String()})
 	if len(p.frames) > 512 {
 		copy(p.frames, p.frames[len(p.frames)-512:])
 		p.frames = p.frames[:512]
 	}
-}
-func screenText(data []byte) string {
-	screen := newScreen()
-	defer screen.Close()
-	_, _ = screen.Write(data)
-	return screen.String()
 }
 
 func (p *ptyChat) text() string {
@@ -193,36 +195,85 @@ func (p *ptyChat) text() string {
 	return p.output.String()
 }
 
-func (p *ptyChat) await(t *testing.T, needle string, after int) int {
+func (p *ptyChat) mark() frameCursor { p.mu.Lock(); defer p.mu.Unlock(); return p.frameSeq }
+func screenStatus(screen string) string {
+	lines := strings.Split(screen, "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "canti-tui · session ") {
+		return ""
+	}
+	status, _, _ := strings.Cut(lines[1], " · ")
+	return status
+}
+func (p *ptyChat) status() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return screenStatus(p.screen.String())
+}
+func (p *ptyChat) frameAfter(after frameCursor, match func(string) bool) (frameCursor, bool) {
+	for _, frame := range p.frames {
+		if frame.sequence > after && match(frame.text) {
+			return frame.sequence, true
+		}
+	}
+	return 0, false
+}
+func (p *ptyChat) awaitStatus(t *testing.T, status string, after frameCursor) frameCursor {
+	t.Helper()
+	return p.awaitMatch(t, "status "+status, after, func(screen string) bool { return screenStatus(screen) == status })
+}
+func (p *ptyChat) await(t *testing.T, needle string, after frameCursor) frameCursor {
+	t.Helper()
+	return p.awaitMatch(t, needle, after, func(screen string) bool { return strings.Contains(screen, needle) })
+}
+func (p *ptyChat) awaitMatch(t *testing.T, description string, after frameCursor, match func(string) bool) frameCursor {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
 		p.mu.Lock()
-		output := ansi.Strip(p.output.String())
-		found := -1
-		for _, frame := range p.frames {
-			if frame.offset > after && strings.Contains(frame.text, needle) {
-				found = frame.offset - 1
-				break
-			}
-		}
+		found, ok := p.frameAfter(after, match)
+		screen := p.screen.String()
 		p.mu.Unlock()
-		if found >= 0 {
+		if ok {
 			return found
 		}
-		if after <= len(output) {
-			if i := strings.Index(output[after:], needle); i >= 0 {
-				return after + i + len(needle)
-			}
-		}
-
 		select {
 		case <-p.wake:
 		case <-deadline.C:
-			t.Fatalf("terminal never showed %q after byte %d; tail: %q", needle, after, output[max(0, len(output)-500):])
+			t.Fatalf("terminal never showed %q after frame %d; screen: %q; process: %v", description, after, screen, p.cmd.Process.Signal(syscall.Signal(0)))
 		}
 	}
+}
+func (p *ptyChat) awaitFinalOutput(t *testing.T, needle string) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		if strings.Contains(ansi.Strip(p.text()), needle) {
+			return
+		}
+		select {
+		case <-p.wake:
+		case <-deadline.C:
+			t.Fatalf("final output missing %q", needle)
+		}
+	}
+}
+func (p *ptyChat) capture(data []byte) {
+	p.mu.Lock()
+	p.record(data)
+	p.mu.Unlock()
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+func readPTYOutput(p *ptyChat, fd int, buf []byte) (int, error) {
+	n, err := unix.Read(fd, buf)
+	if n > 0 {
+		p.capture(buf[:n])
+	}
+	return n, err
 }
 
 func (p *ptyChat) send(t *testing.T, input string) {
@@ -318,7 +369,7 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 				f := newFixture(t, nil)
 				if isTerminal {
 					p := startPTYChat(t, f, nil)
-					p.await(t, "ready", 0)
+					p.awaitStatus(t, "ready", 0)
 					if err := p.cmd.Process.Signal(sig); err != nil {
 						t.Fatal(err)
 					}
@@ -335,13 +386,15 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 					defer reader.Close()
 					defer out.Close()
 					before := descriptionFlags(t, int(out.Fd()))
-					in, input := io.Pipe()
+					in, input, err := os.Pipe()
+					if err != nil {
+						t.Fatal(err)
+					}
 					defer in.Close()
 					defer input.Close()
 					cmd, wait := f.startIO(in, out, nil, tuiCommand)
 					waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.state, "history")); return err == nil })
 					cmd.Process.Signal(sig)
-					input.Close()
 					if r := wait(); r.code != exitStopped {
 						t.Fatalf("signal result: %+v", r)
 					}
@@ -355,7 +408,7 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 	t.Run("SIGKILL preserves inherited file description", func(t *testing.T) {
 		f := newFixture(t, nil)
 		p := startPTYChat(t, f, nil)
-		p.await(t, "ready", 0)
+		p.awaitStatus(t, "ready", 0)
 		p.waited = true
 		p.cmd.Process.Kill()
 		p.cmd.Wait()
@@ -441,9 +494,9 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 			}))
 			t.Cleanup(func() { releaseGate(); gate.Close() })
 			p := startPTYChat(t, f, nil, "-model-url", gate.URL)
-			pos := p.await(t, "ready", 0)
+			pos := p.awaitStatus(t, "ready", 0)
 			p.send(t, "first request\r")
-			pos = p.await(t, "running", pos)
+			pos = p.awaitStatus(t, "running", pos)
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
@@ -462,7 +515,7 @@ func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
 				}
 			}
 			releaseGate()
-			pos = p.await(t, "ready", pos)
+			pos = p.awaitStatus(t, "ready", pos)
 			if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first request" {
 				t.Fatalf("busy input became a run: %+v", s.Run)
 			}
@@ -542,7 +595,7 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "unused"}})
 	held := f.model.holdRequests()
 	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true})
-	p.await(t, "ready", 0)
+	p.awaitStatus(t, "ready", 0)
 	p.send(t, "busy request\r")
 	select {
 	case <-held:
@@ -577,12 +630,12 @@ func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
 	url, release := holdFirstAnswer(t, f)
 	imports := t.TempDir()
 	p := startPTYChat(t, f, nil, "-model-url", url, "-history-imports", imports)
-	pos := p.await(t, "ready", 0)
+	pos := p.awaitStatus(t, "ready", 0)
 	p.send(t, "one\r")
-	pos = p.await(t, "running", pos)
+	pos = p.awaitStatus(t, "running", pos)
 	release()
 	p.await(t, "first answer", pos)
-	p.await(t, "ready", pos)
+	p.awaitStatus(t, "ready", pos)
 	if err := os.Remove(imports); err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +655,7 @@ func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "exec", Payload: "true"}})
 	t.Setenv("PATH", t.TempDir())
 	p := startPTYChat(t, f, nil)
-	p.await(t, "ready", 0)
+	p.awaitStatus(t, "ready", 0)
 	p.send(t, "needs inspection\r")
 	p.finish(t, exitResolution)
 	s := f.status()
@@ -676,7 +729,7 @@ func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 	})
 	f.autoHost()
 	p := startPTYChatWithAttr(t, f, nil, nil, true, 30*time.Second, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-host", "auto")
-	p.await(t, "ready", 0)
+	p.awaitStatus(t, "ready", 0)
 	p.send(t, "busy request\r")
 	waitFor(t, func() bool { return len(f.model.requests()) == 1 })
 	p.waited = true
@@ -694,5 +747,31 @@ func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 	waitFor(t, func() bool { return f.status().Phase == "returned" })
 	if h := f.history(); slicesContain(kinds(h), "stop_requested") || len(f.model.requests()) != 1 {
 		t.Fatalf("a hangup of a chat attached to a host stopped its run: %q", kinds(h))
+	}
+}
+
+func TestScreenObserverRequiresExactStatusAndFreshFrame(t *testing.T) {
+	p := &ptyChat{screen: newScreen(100)}
+	defer p.screen.Close()
+	p.record([]byte("canti-tui · session pty\r\nrunning · draft editable\r\nEnter send when ready"))
+	ready := func(screen string) bool { return screenStatus(screen) == "ready" }
+	if _, ok := p.frameAfter(0, ready); ok {
+		t.Fatal("footer matched ready status")
+	}
+	p.record([]byte("\x1b[2;1H\x1b[2Kready · current launch flags apply"))
+	frame, ok := p.frameAfter(0, ready)
+	if !ok {
+		t.Fatal("exact ready status was not observed")
+	}
+	if _, ok = p.frameAfter(frame, ready); ok {
+		t.Fatal("the same frame was reused")
+	}
+	p.record([]byte("\x1b[3;1Hnew output"))
+	next, ok := p.frameAfter(frame, ready)
+	if !ok || next <= frame {
+		t.Fatal("fresh frame was not distinguished")
+	}
+	if next != 3 {
+		t.Fatalf("frame sequence depended on raw or stripped byte offsets: %d", next)
 	}
 }

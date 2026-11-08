@@ -14,7 +14,7 @@ import (
 func TestChatPTYHangupCancelsTheDockerJob(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]decision{1: {Kind: "exec", Payload: "echo started > started; sleep 60"}})
 	p := startPTYChatWithAttr(t, f, nil, nil, true, time.Minute, &syscall.SysProcAttr{Setsid: true, Setctty: true}, "-image", image)
-	p.await(t, "ready", 0)
+	p.awaitStatus(t, "ready", 0)
 	p.send(t, "start job\r")
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -51,9 +51,9 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 	f.model.answer(1, 2, reply{text: `{"kind":"exec","payload":"echo second > second-started; sleep 60"}`})
 	f.model.answer(1, 3, reply{text: `{"kind":"return","payload":"after interrupts"}`})
 	p := startPTYChat(t, f, nil, "-image", image)
-	ready := p.await(t, "ready", 0)
+	ready := p.awaitStatus(t, "ready", 0)
 	p.send(t, "start job\r")
-	ready = p.await(t, "running", ready)
+	ready = p.awaitStatus(t, "running", ready)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(f.workspace, "started")); err == nil {
@@ -65,7 +65,7 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	p.send(t, "\x03")
-	ready = p.await(t, "ready", ready)
+	ready = p.awaitStatus(t, "ready", ready)
 	stopped := f.status()
 	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.SessionSeq != 1 {
 		t.Fatalf("PTY Ctrl-C did not stop the Docker run: %+v", stopped)
@@ -73,7 +73,7 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 	firstHistory := f.history("-run", stopped.Run.ID)
 	checkReleased(t, f, firstHistory)
 	p.send(t, "second job\r")
-	ready = p.await(t, "running", ready)
+	ready = p.awaitStatus(t, "running", ready)
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(f.workspace, "second-started")); err == nil {
@@ -85,7 +85,7 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	p.send(t, "\x03")
-	ready = p.await(t, "ready", ready)
+	ready = p.awaitStatus(t, "ready", ready)
 	stopped = f.status()
 	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.SessionSeq != 2 {
 		t.Fatalf("second PTY Ctrl-C did not stop the Docker run: %+v", stopped)

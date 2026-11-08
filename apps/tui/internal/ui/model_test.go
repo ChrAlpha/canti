@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -170,5 +171,65 @@ func TestExitOutputErrorsIncludeFinalFallbackAndContinuationHint(t *testing.T) {
 		if err := writeExit(w, m, "s"); !errors.Is(err, failure) {
 			t.Fatalf("fallback=%v err=%v", fallback, err)
 		}
+	}
+}
+
+func TestExitKeepsUsageCodeAndPriorDisplayFailure(t *testing.T) {
+	failure := errors.New("no input fits")
+	m := model()
+	updated, _ := m.complete(session.Result{Code: session.Usage, Err: failure, Rejected: true, NoInputFits: true})
+	m = updated.(Model)
+	if code, err := m.result(nil); code != session.Usage || !errors.Is(err, failure) {
+		t.Fatalf("usage: %d %v", code, err)
+	}
+	m = model()
+	m.err = failure
+	m.code = session.Error
+	m.exitAfter = true
+	updated, _ = m.complete(session.Result{Code: session.Stopped})
+	m = updated.(Model)
+	if code, err := m.result(nil); code != session.Error || !errors.Is(err, failure) {
+		t.Fatalf("display failure: %d %v", code, err)
+	}
+}
+
+func TestClosingNeverAcceptsQueuedEnter(t *testing.T) {
+	for _, event := range []tea.Msg{tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}), signalMsg{syscall.SIGTERM}, tea.InputClosedMsg{}} {
+		m := model()
+		m.editor.SetValue("next draft")
+		m = update(m, event)
+		if m.phase != closing {
+			t.Fatalf("exit event left send enabled: %T", event)
+		}
+		m = update(m, tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+		if m.turn != nil || m.pending != nil || m.editor.Value() != "next draft" {
+			t.Fatal("queued Enter submitted while closing")
+		}
+	}
+	m := model()
+	m.exitAfter = true
+	updated, _ := m.complete(session.Result{Code: session.OK})
+	m = updated.(Model)
+	if m.phase != closing {
+		t.Fatal("completion during exit reopened sending")
+	}
+}
+
+func TestUnconfirmedExitKeepsRecoveryIdentityAndFailure(t *testing.T) {
+	m := model()
+	s := session.NewSnapshot("pending")
+	m.pending = &s
+	updated, _ := m.complete(session.Result{Code: session.Error, Err: errors.New("ambiguous response"), Uncertain: true})
+	m = updated.(Model)
+	m = update(m, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	if code, _ := m.result(nil); code != session.Error {
+		t.Fatalf("unconfirmed exit code %d", code)
+	}
+	var output strings.Builder
+	if err := writeExit(&output, m, "session"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "-input "+s.InputID) || strings.Contains(output.String(), "continue session with") {
+		t.Fatalf("unsafe recovery hint: %s", output.String())
 	}
 }

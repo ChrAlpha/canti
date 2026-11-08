@@ -33,6 +33,7 @@ type Turn struct {
 	diagnostics    []string
 	mu             sync.Mutex
 	lost           bool
+	stopping       bool
 	interrupts     int
 	ack            *hostrpc.Ack
 	items          []hostrpc.Item
@@ -99,12 +100,29 @@ func (t *Turn) Interrupt() {
 	defer t.mu.Unlock()
 	t.interrupts++
 	if t.interrupts == 1 {
+		t.requestStopLocked()
+	} else {
+		t.cancel()
+	}
+}
+
+func (t *Turn) requestStopLocked() {
+	if !t.stopping {
+		t.stopping = true
 		select {
 		case t.stop <- struct{}{}:
 		default:
 		}
-	} else {
-		t.cancel()
+	}
+}
+func (t *Turn) requestStop()        { t.mu.Lock(); defer t.mu.Unlock(); t.requestStopLocked() }
+func (t *Turn) stopRequested() bool { t.mu.Lock(); defer t.mu.Unlock(); return t.stopping }
+func (t *Turn) takeStop() bool {
+	select {
+	case <-t.stop:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -116,12 +134,8 @@ func (t *Turn) InputLost() {
 		return
 	}
 	t.lost = true
-	if t.owned && t.interrupts == 0 {
-		t.interrupts = 1
-		select {
-		case t.stop <- struct{}{}:
-		default:
-		}
+	if t.owned {
+		t.requestStopLocked()
 	}
 	t.mu.Unlock()
 	if !t.owned {

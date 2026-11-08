@@ -34,7 +34,7 @@ func (p *ptyChat) awaitInputRead(t *testing.T) {
 func TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "paste accepted"}})
 	p := startPTYChat(t, f, nil)
-	pos := p.await(t, "ready", 0)
+	pos := p.awaitStatus(t, "ready", 0)
 	p.send(t, "\x1b[20")
 	p.awaitInputRead(t)
 	p.send(t, "0~line one\nline two\x1b[201~")
@@ -72,9 +72,9 @@ func TestChatPTYPasteSpansCompletionAndRequiresManualSend(t *testing.T) {
 	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(func() { releaseGate(); gate.Close() })
 	p := startPTYChat(t, f, nil, "-model-url", gate.URL)
-	pos := p.await(t, "ready", 0)
+	pos := p.awaitStatus(t, "ready", 0)
 	p.send(t, "first request\r")
-	pos = p.await(t, "running", pos)
+	pos = p.awaitStatus(t, "running", pos)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -84,13 +84,13 @@ func TestChatPTYPasteSpansCompletionAndRequiresManualSend(t *testing.T) {
 	p.awaitInputRead(t)
 	releaseGate()
 	awaitPTYPhase(t, f, "returned")
-	pos = p.await(t, "ready", pos)
+	pos = p.awaitStatus(t, "ready", pos)
 	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 {
 		t.Fatalf("first request did not finish before paste suffix: %+v", s)
 	}
 	p.send(t, "draft suffix\r\x1b[201~")
 	p.awaitInputRead(t)
-	pos = p.await(t, "ready", pos)
+	pos = p.awaitStatus(t, "ready", pos)
 	if s := f.status(); s.Run.SessionSeq != 1 {
 		t.Fatalf("busy paste tail created a run: %+v", s.Run)
 	}

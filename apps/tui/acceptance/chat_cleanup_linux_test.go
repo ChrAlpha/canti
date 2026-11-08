@@ -3,7 +3,6 @@
 package acceptance
 
 import (
-	"bytes"
 	"os"
 	"testing"
 	"time"
@@ -31,8 +30,8 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 		var output []byte
 		var chunk [4096]byte
 		deadline := time.Now().Add(5 * time.Second)
-		for !bytes.Contains([]byte(screenText(output)), []byte(needle)) {
-			n, err := unix.Read(readFD, chunk[:])
+		for p.status() != needle {
+			n, err := readPTYOutput(p, readFD, chunk[:])
 			if n > 0 {
 				output = append(output, chunk[:n]...)
 			}

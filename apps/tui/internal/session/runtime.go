@@ -20,15 +20,12 @@ import (
 const (
 	Owned       = "owned"
 	Auto        = "auto"
-	hostOwned   = Owned
-	hostAuto    = Auto
 	autoIdle    = 10 * time.Minute
 	maxStarts   = 4
 	stopCleanup = 30 * time.Second
 )
 
 var ErrLocked = errors.New("workspace locked")
-var errLocked = ErrLocked
 var credentialVariables = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"}
 
 type runtimeClient struct {
@@ -42,8 +39,8 @@ type runtimeClient struct {
 }
 
 func (a *runtimeClient) checkHostMode() error {
-	if a.hostMode != hostOwned && a.hostMode != hostAuto {
-		return fmt.Errorf("-host must be %s or %s", hostOwned, hostAuto)
+	if a.hostMode != Owned && a.hostMode != Auto {
+		return fmt.Errorf("-host must be %s or %s", Owned, Auto)
 	}
 	if a.hostWait <= 0 {
 		return errors.New("-host-wait must be positive")
@@ -54,8 +51,8 @@ func (a *runtimeClient) checkHostMode() error {
 func leaving(err error) bool { return errors.Is(err, hostrpc.ErrClosing) || hostrpc.Lost(err) }
 
 func (a *runtimeClient) connect(ctx context.Context) (*hostrpc.Client, error) {
-	if a.hostMode == hostOwned && a.child == nil && locked(a.state) {
-		return nil, fmt.Errorf("%w: owned mode requires exclusive runtime ownership; use -host auto to attach", errLocked)
+	if a.hostMode == Owned && a.child == nil && locked(a.state) {
+		return nil, fmt.Errorf("%w: owned mode requires exclusive runtime ownership; use -host auto to attach", ErrLocked)
 	}
 	path, err := hostrpc.SocketPath(a.state)
 	if err != nil {
@@ -85,7 +82,7 @@ func (a *runtimeClient) connect(ctx context.Context) (*hostrpc.Client, error) {
 			starts++
 		case time.Now().After(deadline):
 			if locked(a.state) {
-				return nil, fmt.Errorf("workspace %s is %w and no host serves it", a.workspace, errLocked)
+				return nil, fmt.Errorf("workspace %s is %w and no host serves it", a.workspace, ErrLocked)
 			}
 			return nil, fmt.Errorf("no host started serving workspace %s within %v; see %s", a.workspace, a.hostWait, filepath.Join(a.state, "host.log"))
 		}
@@ -130,7 +127,7 @@ func (a *runtimeClient) startHost() error {
 	cmd := exec.Command(exe, "host", "-workspace", a.workspace, "-state", a.state, "-idle", autoIdle.String(), "-log-level", strings.ToLower(a.logLevel))
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if a.hostMode == hostOwned {
+	if a.hostMode == Owned {
 		cmd.SysProcAttr.Pdeathsig = syscall.SIGTERM
 	}
 	for _, kv := range a.env {
@@ -143,7 +140,7 @@ func (a *runtimeClient) startHost() error {
 	}
 	done := make(chan struct{})
 	a.starting = done
-	if a.hostMode == hostOwned {
+	if a.hostMode == Owned {
 		exited := make(chan error, 1)
 		a.child, a.childDone = cmd, exited
 		go func() { exited <- cmd.Wait(); close(done) }()
@@ -203,8 +200,8 @@ func (a *runtimeClient) canStartHost() bool {
 
 func (a *runtimeClient) hello(ctx context.Context, c *hostrpc.Client) error {
 	h, err := c.Hello(ctx)
-	if err == nil && a.hostMode == hostOwned && (a.child == nil || h.PID != a.child.Process.Pid) {
-		return fmt.Errorf("%w: owned mode requires its own runtime; use -host auto to attach to the serving host", errLocked)
+	if err == nil && a.hostMode == Owned && (a.child == nil || h.PID != a.child.Process.Pid) {
+		return fmt.Errorf("%w: owned mode requires its own runtime; use -host auto to attach to the serving host", ErrLocked)
 	}
 	return err
 }

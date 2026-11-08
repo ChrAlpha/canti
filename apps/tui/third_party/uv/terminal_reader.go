@@ -202,7 +202,23 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 	}
 	tick := time.NewTimer(interval)
 	defer tick.Stop()
+	limitTimer := time.NewTimer(DefaultInputTimeout)
+	defer limitTimer.Stop()
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		var limitc <-chan time.Time
+		if deadline := d.inputDeadline(pendingSince, lastRead); !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return ErrInputTimeout
+			}
+			limitTimer.Reset(remaining)
+			limitc = limitTimer.C
+		} else {
+			limitTimer.Stop()
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -218,16 +234,12 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 				return nil
 			}
 			return err
+		case <-limitc:
+			if ctx.Err() != nil {
+				return nil
+			}
+			return ErrInputTimeout
 		case now := <-tick.C:
-			if d.eventScanner.pasteOverflow && now.Sub(d.eventScanner.overflowAt) >= DefaultInputTimeout {
-				return ErrInputTimeout
-			}
-			if d.IncompleteTimeout > 0 && !pendingSince.IsZero() && now.Sub(pendingSince) >= d.IncompleteTimeout {
-				return ErrInputTimeout
-			}
-			if d.eventScanner.paste != nil && now.Sub(lastRead) >= DefaultInputTimeout {
-				return ErrInputTimeout
-			}
 			if buf.Len() > 0 && now.Sub(lastRead) >= interval && (d.IncompleteTimeout <= 0 || !pendingControl(buf.Bytes())) && d.eventScanner.paste == nil {
 				buf.Next(d.sendEvents(ctx, eventc, buf.Bytes(), true))
 				if buf.Len() == 0 {
@@ -262,6 +274,28 @@ func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, re
 			}
 		}
 	}
+}
+
+// Resource deadlines are absolute and independent of escape-key ambiguity.
+// New bytes may restart an idle-paste timeout, never overflow or sequence time.
+func (d *TerminalReader) inputDeadline(pendingSince, lastRead time.Time) time.Time {
+	var deadlines []time.Time
+	if d.eventScanner.pasteOverflow {
+		deadlines = append(deadlines, d.eventScanner.overflowAt.Add(DefaultInputTimeout))
+	}
+	if d.IncompleteTimeout > 0 && !pendingSince.IsZero() {
+		deadlines = append(deadlines, pendingSince.Add(d.IncompleteTimeout))
+	}
+	if d.eventScanner.paste != nil && !lastRead.IsZero() {
+		deadlines = append(deadlines, lastRead.Add(DefaultInputTimeout))
+	}
+	var first time.Time
+	for _, deadline := range deadlines {
+		if first.IsZero() || deadline.Before(first) {
+			first = deadline
+		}
+	}
+	return first
 }
 
 // A control string or partial CSI is never converted to editable text merely

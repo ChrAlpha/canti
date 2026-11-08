@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/charmbracelet/x/ansi"
 )
 
 func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
@@ -55,25 +53,34 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(func() { unblockFirst(); unblock(); gate.Close() })
 	p := startPTYChatWithEnv(t, f, nil, []string{"TERM=tmux-256color"}, "-model-url", gate.URL)
-	pos := p.await(t, "ready", 0)
+	pos := p.awaitStatus(t, "ready", 0)
 	p.send(t, "first request\r")
-	pos = p.await(t, "draft editable", pos)
+	pos = p.awaitStatus(t, "running", pos)
 	unblockFirst()
 	p.await(t, line(39), pos)
-	pos = p.await(t, "eady", pos)
+	pos = p.awaitStatus(t, "ready", pos)
 	p.send(t, "second request\r")
-	p.await(t, "draft editable", pos)
+	p.awaitStatus(t, "running", pos)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("second request did not reach provider")
 	}
-	pos = len(ansi.Strip(p.text()))
+	pos = p.mark()
 	p.send(t, "draft text\r\x1b[200~draft paste\x1b[5~\x1b[201~\x1b[5")
 	p.awaitInputRead(t)
 	p.send(t, "~")
-	p.await(t, line(12), pos)
-	pos = len(ansi.Strip(p.text()))
+	// The current 24-row layout reserves nine rows, so one page up shows
+	// history rows 14 through 28. Assert the complete window and retained
+	// draft, not a substring of incremental terminal output.
+	p.await(t, line(14), pos)
+	p.mu.Lock()
+	screen := p.screen.String()
+	p.mu.Unlock()
+	if !strings.Contains(screen, line(28)) || strings.Contains(screen, line(39)) || !strings.Contains(screen, "draft textdraft paste") {
+		t.Fatalf("page up changed viewport or draft incorrectly: %q", screen)
+	}
+	pos = p.mark()
 	p.send(t, "\x1b[6~")
 	pos = p.await(t, line(39), pos)
 	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != "request_sent" {
@@ -81,7 +88,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	}
 	unblock()
 	p.await(t, "second answer", pos)
-	pos = p.await(t, "eady", pos)
+	pos = p.awaitStatus(t, "ready", pos)
 	p.send(t, "\r")
 	p.await(t, "third answer", pos)
 	if s := f.status(); s.Run.SessionSeq != 3 || s.Run.Goal != "draft textdraft paste" || s.Phase != "returned" {

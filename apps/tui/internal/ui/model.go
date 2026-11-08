@@ -27,6 +27,7 @@ const (
 	running
 	stopping
 	unconfirmed
+	closing
 )
 
 type fact struct {
@@ -129,6 +130,7 @@ func (m *Model) key(k tea.KeyPressMsg) (bool, tea.Cmd) {
 			m.turn.Interrupt()
 			return true, nil
 		}
+		m.phase = closing
 		return true, tea.Quit
 	case "enter":
 		if m.phase != ready {
@@ -214,7 +216,9 @@ func (m Model) complete(out session.Result) (tea.Model, tea.Cmd) {
 	answer, note := present.Result(out)
 	m.final = answer + note
 	m.add(m.final)
-	m.code = out.Code
+	if m.err == nil {
+		m.code = out.Code
+	}
 	switch {
 	case out.Uncertain:
 		m.phase = unconfirmed
@@ -228,13 +232,16 @@ func (m Model) complete(out session.Result) (tea.Model, tea.Cmd) {
 		m.phase = ready
 		m.pending = nil
 	}
-	if m.exitAfter || out.NoInputFits || out.Code == session.Resolution || out.Code == session.Active || out.Err != nil && !out.Rejected && !out.Uncertain {
+	if m.exitAfter || out.Interrupted || out.NoInputFits || out.Code == session.Resolution || out.Code == session.Active || out.Err != nil && !out.Rejected && !out.Uncertain {
 		if m.err == nil {
 			m.err = out.Err
 		}
+		m.phase = closing
 		return m, tea.Quit
 	}
-	m.code = session.OK
+	if !out.Uncertain {
+		m.code = session.OK
+	}
 	return m, nil
 }
 func (m Model) signal(sig os.Signal) (tea.Model, tea.Cmd) {
@@ -247,13 +254,16 @@ func (m Model) signal(sig os.Signal) (tea.Model, tea.Cmd) {
 		m.exitAfter = m.exitAfter || sig == syscall.SIGTERM
 		return m, nil
 	}
-	if sig == syscall.SIGTERM {
+	if sig == syscall.SIGTERM && m.err == nil && m.phase != unconfirmed {
 		m.code = session.Stopped
 	}
+	m.phase = closing
 	return m, tea.Quit
 }
 func (m Model) lost(err error) (tea.Model, tea.Cmd) {
-	m.err = err
+	if m.err == nil {
+		m.err = err
+	}
 	if err != nil {
 		m.code = session.Error
 	}
@@ -263,6 +273,7 @@ func (m Model) lost(err error) (tea.Model, tea.Cmd) {
 		m.turn.InputLost()
 		return m, nil
 	}
+	m.phase = closing
 	return m, tea.Quit
 }
 func tail(s string, limit int) string {
@@ -306,7 +317,7 @@ func (m Model) transcript() string {
 	return s
 }
 func (m Model) View() tea.View {
-	status := map[phase]string{ready: "ready", submitting: "submitting · draft editable", running: "running · draft editable", stopping: "stopping · waiting for cleanup · draft editable", unconfirmed: "acceptance unknown · Ctrl+R reconcile"}[m.phase]
+	status := map[phase]string{ready: "ready", submitting: "submitting · draft editable", running: "running · draft editable", stopping: "stopping · waiting for cleanup · draft editable", unconfirmed: "acceptance unknown · Ctrl+R reconcile", closing: "closing"}[m.phase]
 	content := "canti-tui · session " + m.controller.ID() + "\n" + status + " · current launch flags apply to each new input\n" + m.notice + "\n" + m.viewport.View() + "\n\n" + m.editor.View() + "\nEnter send when ready · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C stop/exit · Ctrl+R recover"
 	v := tea.NewView(content)
 	v.AltScreen = true

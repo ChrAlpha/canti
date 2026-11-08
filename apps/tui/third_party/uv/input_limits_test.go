@@ -3,6 +3,7 @@ package uv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -229,5 +230,58 @@ func TestPasteDiscardBudgetIncludesUnfinishedDelimiter(t *testing.T) {
 		if !errors.Is(d.limitErr, ErrInputLimit) {
 			t.Fatalf("suffix=%q budget exhaustion did not terminate", suffix)
 		}
+	}
+}
+
+func TestContinuousInputCannotExtendAbsoluteRecoveryDeadline(t *testing.T) {
+	for _, initial := range []string{"\x1b[200~123456789", "\x1b]11;"} {
+		t.Run(fmt.Sprintf("%q", initial), func(t *testing.T) {
+			r, w := io.Pipe()
+			defer r.Close()
+			defer w.Close()
+			reader := NewTerminalReader(r, "xterm")
+			reader.MaxPasteBytes = 8
+			reader.IncompleteTimeout = DefaultInputTimeout
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			events := make(chan Event, 8)
+			start := time.Now()
+			go func() { done <- reader.StreamEvents(ctx, events) }()
+			sent := make(chan struct{})
+			go func() {
+				defer close(sent)
+				if _, err := io.WriteString(w, initial); err != nil {
+					return
+				}
+				tick := time.NewTicker(10 * time.Millisecond)
+				defer tick.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-tick.C:
+						if _, err := io.WriteString(w, "x"); err != nil {
+							return
+						}
+					}
+				}
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrInputTimeout) {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("arriving bytes extended absolute deadline")
+			}
+			if elapsed := time.Since(start); elapsed < DefaultInputTimeout || elapsed > DefaultInputTimeout+500*time.Millisecond {
+				t.Fatalf("recovery ended after %v", elapsed)
+			}
+			cancel()
+			r.Close()
+			w.Close()
+			<-sent
+		})
 	}
 }

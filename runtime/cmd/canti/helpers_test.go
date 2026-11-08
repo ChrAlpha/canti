@@ -75,7 +75,7 @@ func newScriptedModel(t *testing.T, key string, script map[int]core.Decision) *s
 	return m
 }
 
-// fixtureModel names the model API and model of a fixture's run and chat,
+// fixtureModel names the model API and model of a fixture's run,
 // which a test can override with later flags; canti has neither default.
 var fixtureModel = []string{"-api", "anthropic-messages", "-model", "fixture-model"}
 
