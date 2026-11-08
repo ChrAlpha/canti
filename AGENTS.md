@@ -9,6 +9,9 @@ builds with `GOWORK=off` using its relative SDK replacement. No Memoh services, 
 are required. Read `README.md` for current scope and `CONTRIBUTING.md` for the
 contribution workflow.
 
+Use English for all collaboration, following the language policy in
+[CONTRIBUTING.md](CONTRIBUTING.md#issues-and-conduct).
+
 Inspect `git status --short`, relevant code, tests, and the affected module `go.mod` files before editing.
 Preserve unrelated changes. State the affected boundary, expected files, and
 verification before a non-trivial change. Keep one coherent intent per commit.
