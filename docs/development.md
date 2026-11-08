@@ -153,9 +153,20 @@ bin/canti-tui -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
 
 The same Compose service can be opened using
 `examples/persistent-environment/.devcontainer/devcontainer.json`. Set the same
-variables before `devcontainer up --workspace-folder "$CANTI_WORKSPACE" --config
-examples/persistent-environment/.devcontainer/devcontainer.json`; attach the
-returned container ID. Use a non-root host UID with these examples.
+variables, then run:
+
+```sh
+COMPOSE_BAKE=false devcontainer up --workspace-folder "$CANTI_WORKSPACE" \
+  --config examples/persistent-environment/.devcontainer/devcontainer.json
+```
+
+Attach the returned container ID. On the verified Dev Containers CLI 0.90.0 and
+Compose 5.7.0 combination, disabling Bake for this Compose-backed invocation
+avoids its rejection of the generated Dockerfile outside the build context
+(`fs.read` privilege request). The direct Compose invocation above and the
+Dockerfile-based DinD invocation below use their own build paths; the recorded
+QA runs required this workaround only for the ordinary Dev Container command.
+Use a non-root host UID with these examples.
 
 Commands use the pinned container user, HOME and PATH, `/bin/sh -c`, and a fresh
 shell each time. `environment attach -init /absolute/file` sources an optional
@@ -428,8 +439,11 @@ The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's
 resolved path>`, with `~/.local/state` when `XDG_STATE_HOME` is unset or
 relative; `-state` overrides it, and it must not overlap the workspace or
-resolve to a path with a colon, which Docker cannot mount. It
-holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
+resolve to a path with a colon, which Docker cannot mount. Existing State or
+parent symlinks are resolved before any state files are created. Safe outside
+aliases use one canonical state and socket identity; dangling, looping or
+unresolvable ancestors are refused. Persistent admission compares that effective
+path against every environment mount before creating state. It holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which ephemeral jobs see
 at `/canti/runs/<run ID>/`; persistent commands use these logical addresses
