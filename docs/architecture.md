@@ -265,8 +265,8 @@ step. That suffices by induction over the publication points:
   that run's operation lock through its own publication. Cancelling the
   waiting submission admits nothing and does not interrupt the prior driver.
 
-The records are never an authority: nothing in canti reads them back, and
-`status` and `history` read the journal. In the CLI only commands holding
+Published records are derived evidence for retrieval, not an authority for
+run state. `status` and `history` read the journal. In the CLI only commands holding
 the workspace lock publish; concurrent publications of one run are not
 supported. A publication fails when an entry it looks at has another type:
 the goal, constraints, result, and files of the latest step must be regular
