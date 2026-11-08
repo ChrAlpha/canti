@@ -3,15 +3,9 @@
 package acceptance
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -28,12 +22,25 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 			if abandon {
 				env = append(env, "CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED="+blocked)
 			}
-			cmd, wait := startChatWithBlockedStderr(t, f, image, env)
-			waitFor(t, func() bool { _, err := os.Stat(filepath.Join(f.workspace, "effects")); return err == nil })
+			cmd, blockOutput, wait := startChatWithStderr(t, f, env, false, "-image", image)
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("runtime evidence: status=%+v history=%v requests=%d", f.status(), kinds(f.history()), len(f.model.requests()))
+				}
+			})
+			waitFor(t, func() bool {
+				data, err := os.ReadFile(filepath.Join(f.workspace, "effects"))
+				return err == nil && string(data) == "started\n"
+			})
 			started := f.status()
-			if started.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if started.Phase != "effect_saved" || started.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("unexpected execution before interrupt: %+v", started)
 			}
+			t.Logf("before backpressure: phase=%s seq=%d session_seq=%d; effect wrote started", started.Phase, started.Seq, started.Run.SessionSeq)
+			// Establish a running effect before applying backpressure. Filling
+			// stderr before Submit races automatic owned output-loss cancellation
+			// against Docker launch, so the effects marker may never be written.
+			blockOutput()
 			began := time.Now()
 			if err := cmd.Process.Signal(os.Interrupt); err != nil {
 				t.Fatal(err)
@@ -88,71 +95,5 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 			}
 			checkReleased(t, f, h)
 		})
-	}
-}
-
-func startChatWithBlockedStderr(t *testing.T, f *fixture, image string, env []string) (*exec.Cmd, func() result) {
-	t.Helper()
-
-	in, input, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { in.Close(); input.Close() })
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { r.Close(); w.Close() })
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	deadline, _ := ctx.Deadline()
-	if err := r.SetReadDeadline(deadline); err != nil {
-		t.Fatal(err)
-	}
-	exe, argv := executable(t, env, append([]string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-image", image}, fixtureModel...))
-	cmd := exec.CommandContext(ctx, exe, argv...)
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
-			cmd.Env = append(cmd.Env, kv)
-		}
-	}
-	cmd.Env = append(cmd.Env, "CANTI_TEST_MAIN=1", "GORACE=atexit_sleep_ms=0")
-	cmd.Env = append(cmd.Env, env...)
-	var stdout bytes.Buffer
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, &stdout, w
-	t.Cleanup(func() {
-		cancel()
-		if cmd.Process != nil && cmd.ProcessState == nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-		}
-	})
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	var prev byte
-	var b [1]byte
-	for {
-		if _, err := r.Read(b[:]); err != nil {
-			t.Fatal(err)
-		}
-		if prev == '>' && b[0] == ' ' {
-			break
-		}
-		prev = b[0]
-	}
-	fillPipe(t, w)
-	w.Close()
-	if _, err := io.WriteString(input, "work\nnever\n"); err != nil {
-		t.Fatal(err)
-	}
-	input.Close()
-	return cmd, func() result {
-		t.Helper()
-		var exit *exec.ExitError
-		if err := cmd.Wait(); err != nil && !errors.As(err, &exit) {
-			t.Fatal(err)
-		}
-		return result{code: cmd.ProcessState.ExitCode(), stdout: stdout.String()}
 	}
 }
