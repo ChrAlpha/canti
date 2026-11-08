@@ -9,6 +9,9 @@ builds with `GOWORK=off` using its relative SDK replacement. No Memoh services, 
 are required. Read `README.md` for current scope and `CONTRIBUTING.md` for the
 contribution workflow.
 
+Use English for all collaboration, following the language policy in
+[CONTRIBUTING.md](CONTRIBUTING.md#issues-and-conduct).
+
 Inspect `git status --short`, relevant code, tests, and the affected module `go.mod` files before editing.
 Preserve unrelated changes. State the affected boundary, expected files, and
 verification before a non-trivial change. Keep one coherent intent per commit.
@@ -83,7 +86,7 @@ specify its durable commit point, attached facts, and behavior after restart.
 Model request bytes and provenance must be committed before sending; a
 decision and its normalized action before it is performed or bound; the executor publishes its durable owner binding before consuming its launch
 latch; a result together with run progress, and with any
-change of harness state it causes, such as the context window, in one
+change of harness state it causes, such as a context anchor or focus selection, in one
 `Transition`. Events carry the step, attempt, or effect they belong to, and
 commits are sequenced: changing either identity scheme is a semantics change
 and must bump `core.SemanticsVersion`.

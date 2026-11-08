@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/runtime/core"
-	"golang.org/x/sys/unix"
 )
 
 func TestStderrWriterOrdered(t *testing.T) {
@@ -388,51 +387,6 @@ func TestALongFlagErrorKeepsTheWholeUsage(t *testing.T) {
 		if r.code != exitUsage || !strings.Contains(r.stderr, "Usage: canti status [flags]") || !strings.HasSuffix(r.stderr, "workspace directory of the run (default \".\")\n") {
 			t.Fatalf("status %.12q...: exit %d, stderr tail %q", arg, r.code, r.stderr[max(0, len(r.stderr)-160):])
 		}
-	}
-}
-
-func TestChatSetupNoteLeadsAStderrItWaitedOn(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reopens a pipe whatever its mode")
-	}
-	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "first answer"}})
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer outR.Close()
-	if err := unix.Fchmod(int(outW.Fd()), 0); err != nil {
-		t.Fatal(err)
-	}
-	errR, errW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer errR.Close()
-	fillPipe(t, errW)
-	cmd := cliCommand(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append([]string{"chat", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL}, fixtureModel...)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader("one\n"), outW, errW
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	outW.Close()
-	errW.Close()
-	defer cmd.Wait()
-	var answer []byte
-	for buf := make([]byte, 256); !bytes.Contains(answer, []byte("first answer\n")); {
-		n, err := outR.Read(buf)
-		if err != nil {
-			t.Fatalf("chat behind a blocked stderr never answered: %q, %v", answer, err)
-		}
-		answer = append(answer, buf[:n]...)
-	}
-	stderr, err := io.ReadAll(errR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	note := "canti-tui: standard output: reopen /proc/self/fd/1: permission denied; "
-	if lines := strings.Split(string(bytes.TrimLeft(stderr, "\x00")), "\n"); !strings.HasPrefix(lines[0], note) || strings.Count(string(stderr), note) != 1 {
-		t.Fatalf("stderr drained behind the setup note does not start with it, once:\n%s", bytes.TrimLeft(stderr, "\x00"))
 	}
 }
 

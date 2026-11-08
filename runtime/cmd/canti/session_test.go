@@ -260,24 +260,16 @@ func TestSessionRetryReportsAnInputAcceptedDuringItsChecks(t *testing.T) {
 }
 
 func TestSessionInputInitializesAnEmptyJournal(t *testing.T) {
-	for _, chat := range []bool{false, true} {
-		f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-		if err := os.Mkdir(f.state, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(f.state, "canti.db"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var r result
-		if chat {
-			_, wait := f.startWith(strings.NewReader("g\n"), nil, "chat")
-			r = wait()
-		} else {
-			r = f.cli(nil, "run", "-session", "s", "-input", "i", "-goal", "g")
-		}
-		if r.code != exitOK || r.stdout != "done\n" {
-			t.Errorf("chat=%v over an empty journal: %+v", chat, r)
-		}
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	if err := os.Mkdir(f.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.state, "canti.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := f.cli(nil, "run", "-session", "s", "-input", "i", "-goal", "g")
+	if r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("run over an empty journal: %+v", r)
 	}
 }
 

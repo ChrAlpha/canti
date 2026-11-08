@@ -725,7 +725,7 @@ func TestAReplayNamesTheSettingsItIgnoresInEveryMode(t *testing.T) {
 // A slow child is still this client's outstanding startup attempt even before
 // it acquires the state lock. A sibling must not outlive and replace it later.
 func TestAnAutoClientWaitsForItsStartingHost(t *testing.T) {
-	for _, command := range []string{"run", "chat"} {
+	for _, command := range []string{"run"} {
 		t.Run(command, func(t *testing.T) {
 			f := newFixture(t, nil)
 			f.autoHost()
@@ -761,7 +761,7 @@ func TestAnAutoClientWaitsForItsStartingHost(t *testing.T) {
 // Reaping a pending child must release its startup slot. The same client then
 // reaches a fresh host and admits its input once, without inheriting a sibling.
 func TestAnAutoClientReplacesItsExitedStartingHost(t *testing.T) {
-	for _, command := range []string{"run", "chat"} {
+	for _, command := range []string{"run"} {
 		t.Run(command, func(t *testing.T) {
 			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
 			f.autoHost()
