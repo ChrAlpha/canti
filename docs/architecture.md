@@ -260,7 +260,10 @@ step. That suffices by induction over the publication points:
   `canti run` repairs it.
 - `canti run` publishes the latest run of its state directory before it
   creates a run and refuses, creating nothing, when that fails, so every
-  earlier run a job sees has its final step and result published.
+  earlier run a job sees has its final step and result published. Admission
+  waits for a closed run's driver to finish its final publication, holding
+  that run's operation lock through its own publication. Cancelling the
+  waiting submission admits nothing and does not interrupt the prior driver.
 
 The records are never an authority: nothing in canti reads them back, and
 `status` and `history` read the journal. In the CLI only commands holding

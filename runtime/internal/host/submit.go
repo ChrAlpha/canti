@@ -201,8 +201,8 @@ func snake(s string) string {
 }
 
 // Closed fails unless the latest run of the state directory, if any, is
-// closed and its step records are published: a new run is admitted only
-// beside closed ones.
+// closed, its driver has ended, and its step records are published: a new run
+// is admitted only beside closed ones whose publication is quiescent.
 func (h *Host) Closed(ctx context.Context) error {
 	last, err := h.store.LastRun(ctx)
 	if errors.Is(err, harness.ErrNotFound) {
@@ -220,13 +220,7 @@ func (h *Host) Closed(ctx context.Context) error {
 	case err != nil:
 		return err
 	case snap.State.Closed():
-		if err := h.store.CheckAdmission(ctx); err != nil {
-			return err
-		}
-		if err := harness.PublishHistory(ctx, h.store, HistoryRoot(h.opts.State), last.ID); err != nil {
-			return fmt.Errorf("publishing the step records of run %s: %w", last.ID, err)
-		}
-		return nil
+		return h.publishClosed(ctx, last.ID)
 	case p == core.PhaseNeedsResolution:
 		return fmt.Errorf("run %s needs resolution: resolve it first", last.ID)
 	}
@@ -235,6 +229,35 @@ func (h *Host) Closed(ctx context.Context) error {
 		next = "stop"
 	}
 	return fmt.Errorf("run %s is %s: %s it first", last.ID, snap.State.Phase, next)
+}
+
+// publishClosed waits for the final publication of a closed run's driver
+// without interrupting it. The run lock excludes a new drive, stop or resolution
+// until admission's own publication finishes; the admission lock alone cannot
+// exclude a driver that committed its terminal fact but is still publishing.
+func (h *Host) publishClosed(ctx context.Context, id string) error {
+	unlock, err := h.lockRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	h.mu.Lock()
+	d := h.drivers[id]
+	h.mu.Unlock()
+	if d != nil {
+		select {
+		case <-d.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := h.store.CheckAdmission(ctx); err != nil {
+		return err
+	}
+	if err := harness.PublishHistory(ctx, h.store, HistoryRoot(h.opts.State), id); err != nil {
+		return fmt.Errorf("publishing the step records of run %s: %w", id, err)
+	}
+	return nil
 }
 
 // drivable fails unless a run of c, which stores provider p, can be driven

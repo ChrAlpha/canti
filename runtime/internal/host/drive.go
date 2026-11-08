@@ -278,9 +278,9 @@ func (h *Host) Shutdown(ctx context.Context) error {
 	return h.Close()
 }
 
-// runLock serializes the starts, stops, and resolutions of one run: its slot
-// is held by one of them at a time, and n counts its holders and waiters, so
-// that the host forgets it once none remains.
+// runLock serializes starts, stops, resolutions and admission's publication
+// of one run. Its slot is held by one operation at a time; n counts holders
+// and waiters, so the host forgets it once none remains.
 type runLock struct {
 	slot chan struct{}
 	n    int
