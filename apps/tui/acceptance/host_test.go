@@ -4,12 +4,16 @@ package acceptance
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -149,5 +153,86 @@ func TestTUIAutoClientReplacesItsExitedStartingHost(t *testing.T) {
 				t.Fatalf("replacement admitted unexpected work: %+v", got)
 			}
 		})
+	}
+}
+
+// The proxy loses the answer only after the real host has durably accepted it.
+// Retrying must reconcile that InputID, even if the run returned before retry.
+func TestTUIReplaysLostSubmitAcknowledgementWithoutAnotherRun(t *testing.T) {
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "answer"}})
+	f.autoHost()
+	if r := f.cli(nil, "run", "-host", "auto", "-goal", "initialize host"); r.code != exitOK {
+		t.Fatal(r)
+	}
+	socket := f.socket()
+	upstream := filepath.Join(f.state, "upstream.sock")
+	if err := os.Rename(socket, upstream); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var ids []string
+	var connections sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer conn.Close()
+				var request hostrpc.Request
+				if json.NewDecoder(conn).Decode(&request) != nil {
+					return
+				}
+				remote, err := net.DialTimeout("unix", upstream, time.Second)
+				if err != nil {
+					return
+				}
+				defer remote.Close()
+				remote.SetDeadline(time.Now().Add(3 * time.Second))
+				if json.NewEncoder(remote).Encode(request) != nil {
+					return
+				}
+				var response hostrpc.Response
+				if json.NewDecoder(remote).Decode(&response) != nil {
+					return
+				}
+				if request.Op == hostrpc.OpSubmit {
+					mu.Lock()
+					ids = append(ids, request.Submit.InputID)
+					mu.Unlock()
+					if calls.Add(1) == 1 {
+						return
+					}
+				}
+				json.NewEncoder(conn).Encode(response)
+			}()
+		}
+	}()
+	t.Cleanup(func() { listener.Close(); <-done; connections.Wait() })
+	before := len(f.model.requests())
+	_, wait := f.startWith(strings.NewReader("one accepted input\n"), nil, tuiCommand, "-host", "auto", "-session", "replay")
+	if r := wait(); r.code != exitOK || r.stdout != "answer\n" {
+		t.Fatalf("lost ACK client: %+v", r)
+	}
+	if s := f.status(); s.Run.SessionID != "replay" || s.Run.SessionSeq != 1 || s.Run.Goal != "one accepted input" {
+		t.Fatalf("replayed admission: %+v", s)
+	}
+	if len(f.model.requests()) != before+1 {
+		t.Fatal("lost ACK dispatched the model again")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ids) != 2 || ids[0] == "" || ids[0] != ids[1] {
+		t.Fatalf("submission identities: %q", ids)
 	}
 }
