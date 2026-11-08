@@ -36,8 +36,8 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 	sourceRun := f.status().Run.ID
 	f.model = newScriptedModel(t, f.key, nil)
 	goal := "Resume Orchid deployment from run " + sourceRun + "; recover the approved wait and retry budget, accounting for revised decisions."
-	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image, "-window-steps", "9",
-		"-max-steps", "30", "-token-budget", "4000", "-wall-time", "3m", "-job-timeout", "10s", "-output-limit", "2048", "-output-budget", "8192")
+	r := f.cli(nil, "run", "-once", "-goal", goal, "-image", image,
+		"-max-steps", "33", "-token-budget", "4000", "-wall-time", "3m", "-job-timeout", "10s", "-output-limit", "2048", "-output-budget", "8192")
 	if r.code != exitActive {
 		t.Fatalf("start: %d %s", r.code, r.stderr)
 	}
@@ -77,6 +77,7 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 		t.Fatal("missing observation")
 		return harness.Observation{}
 	}
+	var latestHandles []sourceHandle
 	query := func(operation, path string) archive.Retrieval {
 		t.Helper()
 		q := archive.RetrievalQuery{Operation: operation, Path: path, Reason: "recover original deployment evidence", Limit: 4096}
@@ -85,7 +86,9 @@ func TestRetrievalDiscoveryAcrossFreshPages(t *testing.T) {
 		}
 		body, _ := json.Marshal(q)
 		act(core.Decision{Kind: core.Exec, Payload: "canti:retrieve " + string(body)})
-		o := latestOutcome(t, f.history())
+		history := f.history()
+		o := latestOutcome(t, history)
+		latestHandles = sourceHandles(t, history)
 		if o.Retrieval == nil || o.Retrieval.Error != "" || len(o.Retrieval.Sources) == 0 {
 			t.Fatalf("missing evidence: %+v", o)
 		}
@@ -98,7 +101,7 @@ for file in /canti/runs/%s/steps/*/preview; do
   examined=$((examined+1))
   [ "$examined" -le 128 ] || { printf 'incomplete: file limit\n' >&2; exit 2; }
   first=$(head -n 1 "${file%%/preview}/command") || { printf 'incomplete: command unavailable\n' >&2; exit 2; }
-  case "$first" in 'canti:retrieve '*|'canti:handover '*|'# canti:discovery'*) continue ;; esac
+  case "$first" in 'canti:'*|'# canti:discovery'*) continue ;; esac
   if grep -F -q 'Orchid' "$file"; then
     found=$((found+1))
     [ "$found" -le 16 ] || { printf 'incomplete: path limit\n' >&2; exit 2; }
@@ -141,6 +144,7 @@ done`, sourceRun)
 		if !slices.Equal(paths, want) {
 			t.Fatalf("discovery paths: %q, want %q (exclude earlier discovery)", paths, want)
 		}
+		var selected []sourceHandle
 		for _, path := range paths {
 			found := query("search", path)
 			searchCalls++
@@ -152,6 +156,7 @@ done`, sourceRun)
 			}
 			read := query("read", found.Sources[0].Path)
 			readCalls++
+			selected = append(selected, latestHandles...)
 			if len(read.Evidence) != len(read.Sources) {
 				t.Fatalf("read returned %d evidence texts for %d sources", len(read.Evidence), len(read.Sources))
 			}
@@ -159,11 +164,16 @@ done`, sourceRun)
 				returnedBytes += source.Length
 			}
 		}
+		focus, _ := json.Marshal(struct {
+			Sources []sourceHandle `json:"sources"`
+		}{selected})
+		act(core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + string(focus)})
 		if page < 2 {
-			act(core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Continue deployment. Recheck original decisions in /canti/runs/" + sourceRun + "/steps before applying wait and retry settings."})
+			act(core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`})
 		} else {
 			act(core.Decision{Kind: core.Return, Payload: "scripted evidence check complete"})
 		}
+		checkSelectedRequest(t, f, step-1, selected)
 		joined := f.model.prompts(step - 1)
 		if len(joined) != 1 || !strings.Contains(joined[0], corrected) || !strings.Contains(joined[0], retry) || !strings.Contains(joined[0], old) {
 			t.Fatal("full joint evidence and correction were not simultaneously delivered")
@@ -179,8 +189,9 @@ done`, sourceRun)
 		}
 	}
 	s := f.status()
-	if s.Phase != core.PhaseReturned || len(f.model.requests()) != 30 || s.Totals.InputTokens+s.Totals.OutputTokens > 4000 {
+	if s.Phase != core.PhaseReturned || len(f.model.requests()) != 33 || s.Totals.InputTokens+s.Totals.OutputTokens > 4000 {
 		t.Fatalf("run/call/token bound: %+v, calls=%d", s, len(f.model.requests()))
 	}
-	t.Logf("SCRIPTED_DISCOVERY pages=3 shell_calls=3 search_calls=%d read_calls=%d model_calls=30 shell_bytes=%d native_bytes=%d frozen_request_bytes=%d synthetic_tokens=%d; real CLI/SQLite/Docker, scripted query choice and decisions; no live model task score or provider cost", searchCalls, readCalls, shellBytes, returnedBytes, frozenBytes, s.Totals.InputTokens+s.Totals.OutputTokens)
+	checkReplay(t, f.status().Run.ID, f.history())
+	t.Logf("SCRIPTED_DISCOVERY pages=3 shell_calls=3 search_calls=%d read_calls=%d model_calls=33 focus_selections=3 shell_bytes=%d native_bytes=%d frozen_request_bytes=%d synthetic_tokens=%d; real CLI/SQLite/Docker, scripted query choice and decisions; no live model task score or provider cost", searchCalls, readCalls, shellBytes, returnedBytes, frozenBytes, s.Totals.InputTokens+s.Totals.OutputTokens)
 }

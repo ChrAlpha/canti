@@ -98,7 +98,14 @@ func (e *Endpoint) Post(ctx context.Context, body []byte, header http.Header) (R
 		return Reply{}, e.failure(ctx, attempt, err)
 	}
 	defer res.Body.Close()
-	r := Reply{Status: res.StatusCode, Header: res.Header}
+	r := Reply{Status: res.StatusCode, Header: res.Header.Clone()}
+	if e.cfg.Secret != "" {
+		for name, values := range r.Header {
+			for i, value := range values {
+				r.Header[name][i] = strings.ReplaceAll(value, e.cfg.Secret, "[redacted]")
+			}
+		}
+	}
 	r.Body, err = io.ReadAll(io.LimitReader(res.Body, e.cfg.MaxResponseBytes+1))
 	if e.cfg.Secret != "" {
 		r.Body = bytes.ReplaceAll(r.Body, []byte(e.cfg.Secret), []byte("[redacted]"))
@@ -177,6 +184,24 @@ func ExactObject(raw []byte) (map[string]json.RawMessage, bool) {
 func ExactString(fields map[string]json.RawMessage, name string) string {
 	var value string
 	_ = json.Unmarshal(fields[name], &value)
+	return value
+}
+
+// ExactField reads a canonical wire key and refuses case-variant aliases of
+// that same discriminator. Other, unrelated extension fields remain allowed.
+func ExactField(fields map[string]json.RawMessage, name string) json.RawMessage {
+	for key := range fields {
+		if key != name && strings.EqualFold(key, name) {
+			return nil
+		}
+	}
+	return fields[name]
+}
+
+// Discriminator reads an exact canonical string without case aliases.
+func Discriminator(fields map[string]json.RawMessage, name string) string {
+	var value string
+	_ = json.Unmarshal(ExactField(fields, name), &value)
 	return value
 }
 

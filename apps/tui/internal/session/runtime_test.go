@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -128,13 +129,13 @@ func TestRuntimePreflightRejectsAmbiguousAndTrailingResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
 	}{
-		{"trailing", `{"protocol":5,"validated":{"state":"ok"}} {}`},
-		{"unknown field", `{"protocol":5,"validated":{"state":"ok"},"unexpected":true}`},
-		{"success and error", `{"protocol":5,"validated":{"state":"ok"},"error":{"code":"spec","message":"refused"}}`},
+		{"trailing", fmt.Sprintf(`{"protocol":%d,"validated":{"state":"ok"}} {}`, hostrpc.Protocol)},
+		{"unknown field", fmt.Sprintf(`{"protocol":%d,"validated":{"state":"ok"},"unexpected":true}`, hostrpc.Protocol)},
+		{"success and error", fmt.Sprintf(`{"protocol":%d,"validated":{"state":"ok"},"error":{"code":"spec","message":"refused"}}`, hostrpc.Protocol)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := decodeValidation([]byte(tc.body), hostrpc.Binding{}); err == nil {
-				t.Fatal("ambiguous preflight response was accepted")
+			if _, err := decodeValidation([]byte(tc.body), hostrpc.Binding{}); err == nil || errors.Is(err, hostrpc.ErrProtocol) {
+				t.Fatalf("malformed current-protocol response bypassed its structural check: %v", err)
 			}
 		})
 	}

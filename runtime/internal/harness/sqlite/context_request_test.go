@@ -25,7 +25,7 @@ func TestContextRequestSelectsOnlyFrozenRevision(t *testing.T) {
 func TestContextRequestIsolatesSelectedRecord(t *testing.T) {
 	s, d := contextHistory(t)
 	w := d.store.(*Store)
-	if _, err := w.db.Exec(`UPDATE transitions SET facts = '{', event = '{', from_state = '{', to_state = '{', semantics = 999 WHERE seq != 5;
+	if _, err := w.db.Exec(`UPDATE transitions SET facts = '{', event = '{', from_state = CASE WHEN kind IN ('observed','resolved','performed') THEN json_set(from_state,'$.Step',9999) ELSE '{' END, to_state = '{', semantics = 999 WHERE seq != 5;
 		UPDATE runs SET run = '{', semantics = 999`); err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +41,8 @@ func TestContextRequestRejectsMalformedSelectedRecord(t *testing.T) {
 		`UPDATE transitions SET facts = json_insert(facts, '$.Unknown', 1)`,
 		`UPDATE transitions SET facts = '{}'`,
 		`UPDATE transitions SET facts = json_set(facts, '$.Request.Body', 'not base64')`,
+		`UPDATE transitions SET facts = json_remove(facts,'$.Request.ContextState')`,
+		`UPDATE transitions SET facts = json_set(facts,'$.Request.ContextState.AnchorSeq',1)`,
 		`UPDATE transitions SET event = json_insert(event, '$.Unknown', 1)`,
 		`UPDATE transitions SET semantics = 999`,
 		`UPDATE transitions SET from_state = json_set(from_state, '$.RunID', 'other')`,

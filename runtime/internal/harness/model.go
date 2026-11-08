@@ -2,6 +2,9 @@ package harness
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
 	"strings"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -23,7 +26,7 @@ type Model interface {
 
 // Prompt is the provider-neutral input built from a Frame: a system prompt
 // and a user message in non-empty blocks. Blocks[:Stable] is the stable
-// prefix, which the next prompt of the same context window extends byte for
+// prefix, which the next prompt of the same context anchor extends byte for
 // byte as steps complete. The blocks after it change with every request.
 type Prompt struct {
 	System string
@@ -37,12 +40,12 @@ func (p Prompt) User() string { return strings.Join(p.Blocks, "") }
 // Request is the frozen, provider-facing input for one step. Its identity
 // comes from the run state it is committed with.
 type Request struct {
-	Body     []byte
-	Model    string
-	Protocol string
-	Adapter  string
-	Window   *Window         `json:",omitempty"`
-	Context  *ContextCapture `json:",omitempty"`
+	Body         []byte
+	Model        string
+	Protocol     string
+	Adapter      string
+	ContextState *ContextState   `json:",omitempty"`
+	Context      *ContextCapture `json:",omitempty"`
 }
 
 // Response is the raw model result before core decoding. Complete reports
@@ -60,6 +63,24 @@ type Response struct {
 type Usage struct {
 	InputTokens  int64
 	OutputTokens int64
+	// Presence is independent for each provider count: a reported zero is
+	// known; an absent counter is unknown. Totals keep sums separately from
+	// the coverage of the attempts contributing them.
+	InputReported  bool
+	OutputReported bool
+}
+
+// CheckedAdd sums nonnegative resource counters without wrapping.
+func CheckedAdd(a, b int64) (int64, error) {
+	if a < 0 || b < 0 || a > math.MaxInt64-b {
+		return 0, errors.New("harness: invalid or overflowing resource count")
+	}
+	return a + b, nil
+}
+
+func (u Usage) Validate() error {
+	_, err := CheckedAdd(u.InputTokens, u.OutputTokens)
+	return err
 }
 
 // StopError reports a model failure that no retry of the same bytes can fix;
@@ -73,3 +94,29 @@ type StopError struct {
 func (e *StopError) Error() string { return string(e.Reason) + ": " + e.Err.Error() }
 
 func (e *StopError) Unwrap() error { return e.Err }
+
+// ContextLimitError is a confirmed provider context rejection. Only a tested,
+// structured provider signal may construct it; output truncation is distinct.
+type ContextLimitError struct {
+	Status     int
+	Type       string
+	Code       string
+	StopReason string
+	RequestID  string
+}
+
+func (e *ContextLimitError) Error() string {
+	return fmt.Sprintf("provider context limit: status=%d type=%s code=%s stop_reason=%s request_id=%s", e.Status, e.Type, e.Code, e.StopReason, e.RequestID)
+}
+
+// Confirmed reports whether the recorded signal has one of the adapter-tested
+// context-limit shapes. It does not infer a rejection from free-form errors.
+func (e ContextLimitError) Confirmed() bool {
+	if e.Status == 200 && e.StopReason == "model_context_window_exceeded" && e.Code == "" && e.Type == "" {
+		return true
+	}
+	if e.Status == 400 && e.Type == "invalid_request_error" && e.Code == "prompt_too_long" && e.StopReason == "" {
+		return true
+	}
+	return (e.Status == 200 || e.Status == 400) && e.Code == "context_length_exceeded" && e.StopReason == ""
+}

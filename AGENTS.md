@@ -23,7 +23,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   rules. It holds no per-run state between calls and must not acquire model
   I/O, history, storage, clocks, execution, or dependencies outside the
   standard library. Its events name recovery semantics, not capabilities: a
-  capability, such as retrieval or handover, adds no event kind or core
+  capability, such as retrieval or focus, adds no event kind or core
   rule, and a new event kind needs a recovery semantic that no existing
   event expresses. The core never interprets an exec payload, an archive
   query, or a context window.
@@ -75,7 +75,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
 
 Retry, termination, and cancellation rules live in `core.State.Next`; change
 them there with a transition-table test. A harness policy, such as a budget,
-the context window, or handover, ends a run only by committing
+or a request resource ceiling, ends a run only by committing
 `StopRequested` with its reason and a `Failure` that names the cause. The
 transitions a bounded exploration from `core.NewState` reaches are recorded
 per semantics version in `runtime/core/testdata/semantics-v<N>.txt`, so a change to
@@ -86,15 +86,15 @@ specify its durable commit point, attached facts, and behavior after restart.
 Model request bytes and provenance must be committed before sending; a
 decision and its normalized action before it is performed or bound; the executor publishes its durable owner binding before consuming its launch
 latch; a result together with run progress, and with any
-change of harness state it causes, such as the context window, in one
+change of harness state it causes, such as a context anchor or focus selection, in one
 `Transition`. Events carry the step, attempt, or effect they belong to, and
 commits are sequenced: changing either identity scheme is a semantics change
 and must bump `core.SemanticsVersion`.
 
 The context version (`ContextVersion` in `runtime/internal/host/config.go`) names the
 rules that render and account for a request. Give the next one when, for the
-same committed facts, a rendered byte, a reserve, a cap, an admission floor,
-the window or session selection, or the evidence a request shows changes;
+same committed facts, a rendered byte, a resource cap,
+the anchor or session navigation, or the evidence a request shows changes;
 `TestContextVersionPinsItsRules` fails until it is recorded. A refactor that
 the frozen-request corpus proves byte-identical keeps the version, and a new
 version never rewrites frozen bytes.

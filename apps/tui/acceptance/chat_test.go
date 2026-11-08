@@ -3,6 +3,7 @@
 package acceptance
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,14 +37,14 @@ func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
 	if strings.Contains(r.stderr, "level=INFO") {
 		t.Fatalf("info logs in chat: %s", r.stderr)
 	}
-	if p := f.model.prompts(1); len(p) != 2 || !strings.Contains(p[1], "first question") || !strings.Contains(p[1], "first answer") {
-		t.Fatalf("second prompt lacks the dialogue: %q", p)
+	if p := f.model.prompts(1); len(p) != 2 || !strings.Contains(p[1], "Previous run: /canti/runs/") || !strings.Contains(p[1], block) {
+		t.Fatalf("second prompt lacks current task or prior navigation: %q", p)
 	}
 	_, wait = f.startWith(strings.NewReader("third question"), nil, tuiCommand, "-session", s.Run.SessionID)
 	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
-	if s := f.status(); s.Run.SessionSeq != 3 || s.Run.Constraints != "Be brief" || !strings.Contains(f.model.prompts(1)[2], "EN\n END") {
+	if current := f.status(); current.Run.SessionSeq != 3 || current.Run.Constraints != "Be brief" || !strings.Contains(f.model.prompts(1)[2], "Previous run: /canti/runs/"+s.Run.ID+"/") {
 		t.Fatalf("continued session: %+v", s.Run)
 	}
 }
@@ -62,10 +63,10 @@ func TestChatShowsBuiltinSteps(t *testing.T) {
 
 func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "done"}})
-	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", 1<<20)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, tuiCommand, "-context-bytes", "81600")
+	_, wait := f.startWith(strings.NewReader("\xff\n"+strings.Repeat("g", 32768+1)+"\n"+strings.Repeat("g", 20000)+"\n<<EOF and more\nok\n"), nil, tuiCommand, "-request-bytes", "20000")
 	r := wait()
 	if r.code != exitOK || r.stdout != "done\n" || !strings.Contains(r.stderr, "input and -constraints must be valid UTF-8") || !strings.Contains(r.stderr, "input must be at most") ||
-		!strings.Contains(r.stderr, "canti-tui: the input does not fit -context-bytes (harness: ") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
+		!strings.Contains(r.stderr, "canti-tui: the input does not fit -request-bytes (") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
 		t.Fatalf("chat: %+v", r)
 	}
 	if s := f.status(); s.Run.SessionSeq != 1 {
@@ -113,7 +114,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if r.code != exitError || strings.Contains(r.stderr, "> ") {
 		t.Fatalf("unreadable journal: %+v", r)
 	}
-	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-context-bytes", "71600"}} {
+	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-request-bytes", "12000"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, tuiCommand, args...)
 		if r := wait(); r.code != exitUsage && r.code != exitError || strings.Contains(r.stderr, "> ") {
 			t.Fatalf("chat %q: %+v", args, r)
@@ -142,7 +143,7 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "done"}})
 	in, w := io.Pipe()
-	_, wait := f.startWith(in, nil, tuiCommand, "-session", "shared", "-context-bytes", "71600")
+	_, wait := f.startWith(in, nil, tuiCommand, "-session", "shared", "-request-bytes", "12000")
 	io.WriteString(w, "one\n")
 	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
 	// The terminal transition precedes closing the journal and releasing the
@@ -290,9 +291,34 @@ func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 		t.Fatalf("%d step 1 requests", len(p))
 	}
 	c := p[3]
-	first, answer, interrupted, again := strings.Index(c, "first request"), strings.Index(c, "first answer"), strings.Index(c, "interrupted request"), strings.Index(c, "interrupted again")
-	if !strings.Contains(c, "## Goal\nlast request\n") || first < 0 || !(first < answer && answer < interrupted && interrupted < again) ||
-		strings.Count(c, "stopped, reason cancelled, recorded steps 0; no assistant return.") != 2 {
-		t.Fatalf("the input after interrupts lost the dialogue:\n%s", c)
+	if !strings.Contains(c, "## Goal\nlast request\n") || !strings.Contains(c, "Previous run: /canti/runs/") {
+		t.Fatalf("last input lost task/navigation: %s", c)
 	}
+	// Resolve the session chain through published records after interrupted runs.
+	id := f.status().Run.ID
+	for i, want := range []string{"last request", "interrupted again", "interrupted request", "first request"} {
+		root := filepath.Join(f.state, "history", id)
+		checkFile(t, filepath.Join(root, "goal"), want)
+		body, err := os.ReadFile(filepath.Join(root, "session"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var meta struct {
+			Previous string `json:"previous_run_id"`
+		}
+		if err := json.Unmarshal(body, &meta); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 || i == 2 {
+			result, err := os.ReadFile(filepath.Join(root, "result"))
+			if err != nil || !strings.Contains(string(result), "reason: cancelled") {
+				t.Fatalf("lost cancellation evidence: %s, %v", result, err)
+			}
+		}
+		id = meta.Previous
+	}
+	if id != "" {
+		t.Fatal("session chain did not end at first run")
+	}
+
 }

@@ -25,7 +25,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 		t.Run(fmt.Sprintf("max_%d_%s", tc.limit, tc.crash), func(t *testing.T) {
 			f, image := recoveryFixture(t, nil)
 			r := f.cli(nil, "run", "-once", "-goal", "write once and verify after handovers", "-image", image,
-				"-max-steps", strconv.Itoa(tc.limit), "-window-steps", "3", "-wall-time", "3m", "-job-timeout", "10s")
+				"-max-steps", strconv.Itoa(tc.limit), "-wall-time", "3m", "-job-timeout", "10s")
 			if r.code != exitActive {
 				t.Fatalf("freeze: %+v", r)
 			}
@@ -40,10 +40,14 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				case step == 23:
 					d = core.Decision{Kind: core.Return, Payload: "done"}
 				case step%4 == 0:
-					d.Payload = harness.HandoverPrefix + "Verify proof contains once and write result at step 22."
+					d.Payload = harness.FocusPrefix + `{"sources":[]}`
 				}
 				body, _ := json.Marshal(d)
 				f.model.answer(step, 1, reply{text: string(body)})
+				if step%4 == 0 && step < 22 {
+					f.model.answer(step, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+					f.model.answer(step, 2, reply{text: string(body)})
+				}
 				if step == 2 {
 					f.model.answer(step, 1, reply{status: 503, body: "temporary failure"})
 					f.model.answer(step, 2, reply{text: string(body)})
@@ -74,6 +78,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				t.Fatal("restart changed committed facts")
 			}
 			requests, handovers, startedAttempts := 0, 0, 0
+			currentContext := harness.InitialContext()
 			builtin := map[string]bool{}
 			for _, e := range h {
 				if e.State.Limits.MaxSteps != tc.limit {
@@ -94,18 +99,20 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 						t.Fatalf("attempt started out of order: %+v", e.State)
 					}
 				}
+				if e.Kind == "request_rejected" && e.Facts.ContextState != nil {
+					currentContext = *e.Facts.ContextState
+				}
 				if req := e.Facts.Request; req != nil {
 					requests++
-					wantFirst := 1 + (e.State.Step-1)/4*4
-					if req.Window == nil || req.Window.FirstStep != wantFirst {
-						t.Fatalf("window at step %d: %+v", e.State.Step, req.Window)
+					if req.ContextState == nil || !req.ContextState.Equal(currentContext) {
+						t.Fatalf("window at step %d: %+v", e.State.Step, req.ContextState)
 					}
 					if tc.limit == 0 && !bytes.Contains(req.Body, []byte("(unlimited steps)")) {
 						t.Fatal("frozen request lost unlimited progress")
 					}
 				}
 				if o := e.Facts.Outcome; o != nil {
-					if o.Handover != nil {
+					if o.Focus != nil {
 						handovers++
 					}
 					builtin[evEvent[core.Performed](t, e).EffectID] = true
@@ -119,8 +126,8 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				t.Fatalf("started attempts = %d, want %d", startedAttempts, wantStarted)
 			}
 			sent := f.model.requests()
-			if requests != 23 || handovers != 5 || len(sent) != 24 || !bytes.Equal(sent[0], prefix[0].Facts.Request.Body) || !bytes.Equal(sent[1], sent[2]) {
-				t.Fatalf("requests=%d handovers=%d sends=%d; expected 23/5/24 and frozen retry bytes", requests, handovers, len(sent))
+			if requests != 28 || handovers != 5 || len(sent) != 29 || !bytes.Equal(sent[0], prefix[0].Facts.Request.Body) || !bytes.Equal(sent[1], sent[2]) {
+				t.Fatalf("requests=%d handovers=%d sends=%d; expected 28/5/29 and frozen retry bytes", requests, handovers, len(sent))
 			}
 			checkFile(t, filepath.Join(f.workspace, "proof"), "once\n")
 			checkFile(t, filepath.Join(f.workspace, "result"), "verified\n")

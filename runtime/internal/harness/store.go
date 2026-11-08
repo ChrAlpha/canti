@@ -33,7 +33,7 @@ var ErrBrokenChain = errors.New("harness: transition does not extend the committ
 // acknowledgement was lost — while conflicting content must fail and never
 // overwrite. In the same transaction it must apply CheckEffect to every
 // transition EffectTransition accepts, with the committed acceptance of its
-// effect and the window of the request at its From's step and revision,
+// effect and the context of the request at its From's step and revision,
 // failing with ErrFacts and recording nothing when it fails. A concrete store
 // also owns crash safety and workspace ownership,
 // and must provide recovery reads for the latest Snapshot, the frozen request
@@ -64,16 +64,20 @@ type Journal interface {
 	Store
 	Run(ctx context.Context, runID string) (Run, error)
 	Latest(ctx context.Context, runID string) (Snapshot, error)
+	// Context reads the head and context pointer in one snapshot, rejecting a stale expected position.
+	Context(ctx context.Context, expected Snapshot) (ContextState, error)
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
 	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
+	Receipts(ctx context.Context, runID string, before int64, limit int) ([]StepReceipt, error)
 	// Completion returns the step that the transition at seq completed, by a
 	// point read that needs no history scan: ErrNotFound when the run holds
 	// no transition at seq, and ErrIncompatible when the transition there
 	// completes no step or does not decode as one.
 	Completion(ctx context.Context, runID string, seq int64) (StepRecord, error)
+	CompletionAtStep(ctx context.Context, runID string, step int) (StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
 	// SessionRuns returns at most limit runs of the session, newest first,
 	// before session sequence before when positive.
@@ -105,8 +109,8 @@ type Budget struct {
 
 // StepRecord is one completed step as the input builder sees it. Seq is the
 // sequence of the observed, performed, or resolved transition that completed
-// it. A performed step has an Outcome and the Window it committed, if any,
-// and a zero Observation; any other step has an Observation.
+// it. A performed step has an Outcome and a zero Observation; external steps have
+// an Observation. Context mutations live on their authoritative Transition.
 type StepRecord struct {
 	Seq         int64
 	Step        int
@@ -114,7 +118,6 @@ type StepRecord struct {
 	Purpose     string
 	Observation Observation
 	Outcome     *Outcome `json:",omitempty"`
-	Window      *Window  `json:",omitempty"`
 	Resolved    bool
 }
 
@@ -123,8 +126,18 @@ type StepRecord struct {
 // the number of observed, performed, or resolved steps.
 type Totals struct {
 	Usage       Usage
+	Coverage    UsageCoverage
 	OutputBytes int64
 	Steps       int
+}
+
+// UsageCoverage describes settled attempts, including unknown reports and lost
+// sends. Reported totals are retrospective and cannot bound unreported charges.
+type UsageCoverage struct {
+	Attempts      int64 `json:"attempts"`
+	InputReports  int64 `json:"input_reports"`
+	OutputReports int64 `json:"output_reports"`
+	Lost          int64 `json:"lost"`
 }
 
 // Snapshot is the committed position of a run: the state and the sequence of
@@ -161,16 +174,28 @@ type Transition struct {
 // surrounding states, so records carry only content and provenance. Each
 // event permits a fixed subset; Runner.Commit rejects anything else. Action
 // belongs to the ResponseLoaded that accepts an exec decision; Outcome and
-// Window, the window the next step renders when it changes, to Performed.
+// ContextState, the anchor/focus the next request renders when it changes, to Performed.
 type Facts struct {
-	Request     *Request
-	Response    *Response
-	Observation *Observation
-	Action      *Action            `json:",omitempty"`
-	Execution   *ExecutionIdentity `json:",omitempty"`
-	Receipt     *Job               `json:",omitempty"`
-	Resolution  *Resolution        `json:",omitempty"`
-	Outcome     *Outcome           `json:",omitempty"`
-	Window      *Window            `json:",omitempty"`
-	Failure     string
+	Request      *Request
+	Response     *Response
+	Observation  *Observation
+	Action       *Action            `json:",omitempty"`
+	Execution    *ExecutionIdentity `json:",omitempty"`
+	Receipt      *Job               `json:",omitempty"`
+	Resolution   *Resolution        `json:",omitempty"`
+	Outcome      *Outcome           `json:",omitempty"`
+	ContextState *ContextState      `json:",omitempty"`
+	Rejection    *ContextRejection  `json:",omitempty"`
+	Failure      string
+}
+
+// StepReceipt is the bounded historical projection needed by a request.
+// Whole commands and result/evidence bodies stay in the archive and journal.
+type StepReceipt struct {
+	Seq      int64
+	Step     int
+	Purpose  string
+	Status   string
+	ExitCode *int
+	Resolved bool
 }

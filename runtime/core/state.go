@@ -60,7 +60,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 5
+const SemanticsVersion = 6
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -251,6 +251,13 @@ func (s State) Next(event Event) (State, error) {
 			}
 			return s.retry(StopAttemptsExhausted, PhaseRequestFrozen), nil
 		}
+	case RequestRejected:
+		if s.Phase == PhaseRequestSent {
+			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
+				return s, err
+			}
+			return s.retry(StopAttemptsExhausted, PhaseIdle), nil
+		}
 	case ResponseLoaded:
 		if s.Phase == PhaseResponseSaved {
 			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
@@ -344,6 +351,7 @@ func validateEvent(event Event) error {
 		}
 	case ResponseSaved:
 	case ResponseIncomplete:
+	case RequestRejected:
 	case ResponseLoaded:
 		if len(e.Body) == 0 {
 			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)

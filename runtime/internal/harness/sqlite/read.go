@@ -77,8 +77,12 @@ func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.S
 
 // Totals returns the run-wide sums maintained by Commit.
 func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error) {
+	return s.totals(ctx, nil, runID)
+}
+
+func (s *Store) totals(ctx context.Context, tx *sql.Tx, runID string) (harness.Totals, error) {
 	var t harness.Totals
-	err := s.stmts[totalsSQL].QueryRowContext(ctx, runID).Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps)
+	err := s.stmt(ctx, tx, totalsSQL).QueryRowContext(ctx, runID).Scan(&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.OutputBytes, &t.Steps, &t.Coverage.Attempts, &t.Coverage.InputReports, &t.Coverage.OutputReports, &t.Coverage.Lost)
 	return t, missing(err, "run")
 }
 
@@ -153,7 +157,7 @@ func (s *Store) Request(ctx context.Context, runID string, step, rev int) (harne
 
 func (s *Store) request(ctx context.Context, tx *sql.Tx, runID string, step, rev int) (harness.Request, error) {
 	facts, err := decodeFacts(s.stmt(ctx, tx, requestSQL).QueryRowContext(ctx, runID, step, rev))
-	if err == nil && facts.Request == nil {
+	if err == nil && (facts.Request == nil || facts.Request.ContextState == nil) {
 		err = fmt.Errorf("%w: frozen request without a request record", ErrIncompatible)
 	}
 	if err != nil {
@@ -242,27 +246,6 @@ func (s *Store) accepted(ctx context.Context, tx *sql.Tx, runID string, step, at
 	return accepted, nil
 }
 
-// window returns the window of the request frozen at revision rev of step,
-// nil when it records none, without decoding the request body.
-func (s *Store) window(ctx context.Context, tx *sql.Tx, runID string, step, rev int) (*harness.Window, error) {
-	var semantics int
-	var data sql.NullString
-	if err := s.stmt(ctx, tx, windowSQL).QueryRowContext(ctx, runID, step, rev).Scan(&semantics, &data); err != nil {
-		return nil, missing(err, "request")
-	}
-	if err := core.KnownSemantics(semantics); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrIncompatible, err)
-	}
-	if !data.Valid {
-		return nil, nil
-	}
-	var w harness.Window
-	if err := strict(data.String, &w); err != nil {
-		return nil, err
-	}
-	return &w, nil
-}
-
 // Recent returns bounded current-format completions, oldest first.
 func (s *Store) Recent(ctx context.Context, runID string, before int64, limit int) ([]harness.StepRecord, error) {
 	if before <= 0 {
@@ -288,7 +271,11 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 // completes no step or does not decode as a step its version records; a
 // done context and a failed read are returned as they are.
 func (s *Store) Completion(ctx context.Context, runID string, seq int64) (harness.StepRecord, error) {
-	rows, err := s.stmts[completionSQL].QueryContext(ctx, runID, seq)
+	return s.completion(ctx, nil, runID, seq)
+}
+
+func (s *Store) completion(ctx context.Context, tx *sql.Tx, runID string, seq int64) (harness.StepRecord, error) {
+	rows, err := s.stmt(ctx, tx, completionSQL).QueryContext(ctx, runID, seq)
 	if err != nil {
 		return harness.StepRecord{}, err
 	}
@@ -307,6 +294,23 @@ func (s *Store) Completion(ctx context.Context, runID string, seq int64) (harnes
 		return harness.StepRecord{}, err
 	}
 	return step, rows.Close()
+}
+
+// CompletionAtStep resolves one archived step through its bounded unique index.
+func (s *Store) CompletionAtStep(ctx context.Context, runID string, step int) (harness.StepRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq,kind,semantics,from_state,facts FROM transitions INDEXED BY transitions_completion_step
+        WHERE run_id=? AND json_extract(from_state,'$.Step')=? AND kind IN ('observed','resolved','performed')`, runID, step)
+	if err != nil {
+		return harness.StepRecord{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return harness.StepRecord{}, err
+		}
+		return harness.StepRecord{}, harness.ErrNotFound
+	}
+	return scanStep(rows)
 }
 
 // scanStep decodes a row of seq, kind, semantics, from state, and facts of a
@@ -329,7 +333,7 @@ func scanStep(rows *sql.Rows) (harness.StepRecord, error) {
 		return harness.StepRecord{}, fmt.Errorf("%w: a %s transition at seq %d completes no step", ErrIncompatible, kind, seq)
 	}
 	r := harness.StepRecord{Seq: seq, Step: state.Step, Command: state.Decision.Payload, Purpose: state.Decision.Purpose,
-		Outcome: facts.Outcome, Window: facts.Window, Resolved: facts.Resolution != nil && facts.Resolution.Source == harness.ResolutionOperator}
+		Outcome: facts.Outcome, Resolved: facts.Resolution != nil && facts.Resolution.Source == harness.ResolutionOperator}
 	if facts.Observation != nil {
 		r.Observation = *facts.Observation
 	}

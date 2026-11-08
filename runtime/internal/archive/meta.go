@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -13,11 +14,13 @@ import (
 // CommandFile, the whole decision purpose as PurposeFile, and the preview as
 // PreviewFile. A step published before PurposeFile existed lacks it.
 const (
-	StepsDir    = "steps"
-	MetaFile    = "meta"
-	CommandFile = "command"
-	PurposeFile = "purpose"
-	PreviewFile = "preview"
+	StepsDir     = "steps"
+	MetaFile     = "meta"
+	CommandFile  = "command"
+	PurposeFile  = "purpose"
+	PreviewFile  = "preview"
+	EvidenceFile = "evidence.json"
+	EvidenceDir  = "evidence"
 )
 
 const unavailable = "unavailable"
@@ -76,4 +79,67 @@ func decodeOutput(meta []byte, step int) (string, int64, bool, error) {
 		return "", 0, false, errors.New("invalid original step metadata")
 	}
 	return fields["output"], bytes, complete, nil
+}
+
+// EvidenceManifest makes the exact retrieval observation independently
+// navigable in the archive. Files contain the committed bytes, never rereads.
+type EvidenceManifest struct {
+	Seq          int64            `json:"seq"`
+	Query        RetrievalQuery   `json:"query"`
+	Sources      []EvidenceSource `json:"sources"`
+	Entries      []string         `json:"entries,omitempty"`
+	NextOffset   int64            `json:"next_offset"`
+	NextCursor   string           `json:"next_cursor,omitempty"`
+	More         bool             `json:"more"`
+	Incomplete   bool             `json:"incomplete,omitempty"`
+	SkippedCount int              `json:"skipped_count,omitempty"`
+	Skipped      []Skip           `json:"skipped,omitempty"`
+	Error        string           `json:"error,omitempty"`
+}
+
+type EvidenceSource struct {
+	SourceRange
+	Source int    `json:"source"`
+	File   string `json:"file"`
+}
+
+func EvidencePath(source int) string { return fmt.Sprintf("%s/%04d", EvidenceDir, source) }
+
+// SnapshotTarget is one native historical retrieval snapshot address.
+// Source is nil for its manifest or evidence directory.
+type SnapshotTarget struct {
+	RunID  string
+	Step   int
+	Source *int
+}
+
+// ParseSnapshotPath recognizes only canonical archive layout paths. The safe
+// reader still validates and opens the path after the harness repairs it.
+func ParseSnapshotPath(name string) (SnapshotTarget, bool) {
+	var target SnapshotTarget
+	if path.Clean(name) != name {
+		return target, false
+	}
+	relative, ok := strings.CutPrefix(name, RunsRoot+"/")
+	if !ok {
+		return target, false
+	}
+	parts := strings.Split(relative, "/")
+	if len(parts) != 4 && len(parts) != 5 || parts[0] == "" || parts[1] != StepsDir {
+		return target, false
+	}
+	step, err := strconv.Atoi(parts[2])
+	if err != nil || step < 1 || StepDir(step) != parts[2] {
+		return target, false
+	}
+	target = SnapshotTarget{RunID: parts[0], Step: step}
+	if len(parts) == 4 {
+		return target, parts[3] == EvidenceFile || parts[3] == EvidenceDir
+	}
+	source, err := strconv.Atoi(parts[4])
+	if parts[3] != EvidenceDir || err != nil || source < 0 || source >= MaxSources || parts[4] != fmt.Sprintf("%04d", source) {
+		return SnapshotTarget{}, false
+	}
+	target.Source = &source
+	return target, true
 }

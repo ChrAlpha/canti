@@ -237,7 +237,6 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 		Environment: corpusEnvironment, History: history,
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
 		Reader: reader, DecisionTool: sc.tool,
-		WindowSteps: sc.windowSteps, WindowBytes: sc.windowBytes, HandoverBytes: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)

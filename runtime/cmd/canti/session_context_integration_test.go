@@ -25,7 +25,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	goal := "Correct the earlier answer: use sync. " + strings.Repeat("Keep the current requirement. ", 10)
 	constraints := "Preserve the workspace result. Do not restore async."
 	start := f.cli(nil, "run", "-once", "-session", "s", "-input", "second", "-goal", goal, "-constraints", constraints,
-		"-image", image, "-context-bytes", "98304", "-window-steps", "1", "-max-steps", "7", "-wall-time", "3m", "-job-timeout", "10s")
+		"-image", image, "-request-bytes", "98304", "-max-steps", "7", "-wall-time", "3m", "-job-timeout", "10s")
 	if start.code != exitActive {
 		t.Fatalf("session start: %+v", start)
 	}
@@ -39,7 +39,8 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	}
 	decision(1, 2, core.Decision{Kind: core.Exec, Payload: "printf async > mode.txt"})
 	handover := func(step, first int) {
-		decision(step, 1, core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "Current correction is sync. Verify the workspace and finish the request."})
+		f.model.answer(step, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
+		decision(step, 2, core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`})
 	}
 	handover(2, 1)
 	f.model.answer(3, 1, reply{status: 503, body: "temporary transport failure"})
@@ -87,11 +88,11 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(envelope.System)+len(prompt) > 98304 || !strings.Contains(prompt, constraints) ||
-			!strings.Contains(prompt, priorAnswer) || !strings.Contains(prompt, priorID) {
+			strings.Contains(prompt, priorAnswer) || !strings.Contains(prompt, priorID) {
 			t.Fatalf("step %d lost the corrected goal, constraints, historical pair, or prompt budget (%d bytes)", step, len(envelope.System)+len(prompt))
 		}
 		if step == 3 {
-			if !strings.Contains(prompt, "This window begins at step 3") || strings.Contains(prompt, "### Step 1\n") {
+			if !strings.Contains(prompt, "first step 2") || strings.Contains(prompt, "### Step 1 (sequence ") {
 				t.Fatalf("fresh window copied earlier steps: %s", prompt)
 			}
 			retry = append(retry, body)
@@ -106,7 +107,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	}
 	var executed []entry
 	for _, e := range f.history("-run", runID) {
-		if !strings.HasPrefix(e.State.Decision.Payload, "canti:handover") {
+		if !strings.HasPrefix(e.State.Decision.Payload, "canti:") {
 			executed = append(executed, e)
 		}
 	}
@@ -117,7 +118,7 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 		t.Fatalf("third session run: %+v", r)
 	}
 	decision(1, 3, core.Decision{Kind: core.Exec, Payload: "cat " + steps + "00000004/command " + steps + "00000003/purpose"})
-	decision(2, 2, core.Decision{Kind: core.Return, Payload: "Continued from the handover."})
+	decision(2, 3, core.Decision{Kind: core.Return, Payload: "Continued from the handover."})
 	for n := 0; f.status().Phase != core.PhaseReturned; n++ {
 		if r := f.cli(nil, "resume", "-once"); n == 20 || r.code != exitActive && r.code != exitOK {
 			t.Fatalf("third session run, process %d: %+v", n, r)
@@ -129,14 +130,12 @@ func TestSessionDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 			third = append(third, prompt)
 		}
 	}
-	path := "Latest handover of this run, agent-written and possibly overtaken by later steps: " + steps + "00000004/command\n"
-	if len(third) != 2 || !strings.Contains(third[0], "; returned):\n"+path) ||
-		!strings.Contains(third[1], "Current correction is sync. Verify the workspace and finish the request.") || !strings.Contains(third[1], "Switch the mode from async to sync.") {
-		t.Fatalf("the third run did not find and read the handover and purpose records from its container: %q", third)
+	if len(third) != 2 || !strings.Contains(third[0], "/canti/runs/"+runID+"/") || !strings.Contains(third[1], `canti:focus {"sources":[]}`) || !strings.Contains(third[1], "Switch the mode from async to sync.") {
+		t.Fatalf("native prior records not recovered: %q", third)
 	}
 	report := f.cli(nil, "context", "-text", "-step", "1", "-revision", "1")
-	if report.code != exitOK || !strings.Contains(report.stdout, "Earlier dialogue: run "+runID+" sequence 2, returned, goal included true, latest handover step 4\n") {
-		t.Fatalf("the context report of the third run does not name the handover step it points to: %+v", report)
+	if report.code != exitOK || !strings.Contains(report.stdout, "Previous session run: "+runID) {
+		t.Fatalf("session navigation not reported: %+v", report)
 	}
 	checkReleased(t, f, append(executed, f.history("-run", f.status().Run.ID)...))
 	t.Logf("SCRIPTED_SESSION context_limit=98304 previous_answer_bytes=%d windows=3 step3_transport_attempts=2 continued_from_handover_step=4; real CLI/SQLite/Docker, process-per-transition resume", len(priorAnswer))
@@ -150,22 +149,34 @@ func TestOversizedPreviousAnswerKeepsSessionNavigation(t *testing.T) {
 	priorID := f.status().Run.ID
 	short, _ := json.Marshal(core.Decision{Kind: core.Return, Payload: "short confirmed answer"})
 	f.model.answer(1, 2, reply{text: string(short)})
-	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "new request", "-context-bytes", "98304"); r.code != exitOK {
+	if r := f.cli(nil, "run", "-session", "s", "-input", "second", "-goal", "new request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("navigation-only linked run: %+v", r)
 	}
-	if r := f.cli(nil, "run", "-session", "s", "-input", "third", "-goal", "third request", "-context-bytes", "98304"); r.code != exitOK {
+	secondID := f.status().Run.ID
+	if r := f.cli(nil, "run", "-session", "s", "-input", "third", "-goal", "third request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("projected linked run: %+v", r)
 	}
-	if r := f.cli(nil, "run", "-goal", "standalone request", "-context-bytes", "98304"); r.code != exitOK {
+	thirdID := f.status().Run.ID
+	if r := f.cli(nil, "run", "-goal", "standalone request", "-request-bytes", "98304"); r.code != exitOK {
 		t.Fatalf("standalone: %+v", r)
 	}
 	prompts := f.model.prompts(1)
-	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) || !strings.Contains(prompts[1], priorID+"/session") ||
-		strings.Contains(prompts[1], "short confirmed answer") || !strings.Contains(prompts[2], "short confirmed answer") ||
-		strings.Contains(prompts[2], strings.Repeat("X", 100)) || strings.Contains(prompts[3], "short confirmed answer") ||
-		strings.Contains(prompts[3], "/session") {
-		t.Fatal("oversized navigation, projected dialogue, and standalone inputs were not distinct")
+	if len(prompts) != 4 || strings.Contains(prompts[1], strings.Repeat("X", 100)) || strings.Contains(prompts[2], strings.Repeat("X", 100)) ||
+		strings.Contains(prompts[3], "short confirmed answer") || strings.Contains(prompts[3], "/session") {
+		t.Fatal("oversized history or session navigation contaminated current/standalone input")
 	}
+	checkSessionLink(t, f, prompts[1], secondID, priorID, "new request", 2)
+	checkSessionLink(t, f, prompts[2], thirdID, secondID, "third request", 3)
+	if got := archiveText(t, f, "/canti/runs/"+priorID+"/result"); got != "phase: returned\n\n"+strings.Repeat("X", 70000) {
+		t.Fatalf("oversized prior result lost exact bytes: %d bytes", len(got))
+	}
+	if got := archiveText(t, f, "/canti/runs/"+priorID+"/goal"); got != "historical request" {
+		t.Fatalf("prior goal=%q", got)
+	}
+	if got := archiveText(t, f, "/canti/runs/"+secondID+"/result"); got != "phase: returned\n\nshort confirmed answer" {
+		t.Fatalf("recent prior result=%q", got)
+	}
+
 	for _, body := range f.model.requests() {
 		_, prompt, err := promptOf(body)
 		if err != nil {

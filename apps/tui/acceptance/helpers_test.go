@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
 // scriptedModel serves the Anthropic Messages API at /v1/messages and the
@@ -426,10 +428,11 @@ type status struct {
 	Decision   *decision       `json:"decision"`
 	EffectID   string          `json:"effect_id"`
 	Totals     struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		OutputBytes  int64 `json:"output_bytes"`
-		Steps        int   `json:"steps"`
+		Coverage     hostrpc.UsageCoverage `json:"coverage"`
+		InputTokens  int64                 `json:"input_tokens"`
+		OutputTokens int64                 `json:"output_tokens"`
+		OutputBytes  int64                 `json:"output_bytes"`
+		Steps        int                   `json:"steps"`
 	} `json:"totals"`
 }
 
@@ -554,4 +557,71 @@ func toolReply(decisions ...decision) string {
 	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
 		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
 	return string(data)
+}
+
+// archiveText reads the published read-only archive layout through a bounded
+// filesystem reader. Acceptance imports only the public SDK, never runtime internals.
+func archiveText(t *testing.T, f *fixture, name string) string {
+	t.Helper()
+	relative, ok := strings.CutPrefix(name, "/canti/runs/")
+	if !ok || filepath.Clean(relative) != relative || strings.HasPrefix(relative, "../") {
+		t.Fatalf("invalid published archive path %q", name)
+	}
+	root, err := os.OpenRoot(filepath.Join(f.state, "history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	file, err := root.Open(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var result strings.Builder
+	page := make([]byte, 8192)
+	for n := 0; n < 128; n++ {
+		count, err := file.Read(page)
+		result.Write(page[:count])
+		if err == io.EOF {
+			return result.String()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("published archive exceeds 1MiB read bound")
+	return ""
+}
+
+type archivedSession struct {
+	SessionID     string `json:"session_id"`
+	Sequence      int64  `json:"sequence"`
+	InputID       string `json:"input_id"`
+	PreviousRunID string `json:"previous_run_id"`
+}
+
+func archiveSession(t *testing.T, f *fixture, run string) archivedSession {
+	t.Helper()
+	var s archivedSession
+	if err := json.Unmarshal([]byte(archiveText(t, f, "/canti/runs/"+run+"/session")), &s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+func checkSessionLink(t *testing.T, f *fixture, prompt, current, previous, goal string, seq int64) {
+	t.Helper()
+	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/session") || !strings.Contains(prompt, "Previous run: /canti/runs/"+previous+"/.") {
+		t.Fatalf("missing task/session navigation: %s", prompt)
+	}
+	link, prior := archiveSession(t, f, current), archiveSession(t, f, previous)
+	if link.PreviousRunID != previous || link.Sequence != seq || prior.Sequence != seq-1 || link.SessionID == "" || prior.SessionID != link.SessionID || link.InputID == "" || prior.InputID == "" || link.InputID == prior.InputID {
+		t.Fatalf("session chain identity: current=%+v prior=%+v", link, prior)
+	}
+}
+func checkFile(t *testing.T, name, want string) {
+	t.Helper()
+	body, err := os.ReadFile(name)
+	if err != nil || string(body) != want {
+		t.Fatalf("%s=%q,%v; want%q", name, body, err, want)
+	}
 }

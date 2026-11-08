@@ -422,10 +422,11 @@ type status struct {
 	Decision   *core.Decision  `json:"decision"`
 	EffectID   string          `json:"effect_id"`
 	Totals     struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		OutputBytes  int64 `json:"output_bytes"`
-		Steps        int   `json:"steps"`
+		Coverage     harness.UsageCoverage `json:"coverage"`
+		InputTokens  int64                 `json:"input_tokens"`
+		OutputTokens int64                 `json:"output_tokens"`
+		OutputBytes  int64                 `json:"output_bytes"`
+		Steps        int                   `json:"steps"`
 	} `json:"totals"`
 }
 
@@ -545,6 +546,13 @@ func toolReply(decisions ...core.Decision) string {
 	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
 		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
 	return string(data)
+}
+
+func checkFile(t *testing.T, path, want string) {
+	t.Helper()
+	if data, err := os.ReadFile(path); err != nil || string(data) != want {
+		t.Errorf("%s = %q, %v; want %q", filepath.Base(path), data, err, want)
+	}
 }
 
 func holdFirstAnswer(t *testing.T, f *fixture) (url string, release func()) {

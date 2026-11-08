@@ -16,7 +16,7 @@ import "log/slog"
 // versions refuse each other. Versions 1 and 2 are recorded in testdata/v1
 // and testdata/v2; version 5 adds validation and cursor-free initial progress
 // requests. Records live with the runtime server contract tests.
-const Protocol = 5
+const Protocol = 6
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -116,12 +116,9 @@ type Spec struct {
 	Structured     bool   `json:"structured"`
 	DecisionFormat string `json:"decision_format"`
 	Fallbacks      bool   `json:"fallbacks"`
-	ContextBytes   int    `json:"context_bytes"`
+	RequestBytes   int    `json:"request_bytes"`
 	ContextVersion int    `json:"context_version"`
 	HistoryImports string `json:"history_imports"`
-	WindowSteps    int    `json:"window_steps"`
-	WindowBytes    int    `json:"window_bytes"`
-	HandoverBytes  int    `json:"handover_bytes"`
 	MaxSteps       int    `json:"max_steps"`
 	MaxAttempts    int    `json:"max_attempts"`
 	WallTime       string `json:"wall_time"`
@@ -218,10 +215,21 @@ type Run struct {
 
 // Totals are a run's measured usage.
 type Totals struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	OutputBytes  int64 `json:"output_bytes"`
-	Steps        int   `json:"steps"`
+	InputTokens  int64         `json:"input_tokens"`
+	OutputTokens int64         `json:"output_tokens"`
+	OutputBytes  int64         `json:"output_bytes"`
+	Steps        int           `json:"steps"`
+	Coverage     UsageCoverage `json:"coverage"`
+}
+
+// UsageCoverage describes how many settled/lost attempts supplied each token
+// count. Totals sum received counts only; missing counts remain unknown and
+// a retrospective reported-token threshold cannot guarantee a charge ceiling.
+type UsageCoverage struct {
+	Attempts      int64 `json:"attempts"`
+	InputReports  int64 `json:"input_reports"`
+	OutputReports int64 `json:"output_reports"`
+	Lost          int64 `json:"lost"`
 }
 
 // Budget is a run's budget; durations are Go duration strings.
@@ -258,7 +266,7 @@ type Item struct {
 	Preview    string   `json:"preview,omitempty"`
 	Detail     string   `json:"detail,omitempty"`
 	Outcome    *Outcome `json:"outcome,omitempty"`
-	Window     int      `json:"window,omitempty"`
+	AnchorSeq  int64    `json:"anchor_seq,omitempty"`
 	StopReason string   `json:"stop_reason,omitempty"`
 	Failure    string   `json:"failure,omitempty"`
 	Truncated  bool     `json:"truncated,omitempty"`
@@ -272,7 +280,8 @@ type Outcome struct {
 	RetrievalError string `json:"retrieval_error,omitempty"`
 	Sources        int    `json:"sources,omitempty"`
 	Entries        int    `json:"entries,omitempty"`
-	Handover       bool   `json:"handover,omitempty"`
+	Focus          bool   `json:"focus,omitempty"`
+	FocusSources   int    `json:"focus_sources,omitempty"`
 }
 
 // Wait is what a wait observed: the cursor of the run's latest transition,

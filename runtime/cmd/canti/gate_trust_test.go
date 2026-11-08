@@ -254,7 +254,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	f, image := evFixture(t, map[int]core.Decision{
 		1: {Kind: core.Exec, Payload: "echo fact-one"},
 		2: {Kind: core.Exec, Payload: tamper},
-		3: {Kind: core.Return, Payload: "done"},
+		5: {Kind: core.Return, Payload: "done"},
 	})
 	r := f.cli(nil, "run", "-once", "-goal", "g", "-image", image)
 	for n := 1; r.code == exitActive && f.status().Step < 2; n++ {
@@ -276,6 +276,13 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 	if data, err := os.ReadFile(artifact); err != nil || string(data) != "fact-one\n" || fact.Output.Bytes != 9 || !fact.Output.Available {
 		t.Fatalf("step 1 artifact = %q, %v; observation %+v", data, err, fact)
 	}
+	runID := h[0].State.RunID
+	metaPath := fmt.Sprintf("/canti/runs/%s/steps/00000001/meta", runID)
+	originalPath := path.Join(archive.ArtifactsRoot, fact.Output.Path)
+	for step, source := range map[int]string{3: metaPath, 4: originalPath} {
+		decision, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"read","path":"` + source + `","reason":"Inspect trusted original output after attempted forgery."}`})
+		f.model.answer(step, 1, reply{text: string(decision)})
+	}
 	if r := f.cli(nil, "resume"); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
@@ -284,7 +291,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 		t.Errorf("the committed history changed:\nbefore: %s\nafter: %s", before.stdout, after.stdout)
 	}
 	h = f.history()
-	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, evReturn)) {
+	if !slices.Equal(kinds(h), slices.Concat(evStep, evStep, append(slices.Clone(evReturn), "performed"), append(slices.Clone(evReturn), "performed"), evReturn)) {
 		t.Fatalf("history = %q", kinds(h))
 	}
 	tampered := h[9].Facts.Observation
@@ -304,13 +311,28 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 			t.Errorf("workspace %s = %q, %v", name, data, err)
 		}
 	}
-	ref := fmt.Sprintf("Output: 9 bytes, complete, at %s", path.Join(archive.ArtifactsRoot, fact.Output.Path))
-	if p := f.model.prompts(3); len(p) != 1 || !strings.Contains(p[0], ref) || !strings.Contains(p[0], "fact-one") {
-		t.Errorf("step 3 prompt lacks %q: %q", ref, p)
+	if p := f.model.prompts(3); len(p) != 1 || !strings.Contains(p[0], fmt.Sprintf("Source: /canti/runs/%s/steps/00000001", runID)) {
+		t.Fatalf("trusted original navigation missing: %q", p)
 	}
-	if s := f.status(); s.Phase != core.PhaseReturned || s.Totals.Steps != 2 {
+	if p := f.model.prompts(4); len(p) != 1 || !strings.Contains(p[0], fact.Output.Path) {
+		t.Fatalf("native metadata did not expose original artifact: %q", p)
+	}
+	if p := f.model.prompts(5); len(p) != 1 || !strings.Contains(p[0], "fact-one\n") || strings.Contains(p[0], "forged\n") {
+		t.Fatalf("trusted native result lost/replaced: %q", p)
+	}
+	outcome := latestOutcome(t, h)
+	if outcome.Retrieval == nil || len(outcome.Retrieval.Sources) != 1 || outcome.Retrieval.Sources[0].Path != originalPath ||
+		len(outcome.Retrieval.Evidence) != 1 || outcome.Retrieval.Evidence[0] != "fact-one\n" {
+		t.Fatalf("wrong original native evidence: %+v", outcome)
+	}
+	if got := archiveText(t, f, metaPath); !strings.Contains(got, fact.Output.Path) {
+		t.Fatalf("original metadata changed: %s", got)
+	}
+	if s := f.status(); s.Phase != core.PhaseReturned || s.Totals.Steps != 4 {
 		t.Errorf("status = %+v", s)
 	}
+	checkReplay(t, runID, h)
+
 	checkReleased(t, f, h)
 	evLog(t, image, "trust boundary (facts)", "step 2 runs rm -rf /canti/artifacts/*, writes into /canti/artifacts, and forges canti.db and artifacts/output in /workspace",
 		"removal and write fail read-only; committed history is an unchanged prefix; step 1 artifact intact; forgeries stay in the workspace",

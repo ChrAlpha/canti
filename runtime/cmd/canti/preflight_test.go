@@ -26,8 +26,8 @@ func testPreflightValidation(t *testing.T) hostrpc.Validation {
 			Spec: hostrpc.Spec{
 				Workspace: workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g",
 				Pids: 512, OutputLimit: 8 << 20, API: "openai-responses", Model: "qa-model",
-				MaxTokens: 16000, Structured: true, ContextBytes: 256 << 10,
-				HandoverBytes: 2048, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m",
+				MaxTokens: 16000, Structured: true, RequestBytes: 256 << 10,
+				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m",
 				OutputBudget: 256 << 20, JobTimeout: "10m",
 			},
 		},
@@ -78,7 +78,7 @@ func TestPreflightRejectsInvalidSpecsWithoutCreatingState(t *testing.T) {
 		{"CPU", func(v *hostrpc.Validation) { v.Submission.Spec.CPUs = "0.0000000001" }, false},
 		{"memory", func(v *hostrpc.Validation) { v.Submission.Spec.Memory = "1x" }, false},
 		{"provider", func(v *hostrpc.Validation) { v.Binding.Provider = "relative-provider" }, false},
-		{"context", func(v *hostrpc.Validation) { v.Submission.Spec.ContextBytes = 1 }, false},
+		{"context", func(v *hostrpc.Validation) { v.Submission.Spec.RequestBytes = 1 }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			validation := testPreflightValidation(t)

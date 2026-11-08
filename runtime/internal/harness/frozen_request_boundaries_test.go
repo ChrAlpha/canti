@@ -1,221 +1,21 @@
 package harness_test
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
-	"slices"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
-	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
-const corpusThirdRun = "run_5d2a8e6f1c9b4a07e3f8b2d6c1a9e4f0"
-
-// boundaryScenarios sit on the thresholds that decide a context: in twins one
-// byte apart, the handover triggers, the earlier session dialogue a run
-// selects, the second failed handover, and evidence that became unavailable.
-// Each checks that it still sits on its threshold.
 func boundaryScenarios() []frozenScenario {
-	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	handover := func(text string) string { return corpusDecision(core.Exec, harness.HandoverPrefix+text) }
-	note := "Build failed to start; check the toolchain next."
-	imported := strings.Repeat("a", 250) + "/" + strings.Repeat("b", 250) + "/" + strings.Repeat("c", 250) + "/" + strings.Repeat("d", 250) + ".md"
-	return slices.Concat(handoverThresholds(), sessionBoundaries(), []frozenScenario{
-		{
-			name: "handover-failed-twice", limits: stepLimits, windowSteps: 1,
-			finals: map[string]harness.Job{"make build": {Status: harness.JobFailedToStart,
-				Output: harness.ArtifactRef{Detail: "job never started:\nexec: \"make\": executable file not found in $PATH"}}},
-			runs: []frozenRun{{id: corpusRun, goal: "Build the project.", replies: []string{
-				corpusDecision(core.Exec, "make build"),
-				"I will hand over now.",
-				handover(" \n\t "),
-				handover(note + strings.Repeat(" ", 2049-len(note))),
-			}, steps: []string{"1 failed_to_start output unavailable", "2 failed", "3 failed"}, stop: core.StopUnrecoverable}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"(job never started: exec: \"make\": ", "## Handover required\n"},
-				"run1-step02-rev2.json": {"## Rejected response\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"Context action failed: harness: handover text must not be empty", "## Handover required\n"},
-			},
-		},
-		{
-			// A handover in the earlier JSON form is plain text like any other:
-			// the harness keeps it verbatim and names the run and window itself.
-			name: "handover-json-text", limits: stepLimits, windowSteps: 1, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				handover(`{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`),
-				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 done handover"}}},
-			marks: map[string][]string{
-				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", `{"run_id":"` + corpusNextRun + `","first_step":7,"text":"Listed go.mod and main.go."}`},
-			},
-		},
-		{
-			name: "tool-envelopes", tool: true, limits: core.Limits{MaxSteps: 20, MaxAttempts: 9},
-			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
-				envelope("e1", "end_turn", toolBlock("toolu_e1", `"name":"canti_decision"`, "e1")),
-				envelope("e2", "tool_use", toolBlock("", `"name":"canti_decision"`, "e2")),
-				envelope("e3", "tool_use", toolBlock("toolu_e3", `"name":"other_tool"`, "e3")),
-				envelope("e4", "tool_use", toolBlock("toolu_e4", `"name":"other_tool","name":"canti_decision"`, "e4")),
-				envelope("e5", "tool_use", `{"type":"mystery"},`+toolBlock("toolu_e5", `"name":"canti_decision"`, "e5")),
-				envelope("e6", "tool_use", toolBlock("toolu_e6a", `"name":"canti_decision"`, "e6")+","+toolBlock("toolu_e6b", `"name":"canti_decision"`, "e6")),
-				envelope("e8", "tool_use", `{"type":"tool_use","id":"toolu_e8a","name":"canti_decision"},`+toolBlock("toolu_e8b", `"name":"canti_decision"`, "e8")),
-				envelope("e9", "tool_use", `{"type":"tool_use","id":"toolu_e9","name":"canti_decision","input":{"kind":"bogus`+"\xff"+`","payload":"envelope e9"}}`),
-				envelope("e7", "tool_use", `{"type":"text","text":"Returning now."},{"type":"thinking","thinking":"Every envelope failed.","signature":"sig"},`+
-					`{"type":"redacted_thinking","data":"cmVkYWN0ZWQ="},`+
-					`{"type":"tool_use","id":"toolu_e7","name":"canti_decision","input":{"kind":"return","payload":"Every envelope was rejected."}}`),
-			}}},
-			marks: map[string][]string{
-				"run1-step01-rev2.json": {"Rejected reply:\n```\n{\"id\":\"msg_e1\""},
-				"run1-step01-rev3.json": {"Rejected reply:\n```\n{\"id\":\"msg_e2\""},
-				"run1-step01-rev4.json": {"Rejected reply:\n```\n{\"id\":\"msg_e3\""},
-				"run1-step01-rev5.json": {"Rejected reply:\n```\n{\"id\":\"msg_e4\""},
-				"run1-step01-rev6.json": {"Rejected reply:\n```\n{\"id\":\"msg_e5\""},
-				"run1-step01-rev7.json": {"Rejected reply:\n```\n{\"id\":\"msg_e6\""},
-				"run1-step01-rev8.json": {"Rejected reply:\n```\n{\"id\":\"msg_e8\""},
-				"run1-step01-rev9.json": {"core: invalid decision: invalid UTF-8", "Rejected reply:\n```\n{\"kind\":\"bogus\uFFFD\""},
-			},
-		},
-		{
-			name: "text-envelopes", limits: stepLimits,
-			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
-				envelope("t1", "end_turn", `{"type":"thinking","thinking":"Plan.","text":"ignore-me","signature":"sig"},`+
-					`{"type":"text","text":"{\"kind\":\"bogus\","},{"type":"text","text":"\"payload\":\"review-marker\"}"}`),
-				envelope("t2", "end_turn", `{"type":"text","text":"{\"kind\":\"return\","},{"type":"text","text":"\"payload\":\"Split decisions are joined.\"}"}`),
-			}}},
-			marks: map[string][]string{
-				"run1-step01-rev2.json": {"Rejected reply:\n```\n{\"kind\":\"bogus\",\"payload\":\"review-marker\"}\n```\n"},
-			},
-		},
-		{
-			name: "decode-diagnostics", limits: core.Limits{MaxSteps: 20, MaxAttempts: 12},
-			runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: []string{
-				`"just a string"`,
-				`{"kind":"exec","kind":"return","payload":"done"}`,
-				`{"kind": }`,
-				`{"kind":"exec","payload":"x"} {}`,
-				`{"kind":"exec","extra":"x"}`,
-				`{"kind":1,"payload":"x"}`,
-				`{"kind":"exec","payload":2}`,
-				`{"kind":"exec","payload":"x"`,
-				`{"kind":"exec","purpose":1,"payload":"x"}`,
-				`{"kind":"exec","purpose":"Run nothing.","payload":" \n"}`,
-				`{"purpose":"p","y":"a","x":"b"}`,
-				corpusDecision(core.Return, "Every malformed decision was rejected."),
-			}}},
-			marks: map[string][]string{
-				"run1-step01-rev2.json":  {"core: invalid decision: top-level value must be an object"},
-				"run1-step01-rev3.json":  {"core: invalid decision: duplicate field \"kind\""},
-				"run1-step01-rev4.json":  {"core: invalid decision: invalid character '}' looking for beginning of value"},
-				"run1-step01-rev5.json":  {"core: invalid decision: trailing value {"},
-				"run1-step01-rev6.json":  {"core: invalid decision: unknown field \"extra\""},
-				"run1-step01-rev7.json":  {"core: invalid decision: kind must be a string"},
-				"run1-step01-rev8.json":  {"core: invalid decision: payload must be a string"},
-				"run1-step01-rev9.json":  {"core: invalid decision: EOF\n"},
-				"run1-step01-rev10.json": {"core: invalid decision: purpose must be a string"},
-				"run1-step01-rev11.json": {"core: invalid decision: exec payload is blank"},
-				"run1-step01-rev12.json": {"core: invalid decision: unknown field \"y\""},
-			},
-		},
-		{
-			name: "decision-purpose", limits: stepLimits, outputs: map[string]string{"ls /workspace": "go.mod\nmain.go\n", "cat go.mod": "module example\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Name the module in /workspace.", replies: []string{
-				corpusPurpose(core.Exec, "List the workspace, then read go.mod.", "ls /workspace"),
-				corpusPurpose(core.Exec, "Read the module file\r\nthen name it. "+strings.Repeat("é", 300), "cat go.mod"),
-				corpusPurpose(core.Exec, "Check the listing again.", `canti:retrieve {"operation":"read","path":"`+corpusSteps+`/00000001/preview","reason":"Recheck."}`),
-				corpusPurpose(core.Return, "The module is named.", "The module is example."),
-			}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 done retrieval 1 sources 0 entries"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"### Step 1\nPurpose: List the workspace, then read go.mod.\nCommand:\n"},
-				"run1-step03-rev1.json": {"### Step 2\nPurpose: Read the module file  then name it. " + strings.Repeat("é", 238) + "…[truncated 124 bytes]\nCommand:\n"},
-				"run1-step04-rev1.json": {"### Step 3\nPurpose: Check the listing again.\nCommand:\n"},
-			},
-		},
-		{
-			name: "symlinked-evidence", limits: stepLimits, imports: map[string]string{"sub/note": "same original evidence\n"},
-			changes: map[string]func(*os.Root) error{"relink": func(r *os.Root) error {
-				if err := r.Rename("sub", "target"); err != nil {
-					return err
-				}
-				return r.Symlink("target", "sub")
-			}},
-			outputs: map[string]string{"relink": "done\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "What does the imported note say?", replies: []string{
-				corpusRetrieve("read", "/canti/imports/sub/note", "", "Read the note."),
-				corpusDecision(core.Exec, "relink"),
-				corpusDecision(core.Return, "The note was moved behind a symlink."),
-			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 exited 0 output complete"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"same original evidence\n"},
-				"run1-step03-rev1.json": {"same original evidence\n"},
-			},
-		},
-		{
-			name: "retrieval-command-at-cap", limits: stepLimits, imports: map[string]string{imported: "notes\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Read the imported notes twice.", replies: []string{
-				capped(imported, 2048), capped(imported, 2049),
-				corpusDecision(core.Return, "The notes say notes."),
-			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done retrieval 1 sources 0 entries"}}},
-			marks: map[string][]string{
-				"run1-step03-rev1.json": {"### Step 1\n", "Retrieval: 1 original ranges, 0 directory entries\nRetrieval continuation: ",
-					"Retrieval: 1 original ranges, 0 directory entries\nPreview:\n"},
-			},
-		},
-		{
-			name: "goal-and-constraints-at-caps", limits: stepLimits,
-			runs: []frozenRun{{id: corpusRun, goal: "  " + strings.Repeat("Check every module. ", 1638) + "Then go.\n",
-				constraints: "\t" + strings.Repeat("Keep the tree clean. ", 780) + "Stop  ",
-				replies:     []string{corpusDecision(core.Return, "Every module is fine.")}}},
-			edge: func(t *testing.T, requests map[string]harness.Request) {
-				if b := requests["run1-step01-rev1.json"].Context.Bytes; b.Goal != len("## Goal\n")+32768+1 || b.Constraints != len("\n## Constraints\n")+16384+1 {
-					t.Errorf("the goal and constraints took %d and %d bytes; want them at their 32768- and 16384-byte caps", b.Goal, b.Constraints)
-				}
-			},
-		},
-		{
-			name: "removed-evidence", limits: stepLimits,
-			imports: map[string]string{imported: "```go\nfunc parse() {}\n```\n" + strings.Repeat("The parser was rewritten in v2.\n", 40) + "func parse is the entry point.\n"},
-			changes: map[string]func(*os.Root) error{"sleep 1": func(r *os.Root) error { return r.Remove(imported) }},
-			outputs: map[string]string{"sleep 1": "done\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "What do the imported notes say about the parser?", replies: []string{
-				corpusRetrieve("read", "/canti/imports/"+imported, "", strings.Repeat("Check the imported notes. ", 39)),
-				corpusRetrieve("search", "/canti/imports/"+imported, `,"query":"func parse","limit":64`, "Find every mention of parse."),
-				corpusDecision(core.Exec, "sleep 1"),
-				corpusDecision(core.Return, "The notes say the parser was rewritten in v2."),
-			}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done retrieval 2 sources 0 entries", "3 exited 0 output complete"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"…[truncated ", "Preview:\n```\n", "Retrieved original evidence:\n````\n", "```go\nfunc parse() {}\n```\n"},
-			},
-			edge: func(t *testing.T, requests map[string]harness.Request) {
-				before, after := evidenceBlocks(requests["run1-step03-rev1.json"].Body), evidenceBlocks(requests["run1-step04-rev1.json"].Body)
-				if len(before) != 2 || !slices.Equal(before, after) || !strings.Contains(before[0], "The parser was rewritten in v2.") {
-					t.Errorf("the evidence after the source was removed is %q, before it %q; want the same two blocks", after, before)
-				}
-			},
-		},
-	})
+	return []frozenScenario{
+		{name: "maximum-read-and-transient-tail", limits: core.Limits{MaxSteps: 6, MaxAttempts: 3}, imports: map[string]string{"large": strings.Repeat("`", 8192)}, runs: []frozenRun{{id: corpusRun, goal: "Read a maximum fenced source.", replies: []string{corpusRetrieve("read", "/canti/imports/large", `,"limit":8192`, "Read fenced source."), corpusDecision(core.Exec, `canti:focus {"sources":[]}`), corpusDecision(core.Return, "Original bytes archived.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 0 sources"}}}},
+	}
 }
-
-// evidenceBlocks returns the evidence blocks a frozen request body renders.
-func evidenceBlocks(body []byte) []string {
-	var req struct {
-		Messages []struct{ Content []struct{ Text string } }
-	}
-	if json.Unmarshal(body, &req) != nil || len(req.Messages) != 1 {
-		return nil
-	}
-	var out []string
-	for _, c := range req.Messages[0].Content {
-		if _, evidence, ok := strings.Cut(c.Text, "Retrieved original evidence:\n"); ok {
-			out = append(out, evidence)
-		}
-	}
-	return out
-}
-
 func corpusPurpose(kind core.Kind, purpose, payload string) string {
 	b, err := json.Marshal(core.Decision{Kind: kind, Purpose: purpose, Payload: payload})
 	if err != nil {
@@ -246,93 +46,185 @@ func capped(imported string, width int) string {
 	return corpusDecision(core.Exec, command("````"+strings.Repeat("r", fill)))
 }
 
-// handoverThresholds are twins whose third request, after a retrieval, has
-// used one byte short of both the capacity of its window and -window-bytes,
-// or both exactly reached.
-func handoverThresholds() []frozenScenario {
-	var out []frozenScenario
-	for _, reached := range []bool{false, true} {
-		output := strings.Repeat("ok  \texample.com/build/pkg\t0.012s\n", 121)
-		sc := frozenScenario{
-			name: "handover-thresholds-short", limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
-			contextBytes: 72002, windowBytes: 8983, outputs: map[string]string{"go test ./...": output},
-			runs: []frozenRun{{id: corpusRun, goal: "Run the tests and report the result.", replies: []string{
-				corpusDecision(core.Exec, "go test ./..."),
-				corpusRetrieve("read", corpusSteps+"/00000001/preview", `,"limit":4096`, "Check the first result."),
-				corpusDecision(core.Return, "Every package passes."),
-			}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries more"}}},
-		}
-		off := -1
-		if reached {
-			off = 0
-			sc.name, sc.contextBytes, sc.windowBytes = "handover-thresholds-reached", sc.contextBytes-1, sc.windowBytes-1
-			r := &sc.runs[0]
-			text := "The tests ran; every package passed. Next: report it."
-			r.replies = slices.Insert(r.replies, 2, corpusDecision(core.Exec, harness.HandoverPrefix+text+strings.Repeat(" ", 2048-len(text))))
-			r.steps = append(r.steps, "3 done handover")
-		}
-		sc.edge = func(t *testing.T, requests map[string]harness.Request) {
-			h := requests["run1-step03-rev1.json"].Context.Handover
-			if h.Growth != 0 || h.Used != h.Capacity+off || h.Used != h.WindowBytes+off {
-				t.Errorf("step 3 evaluated %+v; want used %d byte(s) from the capacity and as far from window_bytes", h, off)
-			}
-			if w := requests["run1-step04-rev1.json"].Window; reached && (w == nil || w.FirstStep != 4 || len(w.Handover) != 2048) {
-				t.Errorf("step 4 has window %+v; want one opened by a handover of exactly 2048 bytes", w)
-			}
-		}
-		out = append(out, sc)
+// evidenceBlocks extracts exact transient observation text from a provider body.
+func evidenceBlocks(body []byte) []string {
+	var req struct {
+		Messages []struct{ Content []struct{ Text string } }
 	}
-	return out
-}
-
-// sessionBoundaries are twins one byte apart whose last run selects the
-// earlier session dialogue at a threshold: a stopped run with its goal or
-// only its status, its status or nothing with an older returned run that
-// would fit, and the navigation line or no dialogue at all.
-func sessionBoundaries() []frozenScenario {
-	limits := core.Limits{MaxSteps: 1, MaxAttempts: 3}
-	stopped := frozenRun{id: corpusNextRun, goal: strings.Repeat("Collect every build log under /workspace/logs. ", 40),
-		replies: []string{corpusDecision(core.Exec, "ls /workspace")}, steps: []string{"1 exited 0 output complete"}, stop: core.StopStepsExhausted}
-	small := frozenRun{id: corpusRun, goal: "A.", replies: []string{corpusDecision(core.Return, "B.")}}
-	current := frozenRun{id: corpusThirdRun, goal: "What did the earlier runs find? " + strings.Repeat("List each log they collected with its size. ", 60),
-		replies: []string{corpusDecision(core.Return, "See the session records.")}}
-	type boundary struct {
-		name         string
-		contextBytes int
-		runs         []frozenRun
-		sources      string // the selection the last run records
-	}
-	var out []frozenScenario
-	for _, b := range []boundary{
-		{"session-stopped-goal", 74410, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal true"},
-		{"session-stopped-status", 74409, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-status-only", 72503, []frozenRun{small, stopped, current}, corpusNextRun + " stopped goal false"},
-		{"session-navigation-only", 72502, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-navigation", 72287, []frozenRun{small, stopped, current}, "navigation " + corpusNextRun},
-		{"session-without-dialogue", 72286, []frozenRun{small, stopped, current}, "none"},
-	} {
-		last := fmt.Sprintf("run%d-step01-rev1.json", len(b.runs))
-		out = append(out, frozenScenario{name: b.name, limits: limits, contextBytes: b.contextBytes, runs: b.runs,
-			outputs: map[string]string{"ls /workspace": "logs\n"},
-			edge: func(t *testing.T, requests map[string]harness.Request) {
-				if got := selection(requests[last].Context); got != b.sources {
-					t.Errorf("the last run selected %q; want %q", got, b.sources)
-				}
-			}})
-	}
-	return out
-}
-
-func selection(c *harness.ContextCapture) string {
-	if c == nil || c.SessionNavigation == "" {
-		return "none"
-	}
-	if len(c.Session) == 0 {
-		return "navigation " + c.SessionNavigation
+	if json.Unmarshal(body, &req) != nil || len(req.Messages) != 1 {
+		return nil
 	}
 	var out []string
-	for _, s := range c.Session {
-		out = append(out, fmt.Sprintf("%s %s goal %v", s.RunID, s.Status, s.IncludedGoal))
+	for _, c := range req.Messages[0].Content {
+		if _, evidence, ok := strings.Cut(c.Text, "Retrieved original evidence:\n"); ok {
+			out = append(out, evidence)
+		}
 	}
-	return strings.Join(out, ", ")
+	return out
+}
+
+// These trajectories exercise adapter extraction through the actual Loop and
+// SQLite-frozen repair requests without extending the registered version17 corpus.
+type frozenRepairCase struct {
+	reply, decision, diagnostic string
+	shown                       string // rendered replacement for invalid UTF-8
+}
+
+func TestMalformedToolEnvelopesReachFrozenProtocolRepair(t *testing.T) {
+	var cases []frozenRepairCase
+	for _, raw := range []string{
+		envelope("e1", "end_turn", toolBlock("toolu_e1", `"name":"canti_decision"`, "e1")),
+		envelope("e2", "tool_use", toolBlock("", `"name":"canti_decision"`, "e2")),
+		envelope("e3", "tool_use", toolBlock("toolu_e3", `"name":"other_tool"`, "e3")),
+		envelope("e4", "tool_use", toolBlock("toolu_e4", `"name":"other_tool","name":"canti_decision"`, "e4")),
+		envelope("e5", "tool_use", `{"type":"mystery"},`+toolBlock("toolu_e5", `"name":"canti_decision"`, "e5")),
+		envelope("e6", "tool_use", toolBlock("toolu_e6a", `"name":"canti_decision"`, "e6")+","+toolBlock("toolu_e6b", `"name":"canti_decision"`, "e6")),
+		envelope("e8", "tool_use", `{"type":"tool_use","id":"toolu_e8a","name":"canti_decision"},`+toolBlock("toolu_e8b", `"name":"canti_decision"`, "e8")),
+	} {
+		cases = append(cases, frozenRepairCase{reply: raw, decision: strings.TrimPrefix(raw, "raw:"), diagnostic: "expected kind and payload"})
+	}
+	cases = append(cases, frozenRepairCase{
+		reply:      envelope("e9", "tool_use", `{"type":"tool_use","id":"toolu_e9","name":"canti_decision","input":{"kind":"bogus`+"\xff"+`","payload":"envelope e9"}}`),
+		decision:   "{\"kind\":\"bogus\xff\",\"payload\":\"envelope e9\"}",
+		diagnostic: "invalid UTF-8",
+		shown:      "{\"kind\":\"bogus\uFFFD\",\"payload\":\"envelope e9\"}",
+	})
+	payload := "Every envelope was rejected."
+	valid := envelope("e7", "tool_use", `{"type":"text","text":"Returning now."},{"type":"thinking","thinking":"Every envelope failed.","signature":"sig"},`+
+		`{"type":"redacted_thinking","data":"cmVkYWN0ZWQ="},`+
+		`{"type":"tool_use","id":"toolu_e7","name":"canti_decision","input":{"kind":"return","payload":"Every envelope was rejected."}}`)
+	checkFrozenProtocolRepairs(t, true, cases, valid, payload)
+}
+
+func TestSplitTextEnvelopesReachFrozenProtocolRepair(t *testing.T) {
+	cases := []frozenRepairCase{{
+		reply: envelope("t1", "end_turn", `{"type":"thinking","thinking":"Plan.","text":"ignore-me","signature":"sig"},`+
+			`{"type":"text","text":"{\"kind\":\"bogus\","},{"type":"text","text":"\"payload\":\"review-marker\"}"}`),
+		decision:   `{"kind":"bogus","payload":"review-marker"}`,
+		diagnostic: `unsupported kind "bogus"`,
+	}}
+	valid := envelope("t2", "end_turn", `{"type":"text","text":"{\"kind\":\"return\","},{"type":"text","text":"\"payload\":\"Split decisions are joined.\"}"}`)
+	checkFrozenProtocolRepairs(t, false, cases, valid, "Split decisions are joined.")
+}
+
+func TestDecodeDiagnosticsReachSuccessiveFrozenProtocolRepairs(t *testing.T) {
+	cases := []frozenRepairCase{
+		{decision: `"just a string"`, diagnostic: "top-level value must be an object"},
+		{decision: `{"kind":"exec","kind":"return","payload":"done"}`, diagnostic: `duplicate field "kind"`},
+		{decision: `{"kind": }`, diagnostic: "invalid character '}' looking for beginning of value"},
+		{decision: `{"kind":"exec","payload":"x"} {}`, diagnostic: "trailing value {"},
+		{decision: `{"kind":"exec","extra":"x"}`, diagnostic: `unknown field "extra"`},
+		{decision: `{"kind":1,"payload":"x"}`, diagnostic: "kind must be a string"},
+		{decision: `{"kind":"exec","payload":2}`, diagnostic: "payload must be a string"},
+		{decision: `{"kind":"exec","payload":"x"`, diagnostic: "EOF"},
+		{decision: `{"kind":"exec","purpose":1,"payload":"x"}`, diagnostic: "purpose must be a string"},
+		{decision: `{"kind":"exec","purpose":"Run nothing.","payload":" \n"}`, diagnostic: "exec payload is blank"},
+		{decision: `{"purpose":"p","y":"a","x":"b"}`, diagnostic: `unknown field "y"`},
+	}
+	payload := "Every malformed decision was rejected."
+	checkFrozenProtocolRepairs(t, false, cases, corpusDecision(core.Return, payload), payload)
+}
+
+func checkFrozenProtocolRepairs(t *testing.T, tool bool, cases []frozenRepairCase, valid, payload string) {
+	t.Helper()
+	replies := make([]string, 0, len(cases)+1)
+	for _, c := range cases {
+		if c.reply != "" {
+			replies = append(replies, c.reply)
+		} else {
+			replies = append(replies, c.decision)
+		}
+	}
+	replies = append(replies, valid)
+	sc := frozenScenario{tool: tool, limits: core.Limits{MaxSteps: 2, MaxAttempts: len(replies)},
+		runs: []frozenRun{{id: corpusRun, goal: "Report done.", replies: replies}}}
+	rig := newCorpusRig(t, sc)
+	rig.drive(t, sc)
+	rig.checkOutcomes(t, sc.runs[0])
+	requests, sent := rig.frozen(t, corpusRun), rig.model.sent()
+	if len(requests) != len(replies) || len(sent) != len(requests) {
+		t.Fatalf("requests=%d sends=%d want=%d", len(requests), len(sent), len(replies))
+	}
+	var stableSystem string
+	var stableBlock json.RawMessage
+	for i, tr := range requests {
+		request := tr.Facts.Request
+		if tr.To.Step != 1 || tr.To.Attempt != i+1 || tr.To.RequestRev != i+1 || !bytes.Equal(request.Body, sent[i]) {
+			t.Fatalf("repair %d did not freeze/send a same-step revision: %+v", i, tr.To)
+		}
+		var body struct {
+			System   string
+			Messages []struct{ Content []json.RawMessage }
+		}
+		if err := json.Unmarshal(request.Body, &body); err != nil || len(body.Messages) != 1 || len(body.Messages[0].Content) != 2 {
+			t.Fatalf("repair %d provider input: %v", i, err)
+		}
+		blocks := body.Messages[0].Content
+		var tail struct {
+			Text         string
+			CacheControl json.RawMessage `json:"cache_control"`
+		}
+		if err := json.Unmarshal(blocks[1], &tail); err != nil || len(tail.CacheControl) != 0 {
+			t.Fatalf("repair %d cached its dynamic tail: %s, %v", i, blocks[1], err)
+		}
+		if i == 0 {
+			stableSystem, stableBlock = body.System, blocks[0]
+			if strings.Contains(tail.Text, "## Protocol repair") || request.Context.Preparation != "first_request" {
+				t.Fatal("first request fabricated a repair")
+			}
+			continue
+		}
+		if body.System != stableSystem || !bytes.Equal(blocks[0], stableBlock) || bytes.Equal(request.Body, requests[i-1].Facts.Request.Body) || request.Context.Preparation != "protocol_repair" {
+			t.Fatalf("repair %d changed its stable prefix or reused the previous revision", i)
+		}
+		prior := cases[i-1]
+		shown := prior.decision
+		if prior.shown != "" {
+			shown = prior.shown
+		}
+		want := "\n## Protocol repair\nThe prior reply of this step was invalid. Choose exactly one decision using the system protocol.\n" +
+			"Error:\n```\ncore: invalid decision: " + prior.diagnostic + "\n```\nRejected reply:\n```\n" + shown + "\n```\n"
+		if !strings.HasSuffix(tail.Text, want) || strings.Contains(tail.Text, "ignore-me") {
+			t.Fatalf("repair %d lost the exact extraction/fallback or diagnostic:\ngot %q\nwant suffix %q", i, tail.Text, want)
+		}
+	}
+	checkProtocolRepairRecords(t, rig, cases, replies, payload)
+}
+
+func checkProtocolRepairRecords(t *testing.T, rig *corpusRig, cases []frozenRepairCase, replies []string, payload string) {
+	t.Helper()
+	all, err := rig.store.Transitions(t.Context(), corpusRun, 0, 1000)
+	if err != nil || len(all) != 4*len(replies) {
+		t.Fatalf("protocol-only trajectory: transitions=%d error=%v", len(all), err)
+	}
+	for i, tr := range all {
+		if want := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}[i%4]; tr.Event.Kind() != want || tr.From.Step != 1 || tr.To.Step != 1 || tr.Facts.Action != nil || tr.Facts.Execution != nil {
+			t.Fatalf("malformed reply escaped repair into execution: transition=%+v", tr)
+		}
+		response := i / 4
+		if i%4 == 2 {
+			if raw, ok := strings.CutPrefix(replies[response], "raw:"); ok && !bytes.Equal(tr.Facts.Response.Body, []byte(raw)) {
+				t.Fatalf("response %d lost its exact raw envelope", response)
+			}
+		}
+		if event, ok := tr.Event.(core.ResponseLoaded); ok {
+			want := corpusDecision(core.Return, payload)
+			if response < len(cases) {
+				want = cases[response].decision
+				if tr.To.Phase != core.PhaseIdle {
+					t.Fatalf("response %d did not request repair: %+v", response, tr.To)
+				}
+			}
+			if !bytes.Equal(event.Body, []byte(want)) {
+				t.Fatalf("response %d decoded %q, want exact extracted/fallback bytes %q", response, event.Body, want)
+			}
+		}
+	}
+	final, err := rig.store.Latest(t.Context(), corpusRun)
+	if err != nil || final.State.Phase != core.PhaseReturned || final.State.Decision.Payload != payload {
+		t.Fatalf("valid final decision lost: %+v, %v", final, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(rig.path), "artifacts")); !os.IsNotExist(err) {
+		t.Fatalf("protocol repairs dispatched an executor command: %v", err)
+	}
 }

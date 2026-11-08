@@ -2,13 +2,14 @@ package present
 
 import (
 	"fmt"
-	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
-	"github.com/charmbracelet/x/ansi"
 	"io"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // clean drops every character but newlines, tabs, and graphic characters.
@@ -71,6 +72,8 @@ func hidden(r rune) bool { return r != '\t' && (!unicode.IsGraphic(r) || r == ut
 // result of a completed step.
 func Item(w io.Writer, it hostrpc.Item) {
 	switch {
+	case it.Kind == "context_reset":
+		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":
 		fmt.Fprintf(w, "$ %s\n", strings.Join(excerpt(it.Command, false), "\n  "))
 	case it.Kind == "completed" && it.Outcome != nil:
@@ -103,8 +106,8 @@ func outcomeSummary(o hostrpc.Outcome) string {
 		return "retrieval error: " + o.RetrievalError
 	case o.Retrieval:
 		return fmt.Sprintf("retrieved %d sources and %d directory entries", o.Sources, o.Entries)
-	case o.Handover:
-		return "handover recorded"
+	case o.Focus:
+		return fmt.Sprintf("focus replaced with %d frozen sources", o.FocusSources)
 	}
 	return ""
 }

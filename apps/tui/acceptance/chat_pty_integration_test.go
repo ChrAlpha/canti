@@ -5,7 +5,6 @@ package acceptance
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -104,9 +103,24 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 		t.Fatalf("next input did not complete: %+v", s)
 	}
 	prompts := f.model.prompts(1)
-	if len(prompts) != 3 || !strings.Contains(prompts[2], "start job") || !strings.Contains(prompts[2], "second job") || strings.Count(prompts[2], "stopped, reason cancelled") != 2 {
-		t.Fatalf("next model request lost stopped session context: %q", prompts)
+	if len(prompts) != 3 {
+		t.Fatalf("%d requests, want exactly3 session inputs", len(prompts))
 	}
+	checkSessionLink(t, f, prompts[2], f.status().Run.ID, stopped.Run.ID, "continue session", 3)
+	second := archiveSession(t, f, stopped.Run.ID)
+	firstID := second.PreviousRunID
+	if first := archiveSession(t, f, firstID); first.Sequence != 1 || first.PreviousRunID != "" || first.InputID == second.InputID {
+		t.Fatalf("first session link: %+v", first)
+	}
+	for path, want := range map[string]string{
+		firstID + "/goal": "start job", stopped.Run.ID + "/goal": "second job",
+		firstID + "/result": "phase: stopped\nreason: cancelled\n", stopped.Run.ID + "/result": "phase: stopped\nreason: cancelled\n",
+	} {
+		if got := archiveText(t, f, "/canti/runs/"+path); got != want {
+			t.Fatalf("archive %s=%q, want %q", path, got, want)
+		}
+	}
+
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
 }

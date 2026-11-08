@@ -9,18 +9,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
-	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/executortest"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
@@ -33,7 +29,7 @@ const historyPage = 64 // records per Recent read of the loop
 var (
 	created = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	limits  = core.Limits{MaxSteps: 5, MaxAttempts: 3}
-	usage   = harness.Usage{InputTokens: 100, OutputTokens: 10}
+	usage   = harness.Usage{InputTokens: 100, OutputTokens: 10, InputReported: true, OutputReported: true}
 	cycle   = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "observed"}
 	closing = []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}
 )
@@ -402,6 +398,21 @@ func (p *probe) Recent(ctx context.Context, runID string, before int64, limit in
 	return rs, err
 }
 
+func (p *probe) Context(ctx context.Context, snapshot harness.Snapshot) (harness.ContextState, error) {
+	p.reads++
+	return p.Store.Context(ctx, snapshot)
+}
+func (p *probe) Receipts(ctx context.Context, runID string, before int64, limit int) ([]harness.StepReceipt, error) {
+	p.reads++
+	p.pages++
+	records, err := p.Store.Receipts(ctx, runID, before, limit)
+	for _, r := range records {
+		p.records++
+		p.recordBytes += len(r.Purpose) + len(r.Status)
+	}
+	return records, err
+}
+
 func (p *probe) Commit(_ context.Context, t harness.Transition) error {
 	p.frozen = t.Facts.Request
 	return nil
@@ -594,222 +605,6 @@ func wantContains(t *testing.T, text string, parts ...string) {
 
 func twoSteps() []reply {
 	return []reply{execReply("ls -la /workspace"), execReply("find . -name '*.go' | wc -l"), returnReply("There are 3 Go files.")}
-}
-
-// workingSetScenario is a synthetic task whose evidence is ranges files of
-// archive.MaxBytes each under the imports root. The agent completes units of
-// work, no-op commands; unit u needs range u/perRange, or every range when
-// perRange is zero, shown whole in the request that decides it. An oversized
-// scenario's joint set exceeds the work capacity of its window.
-type workingSetScenario struct {
-	name      string
-	ranges    int
-	units     int
-	perRange  int
-	phases    int // when positive, unit u needs the ranges of its phase: an equal share of the ranges, in order
-	pad       int // bytes of padding in the command of a unit of work
-	total     int // PromptLimits.Total
-	maxSteps  int
-	oversized bool
-	// carry makes the agent hand over carrying the ranges its next unit
-	// needs, leaving out the last of them when miss is set; marginStep makes
-	// the loop admit a carry only with one maximal step of work capacity to
-	// spare.
-	carry, miss, marginStep bool
-}
-
-func (sc workingSetScenario) needs(unit int) []int {
-	first, count := 0, sc.ranges
-	switch {
-	case sc.perRange > 0:
-		first, count = unit/sc.perRange, 1
-	case sc.phases > 0:
-		count = sc.ranges / sc.phases
-		first = unit * sc.phases / sc.units * count
-	}
-	out := make([]int, count)
-	for i := range out {
-		out[i] = first + i
-	}
-	return out
-}
-
-func workingSetMarker(r int) string { return fmt.Sprintf("EVIDENCE-%02d-BEGIN", r) }
-
-func workingSetPath(r int) string { return fmt.Sprintf("%s/range-%02d", archive.ImportsRoot, r) }
-
-func workingSetContent(r int) string {
-	marker := workingSetMarker(r) + "\n"
-	line := strings.Repeat(".", 63) + "\n"
-	body := strings.Repeat(line, (archive.MaxBytes-len(marker))/len(line)+1)
-	return (marker + body)[:archive.MaxBytes]
-}
-
-const workingSetUnit = ": work unit "
-
-var (
-	workingSetDone    = regexp.MustCompile(`Completed units: (\d+)\.`)
-	workingSetWork    = regexp.MustCompile("(?m)^" + workingSetUnit + `(\d+) `)
-	workingSetRead    = regexp.MustCompile("### Step (\\d+)\nPurpose: load evidence\nCommand:\n```\n" + regexp.QuoteMeta(harness.RetrievePrefix) + `\{"operation":"read","path":"` + regexp.QuoteMeta(archive.ImportsRoot) + `/range-(\d+)"`)
-	workingSetCarried = regexp.MustCompile(`Carried step (\d+) source 0: ` + regexp.QuoteMeta(archive.ImportsRoot) + `/range-(\d+)\n`)
-)
-
-// decide is the agent: a pure function of the frozen request body, so a
-// retry or a restarted controller decides the same. A range counts as seen
-// only when the request shows all of its bytes, so a policy that cuts or
-// stubs evidence cannot pass for one that shows it. The agent knows the
-// progress its handover and visible units of work report, as the workspace
-// would let a real agent check, and rereads exactly the whole ranges the
-// next unit needs. That is an assumption of this workload, not a bound on a
-// real model, which may search first, or work from a checkpoint or from a
-// smaller representation that suffices.
-func (sc workingSetScenario) decide(body string) core.Decision {
-	done := 0
-	for _, m := range workingSetDone.FindAllStringSubmatch(body, -1) {
-		n, _ := strconv.Atoi(m[1])
-		done = max(done, n)
-	}
-	for _, m := range workingSetWork.FindAllStringSubmatch(body, -1) {
-		n, _ := strconv.Atoi(m[1])
-		done = max(done, n+1)
-	}
-	if done >= sc.units {
-		return core.Decision{Kind: core.Return, Purpose: "all units done", Payload: "done"}
-	}
-	if strings.Contains(body, "\n## Handover required\n") {
-		text := fmt.Sprintf("Completed units: %d. Reread the ranges under %s that the next unit needs, then continue.", done, archive.ImportsRoot)
-		// After a refused proposal the agent hands over without evidence.
-		if entries := sc.carried(body, done); sc.carry && len(entries) > 0 && !strings.Contains(body, "This step is the last chance to hand over") {
-			args, _ := json.Marshal(struct {
-				Text  string           `json:"text"`
-				Carry []map[string]int `json:"carry"`
-			}{text, entries})
-			return core.Decision{Kind: core.Exec, Purpose: "hand over with evidence", Payload: harness.HandoverCarryPrefix + string(args)}
-		}
-		return core.Decision{Kind: core.Exec, Purpose: "hand over", Payload: harness.HandoverPrefix + text}
-	}
-	for _, r := range sc.needs(done) {
-		if !strings.Contains(body, workingSetContent(r)) {
-			q, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: workingSetPath(r), Reason: "the next unit needs this range", Limit: archive.MaxBytes})
-			return core.Decision{Kind: core.Exec, Purpose: "load evidence", Payload: harness.RetrievePrefix + string(q)}
-		}
-	}
-	return core.Decision{Kind: core.Exec, Purpose: "work", Payload: fmt.Sprintf("%s%d %s", workingSetUnit, done, strings.Repeat("w", sc.pad))}
-}
-
-// carried returns the carry entries for the ranges that unit, the next one,
-// needs: the step that read or carries each range the request shows, but
-// the last one when the scenario misses it.
-func (sc workingSetScenario) carried(body string, unit int) []map[string]int {
-	steps := map[int]int{}
-	for _, re := range []*regexp.Regexp{workingSetCarried, workingSetRead} {
-		for _, m := range re.FindAllStringSubmatch(body, -1) {
-			step, _ := strconv.Atoi(m[1])
-			r, _ := strconv.Atoi(m[2])
-			steps[r] = step
-		}
-	}
-	needs := sc.needs(unit)
-	if sc.miss {
-		needs = needs[:len(needs)-1]
-	}
-	var out []map[string]int
-	seen := map[int]bool{}
-	for _, r := range needs {
-		if step, ok := steps[r]; ok && !seen[step] {
-			seen[step] = true
-			out = append(out, map[string]int{"step": step})
-		}
-	}
-	return out
-}
-
-type workingSetAgent struct{ sc workingSetScenario }
-
-func (a workingSetAgent) Freeze(p harness.Prompt) (harness.Request, error) {
-	return harness.Request{Body: []byte(p.System + "\n\n" + p.User()), Model: "working-set-1", Protocol: "fake/v1", Adapter: "fake"}, nil
-}
-
-// Complete reports no usage: an offline agent has no tokens to report.
-func (a workingSetAgent) Complete(_ context.Context, req harness.Request) (harness.Response, error) {
-	body, err := json.Marshal(a.sc.decide(string(req.Body)))
-	return harness.Response{Body: body, Complete: true, Model: "working-set-1", Protocol: "fake/v1", Adapter: "fake"}, err
-}
-
-func (a workingSetAgent) Decision(r harness.Response) []byte { return r.Body }
-
-// runWorkingSet drives sc to a halt over a SQLite journal and returns the
-// open journal and the final snapshot. With restart set, each Loop.Step runs
-// on a new loop over a journal opened after the previous one is closed. The
-// restarts fall only between steps, and the fake executor and clock are
-// shared across them, as a backend outlives its controllers; crashes inside
-// a step are the subject of the recovery tests. The run halts within
-// sc.maxSteps, each a few commits; the deadline only stops a regression that
-// polls without committing.
-func runWorkingSet(tb testing.TB, sc workingSetScenario, restart bool) (*sqlite.Store, harness.Snapshot) {
-	tb.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	dir := tb.TempDir()
-	imports := filepath.Join(dir, "imports")
-	if err := os.Mkdir(imports, 0o700); err != nil {
-		tb.Fatal(err)
-	}
-	for r := range sc.ranges {
-		if err := os.WriteFile(filepath.Join(imports, path.Base(workingSetPath(r))), []byte(workingSetContent(r)), 0o600); err != nil {
-			tb.Fatal(err)
-		}
-	}
-	open := func() *sqlite.Store {
-		s, err := sqlite.Open(ctx, filepath.Join(dir, "canti.db"))
-		if err != nil {
-			tb.Fatal(err)
-		}
-		return s
-	}
-	store := open()
-	tb.Cleanup(func() { store.Close() })
-	state, err := core.NewState(runID, core.Limits{MaxSteps: sc.maxSteps, MaxAttempts: 3})
-	if err != nil {
-		tb.Fatal(err)
-	}
-	// Every arm of a scenario has its goal, so arms render the same goal.
-	base, _, _ := strings.Cut(sc.name, "/")
-	if err := store.CreateRun(ctx, harness.Run{ID: runID, Goal: "Complete every unit of the scenario " + base + ".", Created: created}, state); err != nil {
-		tb.Fatal(err)
-	}
-	c := &clock{now: created}
-	x := &fakeExec{clock: c, jobs: map[string]*fakeJob{}, fenced: map[string]bool{}}
-	cfg := harness.LoopConfig{Environment: "fixture shell", History: filepath.Join(dir, "history"),
-		Reader: &archive.Reader{Imports: imports}, Now: c.Now, Poll: time.Microsecond, Backoff: -1, Limits: harness.DefaultPromptLimits()}
-	cfg.Limits.Total = sc.total
-	if sc.marginStep {
-		harness.SetCarryMarginStep(&cfg)
-	}
-	loop := func() *harness.Loop {
-		l, err := harness.NewLoop(store, x, workingSetAgent{sc}, cfg)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		return l
-	}
-	l := loop()
-	for {
-		if restart {
-			if err := store.Close(); err != nil {
-				tb.Fatal(err)
-			}
-			store = open()
-			l = loop()
-		}
-		snap, err := l.Step(ctx, runID)
-		if err != nil {
-			tb.Fatalf("Step() error = %v at %+v", err, snap.State)
-		}
-		if snap.State.Intent() == core.IntentHalt {
-			return store, snap
-		}
-	}
 }
 
 func fixtureExecution(command string) *harness.ExecutionIdentity {

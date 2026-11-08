@@ -13,7 +13,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
 )
 
-const toolAdapter = "canti-anthropic/3-tool"
+const toolAdapter = "canti-anthropic/4-tool"
 
 func toolMessage(stop, content string) string { return message(stop, content) }
 

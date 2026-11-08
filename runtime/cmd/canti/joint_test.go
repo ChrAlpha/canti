@@ -32,7 +32,7 @@ const jointNotes = "The parser was rewritten in v2.\nfunc parse is the entry poi
 
 var jointScript = map[int]core.Decision{
 	1: {Kind: core.Exec, Purpose: "read", Payload: `canti:retrieve {"operation":"read","path":"/canti/imports/notes","reason":"Read the notes."}`},
-	2: {Kind: core.Exec, Purpose: "carry", Payload: `canti:handover-carry {"text":"Carry the notes.","carry":[{"step":1}]}`},
+	2: {Kind: core.Exec, Purpose: "carry", Payload: `canti:focus {"sources":[{"seq":5,"source":0}]}`},
 	3: {Kind: core.Return, Payload: "done"},
 }
 
@@ -47,7 +47,7 @@ func jointFixture(t *testing.T) (f *fixture, notes string, flags []string) {
 	if err := os.WriteFile(notes, []byte(jointNotes), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return f, notes, []string{"-window-steps", "1", "-history-imports", dir}
+	return f, notes, []string{"-history-imports", dir}
 }
 
 // carryOf returns the transition of h that performed the carry, which it
@@ -56,7 +56,7 @@ func carryOf(t *testing.T, h []entry) (performed, next entry) {
 	t.Helper()
 	n := 0
 	for i, e := range h {
-		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Handover != nil {
+		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
 			performed, n = e, n+1
 			for _, later := range h[i+1:] {
 				if later.Kind == "request_frozen" {
@@ -79,9 +79,9 @@ func carryFacts(t *testing.T, carry, next entry) string {
 	t.Helper()
 	b, err := json.Marshal(struct {
 		Outcome *harness.Outcome
-		Window  *harness.Window
+		Window  *harness.ContextState
 		Carry   int
-	}{carry.Facts.Outcome, carry.Facts.Window, next.Facts.Request.Context.Bytes.Carry})
+	}{carry.Facts.Outcome, carry.Facts.ContextState, next.Facts.Request.Context.Bytes.Focus})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	}
 	carries := 0
 	for _, it := range all {
-		if it.Kind == "completed" && it.Local && it.Outcome != nil && it.Outcome.Handover && it.Window == 3 {
+		if it.Kind == "completed" && it.Local && it.Outcome != nil && it.Outcome.Focus && it.Outcome.FocusSources == 1 {
 			carries++
 		}
 	}
@@ -167,7 +167,7 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	}
 	words := 0
 	for _, it := range resp.Page.Items {
-		if it.Kind == "decided" && it.Action == "handover_carry" {
+		if it.Kind == "decided" && it.Action == "focus" {
 			words++
 		}
 	}
@@ -212,7 +212,7 @@ func TestJointACarryInterruptedAtItsCommitIsPerformedOnce(t *testing.T) {
 				held := f.history()
 				landed := 0
 				for _, e := range held {
-					if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Handover != nil {
+					if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
 						landed++
 					}
 				}
@@ -304,7 +304,7 @@ func TestJointAFollowerThatStopsReadingDelaysNoOtherClient(t *testing.T) {
 				Payload: `canti:retrieve {"operation":"read","path":"/canti/imports/notes","reason":"` + backslashes + `"}`}, nil
 		default:
 			return core.Decision{Kind: core.Exec, Purpose: purpose,
-				Payload: fmt.Sprintf(`canti:handover-carry {"text":"%s","carry":[{"step":%d}]}`, backslashes, step-1)}, nil
+				Payload: fmt.Sprintf(`canti:focus %s{"sources":[{"seq":%d,"source":0}]}`, strings.Repeat(" ", sqlite.ProgressCommandBytes), 5*(step-1))}, nil
 		}
 	})
 	_, wait := f.start(nil, "run", append([]string{"-host", "auto", "-goal", "g", "-max-steps", strconv.Itoa(last)}, flags...)...)
@@ -360,7 +360,7 @@ func TestJointAFollowerThatStopsReadingDelaysNoOtherClient(t *testing.T) {
 	}
 	carries := 0
 	for _, it := range fresh.Page.Items {
-		if it.Kind == "completed" && it.Outcome != nil && it.Outcome.Handover && it.Window > 0 {
+		if it.Kind == "completed" && it.Outcome != nil && it.Outcome.Focus && it.Outcome.FocusSources > 0 {
 			carries++
 		}
 	}

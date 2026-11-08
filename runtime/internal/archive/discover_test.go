@@ -574,3 +574,88 @@ func TestDiscoveryStopsBeforeAnUndecidedCommandItCannotPayFor(t *testing.T) {
 		t.Fatalf("the continuation did not skip step 2 and scan step 1: %+v", next)
 	}
 }
+
+func TestDiscoverySearchesOriginalPurposeAndContinuesItsField(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "execute original", "unrelated preview", "unrelated output", true)
+	purpose := filepath.Join(r.History, "run", "steps", StepDir(1), PurposeFile)
+	if err := os.WriteFile(purpose, []byte("needle original purpose"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := retrieveOK(t, r, discoveryQuery())
+	texts := discoveryTexts(t, r, result)
+	if result.More || result.Incomplete || !strings.Contains(texts[RunsRoot+"/run/steps/00000001/purpose"], "original purpose") {
+		t.Fatalf("purpose candidates=%+v %v", result, texts)
+	}
+	// A cursor can address the fourth possible field (artifact after an
+	// incomplete preview), while arbitrary out-of-range fields are refused.
+	q := discoveryQuery()
+	c, err := discoveryStart(q, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Field = 3
+	q.Cursor = encodeCursor(c)
+	if _, err := discoveryStart(q, 1); err != nil {
+		t.Fatalf("valid purpose-aware cursor rejected: %v", err)
+	}
+	c.Field = 4
+	q.Cursor = encodeCursor(c)
+	if _, err := discoveryStart(q, 1); err == nil {
+		t.Fatal("invalid cursor field accepted")
+	}
+}
+
+func TestPurposeDiscoveryContinuationRetainsSkippedCoverageAndLimits(t *testing.T) {
+	r := discoveryFixture(t)
+	for step := 1; step <= 4; step++ {
+		discoveryStep(t, r, step, "original command", "unrelated preview", "unrelated retained output", true)
+		body := strings.Repeat(fmt.Sprintf("needle-purpose-%d ", step), 60)
+		if step == 2 {
+			body = "binary\x00purpose"
+		}
+		if err := os.WriteFile(filepath.Join(r.History, "run", "steps", StepDir(step), PurposeFile), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := discoveryQuery()
+	q.Limit = 512
+	seen := map[string]bool{}
+	pages := 0
+	for {
+		pages++
+		if pages > 16 {
+			t.Fatal("purpose continuation did not terminate")
+		}
+		got := retrieveOK(t, r, q)
+		bytes := 0
+		for i, source := range got.Sources {
+			bytes += len(got.Evidence[i])
+			if strings.HasSuffix(source.Path, "/purpose") {
+				seen[source.Path] = true
+			}
+		}
+		if bytes > q.Limit || len(got.Sources) > MaxSources {
+			t.Fatalf("unbounded page: %+v", got)
+		}
+		if !got.More {
+			if !got.Incomplete || got.SkippedCount != 1 || len(got.Skipped) != 1 || got.Skipped[0].Field != "purpose" || got.Skipped[0].Reason != "nul" {
+				t.Fatalf("purpose skip coverage lost: %+v", got)
+			}
+			break
+		}
+		if got.NextCursor == "" || got.NextCursor == q.Cursor {
+			t.Fatal("nonadvancing cursor")
+		}
+		q.Cursor = got.NextCursor
+	}
+	if pages < 2 || len(seen) != 3 {
+		t.Fatalf("pages=%d purposes=%v", pages, seen)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := r.Retrieve(cancelled, discoveryQuery())
+	if err != context.Canceled || len(got.Evidence) != 0 || len(got.Sources) != 0 {
+		t.Fatalf("cancelled discovery returned evidence: %+v %v", got, err)
+	}
+}

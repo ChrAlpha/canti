@@ -70,14 +70,20 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	p.send(t, "draft text\r\x1b[200~draft paste\x1b[5~\x1b[201~\x1b[5")
 	p.awaitInputRead(t)
 	p.send(t, "~")
-	// The current 24-row layout reserves nine rows, so one page up shows
-	// history rows 14 through 28. Assert the complete window and retained
+	// The 24-row layout reserves nine rows. The completed turn's reported
+	// usage adds one transcript row, so page up shows history rows 15..29.
+	// Assert the complete window and retained
 	// draft, not a substring of incremental terminal output.
-	p.await(t, line(14), pos)
+	p.await(t, line(15), pos)
 	p.mu.Lock()
 	screen := p.screen.String()
 	p.mu.Unlock()
-	if !strings.Contains(screen, line(28)) || strings.Contains(screen, line(39)) || !strings.Contains(screen, "draft textdraft paste") {
+	for i := 15; i <= 29; i++ {
+		if !strings.Contains(screen, line(i)) {
+			t.Fatalf("page up lost history row %d: %q", i, screen)
+		}
+	}
+	if strings.Contains(screen, line(14)) || strings.Contains(screen, line(30)) || strings.Contains(screen, line(39)) || !strings.Contains(screen, "draft textdraft paste") {
 		t.Fatalf("page up changed viewport or draft incorrectly: %q", screen)
 	}
 	pos = p.mark()

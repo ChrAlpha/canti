@@ -15,7 +15,7 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
-const legalPairs = 20
+const legalPairs = 21
 
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
@@ -98,6 +98,7 @@ func eventSamples() []struct {
 		{core.AttemptStarted{Step: 1, Attempt: 1}, "attempt_started"},
 		{core.ResponseSaved{Step: 1, Attempt: 1}, "response_saved"},
 		{core.ResponseIncomplete{Step: 1, Attempt: 1}, "response_incomplete"},
+		{core.RequestRejected{Step: 1, Attempt: 1}, "request_rejected"},
 		{core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, "response_loaded"},
 		{core.EffectRecovered{EffectID: "effect-1"}, "effect_recovered"},
 		{core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, "observed"},
@@ -120,6 +121,8 @@ func legalTransitions() []transition {
 
 		{"sent request counts lost attempt", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 2}, at(core.PhaseRequestSent, withRev(1), withAttempt(2))},
 		{"sent request saves response", at(core.PhaseRequestSent, withRev(1)), core.ResponseSaved{Step: 1, Attempt: 1}, at(core.PhaseResponseSaved, withRev(1))},
+		{"rejected request requires new input", at(core.PhaseRequestSent, withRev(1)), core.RequestRejected{Step: 1, Attempt: 1}, at(core.PhaseIdle, withRev(1), withAttempt(2))},
+		{"rejected request exhausts attempts", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.RequestRejected{Step: 1, Attempt: 2}, at(core.PhaseStopped, withRev(1), withAttempt(2), withReason(core.StopAttemptsExhausted))},
 		{"sent request retries incomplete response", at(core.PhaseRequestSent, withRev(1)), core.ResponseIncomplete{Step: 1, Attempt: 1}, at(core.PhaseRequestFrozen, withRev(1), withAttempt(2))},
 		{"sent request stops", at(core.PhaseRequestSent, withRev(1)), core.StopRequested{Reason: core.StopTimedOut}, at(core.PhaseStopped, withRev(1), withReason(core.StopTimedOut))},
 
@@ -231,8 +234,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 5 {
-		t.Errorf("SemanticsVersion = %d, want 5", core.SemanticsVersion)
+	if core.SemanticsVersion != 6 {
+		t.Errorf("SemanticsVersion = %d, want 6", core.SemanticsVersion)
 	}
 }
 
@@ -388,6 +391,7 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"response saved for an earlier step", at(core.PhaseRequestSent, withRev(1), withStep(2)), core.ResponseSaved{Step: 1, Attempt: 1}},
 		{"incomplete response for an earlier step", at(core.PhaseRequestSent, withRev(1), withStep(2)), core.ResponseIncomplete{Step: 1, Attempt: 1}},
 		{"response loaded for an earlier step", at(core.PhaseResponseSaved, withRev(1), withStep(2)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},
+		{"stale rejected request", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.RequestRejected{Step: 1, Attempt: 1}},
 		{"stale incomplete response", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseIncomplete{Step: 1, Attempt: 1}},
 		{"empty response body", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1}},
 		{"stale response loaded", at(core.PhaseResponseSaved, withRev(1), withAttempt(2)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}},

@@ -21,8 +21,8 @@ const (
 	version        = "2023-06-01"
 	protocol       = "anthropic-messages/" + version
 	fallbackBeta   = "server-side-fallback-2026-07-01"
-	adapter        = "canti-anthropic/2"
-	toolAdapter    = "canti-anthropic/3-tool"
+	adapter        = "canti-anthropic/4"
+	toolAdapter    = "canti-anthropic/4-tool"
 	decisionFormat = `{"type":"json_schema","schema":` + harness.DecisionSchema + `}`
 	// decisionTool is strict, so a tool call always matches the decision
 	// schema. The tool choice is auto: current models reject a forced one,
@@ -204,8 +204,13 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	resp := harness.Response{Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter}
 	reply, err := m.endpoint.Post(ctx, req.Body, header)
 	resp.Body = reply.Body
+	usage, _, usageErr := provider.Usage(resp.Body, true)
+	resp.Usage = usage
 	if err != nil {
 		return resp, err
+	}
+	if usageErr != nil {
+		return resp, usageErr
 	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
@@ -218,16 +223,17 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if msg.Model != "" {
 		resp.Model = msg.Model
 	}
-	u := msg.Usage
-	resp.Usage = harness.Usage{InputTokens: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, OutputTokens: u.OutputTokens}
-	if req.Adapter == toolAdapter {
-		fields, ok := provider.ExactObject(resp.Body)
-		if !ok {
-			return resp, errors.New("anthropic: malformed tool response")
-		}
-		msg.StopReason = provider.ExactString(fields, "stop_reason")
+	fields, ok := provider.ExactObject(resp.Body)
+	if !ok {
+		return resp, errors.New("anthropic: malformed response envelope")
 	}
+	msg.StopReason = provider.Discriminator(fields, "stop_reason")
 	switch msg.StopReason {
+	case "model_context_window_exceeded":
+		if reply.Status != 200 {
+			return resp, errors.New("anthropic: context stop reason outside documented status")
+		}
+		return resp, &harness.ContextLimitError{Status: reply.Status, StopReason: msg.StopReason, RequestID: reply.Header.Get("request-id")}
 	case "end_turn", "stop_sequence", "refusal":
 		resp.Complete = true
 		return resp, nil
@@ -273,7 +279,12 @@ func statusError(r provider.Reply) error {
 		} `json:"error"`
 		RequestID string `json:"request_id"`
 	}
-	_ = json.Unmarshal(r.Body, &e)
+	fields, exact := provider.ExactObject(r.Body)
+	errorFields, nested := provider.ExactObject(provider.ExactField(fields, "error"))
+	decoded := json.Unmarshal(r.Body, &e) == nil
+	if exact && nested && decoded && r.Status == http.StatusBadRequest && provider.Discriminator(errorFields, "type") == "invalid_request_error" && strings.HasPrefix(provider.Discriminator(errorFields, "message"), "prompt is too long:") {
+		return &harness.ContextLimitError{Status: r.Status, Type: "invalid_request_error", Code: "prompt_too_long", RequestID: cmp.Or(provider.ExactString(fields, "request_id"), r.Header.Get("request-id"))}
+	}
 	return provider.StatusError("anthropic", r.Status, provider.Failure{
 		Type: e.Error.Type, Message: e.Error.Message, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id")),
 		Exhausted: r.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(e.Error.Message), "credit balance"),

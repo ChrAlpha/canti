@@ -33,8 +33,6 @@ type frozenScenario struct {
 	tool         bool
 	limits       core.Limits
 	contextBytes int // PromptLimits.Total instead of 256 KiB
-	windowSteps  int
-	windowBytes  int
 	outputs      map[string]string
 	finals       map[string]harness.Job                  // final job of a command instead of success
 	imports      map[string]string                       // files of a read-only imported history archive
@@ -67,105 +65,19 @@ func corpusRetrieve(operation, path, extra, reason string) string {
 }
 
 func frozenScenarios() []frozenScenario {
-	stepLimits := core.Limits{MaxSteps: 20, MaxAttempts: 3}
-	ls := map[string]string{"ls /workspace": "go.mod\nmain.go\n"}
+	limits := core.Limits{MaxSteps: 20, MaxAttempts: 4}
+	overflow := `raw:{"model":"claude-opus-5","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"never execute partial\"}"}],"usage":{"input_tokens":13,"output_tokens":2}}`
+	focus := func(seq int64) string {
+		return corpusDecision(core.Exec, fmt.Sprintf(`canti:focus {"sources":[{"seq":%d,"source":0}]}`, seq))
+	}
 	return slices.Concat([]frozenScenario{
-		{
-			name: "shell-and-retrieval", limits: stepLimits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"},
-			runs: []frozenRun{{id: corpusRun, goal: "Find which line of the listing mentions beta.", replies: []string{
-				corpusDecision(core.Exec, corpusListing),
-				corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the listing preview."),
-				corpusRetrieve("list", corpusSteps, "", "List the recorded steps."),
-				corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta in the preview."),
-				corpusRetrieve("search", corpusSteps+"/00000001", `,"query":"gamma"`, "Find gamma in the step record."),
-				corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find the step that printed beta."),
-				corpusDecision(core.Return, "Line 2 of the listing mentions beta."),
-			}, steps: []string{
-				"1 exited 0 output complete",
-				"2 done retrieval 1 sources 0 entries",
-				"3 done retrieval 0 sources 2 entries",
-				"4 done retrieval 1 sources 0 entries",
-				"5 done retrieval 2 sources 0 entries",
-				"6 done retrieval 3 sources 0 entries",
-			}}},
-			marks: map[string][]string{
-				"run1-step01-rev1.json": {"Step 1 of at most 20, attempt 1 of 3.", "## Current window steps\nNone.\n"},
-				"run1-step02-rev1.json": {"### Step 1\n", "Execution: exited, exit code 0\nOutput: 17 bytes, complete", "Preview:\n```\nalpha\nbeta\ngamma\n```\n"},
-				"run1-step03-rev1.json": {"### Step 2\n", "Retrieved original evidence:\n"},
-				"run1-step04-rev1.json": {"### Step 3\n", "Entries: [\"" + corpusSteps + "/00000001\",\"" + corpusSteps + "/00000002\"]"},
-				"run1-step05-rev1.json": {"### Step 4\n", `"operation":"search"`, "Retrieved original evidence:\n"},
-				"run1-step06-rev1.json": {"### Step 5\n", "Path " + corpusSteps + "/00000001/command:\n"},
-				"run1-step07-rev1.json": {"### Step 6\n", "Retrieval: 3 candidate ranges", "Path /canti/artifacts/effect_"},
-			},
-		},
-		{
-			name: "handover", limits: stepLimits, windowSteps: 1, outputs: ls,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Listed /workspace: go.mod and main.go. Next: report them."),
-				corpusDecision(core.Return, "The workspace holds go.mod and main.go."),
-			}, steps: []string{"1 exited 0 output complete", "2 done handover"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"### Step 1\n", "## Handover required\n"},
-				"run1-step03-rev1.json": {"This window begins at step 3.", "## Handover\n", "Next: report them.", "## Current window steps\nNone.\n"},
-			},
-		},
-		{
-			name: "protocol-repair", limits: stepLimits,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				"I will start by listing the workspace.",
-				strings.Repeat("`", 2048),
-				corpusDecision(core.Return, "I need the workspace path first."),
-			}}},
-			marks: map[string][]string{
-				"run1-step01-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", "I will start by listing the workspace."},
-				"run1-step01-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n…[truncated 2048 bytes]\n```\n"},
-			},
-		},
-		{
-			name: "session-dialogue", limits: stepLimits, outputs: ls,
-			runs: []frozenRun{
-				{id: corpusRun, goal: "\tWhat is in /workspace?  \n", replies: []string{
-					corpusDecision(core.Exec, "ls /workspace"),
-					corpusDecision(core.Return, "  go.mod and main.go.\n"),
-				}, steps: []string{"1 exited 0 output complete"}},
-				{id: corpusNextRun, goal: "Which of those files is the entry point?", replies: []string{
-					corpusDecision(core.Return, "main.go is the entry point."),
-				}},
-			},
-			marks: map[string][]string{
-				"run1-step01-rev1.json": {"## Goal\nWhat is in /workspace?\n\n"},
-				"run2-step01-rev1.json": {"## Earlier session dialogue\n", "Earlier user goal:\n```\nWhat is in /workspace?\n```\n",
-					"Earlier assistant return:\n```\n  go.mod and main.go.\n```\n"},
-			},
-		},
-		{
-			name: "unlimited-steps", limits: core.Limits{MaxAttempts: 3}, outputs: ls,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				corpusDecision(core.Exec, harness.HandoverPrefix+"Nothing done yet."),
-				corpusDecision(core.Exec, "ls /workspace"),
-				corpusDecision(core.Return, "go.mod and main.go."),
-			}, steps: []string{"1 failed", "2 exited 0 output complete"}}},
-			marks: map[string][]string{
-				"run1-step01-rev1.json": {"Step 1 (unlimited steps), attempt 1 of 3."},
-				"run1-step02-rev1.json": {"Step 2 (unlimited steps), attempt 1 of 3.", "Context action failed: handover was not requested for this step"},
-			},
-		},
-		{
-			name: "tool-transport", tool: true, limits: stepLimits, outputs: ls,
-			runs: []frozenRun{{id: corpusRun, goal: "Report the files in /workspace.", replies: []string{
-				`{"kind":"exec","payload":"ls /workspace"}`,
-				`{"kind":"exec"}`,
-				`null`,
-				`{"kind":"return","payload":"go.mod and main.go."}`,
-			}, steps: []string{"1 exited 0 output complete"}}},
-			marks: map[string][]string{
-				"run1-step02-rev1.json": {"### Step 1\n"},
-				"run1-step02-rev2.json": {"attempt 2 of 3.", "## Rejected response\n", `{"kind":"exec"}`},
-				"run1-step02-rev3.json": {"attempt 3 of 3.", "Rejected reply:\n```\n{\"id\":\"msg_03\"", `"input":null`},
-			},
-		},
-	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), carryScenarios(), boundaryScenarios())
+		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}}},
+		{name: "reset-focus-repair", limits: limits, imports: map[string]string{"notes": "FROZEN_ORIGINAL_NOTES"}, runs: []frozenRun{{id: corpusRun, goal: "Recover original notes across provider rejection.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read notes."), overflow, focus(5), corpusDecision(core.Exec, "canti:focus {\"sources\":[]}"), "invalid decision", corpusDecision(core.Return, "Recovered notes.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources", "3 done focus 0 sources"}}}, marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "Its result predates this anchor"}, "run1-step03-rev1.json": {"Selected focus evidence", "FROZEN_ORIGINAL_NOTES"}, "run1-step04-rev2.json": {"Protocol repair"}}},
+		{name: "session-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"previous_run_id", "/canti/runs/" + corpusRun + "/"}}},
+		{name: "legacy-actions-are-local-failures", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Reject retired actions locally.", replies: []string{corpusDecision(core.Exec, "canti:handover next"), corpusDecision(core.Exec, "canti:handover-carry {}"), corpusDecision(core.Return, "Retired actions failed locally.")}, steps: []string{"1 failed", "2 failed"}}}},
+		{name: "tool-transport", tool: true, limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Inspect files.", replies: []string{corpusDecision(core.Exec, "ls"), `{"kind":"exec"}`, corpusDecision(core.Return, "go.mod")}, steps: []string{"1 exited 0 output complete"}}}},
+		{name: "protocol-repair", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Repair a decision.", replies: []string{"not a decision", strings.Repeat("`", 2048), corpusDecision(core.Return, "repaired")}}}},
+	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
 }
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
@@ -189,9 +101,9 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			rig := newCorpusRig(t, sc)
 			rig.drive(t, sc)
-			adapter := "canti-anthropic/2"
+			adapter := "canti-anthropic/4"
 			if sc.tool {
-				adapter = "canti-anthropic/3-tool"
+				adapter = "canti-anthropic/4-tool"
 			}
 			got, requests := map[string][]byte{}, map[string]harness.Request{}
 			var committed [][]byte
@@ -232,7 +144,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 					}
 				}
 			}
-			dir := filepath.Join("testdata", "frozen-requests", sc.name)
+			dir := filepath.Join("testdata", "frozen-requests-v17", sc.name)
 			if *updateRequests {
 				if t.Failed() {
 					t.Fatal("-update-requests keeps the goldens of a failing scenario")
@@ -273,8 +185,8 @@ func stepOutcome(s harness.StepRecord) string {
 			if r.More {
 				out += " more"
 			}
-		case o.Handover != nil:
-			out += " handover"
+		case o.Focus != nil:
+			out += fmt.Sprintf(" focus %d sources", len(o.Focus.Sources))
 		}
 		return out
 	}
@@ -350,7 +262,7 @@ func elideBody(t *testing.T, facts, name string) string {
 // scenario passed.
 func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) (orphans []string) {
 	t.Helper()
-	root := filepath.Join("testdata", "frozen-requests")
+	root := filepath.Join("testdata", "frozen-requests-v17")
 	names := map[string]bool{}
 	for _, sc := range scenarios {
 		if names[sc.name] {
@@ -438,7 +350,7 @@ func TestCurrentVersionRequestsAreSentAsFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := harness.Request{Body: frozen, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Window: &harness.Window{FirstStep: 1}}
+	req := harness.Request{Body: frozen, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", ContextState: &harness.ContextState{FirstStep: 1}}
 	if _, err = runner.Commit(f.bounded(), snap, core.RequestFrozen{}, harness.Facts{Request: &req}); err != nil {
 		t.Fatal(err)
 	}

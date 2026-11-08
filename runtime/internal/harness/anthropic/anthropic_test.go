@@ -25,7 +25,7 @@ const (
 	authToken    = "sk-ant-oat-SECRET-token"
 	protocol     = "anthropic-messages/2023-06-01"
 	fallbackBeta = "server-side-fallback-2026-07-01"
-	adapter      = "canti-anthropic/2"
+	adapter      = "canti-anthropic/4"
 	cached       = `,"cache_control":{"type":"ephemeral"}`
 	purposeField = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
 	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},` + purposeField + `,"payload":{"type":"string"}},"required":["kind","payload","purpose"],"additionalProperties":false}}}`
@@ -190,7 +190,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		}
 	}
 
-	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, RunID: "run_x", Window: &harness.Window{FirstStep: 1}}
+	f := harness.Frame{Goal: "g", Environment: "e", MaxSteps: 4, Attempt: 1, MaxAttempts: 1, RunID: "run_x", ContextState: &harness.ContextState{FirstStep: 1}}
 	for n := 1; n <= 3; n++ {
 		f.Step = n
 		p, err := f.Prompt(harness.DefaultPromptLimits())
@@ -226,7 +226,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		if c, want := bytes.Count(req.Body, []byte("cache_control")), min(2, p.Stable); c != want {
 			t.Errorf("step %d: %d cache breakpoints, want %d", n, c, want)
 		}
-		f.Steps = append(f.Steps, harness.StepRecord{Step: n, Command: "true", Observation: harness.Observation{Execution: core.ExecutionExited}})
+		f.Receipts = append(f.Receipts, harness.StepReceipt{Seq: int64(n * 5), Step: n, Status: "exited"})
 	}
 }
 
@@ -462,7 +462,7 @@ func TestCompleteClassifiesStopReason(t *testing.T) {
 			if stopReason(err) != "" {
 				t.Fatalf("err = %v, want retryable", err)
 			}
-			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7}}
+			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7, InputReported: true, OutputReported: true}}
 			if !reflect.DeepEqual(resp, want) {
 				t.Fatalf("response = %+v\nwant %+v", resp, want)
 			}
@@ -474,7 +474,7 @@ func TestCompleteDefaultsResponseModel(t *testing.T) {
 	srv := serve(t, reply(http.StatusOK, `{"type":"message","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`))
 	m := newModel(t, srv.URL, nil)
 	resp, err := m.Complete(context.Background(), freeze(t, m))
-	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, OutputTokens: 2}) {
+	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, OutputTokens: 2, InputReported: true, OutputReported: true}) {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
 }
@@ -653,6 +653,129 @@ func TestDecision(t *testing.T) {
 			}
 			if _, err := core.Decode(got); (err == nil) != (tc.want == exec) {
 				t.Fatalf("core.Decode(%s) = %v", got, err)
+			}
+		})
+	}
+}
+
+func TestConfirmedContextLimitSignals(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name     string
+			status   int
+			body     string
+			overflow bool
+		}{
+			{"prompt", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"},"request_id":"req_reset"}`, true},
+			{"stop", 200, `{"model":"m","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"unsafe\"}"}],"usage":{"input_tokens":12,"output_tokens":3}}`, true},
+			{"generic", 400, `{"error":{"type":"invalid_request_error","message":"invalid prompt"}}`, false},
+			{"unstructured", 400, `{"message":"prompt is too long: 200001 tokens"}`, false},
+			{"output", 200, `{"stop_reason":"max_tokens"}`, false},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				srv := serve(t, reply(tc.status, tc.body))
+				m := newModel(t, srv.URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) != tc.overflow || err == nil || resp.Complete || string(resp.Body) != tc.body {
+					t.Fatalf("response=%+v error=%v", resp, err)
+				}
+				if tc.name == "stop" && resp.Usage.InputTokens != 12 {
+					t.Fatalf("lost partial usage: %+v", resp.Usage)
+				}
+			})
+		}
+	}
+}
+
+func TestUsagePresenceAndNumericContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		want        harness.Usage
+		invalid     bool
+	}{
+		{"missing", `null`, harness.Usage{}, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
+		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
+		{"negative", `{"input_tokens":-1}`, harness.Usage{}, true},
+		{"fractional", `{"output_tokens":0.5}`, harness.Usage{}, true},
+		{"integer overflow", `{"input_tokens":9223372036854775808}`, harness.Usage{}, true},
+		{"sum overflow", `{"input_tokens":9223372036854775807,"output_tokens":1}`, harness.Usage{}, true},
+		{"duplicate", `{"input_tokens":1,"input_tokens":2}`, harness.Usage{}, true},
+		{"cache overflow", `{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}`, harness.Usage{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"stop_reason":"end_turn","usage":` + tc.usage + `}`
+			srv := serve(t, reply(200, body))
+			m := newModel(t, srv.URL, nil)
+			resp, err := m.Complete(context.Background(), freeze(t, m))
+			var stop *harness.StopError
+			if errors.As(err, &stop) != tc.invalid || resp.Usage != tc.want || string(resp.Body) != body || resp.Complete == tc.invalid {
+				t.Fatalf("usage=%+v complete=%v error=%v", resp.Usage, resp.Complete, err)
+			}
+		})
+	}
+}
+
+func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"duplicate-stop-forward", 200, `{"stop_reason":"end_turn","stop_reason":"model_context_window_exceeded"}`},
+			{"duplicate-stop-reverse", 200, `{"stop_reason":"model_context_window_exceeded","stop_reason":"end_turn"}`},
+			{"duplicate-overflow-stop", 200, `{"stop_reason":"model_context_window_exceeded","stop_reason":"model_context_window_exceeded"}`},
+			{"uppercase-stop-only", 200, `{"Stop_Reason":"model_context_window_exceeded"}`},
+			{"case-stop-override-forward", 200, `{"stop_reason":"end_turn","Stop_Reason":"model_context_window_exceeded"}`},
+			{"case-stop-override-reverse", 200, `{"Stop_Reason":"model_context_window_exceeded","stop_reason":"end_turn"}`},
+			{"wrong-status-413", 413, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"wrong-status-429", 429, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"wrong-status-500", 500, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-type-forward", 400, `{"error":{"type":"server_error","type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-type-reverse", 400, `{"error":{"type":"invalid_request_error","type":"server_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-type-override-forward", 400, `{"error":{"type":"server_error","Type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-type-override-reverse", 400, `{"error":{"Type":"invalid_request_error","type":"server_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"uppercase-error-type-only", 400, `{"error":{"Type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-message-forward", 400, `{"error":{"type":"invalid_request_error","message":"ordinary validation","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"duplicate-error-message-reverse", 400, `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum","message":"ordinary validation"}}`},
+			{"case-error-message-override-forward", 400, `{"error":{"type":"invalid_request_error","message":"ordinary validation","Message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-error-message-override-reverse", 400, `{"error":{"type":"invalid_request_error","Message":"prompt is too long: 200001 tokens > 200000 maximum","message":"ordinary validation"}}`},
+			{"uppercase-error-message-only", 400, `{"error":{"type":"invalid_request_error","Message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-root-error-override-forward", 400, `{"error":{"type":"server_error","message":"ordinary validation"},"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+			{"case-root-error-override-reverse", 400, `{"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"},"error":{"type":"server_error","message":"ordinary validation"}}`},
+			{"uppercase-root-error-only", 400, `{"Error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				m := newModel(t, serve(t, reply(tc.status, tc.body)).URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) {
+					t.Errorf("ambiguous/noncanonical envelope established overflow: %+v; body=%s", limit, tc.body)
+				}
+				if string(resp.Body) != tc.body {
+					t.Errorf("lost original response: got %s want %s", resp.Body, tc.body)
+				}
+			})
+		}
+	}
+}
+
+func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		t.Run(format, func(t *testing.T) {
+			body := `{"usage":{"input_tokens":3,"output_tokens":0},"stop_reason":"model_context_window_exceeded"}`
+			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Length", "4096")
+				io.WriteString(w, body)
+			})
+			m := newModel(t, server.URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+			response, err := m.Complete(context.Background(), freeze(t, m))
+			var limit *harness.ContextLimitError
+			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true, OutputReported: true}) {
+				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
 			}
 		})
 	}

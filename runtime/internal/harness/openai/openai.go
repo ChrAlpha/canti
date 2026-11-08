@@ -19,8 +19,8 @@ import (
 
 const (
 	protocol    = "openai-responses/v1"
-	adapter     = "canti-openai-responses/1"
-	toolAdapter = "canti-openai-responses/1-tool"
+	adapter     = "canti-openai-responses/2"
+	toolAdapter = "canti-openai-responses/2-tool"
 	// decisionFormat and decisionTool are strict, so a decision always
 	// matches the schema. The tool choice is auto, as for every model API
 	// canti supports, and a reply without the call is repaired like any
@@ -124,8 +124,9 @@ func (m *Model) Freeze(p harness.Prompt) (harness.Request, error) {
 		Tools             json.RawMessage `json:"tools,omitempty"`
 		ToolChoice        string          `json:"tool_choice,omitempty"`
 		ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+		Truncation        string          `json:"truncation"`
 		Store             bool            `json:"store"`
-	}{Model: m.cfg.Model, Instructions: p.System, Input: []inputMessage{{"user", content}}, MaxOutputTokens: m.cfg.MaxTokens}
+	}{Model: m.cfg.Model, Instructions: p.System, Input: []inputMessage{{"user", content}}, MaxOutputTokens: m.cfg.MaxTokens, Truncation: "disabled"}
 	if m.cfg.Effort != "" {
 		body.Reasoning = &reasoning{m.cfg.Effort}
 	}
@@ -183,8 +184,13 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	resp := harness.Response{Model: req.Model, Protocol: req.Protocol, Adapter: req.Adapter}
 	reply, err := m.endpoint.Post(ctx, req.Body, provider.Header("authorization", "Bearer "+m.cfg.APIKey))
 	resp.Body = reply.Body
+	usage, _, usageErr := provider.Usage(resp.Body, false)
+	resp.Usage = usage
 	if err != nil {
 		return resp, err
+	}
+	if usageErr != nil {
+		return resp, usageErr
 	}
 	if reply.Status/100 != 2 {
 		return resp, statusError(reply)
@@ -195,14 +201,16 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		return resp, errors.New("openai: malformed response")
 	}
 	resp.Model = cmp.Or(r.Model, resp.Model)
-	resp.Usage = harness.Usage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
-	switch status := provider.ExactString(fields, "status"); {
+	switch status := provider.Discriminator(fields, "status"); {
 	case status == "completed":
 		resp.Complete = true
 		return resp, nil
 	case status == "incomplete" && r.IncompleteDetails != nil:
 		return resp, fmt.Errorf("openai: incomplete response: %s", r.IncompleteDetails.Reason)
 	case status == "failed" && r.Error != nil:
+		if errorFields, ok := provider.ExactObject(provider.ExactField(fields, "error")); reply.Status == 200 && ok && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
+			return resp, &harness.ContextLimitError{Status: reply.Status, Code: "context_length_exceeded", RequestID: reply.Header.Get("x-request-id")}
+		}
 		return resp, fmt.Errorf("openai: failed response: %s: %s", r.Error.Code, r.Error.Message)
 	default:
 		return resp, fmt.Errorf("openai: incomplete response: status %q", status)
@@ -282,7 +290,12 @@ func statusError(r provider.Reply) error {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	_ = json.Unmarshal(r.Body, &e)
+	fields, exact := provider.ExactObject(r.Body)
+	errorFields, nested := provider.ExactObject(provider.ExactField(fields, "error"))
+	decoded := json.Unmarshal(r.Body, &e) == nil
+	if exact && nested && decoded && r.Status == http.StatusBadRequest && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
+		return &harness.ContextLimitError{Status: r.Status, Type: provider.Discriminator(errorFields, "type"), Code: "context_length_exceeded", RequestID: r.Header.Get("x-request-id")}
+	}
 	return provider.StatusError("openai", r.Status, provider.Failure{
 		Type: cmp.Or(e.Error.Code, e.Error.Type), Message: e.Error.Message, RequestID: r.Header.Get("x-request-id"),
 		Exhausted: e.Error.Code == "insufficient_quota",

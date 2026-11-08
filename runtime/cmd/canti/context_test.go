@@ -13,7 +13,7 @@ import (
 
 func TestContextConfigurationSurvivesResume(t *testing.T) {
 	imported := t.TempDir()
-	s := runSpec(t, "-history-imports", imported, "-window-steps", "3", "-window-bytes", "32768", "-handover-bytes", "1024")
+	s := runSpec(t, "-history-imports", imported, "-request-bytes", "1048576")
 	s.Config.Workspace = t.TempDir()
 	run, _, err := host.NewRun("goal", "constraints", s, time.Now())
 	if err != nil {
@@ -23,13 +23,13 @@ func TestContextConfigurationSurvivesResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ContextVersion != host.ContextVersion || c.HistoryImports != imported || c.WindowSteps != 3 || c.WindowBytes != 32768 || c.HandoverBytes != 1024 {
+	if c.ContextVersion != host.ContextVersion || c.HistoryImports != imported || c.RequestBytes != 1048576 {
 		t.Fatalf("config lost on resume: %#v", c)
 	}
 }
 
 func TestContextConfigurationRejectsInvalidLimits(t *testing.T) {
-	for _, args := range [][]string{{"-window-steps", "-1"}, {"-window-bytes", "-1"}, {"-handover-bytes", "0"}, {"-handover-bytes", "8193"}} {
+	for _, args := range [][]string{{"-request-bytes", "-1"}, {"-request-bytes", "0"}, {"-request-bytes", "8388609"}} {
 		if _, _, err := host.NewRun("goal", "", runSpec(t, args...), time.Now()); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
@@ -37,7 +37,7 @@ func TestContextConfigurationRejectsInvalidLimits(t *testing.T) {
 }
 
 func TestRemovedContextStrategiesAreRejected(t *testing.T) {
-	for _, name := range []string{"retrieval", "without-handover"} {
+	for _, name := range []string{"retrieval", "without-handover", "context-bytes", "window-steps", "window-bytes", "handover-bytes"} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		var s host.Spec

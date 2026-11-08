@@ -23,6 +23,8 @@ func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 			"event_fb1e6a34760a8376f6bccaba8289a9288bb8fcc457c4b9dedd95522c02046c1d"},
 		{core.ResponseIncomplete{Step: 9, Attempt: 2}, "response_incomplete", `{"Step":9,"Attempt":2}`,
 			"event_ce73726bec4f54580afb71beb4a6b737e40fa5d8affa314397402b78c9aca61a"},
+		{core.RequestRejected{Step: 9, Attempt: 2}, "request_rejected", `{"Step":9,"Attempt":2}`,
+			"event_3ae040dd46290e336ece44bee1064ff60b016480259118cb9889843802be3ea6"},
 		{core.ResponseLoaded{Step: 9, Attempt: 2, Body: []byte(`{"kind":"exec","payload":"go test ./..."}`)}, "response_loaded",
 			`{"Step":9,"Attempt":2,"Body":"eyJraW5kIjoiZXhlYyIsInBheWxvYWQiOiJnbyB0ZXN0IC4vLi4uIn0="}`,
 			"event_a4c7088d04e609a41fe7dcc8835db463c6668ddc38661ef65685d350ff7f08fd"},

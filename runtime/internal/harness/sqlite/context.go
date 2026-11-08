@@ -181,6 +181,9 @@ func contextFrozen(ctx context.Context, tx *sql.Tx, runID, selection string, arg
 		return nil, fmt.Errorf("%w: frozen request identity or facts at seq %d", ErrIncompatible, seq)
 	}
 	t.Seq, t.EventID = seq, eventID
+	if err := harness.ValidateTransition(t); err != nil {
+		return nil, fmt.Errorf("%w: invalid frozen context: %v", ErrIncompatible, err)
+	}
 	return &t, nil
 }
 

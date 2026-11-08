@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ const (
 type frozenBody struct {
 	System string
 	Blocks []string
+	Cached []bool
 }
 
 // frozenBodies returns the frozen request bodies of h by step and revision.
@@ -41,7 +43,12 @@ func parseFrozen(t *testing.T, body []byte) frozenBody {
 	t.Helper()
 	var req struct {
 		System   string
-		Messages []struct{ Content []struct{ Text string } }
+		Messages []struct {
+			Content []struct {
+				Text         string
+				CacheControl json.RawMessage `json:"cache_control"`
+			}
+		}
 	}
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 {
 		t.Fatalf("frozen body is not one user message: %v", err)
@@ -49,6 +56,7 @@ func parseFrozen(t *testing.T, body []byte) frozenBody {
 	f := frozenBody{System: req.System}
 	for _, b := range req.Messages[0].Content {
 		f.Blocks = append(f.Blocks, b.Text)
+		f.Cached = append(f.Cached, len(b.CacheControl) > 0)
 	}
 	return f
 }
@@ -121,18 +129,38 @@ func TestDecisionPurposeReachesLaterRequestsAcrossRestarts(t *testing.T) {
 				checkTransport(t, format, frozen[key])
 			}
 			rev1, rev2, last := parseFrozen(t, frozen[[2]int{2, 1}]), parseFrozen(t, frozen[[2]int{2, 2}]), parseFrozen(t, frozen[[2]int{3, 1}])
-			stepOne := "### Step 1\nPurpose: " + first + "\nCommand:\n```\nprintf 'one\\n' > one.txt\n```\n"
-			if len(rev1.Blocks) != 3 || !strings.HasPrefix(rev1.Blocks[1], stepOne) {
-				t.Fatalf("step 2 request blocks =\n%q\nwant step 1 starting\n%q", rev1.Blocks, stepOne)
+			runID := h[0].State.RunID
+			receipt := func(step int, seq int, purpose string) string {
+				return fmt.Sprintf("### Step %d (sequence %d)\nPurpose: %s\nOutcome: exited, exit code 0\nSource: /canti/runs/%s/steps/%08d\n", step, seq, purpose, runID, step)
+			}
+			stepOne := receipt(1, 5, first)
+			if len(rev1.Blocks) != 3 || rev1.Blocks[1] != stepOne || !strings.HasSuffix(rev1.Blocks[0], "## Completed step receipts\n") ||
+				!strings.HasPrefix(rev1.Blocks[2], "## Execution position\n") || !strings.Contains(rev1.Blocks[2], "## Latest completion\n") ||
+				!strings.Contains(rev1.Blocks[2], "Purpose: "+first+"\nCommand:\n```\nprintf 'one\\n' > one.txt\n```\n") {
+				t.Fatalf("step2 stable receipt/latest-tail ordering: %+v", rev1)
 			}
 			if rev2.System != rev1.System || len(rev2.Blocks) != 3 || rev2.Blocks[0] != rev1.Blocks[0] || rev2.Blocks[1] != rev1.Blocks[1] ||
-				!strings.Contains(rev2.Blocks[2], "## Rejected response") {
-				t.Fatalf("revision 2 of step 2, rendered by a new process, changed the stable prefix:\n%q\n%q", rev2.Blocks, rev1.Blocks)
+				!strings.Contains(rev2.Blocks[2], "## Protocol repair\n") || strings.Index(rev2.Blocks[2], "## Protocol repair") <= strings.Index(rev2.Blocks[2], "## Latest completion") {
+				t.Fatalf("repair changed stable receipt or tail ordering: %+v %+v", rev1, rev2)
 			}
-			stepTwo := "### Step 2\nPurpose: read the file back " + strings.Repeat("é", 246) + "…[truncated 108 bytes]\nCommand:\n```\ncat one.txt\n```\n"
-			if last.System != rev1.System || len(last.Blocks) != 4 || last.Blocks[1] != rev1.Blocks[1] || !strings.HasPrefix(last.Blocks[2], stepTwo) {
-				t.Fatalf("step 3 request blocks =\n%q\nwant step 1 unchanged and step 2 starting\n%q", last.Blocks, stepTwo)
+			clipped := "read the file back " + strings.Repeat("é", 246) + "…[truncated 108 bytes]"
+			if last.System != rev1.System || len(last.Blocks) != 4 || last.Blocks[0] != rev1.Blocks[0] || last.Blocks[1] != stepOne || last.Blocks[2] != receipt(2, 14, clipped) ||
+				!strings.Contains(last.Blocks[3], "### Step 2\nPurpose: "+clipped+"\nCommand:\n```\ncat one.txt\n```\n") {
+				t.Fatalf("step3 clipped committed purpose/stable receipt/latest tail: %+v", last)
 			}
+			for _, request := range []frozenBody{rev1, rev2, last} {
+				for index, cached := range request.Cached {
+					if cached != (index == 0 || index == len(request.Blocks)-2) {
+						t.Fatalf("wrong stable cache boundary: %+v", request)
+					}
+				}
+			}
+			for step, want := range map[int]string{1: first, 2: long} {
+				if got := archiveText(t, f, fmt.Sprintf("/canti/runs/%s/steps/%08d/purpose", runID, step)); got != want {
+					t.Fatalf("published exact purpose step%d=%q, want%q", step, got, want)
+				}
+			}
+
 			purposes := map[int]string{}
 			for _, e := range h {
 				if e.Kind == "response_loaded" && e.State.Decision.Kind != "" {

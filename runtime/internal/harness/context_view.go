@@ -16,7 +16,7 @@ type ContextRequest struct {
 	Adapter          string          `json:"adapter"`
 	BodyBytes        int             `json:"body_bytes"`
 	SHA256           string          `json:"sha256"`
-	Window           *Window         `json:"window,omitempty"`
+	Anchor           *ContextState   `json:"anchor,omitempty"`
 	CaptureAvailable bool            `json:"capture_available"`
 	Capture          *ContextCapture `json:"capture,omitempty"`
 }
@@ -24,7 +24,7 @@ type ContextRequest struct {
 type ContextDelta struct {
 	BodyBytes     int   `json:"body_bytes"`
 	PromptBytes   *int  `json:"prompt_bytes,omitempty"`
-	WindowChanged *bool `json:"window_changed"`
+	AnchorChanged *bool `json:"anchor_changed"`
 }
 
 type ContextResponse struct {
@@ -36,18 +36,20 @@ type ContextResponse struct {
 }
 
 type ContextEvent struct {
-	Seq              int64            `json:"seq"`
-	Kind             string           `json:"kind"`
-	Step             int              `json:"step"`
-	Revision         int              `json:"revision"`
-	Attempt          int              `json:"attempt"`
-	LostAttempt      int              `json:"lost_attempt,omitempty"`
-	RequestedAttempt int              `json:"requested_attempt,omitempty"`
-	Phase            core.Phase       `json:"phase"`
-	Outcome          string           `json:"outcome"`
-	Reason           core.StopReason  `json:"reason,omitempty"`
-	Failure          string           `json:"failure,omitempty"`
-	Response         *ContextResponse `json:"response,omitempty"`
+	Seq              int64              `json:"seq"`
+	Kind             string             `json:"kind"`
+	Step             int                `json:"step"`
+	Revision         int                `json:"revision"`
+	Attempt          int                `json:"attempt"`
+	LostAttempt      int                `json:"lost_attempt,omitempty"`
+	RequestedAttempt int                `json:"requested_attempt,omitempty"`
+	Phase            core.Phase         `json:"phase"`
+	Outcome          string             `json:"outcome"`
+	Reason           core.StopReason    `json:"reason,omitempty"`
+	Failure          string             `json:"failure,omitempty"`
+	Reset            *ContextState      `json:"reset,omitempty"`
+	Signal           *ContextLimitError `json:"signal,omitempty"`
+	Response         *ContextResponse   `json:"response,omitempty"`
 }
 
 func DescribeContextRequest(t Transition) (ContextRequest, error) {
@@ -59,7 +61,7 @@ func DescribeContextRequest(t Transition) (ContextRequest, error) {
 		Seq: t.Seq, Step: t.To.Step, Revision: t.To.RequestRev,
 		Model: r.Model, Protocol: r.Protocol, Adapter: r.Adapter,
 		BodyBytes: len(r.Body), SHA256: fmt.Sprintf("%x", sha256.Sum256(r.Body)),
-		Window: r.Window, CaptureAvailable: r.Context != nil, Capture: r.Context,
+		Anchor: r.ContextState, CaptureAvailable: r.Context != nil, Capture: r.Context,
 	}, nil
 }
 
@@ -69,9 +71,9 @@ func CompareContextRequests(previous, current ContextRequest) ContextDelta {
 		delta := current.Capture.Bytes.Total - previous.Capture.Bytes.Total
 		d.PromptBytes = &delta
 	}
-	if previous.Window != nil && current.Window != nil {
-		changed := previous.Window.FirstStep != current.Window.FirstStep
-		d.WindowChanged = &changed
+	if previous.Anchor != nil && current.Anchor != nil {
+		changed := previous.Anchor.AnchorSeq != current.Anchor.AnchorSeq
+		d.AnchorChanged = &changed
 	}
 	return d
 }
@@ -84,6 +86,10 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 		Attempt: t.From.Attempt, Phase: t.To.Phase, Outcome: t.Event.Kind(),
 		Reason: t.To.Reason, Failure: t.Facts.Failure,
 	}
+	if t.Facts.Rejection != nil {
+		v.Signal = &t.Facts.Rejection.Signal
+	}
+	v.Reset = t.Facts.ContextState
 	if r := t.Facts.Response; r != nil {
 		v.Response = &ContextResponse{Complete: r.Complete, BodyBytes: len(r.Body), SHA256: fmt.Sprintf("%x", sha256.Sum256(r.Body)), Usage: r.Usage}
 		if bodies {
@@ -99,6 +105,11 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 			v.Attempt = e.Attempt
 		} else {
 			v.RequestedAttempt, v.Outcome = e.Attempt, "attempt_not_started"
+		}
+	case core.RequestRejected:
+		v.Outcome = "context_rejected"
+		if t.Facts.ContextState != nil {
+			v.Outcome = "context_reset"
 		}
 	case core.ResponseLoaded:
 		switch t.To.Phase {

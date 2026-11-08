@@ -78,7 +78,17 @@ func (d *driver) do(event core.Event, facts harness.Facts) {
 
 func (d *driver) freeze() {
 	d.t.Helper()
-	d.do(core.RequestFrozen{}, harness.Facts{Request: requestFor(d.snap.State)})
+	request := requestFor(d.snap.State)
+	if j, ok := d.store.(interface {
+		Context(context.Context, harness.Snapshot) (harness.ContextState, error)
+	}); ok {
+		current, err := j.Context(context.Background(), d.snap)
+		if err != nil {
+			d.t.Fatal(err)
+		}
+		request.ContextState = &current
+	}
+	d.do(core.RequestFrozen{}, harness.Facts{Request: request})
 }
 
 func (d *driver) send() {
@@ -105,7 +115,7 @@ func acceptance(s core.State, event core.ResponseLoaded) harness.Facts {
 	if err != nil || next.Phase != core.PhaseEffectSaved {
 		return harness.Facts{}
 	}
-	a := harness.NormalizeAction(next.Decision.Payload, false, true)
+	a := harness.NormalizeAction(next.Decision.Payload, true)
 	f := harness.Facts{Action: &a}
 	if a.Recovery == harness.RecoveryExternal {
 		f.Execution = &harness.ExecutionIdentity{Spec: harness.ConfigDigest([]byte(next.Decision.Payload)), ConfigDigest: harness.ConfigDigest(testRun(next.RunID).Config)}
@@ -140,7 +150,7 @@ func (d *driver) step(command string, usage harness.Usage, outputBytes int64) {
 // the outcome that its invalid arguments yield.
 func (d *driver) perform() {
 	d.t.Helper()
-	a := harness.NormalizeAction(d.snap.State.Decision.Payload, false, true)
+	a := harness.NormalizeAction(d.snap.State.Decision.Payload, true)
 	if a.Invalid == "" {
 		d.t.Fatalf("perform needs an invalid local action, not %+v", a)
 	}
@@ -152,7 +162,7 @@ func execBody(command string) []byte {
 }
 
 func requestFor(s core.State) *harness.Request {
-	return &harness.Request{Body: fmt.Appendf(nil, "request %d.%d", s.Step, s.RequestRev+1), Model: "m", Protocol: "p", Adapter: "a"}
+	return &harness.Request{ContextState: &harness.ContextState{FirstStep: 1}, Body: fmt.Appendf(nil, "request %d.%d", s.Step, s.RequestRev+1), Model: "m", Protocol: "p", Adapter: "a"}
 }
 
 func responseFor(s core.State, body []byte, usage harness.Usage) *harness.Response {

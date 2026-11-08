@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"syscall"
 	"testing"
@@ -231,5 +232,48 @@ func TestUnconfirmedExitKeepsRecoveryIdentityAndFailure(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "-input "+s.InputID) || strings.Contains(output.String(), "continue session with") {
 		t.Fatalf("unsafe recovery hint: %s", output.String())
+	}
+}
+
+func TestContextRecoveryAndReportedUsagePreserveContinuousDraft(t *testing.T) {
+	for _, reported := range []bool{false, true} {
+		t.Run(fmt.Sprint(reported), func(t *testing.T) {
+			m := model()
+			m.phase = running
+			m.editor.SetValue("editable next draft")
+			for _, item := range []hostrpc.Item{{Kind: "context_reset", Step: 7, AnchorSeq: 42}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true, FocusSources: 2}}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true}}} {
+				updated, _ := m.fact(fact{event: session.Event{Item: &item}})
+				m = updated.(Model)
+			}
+			transcript := strings.Join(m.entries, "")
+			for _, want := range []string{"context reset at sequence 42; continuing step 7", "focus replaced with 2 frozen sources", "focus replaced with 0 frozen sources"} {
+				if !strings.Contains(transcript, want) {
+					t.Fatalf("missing %q: %s", want, transcript)
+				}
+			}
+			coverage := hostrpc.UsageCoverage{Attempts: 2, Lost: 1}
+			if reported {
+				coverage.InputReports = 1
+				coverage.OutputReports = 1
+			}
+			updated, _ := m.complete(session.Result{Code: session.OK, Run: hostrpc.Run{Status: hostrpc.StatusReturned, Result: "answer", Totals: hostrpc.Totals{Coverage: coverage}}})
+			m = updated.(Model)
+			want := fmt.Sprintf("reported usage input 0 output 0; coverage input %d/2 output %d/2; lost 1", coverage.InputReports, coverage.OutputReports)
+			if !strings.Contains(m.final, "answer\n") || !strings.Contains(m.final, want) || m.editor.Value() != "editable next draft" || m.pending != nil || m.phase != ready {
+				t.Fatalf("usage/recovery changed continuous draft: %+v", m)
+			}
+		})
+	}
+}
+func TestRequestByteRejectionPreservesDraftAndRejectedSnapshot(t *testing.T) {
+	m := model()
+	m.phase = submitting
+	m.editor.SetValue("next draft")
+	snapshot := session.NewSnapshot("large input")
+	m.pending = &snapshot
+	updated, _ := m.complete(session.Result{Code: session.Usage, Rejected: true, Err: errors.New("-request-bytes: authoritative orientation needs at least 20001 bytes; resource cap is 20000")})
+	m = updated.(Model)
+	if !strings.Contains(m.final, "the input does not fit -request-bytes (authoritative orientation needs at least 20001 bytes; resource cap is 20000)") || m.editor.Value() != "next draft" || m.rejected == nil || *m.rejected != snapshot || m.pending != nil || m.phase != ready {
+		t.Fatalf("resource rejection lost draft/recovery: %+v", m)
 	}
 }

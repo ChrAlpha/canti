@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker/dockertest"
 )
@@ -232,7 +233,7 @@ func checkReleased(t *testing.T, f *fixture, h []entry) map[string]jobRecord {
 
 // checkRecords checks that the step records of the run of h hold goal, the
 // command and preview of every completed step and no other, a performed
-// step's preview as context version 13 presents its outcome, and the run's
+// step's preview as the current context presents its outcome, and the run's
 // result once it is closed.
 func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
 	t.Helper()
@@ -273,8 +274,7 @@ func checkRecords(t *testing.T, f *fixture, goal string, h []entry) {
 	}
 }
 
-// outcomePreview is the preview that context version 13 publishes for a
-// step that the harness performed with outcome o, as version 12 did.
+// outcomePreview is the published preview of the committed local outcome.
 func outcomePreview(t *testing.T, o harness.Outcome) string {
 	t.Helper()
 	switch {
@@ -289,7 +289,10 @@ func outcomePreview(t *testing.T, o harness.Outcome) string {
 		}
 		return string(data)
 	}
-	return "Handover recorded; the next request starts a new context window."
+	if o.Focus == nil {
+		t.Fatal("successful local outcome has neither retrieval nor focus")
+	}
+	return fmt.Sprintf("Focus replaced with %d frozen source ranges.", len(o.Focus.Sources))
 }
 
 func decodeEvent[E core.Event](raw string) (core.Event, error) {
@@ -299,7 +302,7 @@ func decodeEvent[E core.Event](raw string) (core.Event, error) {
 }
 
 var eventDecoders = map[string]func(string) (core.Event, error){
-	"request_frozen": decodeEvent[core.RequestFrozen], "attempt_started": decodeEvent[core.AttemptStarted],
+	"request_frozen": decodeEvent[core.RequestFrozen], "request_rejected": decodeEvent[core.RequestRejected], "attempt_started": decodeEvent[core.AttemptStarted],
 	"response_saved": decodeEvent[core.ResponseSaved], "response_incomplete": decodeEvent[core.ResponseIncomplete],
 	"response_loaded": decodeEvent[core.ResponseLoaded], "effect_recovered": decodeEvent[core.EffectRecovered], "observed": decodeEvent[core.Observed], "performed": decodeEvent[core.Performed],
 	"outcome_unknown": decodeEvent[core.OutcomeUnknown], "stop_requested": decodeEvent[core.StopRequested],
@@ -318,6 +321,10 @@ func checkReplay(t *testing.T, runID string, h []entry) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextHead := harness.InitialContext()
+	var frozen *harness.Request
+	var rebuild *core.State
+	seenEvents := map[string]bool{}
 	for i, e := range h {
 		decode, ok := eventDecoders[e.Kind]
 		if !ok {
@@ -331,7 +338,109 @@ func checkReplay(t *testing.T, runID string, h []entry) {
 		if e.Seq != int64(i+1) || e.From != s.Phase || err != nil || next != e.State {
 			t.Fatalf("replay diverges at seq %d (%s from %s): got %+v, %v\nrecorded %+v", e.Seq, e.Kind, s.Phase, next, err, e.State)
 		}
+		transition := harness.Transition{Seq: e.Seq, EventID: e.EventID, Semantics: e.Semantics, From: s, To: next, Event: event, Facts: e.Facts}
+		if seenEvents[e.EventID] || e.Semantics != core.SemanticsVersion {
+			t.Fatalf("seq %d duplicate event identity or wrong semantics", e.Seq)
+		}
+		seenEvents[e.EventID] = true
+		if err := harness.ValidateTransition(transition); err != nil {
+			t.Fatalf("seq %d invalid attached facts: %v", e.Seq, err)
+		}
+		if err := harness.CheckContextMutation(transition, contextHead); err != nil {
+			t.Fatalf("seq %d invalid atomic context mutation: %v", e.Seq, err)
+		}
+		if request := e.Facts.Request; request != nil {
+			if rebuild != nil && (next.Step != rebuild.Step || next.RequestRev != rebuild.RequestRev+1 || request.Context.Preparation != "request_rejected") {
+				t.Fatalf("seq %d rejection did not rebuild the same unfinished step/new revision", e.Seq)
+			}
+			frozen, rebuild = request, nil
+		}
+		if rejected, ok := event.(core.RequestRejected); ok {
+			r, response := e.Facts.Rejection, e.Facts.Response
+			if rejected.Step != s.Step || rejected.Attempt != s.Attempt || frozen == nil || r == nil || response == nil || len(response.Body) == 0 ||
+				!r.Signal.Confirmed() || !r.Previous.Equal(contextHead) || frozen.ContextState == nil || !frozen.ContextState.Equal(r.Previous) ||
+				response.Adapter != frozen.Adapter || response.Protocol != frozen.Protocol || response.Usage.Validate() != nil {
+				t.Fatalf("seq %d rejection lost sent-request/typed-signal/response/usage provenance", e.Seq)
+			}
+			if next.Phase == core.PhaseIdle {
+				want := harness.ContextState{AnchorSeq: e.Seq, FirstStep: s.Step}
+				if next.Step != s.Step || next.Attempt != s.Attempt+1 || next.RequestRev != s.RequestRev || e.Facts.ContextState == nil || !e.Facts.ContextState.Equal(want) {
+					t.Fatalf("seq %d rejection did not consume one attempt and atomically reset focus", e.Seq)
+				}
+				prior := s
+				rebuild = &prior
+			} else if next.Phase != core.PhaseStopped || next.Reason != core.StopAttemptsExhausted || e.Facts.ContextState != nil || next.Step != s.Step {
+				t.Fatalf("seq %d exhausted rejection invented context or progress", e.Seq)
+			}
+		}
+		if e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
+			if e.Facts.Outcome.Status != harness.OutcomeDone || e.Facts.ContextState == nil ||
+				!slices.Equal(e.Facts.ContextState.Focus, e.Facts.Outcome.Focus.Sources) || next.Step != s.Step+1 {
+				t.Fatalf("seq %d focus selection/release and progress were not committed together", e.Seq)
+			}
+		}
+		if e.Facts.ContextState != nil {
+			contextHead = *e.Facts.ContextState
+		}
 		s = next
+	}
+}
+
+// archiveText follows the same read surface available to native retrievals,
+// paging exact bytes rather than reintroducing automatic session projection.
+func archiveText(t *testing.T, f *fixture, path string) string {
+	t.Helper()
+	reader := archive.Reader{History: filepath.Join(f.state, "history"), Artifacts: filepath.Join(f.state, "artifacts")}
+	query := archive.RetrievalQuery{Operation: "read", Path: path, Reason: "Verify original committed historical evidence.", Limit: 8192}
+	var body strings.Builder
+	for page := 0; page < 128; page++ {
+		result, err := reader.Retrieve(context.Background(), query)
+		if err != nil || result.Error != "" || result.Incomplete || len(result.Sources) != len(result.Evidence) {
+			t.Fatalf("archive read %s: %+v %v", path, result, err)
+		}
+		for _, data := range result.Evidence {
+			body.WriteString(data)
+		}
+		if !result.More {
+			return body.String()
+		}
+		if result.NextOffset <= query.Offset {
+			t.Fatal("archive read did not advance")
+		}
+		query.Offset = result.NextOffset
+	}
+	t.Fatal("archive read exceeded 1MiB bound")
+	return ""
+}
+
+type archivedSession struct {
+	SessionID     string `json:"session_id"`
+	Sequence      int64  `json:"sequence"`
+	InputID       string `json:"input_id"`
+	PreviousRunID string `json:"previous_run_id"`
+}
+
+func archiveSession(t *testing.T, f *fixture, run string) archivedSession {
+	t.Helper()
+	var session archivedSession
+	if err := json.Unmarshal([]byte(archiveText(t, f, "/canti/runs/"+run+"/session")), &session); err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+func checkSessionLink(t *testing.T, f *fixture, prompt, current, previous, goal string, sequence int64) {
+	t.Helper()
+	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/session") ||
+		!strings.Contains(prompt, "Previous run: /canti/runs/"+previous+"/.") {
+		t.Fatalf("missing current task/session navigation: %s", prompt)
+	}
+	link := archiveSession(t, f, current)
+	if link.PreviousRunID != previous || link.Sequence != sequence || link.InputID == "" || link.SessionID == "" {
+		t.Fatalf("wrong session link: %+v", link)
+	}
+	prior := archiveSession(t, f, previous)
+	if prior.SessionID != link.SessionID || prior.Sequence != sequence-1 || prior.InputID == "" || prior.InputID == link.InputID {
+		t.Fatalf("session ordering/input identity: current=%+v previous=%+v", link, prior)
 	}
 }
 
@@ -402,13 +511,6 @@ func writeFile(t *testing.T, path string) {
 	}
 }
 
-func checkFile(t *testing.T, path, want string) {
-	t.Helper()
-	if data, err := os.ReadFile(path); err != nil || string(data) != want {
-		t.Errorf("%s = %q, %v; want %q", filepath.Base(path), data, err, want)
-	}
-}
-
 // evidence logs the one-line evidence record of a gate case.
 func evidence(t *testing.T, gate, injected, image string, f *fixture, h []entry) {
 	t.Helper()
@@ -442,4 +544,47 @@ func latestOutcome(t *testing.T, h []entry) harness.Outcome {
 	}
 	t.Fatal("no completed step")
 	return harness.Outcome{}
+}
+
+// sourceHandles derives explicit focus handles only from the completed retrieval.
+type sourceHandle struct {
+	Seq    int64 `json:"seq"`
+	Source int   `json:"source"`
+}
+
+func sourceHandles(t *testing.T, h []entry) []sourceHandle {
+	t.Helper()
+	for _, e := range slices.Backward(h) {
+		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Retrieval != nil {
+			var handles []sourceHandle
+			for index := range e.Facts.Outcome.Retrieval.Sources {
+				handles = append(handles, sourceHandle{e.Seq, index})
+			}
+			if len(handles) == 0 {
+				t.Fatal("completed retrieval has no focusable sources")
+			}
+			return handles
+		}
+	}
+	t.Fatal("no completed retrieval for focus")
+	return nil
+}
+func checkSelectedRequest(t *testing.T, f *fixture, step int, selected []sourceHandle) {
+	t.Helper()
+	for _, e := range f.history() {
+		if e.Kind != "request_frozen" || e.State.Step != step {
+			continue
+		}
+		request := e.Facts.Request
+		if request == nil || request.ContextState == nil || len(request.ContextState.Focus) != len(selected) {
+			t.Fatalf("selected request lost handles: %+v", request)
+		}
+		for index, ref := range request.ContextState.Focus {
+			if ref.SourceSeq != selected[index].Seq || ref.Source != selected[index].Source {
+				t.Fatalf("selected handles changed: %+v", request.ContextState.Focus)
+			}
+		}
+		return
+	}
+	t.Fatalf("no frozen request for selected step%d", step)
 }

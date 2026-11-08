@@ -16,11 +16,15 @@ func Result(out session.Result) (answer, diagnostic string) {
 		fmt.Fprintf(&b, "canti: detached from run %s, which the host keeps driving; follow it with \"canti resume -host auto -run %[1]s\".\n", r.RunID)
 	}
 	if out.Err != nil {
-		if out.Rejected && !out.NoInputFits && strings.HasPrefix(out.Err.Error(), "-context-bytes:") {
-			fmt.Fprintf(&b, "canti-tui: the input does not fit -context-bytes (%s)\n", strings.TrimPrefix(out.Err.Error(), "-context-bytes: "))
+		if out.Rejected && !out.NoInputFits && strings.HasPrefix(out.Err.Error(), "-request-bytes:") {
+			fmt.Fprintf(&b, "canti-tui: the input does not fit -request-bytes (%s)\n", strings.TrimPrefix(out.Err.Error(), "-request-bytes: "))
 		} else {
 			fmt.Fprintf(&b, "canti-tui: %v\n", out.Err)
 		}
+	}
+	if out.Err == nil && r.Totals.Coverage.Attempts > 0 {
+		c := r.Totals.Coverage
+		fmt.Fprintf(&b, "canti: reported usage input %d output %d; coverage input %d/%d output %d/%d; lost %d\n", r.Totals.InputTokens, r.Totals.OutputTokens, c.InputReports, c.Attempts, c.OutputReports, c.Attempts, c.Lost)
 	}
 	if r.Why != "" && r.Status == hostrpc.StatusActive && !r.Drivable {
 		fmt.Fprintf(&b, "canti: the host cannot continue run %s by itself: %s\n", r.RunID, r.Why)

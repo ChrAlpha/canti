@@ -33,14 +33,14 @@ func TestLoopShowsCommittedPurposesAcrossRestart(t *testing.T) {
 	if len(p) != 4 {
 		t.Fatalf("prompts = %d, want 4", len(p))
 	}
-	first := "### Step 1\nPurpose: list the tree, then count Go files\nCommand:\n```\nls -la /workspace\n```\n"
+	first := "### Step 1 (sequence 5)\nPurpose: list the tree, then count Go files\nOutcome: exited, exit code 0\n"
 	if !strings.HasPrefix(p[1].Blocks[1], first) {
 		t.Fatalf("step 1 block =\n%q\nwant prefix\n%q", p[1].Blocks[1], first)
 	}
 	if p[2].System != p[1].System || p[2].Stable != p[1].Stable || !slices.Equal(p[2].Blocks[:p[2].Stable], p[1].Blocks[:p[1].Stable]) {
 		t.Fatalf("revision 2 of step 2, rendered after a restart, changed the stable blocks:\n%q\n%q", p[2].Blocks[:p[2].Stable], p[1].Blocks[:p[1].Stable])
 	}
-	second := "### Step 2\nPurpose: read it back " + strings.Repeat("é", 249) + "…[truncated 102 bytes]\nCommand:\n"
+	second := "### Step 2 (sequence 14)\nPurpose: read it back " + strings.Repeat("é", 249) + "…[truncated 102 bytes]\nOutcome: exited, exit code 0\n"
 	if p[3].Blocks[1] != p[1].Blocks[1] || !strings.HasPrefix(p[3].Blocks[2], second) {
 		t.Fatalf("step 3 blocks =\n%q\nwant step 1 unchanged and step 2 starting\n%q", p[3].Blocks[1:3], second)
 	}

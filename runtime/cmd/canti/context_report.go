@@ -145,8 +145,8 @@ func (r contextReport) writeText(w io.Writer) error {
 	t.line("Run %s, step %d, revision %d (request seq %d; as of %d)", r.RunID, q.Step, q.Revision, q.Seq, r.AsOfSeq)
 	t.line("Model %s; protocol %s; adapter %s", q.Model, q.Protocol, q.Adapter)
 	t.line("Frozen request bytes: %d; sha256 %s", q.BodyBytes, q.SHA256)
-	if q.Window != nil {
-		t.line("Window begins at step %d; handover source step %d; requested %t", q.Window.FirstStep, q.Window.SourceStep, q.Window.Requested)
+	if q.Anchor != nil {
+		t.line("Anchor sequence %d; first step %d; selected focus sources %d", q.Anchor.AnchorSeq, q.Anchor.FirstStep, len(q.Anchor.Focus))
 	}
 	if q.Capture == nil {
 		t.line("Context capture unavailable for this recorded request.")
@@ -155,10 +155,10 @@ func (r contextReport) writeText(w io.Writer) error {
 	}
 	if r.Previous != nil {
 		t.line("Previous: step %d revision %d (seq %d); request bytes delta %+d", r.Previous.Step, r.Previous.Revision, r.Previous.Seq, r.Delta.BodyBytes)
-		if r.Delta.WindowChanged == nil {
-			t.line("Window change unavailable: recorded window metadata is missing.")
+		if r.Delta.AnchorChanged == nil {
+			t.line("Anchor change unavailable: recorded anchor metadata is missing.")
 		} else {
-			t.line("Window changed: %t", *r.Delta.WindowChanged)
+			t.line("Anchor changed: %t", *r.Delta.AnchorChanged)
 		}
 		if r.Delta.PromptBytes != nil {
 			t.line("Rendered prompt bytes delta: %+d", *r.Delta.PromptBytes)
@@ -180,18 +180,10 @@ func (r contextReport) writeText(w io.Writer) error {
 func (t *textLines) capture(c *harness.ContextCapture) {
 	t.line("Rendered prompt bytes: %d / %d", c.Bytes.Total, c.Bytes.Limit)
 	b := c.Bytes
-	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; earlier dialogue %d; handover %d", b.System, b.Goal, b.Constraints, b.Environment, b.Session, b.Handover)
-	if c.Handover.Status == "evaluated" {
-		t.line("Handover check: %s; reasons %v; used %d + growth %d, work capacity %d", c.Handover.Status, c.Handover.Reasons, c.Handover.Used, c.Handover.Growth, c.Handover.Capacity)
-	} else {
-		t.line("Handover check not evaluated: %s", c.Handover.Status)
-	}
-	for _, s := range c.Session {
-		handover := ""
-		if s.HandoverStep != 0 {
-			handover = fmt.Sprintf(", latest handover step %d", s.HandoverStep)
-		}
-		t.line("Earlier dialogue: run %s sequence %d, %s, goal included %t%s", s.RunID, s.SessionSeq, s.Status, s.IncludedGoal, handover)
+	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; anchor %d; focus %d; latest %d", b.System, b.Goal, b.Constraints, b.Environment, b.Anchor, b.Focus, b.Latest)
+	t.line("Preparation: %s; latest step %d sequence %d; selected sources %d", c.Preparation, c.LatestStep, c.LatestSeq, len(c.Focus))
+	if c.SessionNavigation != "" {
+		t.line("Previous session run: %s", c.SessionNavigation)
 	}
 	for _, retrieval := range c.Retrievals {
 		t.line("Retrieval at step %d: %s; original query in observation; more %t; incomplete %t", retrieval.Step, retrieval.OperationName(), retrieval.More, retrieval.Incomplete)
@@ -200,10 +192,7 @@ func (t *textLines) capture(c *harness.ContextCapture) {
 		}
 	}
 	for _, s := range c.Sources {
-		t.line("Source at step %d: %s [%d,%d) sha256 %s; available when frozen: %t", s.Step, s.Source.Path, s.Source.Offset, s.Source.Offset+int64(s.Source.Length), s.Source.SHA256, s.Available)
-		if s.Error != "" {
-			t.line("  error: %s", s.Error)
-		}
+		t.line("Source sequence %d source %d, step %d: %s [%d,%d) sha256 %s; selected %t", s.Seq, s.Index, s.Step, s.Source.Path, s.Source.Offset, s.Source.Offset+int64(s.Source.Length), s.Source.SHA256, s.Selected)
 	}
 }
 
@@ -222,6 +211,13 @@ func (t *textLines) event(e harness.ContextEvent) {
 		t.line("  attempt %d has no committed response", e.LostAttempt)
 	}
 	if e.Response != nil {
-		t.line("  response bytes: %d; complete %t; recorded tokens input %d output %d", e.Response.BodyBytes, e.Response.Complete, e.Response.Usage.InputTokens, e.Response.Usage.OutputTokens)
+		t.line("  response bytes: %d; complete %t; reported tokens input %s output %s", e.Response.BodyBytes, e.Response.Complete, reportedCount(e.Response.Usage.InputTokens, e.Response.Usage.InputReported), reportedCount(e.Response.Usage.OutputTokens, e.Response.Usage.OutputReported))
 	}
+}
+
+func reportedCount(count int64, reported bool) string {
+	if !reported {
+		return "unknown"
+	}
+	return fmt.Sprint(count)
 }

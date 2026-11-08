@@ -95,7 +95,7 @@ func TestDecisionFormatSelectsTheFrozenSystemPrompt(t *testing.T) {
 func TestDecisionFormatAdmitsContextByItsSystem(t *testing.T) {
 	smallest := func(format string) int {
 		admits := func(n int) bool {
-			s := runSpec(t, "-decision-format", format, "-context-bytes", strconv.Itoa(n))
+			s := runSpec(t, "-decision-format", format, "-request-bytes", strconv.Itoa(n))
 			s.Config.Workspace = "/work"
 			_, _, err := host.NewRun("goal", "", s, time.Time{})
 			return err == nil

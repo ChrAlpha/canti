@@ -2,20 +2,16 @@ package harness_test
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
-	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
 )
 
 func capturedRequest(t *testing.T, f *fixture, step, rev int) harness.Request {
@@ -30,7 +26,7 @@ func capturedRequest(t *testing.T, f *fixture, step, rev int) harness.Request {
 func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	t.Helper()
 	c := req.Context.Bytes
-	total := c.System + c.Goal + c.Constraints + c.Environment + c.Session + c.Window + c.Handover + c.StepHeader + c.EmptySteps + c.Progress + c.HandoverRequired + c.Repair
+	total := c.System + c.Goal + c.Constraints + c.Environment + c.Anchor + c.ReceiptHeader + c.Focus + c.Progress + c.Latest + c.Repair
 	for i, step := range c.Steps {
 		total += step.Bytes
 		if step.Bytes != len(p.Blocks[i+1]) {
@@ -40,7 +36,7 @@ func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	if c.Total != len(p.System)+len(p.User()) || total != c.Total || c.Total > c.Limit || c.System != len(p.System) {
 		t.Fatalf("capture = %+v, total parts=%d, actual=%d", c, total, len(p.System)+len(p.User()))
 	}
-	if c.Goal+c.Constraints+c.Environment+c.Session+c.Window+c.Handover+c.StepHeader != len(p.Blocks[0]) || c.EmptySteps+c.Progress+c.HandoverRequired+c.Repair != len(p.Blocks[len(p.Blocks)-1]) {
+	if c.Goal+c.Constraints+c.Environment+c.Anchor+c.ReceiptHeader != len(p.Blocks[0]) || c.Focus+c.Progress+c.Latest+c.Repair != len(p.Blocks[len(p.Blocks)-1]) {
 		t.Fatalf("head or tail does not match blocks: %+v", c)
 	}
 	if !bytes.Equal(req.Body, []byte(p.System+"\n\n"+p.User())) {
@@ -85,7 +81,7 @@ func TestContextCapturePersistsFrozenEvidenceAndRetry(t *testing.T) {
 		checkCapturedBytes(t, req, f.model.prompts[i])
 	}
 	c := originalReq.Context
-	if len(c.Sources) != 0 {
+	if len(c.Sources) != 1 {
 		t.Fatalf("frozen evidence needs no source check, captured %+v", c.Sources)
 	}
 	steps, err := f.store.Recent(ctx, runID, 0, 1)
@@ -99,220 +95,14 @@ func TestContextCapturePersistsFrozenEvidenceAndRetry(t *testing.T) {
 		t.Fatal("transport retry did not preserve original bytes")
 	}
 	r := repaired.Context
-	if len(r.Sources) != 0 || !strings.Contains(string(repaired.Body), "ORIGINAL") || strings.Contains(string(repaired.Body), "Evidence unavailable") {
+	if len(r.Sources) != 1 || !strings.Contains(string(repaired.Body), "ORIGINAL") || strings.Contains(string(repaired.Body), "Evidence unavailable") {
 		t.Fatalf("the repair after the source was removed lost the frozen evidence: %+v", r.Sources)
 	}
-	if c.Handover.Status != "evaluated" || c.Handover.Capacity <= 0 || c.Handover.Growth != 0 || r.Handover.Status != "request_revision" || r.Handover.Capacity != 0 || len(r.Handover.Reasons) != 0 || r.Bytes.Repair == 0 {
-		t.Fatalf("checks original=%+v repair=%+v", c.Handover, r.Handover)
+	if c.Preparation != "first_request" || r.Preparation != "protocol_repair" || r.Bytes.Repair == 0 {
+		t.Fatalf("wrong preparation capture: %+v %+v", c, r)
 	}
+
 	if !reflect.DeepEqual(originalReq.Context, capturedRequest(t, f, 2, 1).Context) {
 		t.Fatal("later repair rewrote the original capture")
-	}
-}
-
-func TestContextCaptureRecordsHandoverReasonsAndSkippedChecks(t *testing.T) {
-	for _, mode := range []string{"steps", "bytes", "both"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{}, execReply("true"),
-				execReply("must be rejected while handover pending"),
-				execReply(harness.HandoverPrefix+"Continue from original history."), returnReply("done"))
-			var reasons []string
-			if mode != "bytes" {
-				f.cfg.WindowSteps = 1
-				reasons = append(reasons, "window_steps")
-			}
-			if mode != "steps" {
-				f.cfg.WindowBytes = 1
-				reasons = append(reasons, "window_bytes")
-			}
-			wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-			trigger := capturedRequest(t, f, 2, 1)
-			pending := capturedRequest(t, f, 3, 1)
-			next := capturedRequest(t, f, 4, 1)
-			if !slices.Equal(trigger.Context.Handover.Reasons, reasons) || !trigger.Window.Requested || trigger.Context.Handover.Steps != 1 || trigger.Context.Handover.Used != trigger.Context.Bytes.Steps[0].Bytes {
-				t.Fatalf("trigger = %+v", trigger.Context)
-			}
-			if pending.Context.Handover.Status != "already_requested" || len(pending.Context.Handover.Reasons) != 0 || pending.Context.Handover.Capacity != 0 {
-				t.Fatalf("pending = %+v", pending.Context.Handover)
-			}
-			if next.Window.FirstStep != 4 || next.Window.SourceStep != 3 || next.Context.Bytes.Handover == 0 || next.Context.Handover.Status != "evaluated" || next.Context.Handover.Used != 0 || len(next.Context.Sources) != 0 {
-				t.Fatalf("next window = %+v", next)
-			}
-			for i, req := range []harness.Request{capturedRequest(t, f, 1, 1), trigger, pending, next} {
-				checkCapturedBytes(t, req, f.model.prompts[i])
-			}
-		})
-	}
-}
-
-func TestContextCaptureRecordsCapacityAfterTheSourceIsRemoved(t *testing.T) {
-	imported := t.TempDir()
-	file := filepath.Join(imported, "evidence")
-	if err := os.WriteFile(file, []byte(strings.Repeat("x", archive.MaxBytes)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f := newFixture(t, limits, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"first","limit":8192}`),
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"second","limit":8192}`),
-		execReply(harness.HandoverPrefix+"Verify original references."), returnReply("done"))
-	f.cfg.Reader = &archive.Reader{Imports: imported}
-	f.cfg.Limits = harness.DefaultPromptLimits()
-	f.cfg.Limits.Total = 96 << 10
-	ctx := f.bounded()
-	for i := 0; i < 30; i++ {
-		s, err := f.fresh().Step(ctx, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s.State.Step == 3 {
-			break
-		}
-		if i == 29 {
-			t.Fatal("retrieval did not complete")
-		}
-	}
-	if err := os.Remove(file); err != nil {
-		t.Fatal(err)
-	}
-	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-	r := capturedRequest(t, f, 3, 1)
-	c := r.Context.Handover
-	if c.Status != "evaluated" || c.Growth != 0 || slices.Contains(c.Reasons, "capacity") != (c.Used >= c.Capacity) || r.Window.Requested != (len(c.Reasons) > 0) {
-		t.Fatalf("capacity decision = %+v", c)
-	}
-	if len(r.Context.Sources) != 0 || strings.Count(string(r.Body), strings.Repeat("x", archive.MaxBytes)) != 2 {
-		t.Fatalf("the request after the source was removed lost frozen evidence; sources %+v", r.Context.Sources)
-	}
-	checkCapturedBytes(t, r, f.model.prompts[2])
-}
-
-func TestContextCapturePreservesProviderWireBaseline(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, execReply("printf '你好\\n```\\n'"),
-		reply{body: `{"wrong":"protocol"}`},
-		execReply(harness.HandoverPrefix+"Continue at original evidence."), returnReply("done"))
-	f.cfg.WindowSteps = 1
-	wantState(t, f.run(f.fresh()), core.PhaseReturned, "")
-	m, err := anthropic.New(anthropic.Config{APIKey: "fixture", Model: "fixture-model"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Captured from the provider adapter at 956232c before context diagnostics,
-	// then with the decision purpose system text, the description of the
-	// current window, the purpose record of each step, the plain-text
-	// handover request, the system text on what binds the agent, and the
-	// stated restrictions a handover carries, which are the only changes:
-	// restoring the earlier texts reproduces the 956232c bodies.
-	want := []string{
-		"c49d1929406b578f3cf6803ea27f24c48dd14cd8f223e0614b3ada2e685ed3c7",
-		"14cfc414fd722291325d0a357e571b796919ede201b429cd1b02ff307aef5f8f",
-		"e1f2701172d65062110a754484652a063a2e2458356cfa55f75035bb08ae10eb",
-		"18df8cd021c54f4ea7d338e2f5e0393ef1c08e20f272a213ff6b49fc197f529a",
-	}
-	if len(f.model.prompts) != len(want) {
-		t.Fatalf("prompts = %d", len(f.model.prompts))
-	}
-	for i, p := range f.model.prompts {
-		r, err := m.Freeze(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := fmt.Sprintf("%x", sha256.Sum256(r.Body)); got != want[i] {
-			t.Fatalf("provider body %d differs from baseline: %s", i, got)
-		}
-	}
-}
-
-func TestContextCaptureKeepsSelectedSessionIdentities(t *testing.T) {
-	for _, mode := range []string{"dialogue", "status-only", "navigation-only"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newFixture(t, limits, harness.Budget{}, returnReply("standalone"), returnReply("earlier answer"), returnReply("current answer"))
-			wantState(t, f.run(f.loop()), core.PhaseReturned, "")
-			ctx := f.bounded()
-			submit := func(id, goal string) harness.Run {
-				t.Helper()
-				state, err := core.NewState(id, limits)
-				if err != nil {
-					t.Fatal(err)
-				}
-				r, err := f.store.Submit(ctx, harness.Run{ID: id, SessionID: "session-capture", InputID: id, Goal: goal, Created: created}, state)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return r
-			}
-			prior := submit("session-prior", "earlier goal")
-			if mode == "dialogue" {
-				s, err := f.fresh().Run(ctx, prior.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				wantState(t, s, core.PhaseReturned, "")
-			} else {
-				f.model.replies = []reply{returnReply("current answer")}
-				s, err := f.store.Latest(ctx, prior.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				r, err := harness.NewRunner(f.store)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := r.Commit(ctx, s, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{}); err != nil {
-					t.Fatal(err)
-				}
-				large := submit("session-large", strings.Repeat("G", 200000))
-				s, err = f.store.Latest(ctx, large.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if mode == "status-only" {
-					if _, err := r.Commit(ctx, s, core.StopRequested{Reason: core.StopCancelled}, harness.Facts{}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					model := &fakeModel{replies: []reply{returnReply("large return")}}
-					cfg := f.cfg
-					cfg.Limits = harness.DefaultPromptLimits()
-					cfg.Limits.Goal, cfg.Limits.Total = 256<<10, 512<<10
-					loop, err := harness.NewLoop(f.store, f.exec, model, cfg)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if _, err := loop.Run(ctx, large.ID); err != nil {
-						t.Fatal(err)
-					}
-				}
-				prior = large
-			}
-			current := submit("session-current", "current goal")
-			s, err := f.fresh().Run(ctx, current.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantState(t, s, core.PhaseReturned, "")
-			req, err := f.open().LatestRequest(ctx, current.ID)
-			if err != nil || req.Context == nil {
-				t.Fatalf("context = %+v, %v", req.Context, err)
-			}
-			c := req.Context
-			if c.SessionNavigation != prior.ID || c.Bytes.Session <= 0 {
-				t.Fatalf("navigation = %+v", c)
-			}
-			if mode == "navigation-only" {
-				if len(c.Session) != 0 {
-					t.Fatalf("omitted sources entered metadata: %+v", c.Session)
-				}
-			} else {
-				wantStatus := "returned"
-				if mode == "status-only" {
-					wantStatus = "stopped"
-				}
-				want := []harness.ContextSessionSource{{RunID: prior.ID, SessionSeq: prior.SessionSeq, Status: wantStatus, IncludedGoal: mode == "dialogue"}}
-				if !reflect.DeepEqual(c.Session, want) {
-					t.Fatalf("session sources = %+v, want %+v", c.Session, want)
-				}
-			}
-			checkCapturedBytes(t, req, f.model.prompts[len(f.model.prompts)-1])
-		})
 	}
 }

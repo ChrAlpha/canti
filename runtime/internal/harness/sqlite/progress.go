@@ -41,14 +41,15 @@ type ProgressRow struct {
 	Detail    string
 
 	// The outcome of a performed row.
-	Outcome         string
-	OutcomeDetail   string
-	RetrievalError  string
-	Sources         int
-	Entries         int
-	Handover        bool
-	Retrieval       bool
-	WindowFirstStep int // of the window a performed row commits, 0 for none
+	Outcome        string
+	OutcomeDetail  string
+	RetrievalError string
+	Sources        int
+	Entries        int
+	Focus          bool
+	FocusSources   int
+	Retrieval      bool
+	AnchorSeq      int64
 
 	Cut ProgressFields // the texts that were longer than their caps and are cut
 }
@@ -100,7 +101,7 @@ var progressSQL = `SELECT seq, kind, semantics, ` + strings.Join([]string{
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(to_state, '$.Decision.payload')`, ProgressResultBytes) + ` END`,
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(to_state, '$.Decision.purpose')`, ProgressCommandBytes) + ` END`,
 	`CASE WHEN kind IN ('observed', 'resolved', 'performed') THEN ` + clipped(`json_extract(from_state, '$.Decision.payload')`, ProgressCommandBytes) + ` END`,
-	`CASE WHEN kind IN ('response_incomplete', 'outcome_unknown', 'stop_requested') THEN ` + clipped(`json_extract(facts, '$.Failure')`, ProgressTextBytes) + ` END`,
+	`CASE WHEN kind IN ('response_incomplete', 'request_rejected', 'outcome_unknown', 'stop_requested') THEN ` + clipped(`json_extract(facts, '$.Failure')`, ProgressTextBytes) + ` END`,
 	`CASE WHEN kind = 'response_loaded' THEN ` + clipped(`json_extract(facts, '$.Action.Name')`, ProgressNameBytes) + ` END`,
 	`CASE WHEN kind IN ('observed', 'resolved') THEN ` + clipped(`json_extract(facts, '$.Observation.Execution')`, ProgressNameBytes) + ` END`,
 	`CASE WHEN kind IN ('observed', 'resolved') THEN json_extract(facts, '$.Observation.ExitCode') END`,
@@ -112,8 +113,9 @@ var progressSQL = `SELECT seq, kind, semantics, ` + strings.Join([]string{
 	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Retrieval.sources') END`,
 	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Retrieval.entries') END`,
 	`CASE WHEN kind = 'performed' THEN json_type(facts, '$.Outcome.Retrieval') END`,
-	`CASE WHEN kind = 'performed' THEN json_type(facts, '$.Outcome.Handover') END`,
-	`CASE WHEN kind = 'performed' THEN json_extract(facts, '$.Window.FirstStep') END`,
+	`CASE WHEN kind = 'performed' THEN json_type(facts, '$.Outcome.Focus') END`,
+	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Focus.Sources') END`,
+	`json_extract(facts, '$.ContextState.AnchorSeq')`,
 }, ",\n\t") + `
 	FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
 
@@ -151,11 +153,11 @@ func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	var r ProgressRow
 	var phase, reason, effect, resolution, decision, payload, purpose, command, failure, action, execution, preview, detail []byte
 	var outcome, outcomeDetail, retrievalError []byte
-	var retrieval, handover, receipt sql.NullString
-	var step, exitCode, sources, entries, window sql.NullInt64
+	var retrieval, focus, receipt sql.NullString
+	var step, exitCode, sources, entries, focusSources, anchor sql.NullInt64
 	err := rows.Scan(&r.Seq, &r.Kind, &r.Semantics, &phase, &step, &reason, &effect, &receipt, &resolution, &decision, &payload, &purpose, &command,
 		&failure, &action, &execution, &exitCode, &preview, &detail, &outcome, &outcomeDetail, &retrievalError, &sources, &entries,
-		&retrieval, &handover, &window)
+		&retrieval, &focus, &focusSources, &anchor)
 	if err != nil {
 		return r, err
 	}
@@ -186,8 +188,9 @@ func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	r.Outcome = name(outcome)
 	r.OutcomeDetail = text(outcomeDetail, ProgressTextBytes, cut, ProgressOutcomeDetail)
 	r.RetrievalError = text(retrievalError, ProgressTextBytes, cut, ProgressRetrievalError)
-	r.Sources, r.Entries, r.WindowFirstStep = int(sources.Int64), int(entries.Int64), int(window.Int64)
-	r.Retrieval, r.Handover = retrieval.String == "object", handover.String == "object"
+	r.Sources, r.Entries, r.FocusSources = int(sources.Int64), int(entries.Int64), int(focusSources.Int64)
+	r.AnchorSeq = anchor.Int64
+	r.Retrieval, r.Focus = retrieval.String == "object", focus.String == "object"
 	r.External, r.ResolutionSource = receipt.String == "object", name(resolution)
 	return r, nil
 }

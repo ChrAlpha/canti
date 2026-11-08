@@ -108,12 +108,12 @@ func TestFreeze(t *testing.T) {
 		body    string
 		adapter string
 	}{
-		{"plain", nil, base + `,"store":false}`, adapter},
-		{"structured output", func(c *Config) { c.StructuredOutput = true }, base + `,"text":` + decisionFormat + `,"store":false}`, adapter},
+		{"plain", nil, base + `,"truncation":"disabled","store":false}`, adapter},
+		{"structured output", func(c *Config) { c.StructuredOutput = true }, base + `,"text":` + decisionFormat + `,"truncation":"disabled","store":false}`, adapter},
 		{"effort and max tokens", func(c *Config) { c.Effort, c.MaxTokens = "xhigh", 512 },
-			strings.Replace(base, "16000", "512", 1) + `,"reasoning":{"effort":"xhigh"},"store":false}`, adapter},
+			strings.Replace(base, "16000", "512", 1) + `,"reasoning":{"effort":"xhigh"},"truncation":"disabled","store":false}`, adapter},
 		{"tool", func(c *Config) { c.DecisionFormat, c.StructuredOutput, c.Effort = "tool", true, "high" },
-			base + `,"reasoning":{"effort":"high"},"tools":` + decisionTool + `,"tool_choice":"auto","parallel_tool_calls":false,"store":false}`, toolAdapter},
+			base + `,"reasoning":{"effort":"high"},"tools":` + decisionTool + `,"tool_choice":"auto","parallel_tool_calls":false,"truncation":"disabled","store":false}`, toolAdapter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := freeze(t, newModel(t, "https://unused.test/v1", tc.edit))
@@ -187,7 +187,7 @@ func TestCompleteSendsFrozenBytesOnceWithBearer(t *testing.T) {
 		got.Header.Get("x-api-key") != "" || got.Header.Get("anthropic-version") != "" {
 		t.Fatalf("headers = %v", got.Header)
 	}
-	if resp.Model != "test-model-2026" || resp.Usage != (harness.Usage{InputTokens: 10, OutputTokens: 7}) || resp.Protocol != protocol || resp.Adapter != adapter {
+	if resp.Model != "test-model-2026" || resp.Usage != (harness.Usage{InputTokens: 10, OutputTokens: 7, InputReported: true, OutputReported: true}) || resp.Protocol != protocol || resp.Adapter != adapter {
 		t.Fatalf("response = %+v", resp)
 	}
 	if d := string(m.Decision(resp)); d != `{"kind":"return","payload":"done"}` {
@@ -263,7 +263,7 @@ func TestCompleteRefusesAnotherProtocolOrAdapter(t *testing.T) {
 	m := newModel(t, "https://unused.test/v1", nil)
 	for _, req := range []harness.Request{
 		{Body: []byte(`{}`), Protocol: "anthropic-messages/2023-06-01", Adapter: adapter},
-		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/2"},
+		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/4"},
 	} {
 		if _, err := m.Complete(context.Background(), req); stopReason(err) != core.StopUnrecoverable {
 			t.Errorf("Complete(%s %s) = %v, want unrecoverable", req.Protocol, req.Adapter, err)
@@ -277,7 +277,7 @@ func TestDecisionWithoutTextReturnsTheBody(t *testing.T) {
 	if got := string(m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: adapter})); got != refusal {
 		t.Fatalf("Decision = %s", got)
 	}
-	if got := m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/2"}); got != nil {
+	if got := m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/4"}); got != nil {
 		t.Fatalf("Decision of another adapter = %s", got)
 	}
 }
@@ -306,6 +306,140 @@ func TestToolDecision(t *testing.T) {
 			got := m.Decision(harness.Response{Body: []byte(respond(`"completed"`, tc.output)), Complete: tc.complete, Adapter: toolAdapter})
 			if string(got) != tc.want {
 				t.Fatalf("Decision = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfirmedContextLimitSignals(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name     string
+			status   int
+			body     string
+			overflow bool
+		}{
+			{"http", 400, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too large"}}`, true},
+			{"failed", 200, `{"status":"failed","error":{"code":"context_length_exceeded","message":"too large"},"usage":{"input_tokens":12,"output_tokens":3}}`, true},
+			{"incomplete", 200, `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12,"output_tokens":3}}`, false},
+			{"unstructured", 400, `{"message":"context_length_exceeded"}`, false},
+			{"generic", 400, `{"error":{"code":"invalid_value","message":"context_length_exceeded"}}`, false},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				srv := serve(t, reply(tc.status, tc.body))
+				m := newModel(t, srv.URL, func(c *Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) != tc.overflow || err == nil || resp.Complete || string(resp.Body) != tc.body {
+					t.Fatalf("response=%+v error=%v", resp, err)
+				}
+				if tc.name == "failed" && resp.Usage.InputTokens != 12 {
+					t.Fatalf("lost partial usage: %+v", resp.Usage)
+				}
+			})
+		}
+	}
+}
+
+func TestUsagePresenceAndNumericContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		want        harness.Usage
+		invalid     bool
+	}{
+		{"missing", `null`, harness.Usage{}, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
+		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
+		{"negative", `{"input_tokens":-1}`, harness.Usage{}, true},
+		{"fractional", `{"output_tokens":0.5}`, harness.Usage{}, true},
+		{"integer overflow", `{"input_tokens":9223372036854775808}`, harness.Usage{}, true},
+		{"sum overflow", `{"input_tokens":9223372036854775807,"output_tokens":1}`, harness.Usage{}, true},
+		{"duplicate", `{"input_tokens":1,"input_tokens":2}`, harness.Usage{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"status":"completed","usage":` + tc.usage + `}`
+			srv := serve(t, reply(200, body))
+			m := newModel(t, srv.URL, nil)
+			resp, err := m.Complete(context.Background(), freeze(t, m))
+			var stop *harness.StopError
+			if errors.As(err, &stop) != tc.invalid || resp.Usage != tc.want || string(resp.Body) != body || resp.Complete == tc.invalid {
+				t.Fatalf("usage=%+v complete=%v error=%v", resp.Usage, resp.Complete, err)
+			}
+		})
+	}
+}
+
+func TestContextLimitClassificationRequiresExactUniqueDiscriminators(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"http200-duplicate-code-forward", 200, `{"status":"failed","error":{"code":"server_error","code":"context_length_exceeded"}}`},
+			{"http200-duplicate-code-reverse", 200, `{"status":"failed","error":{"code":"context_length_exceeded","code":"server_error"}}`},
+			{"http200-duplicate-overflow-code", 200, `{"status":"failed","error":{"code":"context_length_exceeded","code":"context_length_exceeded"}}`},
+			{"http200-case-code-override-forward", 200, `{"status":"failed","error":{"code":"server_error","Code":"context_length_exceeded"}}`},
+			{"http200-case-code-override-reverse", 200, `{"status":"failed","error":{"Code":"context_length_exceeded","code":"server_error"}}`},
+			{"http200-uppercase-code-only", 200, `{"status":"failed","error":{"Code":"context_length_exceeded"}}`},
+			{"http200-case-error-override-forward", 200, `{"status":"failed","error":{"code":"server_error"},"Error":{"code":"context_length_exceeded"}}`},
+			{"http200-case-error-override-reverse", 200, `{"status":"failed","Error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http200-uppercase-error-only", 200, `{"status":"failed","Error":{"code":"context_length_exceeded"}}`},
+			{"http200-uppercase-error-and-code", 200, `{"status":"failed","Error":{"Code":"context_length_exceeded"}}`},
+			{"http200-duplicate-error-forward", 200, `{"status":"failed","error":{"code":"server_error"},"error":{"code":"context_length_exceeded"}}`},
+			{"http200-duplicate-error-reverse", 200, `{"status":"failed","error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http400-duplicate-code-forward", 400, `{"error":{"code":"server_error","code":"context_length_exceeded"}}`},
+			{"http400-duplicate-code-reverse", 400, `{"error":{"code":"context_length_exceeded","code":"server_error"}}`},
+			{"http400-duplicate-overflow-code", 400, `{"error":{"code":"context_length_exceeded","code":"context_length_exceeded"}}`},
+			{"http400-case-code-override-forward", 400, `{"error":{"code":"server_error","Code":"context_length_exceeded"}}`},
+			{"http400-case-code-override-reverse", 400, `{"error":{"Code":"context_length_exceeded","code":"server_error"}}`},
+			{"http400-uppercase-code-only", 400, `{"error":{"Code":"context_length_exceeded"}}`},
+			{"http400-case-error-override-forward", 400, `{"error":{"code":"server_error"},"Error":{"code":"context_length_exceeded"}}`},
+			{"http400-case-error-override-reverse", 400, `{"Error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"http400-uppercase-error-only", 400, `{"Error":{"code":"context_length_exceeded"}}`},
+			{"http400-uppercase-error-and-code", 400, `{"Error":{"Code":"context_length_exceeded"}}`},
+			{"http400-duplicate-error-forward", 400, `{"error":{"code":"server_error"},"error":{"code":"context_length_exceeded"}}`},
+			{"http400-duplicate-error-reverse", 400, `{"error":{"code":"context_length_exceeded"},"error":{"code":"server_error"}}`},
+			{"wrong-status-413", 413, `{"error":{"code":"context_length_exceeded"}}`},
+			{"wrong-status-429", 429, `{"error":{"code":"context_length_exceeded"}}`},
+			{"wrong-status-500", 500, `{"error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-completed", 200, `{"status":"completed","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-incomplete", 200, `{"status":"incomplete","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-in_progress", 200, `{"status":"in_progress","error":{"code":"context_length_exceeded"}}`},
+			{"nonfailed-cancelled", 200, `{"status":"cancelled","error":{"code":"context_length_exceeded"}}`},
+			{"uppercase-status", 200, `{"Status":"failed","error":{"code":"context_length_exceeded"}}`},
+			{"case-status-override-forward", 200, `{"status":"incomplete","Status":"failed","error":{"code":"context_length_exceeded"}}`},
+			{"case-status-override-reverse", 200, `{"Status":"failed","status":"incomplete","error":{"code":"context_length_exceeded"}}`},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				m := newModel(t, serve(t, reply(tc.status, tc.body)).URL, func(c *Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) {
+					t.Errorf("ambiguous/noncanonical envelope established overflow: %+v; body=%s", limit, tc.body)
+				}
+				if string(resp.Body) != tc.body {
+					t.Errorf("lost original response: got %s want %s", resp.Body, tc.body)
+				}
+			})
+		}
+	}
+}
+
+func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		t.Run(format, func(t *testing.T) {
+			body := `{"usage":{"input_tokens":3,"output_tokens":0},"status":"failed","error":{"code":"context_length_exceeded"}}`
+			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Length", "4096")
+				io.WriteString(w, body)
+			})
+			m := newModel(t, server.URL, func(c *Config) { c.DecisionFormat = format })
+			response, err := m.Complete(context.Background(), freeze(t, m))
+			var limit *harness.ContextLimitError
+			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true, OutputReported: true}) {
+				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
 			}
 		})
 	}

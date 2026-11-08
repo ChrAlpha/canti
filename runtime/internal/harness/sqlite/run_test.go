@@ -130,7 +130,7 @@ func TestOfflineRunRecoversAfterReopen(t *testing.T) {
 			t.Fatalf("Recent(0, %d) = %#v, %v; want %#v", limit, got, err, records)
 		}
 	}
-	totals := harness.Totals{Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 42, Steps: 2}
+	totals := harness.Totals{Coverage: harness.UsageCoverage{Attempts: 4}, Usage: harness.Usage{InputTokens: 45, OutputTokens: 20}, OutputBytes: 42, Steps: 2}
 	if got := totalsOf(t, s, "run-1"); got != totals {
 		t.Fatalf("Totals() = %#v, want %#v", got, totals)
 	}
@@ -146,7 +146,7 @@ func completed(commits []harness.Transition) []harness.StepRecord {
 			_, resolved := tr.Event.(core.Resolved)
 			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Observation: *tr.Facts.Observation, Resolved: resolved})
 		case core.Performed:
-			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Outcome: tr.Facts.Outcome, Window: tr.Facts.Window})
+			out = append(out, harness.StepRecord{Seq: tr.Seq, Step: tr.From.Step, Command: tr.From.Decision.Payload, Outcome: tr.Facts.Outcome})
 		}
 	}
 	return out
@@ -421,7 +421,7 @@ func TestCommitChecksEffectsAgainstTheirAcceptanceInItsTransaction(t *testing.T)
 			harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: "x"}}},
 		{"unexplained window", "canti:lint", func(s core.State) core.Event { return core.Performed{EffectID: s.EffectID} },
 			harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeFailed, Detail: "unknown harness action; the actions are canti:retrieve and canti:handover"},
-				Window: &harness.Window{FirstStep: 1, Requested: true, Failures: 1}}},
+				ContextState: &harness.ContextState{FirstStep: 1}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := open(t, tempPath(t))
