@@ -22,7 +22,7 @@ for commit in $commits; do
 	git -C "$tree" checkout -q --detach "$commit"
 	passed=true
 	if [ -f "$tree/go.work" ]; then
-		if ! (cd "$tree" && scripts/build-modules.sh && scripts/run-modules.sh go vet ./... && scripts/run-modules.sh go vet -tags integration,live ./...); then
+		if ! (cd "$tree" && scripts/build-modules.sh && scripts/run-modules.sh go vet ./... && scripts/run-modules.sh go vet -tags integration,live ./... && (cd apps/tui && GOWORK=off go vet -tags acceptance,integration ./...)); then
 			printf '%s does not build and vet\n' "$(git log -1 --format='%h %s' "$commit")" >&2
 			status=1
 			passed=false

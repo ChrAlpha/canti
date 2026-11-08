@@ -41,7 +41,7 @@ def gate(needs, event):
     code = needs["changes"]["outputs"].get("code")
     if code not in ("true", "false"):
         return False
-    for name in ("quality", "lint", "unit", "integration", "long", "pty", "commits"):
+    for name in ("quality", "lint", "unit", "integration", "long", "pty", "native-deps", "module-minimum", "commits"):
         expected = "success"
         if name == "commits" and event != "pull_request":
             expected = "skipped"

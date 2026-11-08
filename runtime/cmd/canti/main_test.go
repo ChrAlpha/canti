@@ -12,7 +12,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -51,15 +50,8 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	if os.Getenv("CANTI_TEST_MAIN") == "1" {
-		if len(os.Args) > 1 && os.Args[1] == "chat" {
-			exe, err := os.Executable()
-			if err != nil {
-				panic(err)
-			}
-			argv := append([]string{os.Getenv("CANTI_TUI_TEST_BINARY"), "chat", "-runtime", exe}, os.Args[2:]...)
-			if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
-				panic(err)
-			}
+		if len(os.Args) > 1 && os.Args[1] == "fixture-write-lock" {
+			os.Exit(acceptanceWriteLock(os.Args[2:]))
 		}
 
 		if spec := os.Getenv("CANTI_TEST_CRASH"); spec != "" {
@@ -94,22 +86,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 	}
-	dir, err := os.MkdirTemp("", "canti-tui-test-")
-	if err != nil {
-		panic(err)
-	}
-	binary := filepath.Join(dir, "canti-tui")
-	build := exec.Command("go", "build", "-race", "-o", binary, ".")
-	build.Dir = "../../../apps/tui/cmd/canti-tui"
-	if out, err := build.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "build independent TUI: %s: %v", out, err)
-		os.RemoveAll(dir)
-		os.Exit(1)
-	}
-	os.Setenv("CANTI_TUI_TEST_BINARY", binary)
-	code := m.Run()
-	os.RemoveAll(dir)
-	os.Exit(code)
+	os.Exit(m.Run())
 }
 
 type crashing struct {
@@ -447,7 +424,7 @@ func TestRefusedSessionInputsTouchNothing(t *testing.T) {
 }
 
 func TestAStateDockerCannotMountIsRefusedBeforeItExists(t *testing.T) {
-	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}, {"chat"}} {
+	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}} {
 		f := newFixture(t, nil)
 		state := filepath.Join(t.TempDir(), "a:b", "state")
 		r := f.cli(nil, args[0], slices.Concat(args[1:], []string{"-state", state})...)
@@ -478,7 +455,6 @@ func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 		}{
 			{"run", []string{"run", "-goal", "g"}},
 			{"run -session", []string{"run", "-session", "s", "-input", "i", "-goal", "g"}},
-			{"chat", []string{"chat"}},
 		} {
 			t.Run(layout.name+"/"+command.name, func(t *testing.T) {
 				f := newFixture(t, nil)

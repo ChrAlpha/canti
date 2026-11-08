@@ -187,6 +187,42 @@ jobs:
         if: always()
         run: test -z "$(docker ps -aq --filter label=canti.effect)"
 
+  native-deps:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          scope: native
+      - name: Verify native dependency provenance and upstream race suites
+        run: make native-deps
+
+  module-minimum:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up independent runtime and SDK minimum Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+      - name: Verify runtime and SDK without TUI source
+        env:
+          GOTOOLCHAIN: local
+        run: make isolation
+
   integration:
     if: always()
     needs: [changes, integration-shards]
@@ -225,7 +261,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, quality, lint, unit, integration, long, pty, commits]
+    needs: [changes, quality, lint, unit, integration, long, pty, native-deps, module-minimum, commits]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

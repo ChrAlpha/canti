@@ -56,7 +56,7 @@ observable.
 
 ## Running an agent
 
-Requirements: Go 1.25 or newer, Linux (the only verified platform), a Docker
+Requirements: Go 1.26 or newer, Linux (the only verified platform), a Docker
 daemon the `docker` CLI can reach, and the credential of the model API:
 `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) for `anthropic-messages`,
 `OPENAI_API_KEY` for `openai-responses`. `-model-url`, or else

@@ -1,252 +1,172 @@
-// Command canti-tui presents terminal and pipe chat through the runtime protocol.
+// Command canti-tui composes native terminal or pipe chat with the runtime SDK.
 package main
 
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/mattn/go-isatty"
-
+	"github.com/ChrAlpha/canti/apps/tui/internal/pipe"
+	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/terminal"
+	"github.com/ChrAlpha/canti/apps/tui/internal/ui"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
+	"github.com/mattn/go-isatty"
 )
 
 const version = "dev"
 
-const (
-	exitOK         = 0
-	exitError      = 1
-	exitUsage      = 2
-	exitStopped    = 3
-	exitResolution = 4
-	exitActive     = 5
-	exitLocked     = 6
-)
-
-const stopCleanup = 30 * time.Second
-
 func main() { os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
 
-type action func(context.Context) (int, error)
-
-type app struct {
-	stdout, stderr              io.Writer
-	display                     *stderrWriter
-	log                         *slog.Logger
-	workspace, state            string
-	steps                       io.Writer
-	signal                      os.Signal
-	stopSignals                 chan os.Signal
-	displayFailure              <-chan error
-	cred                        hostrpc.Binding
-	runtimePath                 string
-	goalLimit, constraintsLimit int
-	child                       *exec.Cmd
-	childDone                   chan error
-	starting                    <-chan struct{}
-	hostMode                    string
-	hostWait                    time.Duration
-	detach                      chan struct{} // closed by a chat that ends attached to a host process
+type options struct {
+	cfg                          session.Config
+	workspace, state, url, level string
 }
 
-func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		switch args[0] {
-		case "version", "-version", "--version":
-			fmt.Fprintln(stdout, version)
-			return exitOK
-		case "help":
-			args = []string{"-h"}
-		case "chat":
-			args = args[1:]
-		}
-	}
-	tui := isatty.IsTerminal(os.Stdin.Fd())
-	var queue *stderrWriter
-	setupNote := func(s string) { writeBounded(stderr, s) }
-	if !tui {
-		queue = newStderrWriter(stderr)
-		defer queue.Close()
-		setupNote = func(s string) { io.WriteString(finalStderr{queue}, s) }
-	}
-	displayFailure := make(chan error, 2)
-	out, restoreOut, err := newChatOutput(stdout, displayFailure)
-	if err != nil {
-		setupNote(fmt.Sprintf("canti-tui: standard output: %v\n", err))
-		return exitError
-	}
-	defer restoreOut()
-	note := blockingNote("standard output", out)
-	stdout = out
-	if tui {
-		diagnostic, restoreErr, err := newChatOutput(stderr, displayFailure)
-		if err != nil {
-			setupNote(fmt.Sprintf("canti-tui: standard error: %v\n", err))
-			return exitError
-		}
-		defer restoreErr()
-		stderr = diagnostic
-		setupNote = func(s string) { io.WriteString(diagnostic, s) }
-		note += blockingNote("standard error", diagnostic)
-	}
-	if note != "" {
-		setupNote(note)
-	}
-	a := &app{stdout: stdout, stderr: stderr, displayFailure: displayFailure}
-	defer a.closeHost()
+func parse(args []string, out io.Writer) (options, int, error) {
+	var o options
 	fs := flag.NewFlagSet("canti-tui", flag.ContinueOnError)
-	var parseErr strings.Builder
-	fs.SetOutput(&parseErr)
-	fs.Usage = func() {}
-	workspace := fs.String("workspace", ".", "workspace `directory` of the run")
-	state := fs.String("state", "", "state `directory` (default $XDG_STATE_HOME/canti/<hash of the workspace path>)")
-	level := fs.String("log-level", "info", "log `level`: debug, info, warn, or error")
-	act := chatCommand(fs, a)
-	help := func(w io.Writer) {
-		fmt.Fprint(w, "Usage: canti-tui [flags]\n\nFlags:\n")
-		fs.SetOutput(w)
-		fs.PrintDefaults()
+	fs.SetOutput(out)
+	fs.StringVar(&o.workspace, "workspace", ".", "workspace `directory` of the run")
+	fs.StringVar(&o.state, "state", "", "state `directory` (default $XDG_STATE_HOME/canti/<workspace hash>)")
+	fs.StringVar(&o.level, "log-level", "warn", "log `level`: debug, info, warn, or error")
+	fs.StringVar(&o.url, "model-url", "", "model API base `URL` (default the API's environment or public endpoint)")
+	fs.StringVar(&o.cfg.SessionID, "session", "", "conversation `ID` to continue (default a new one)")
+	fs.StringVar(&o.cfg.Constraints, "constraints", "", "rules the agent must follow")
+	fs.StringVar(&o.cfg.RuntimePath, "runtime", "", "canti runtime executable (default canti on PATH)")
+	fs.StringVar(&o.cfg.HostMode, "host", session.Auto, "runtime lifecycle: auto keeps the host running after detach; owned owns a separate runtime process for each input")
+	fs.DurationVar(&o.cfg.HostWait, "host-wait", 10*time.Second, "`time` to wait for a host process to start serving")
+	registerSpec(fs, &o.cfg.Spec)
+	fs.Usage = func() { fmt.Fprint(out, "Usage: canti-tui [flags]\n\nFlags:\n"); fs.PrintDefaults() }
+	err := fs.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return o, session.OK, err
 	}
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		help(stdout)
-		return exitOK
-	case err != nil || fs.NArg() > 0:
-		if err == nil {
-			fmt.Fprintf(&parseErr, "canti-tui: unexpected argument %q\n", fs.Arg(0))
-		}
-		var usage strings.Builder
-		help(&usage)
-		setupNote(parseErr.String())
-		setupNote(usage.String())
-		return exitUsage
+	if err == nil && fs.NArg() > 0 {
+		err = fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	final := stderr
-	if queue != nil {
-		stderr, a.stderr, a.display, final = queue, queue, queue, finalStderr{queue}
+	if err != nil {
+		return o, session.Usage, err
 	}
 	var lv slog.Level
-	code, err := exitUsage, lv.UnmarshalText([]byte(*level))
-	if err == nil {
-		a.log = slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: lv}))
-		code, err = exitError, a.locate(*workspace, *state)
+	if err = lv.UnmarshalText([]byte(o.level)); err != nil {
+		return o, session.Usage, err
 	}
-	if err == nil {
-		a.cred = credentials()
-		code, err = act(ctx)
-	}
-	if err != nil {
-		var out strings.Builder
-		fmt.Fprintf(&out, "canti-tui: %v\n", err)
-		switch {
-		case code == exitUsage:
-			help(&out)
-		case errors.Is(err, errLocked):
-			code = exitLocked
-		}
-		io.WriteString(final, out.String())
-		code = cmp.Or(code, exitError)
-	}
-	return code
+	o.cfg.LogLevel = lv
+	fs.Visit(func(f *flag.Flag) { o.cfg.ExplicitConstraints = o.cfg.ExplicitConstraints || f.Name == "constraints" })
+	return o, session.OK, nil
 }
-
-func (a *app) locate(workspace, state string) error {
-	ws, err := filepath.Abs(workspace)
+func (o *options) locate() error {
+	ws, err := filepath.Abs(o.workspace)
 	if err == nil {
 		ws, err = filepath.EvalSymlinks(ws)
 	}
 	if err != nil {
 		return fmt.Errorf("workspace: %w", err)
 	}
+	state := o.state
 	if state == "" {
 		state, err = defaultState(ws)
 	} else {
 		state, err = filepath.Abs(state)
 	}
-	a.workspace, a.state = ws, state
+	if err != nil {
+		return err
+	}
+	o.cfg.Workspace, o.cfg.State = ws, state
+	o.cfg.Spec.Workspace = ws
+	if o.cfg.Spec.HistoryImports != "" {
+		o.cfg.Spec.HistoryImports, err = filepath.Abs(o.cfg.Spec.HistoryImports)
+	}
+	o.cfg.SessionID = cmp.Or(o.cfg.SessionID, strings.ToLower(rand.Text()))
 	return err
 }
-
-func modelURL(fs *flag.FlagSet) *string {
-	return fs.String("model-url", "", "model API base `URL`: default $ANTHROPIC_BASE_URL, else https://api.anthropic.com, for anthropic-messages; "+
-		"$OPENAI_BASE_URL, else https://api.openai.com/v1, for openai-responses; not saved with the run")
-}
-
-// stopControl applies each stop signal of a drive to the next of its
-// cancels. Chat sends its signals on a.stopSignals, and each one handled is
-// kept on seen for release to record.
-type stopControl struct {
-	sig, seen chan os.Signal
-	relay     bool
-	cancels   []context.CancelFunc
-}
-
-func (a *app) stopControl() *stopControl {
-	c := &stopControl{sig: make(chan os.Signal, 2), seen: make(chan os.Signal, 2)}
-	if a.stopSignals == nil {
-		signal.Notify(c.sig, os.Interrupt, syscall.SIGTERM)
-		signal.Notify(c.seen, os.Interrupt, syscall.SIGTERM)
+func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "version", "-version", "--version":
+			fmt.Fprintln(stdout, version)
+			return session.OK
+		case "help":
+			args = []string{"-h"}
+		}
+	}
+	failures := make(chan error, 2)
+	diagnostic, closeErr, err := terminal.NewOutput(stderr, failures)
+	if err != nil {
+		if fallback, closeFallback, e := terminal.NewOutput(stdout, failures); e == nil {
+			fmt.Fprintf(fallback, "canti-tui: standard error: %v\n", err)
+			closeFallback()
+		}
+		return session.Error
+	}
+	defer closeErr()
+	out, closeOut, err := terminal.NewOutput(stdout, failures)
+	if err != nil {
+		fmt.Fprintf(diagnostic, "canti-tui: standard output: %v\n", err)
+		return session.Error
+	}
+	defer closeOut()
+	var usage strings.Builder
+	o, code, err := parse(args, &usage)
+	if errors.Is(err, flag.ErrHelp) {
+		io.WriteString(out, usage.String())
+		return session.OK
+	}
+	if err == nil {
+		err = o.locate()
+	}
+	if err != nil {
+		fmt.Fprintf(diagnostic, "canti-tui: %v\n%s", err, usage.String())
+		return max(code, session.Usage)
+	}
+	o.cfg.Binding = binding(credentials(), o.cfg.Spec.API, o.url)
+	o.cfg.Environment = runtimeEnvironment()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	c := session.New(o.cfg)
+	if code, err = setup(ctx, c, signals); err != nil {
+		fmt.Fprintf(diagnostic, "canti-tui: %v\n", err)
+		return code
+	}
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		code, err = ui.Run(ctx, c, os.Stdin, diagnostic, signals, failures)
 	} else {
-		c.sig, c.relay = a.stopSignals, true
+		code, err = pipe.Run(ctx, c, os.Stdin, out, diagnostic, signals, failures)
 	}
-	return c
-}
-
-func (c *stopControl) handle(s os.Signal, cancel context.CancelFunc) {
-	if c.relay {
-		c.seen <- s
-	}
-	cancel()
-}
-
-func (c *stopControl) pending() int {
-	for n, cancel := range c.cancels {
-		select {
-		case s := <-c.sig:
-			c.handle(s, cancel)
-		default:
-			return n
+	if err != nil {
+		fmt.Fprintf(diagnostic, "canti-tui: %v\n", err)
+		if code == session.Usage {
+			var help strings.Builder
+			_, _, _ = parse([]string{"-h"}, &help)
+			if _, writeErr := io.WriteString(diagnostic, help.String()); writeErr != nil {
+				return session.Error
+			}
+		}
+		if code == session.OK {
+			code = errorCode(err)
 		}
 	}
-	return len(c.cancels)
+	return code
 }
-
-func (c *stopControl) watch(done <-chan struct{}, start <-chan int) {
-	var handled int
-	select {
-	case handled = <-start:
-	case <-done:
-		return
+func errorCode(err error) int {
+	if errors.Is(err, session.ErrLocked) {
+		return session.Locked
 	}
-	for _, cancel := range c.cancels[handled:] {
-		select {
-		case s := <-c.sig:
-			c.handle(s, cancel)
-		case <-done:
-			return
-		}
+	if errors.As(err, new(hostrpc.SpecError)) {
+		return session.Usage
 	}
-	signal.Stop(c.sig)
-	signal.Stop(c.seen)
+	return session.Error
 }
-
-func (a *app) record(signals chan os.Signal) {
-	for len(signals) > 0 {
-		if s := <-signals; a.signal != syscall.SIGTERM {
-			a.signal = s
-		}
-	}
-}
-
-var errLocked = errors.New("workspace locked")

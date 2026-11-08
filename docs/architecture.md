@@ -42,7 +42,7 @@ is not.
 | `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 5, with side-effect-free preflight validation and opaque progress cursors), opaque run-bound cursors, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
-| `apps/tui/cmd/canti-tui` | Terminal and pipe chat, runtime selection and launch, rendering protocol projections | Pure UI tests; runtime end-to-end tests launch the separate TUI executable |
+| `apps/tui/cmd/canti-tui` | Terminal and pipe chat, runtime selection and launch, rendering protocol projections | Pure UI/session/transport tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
 
 The core imports only the standard library and holds no per-run state between
 calls. The journal uses `modernc.org/sqlite`, a cgo-free SQLite implementation. Model I/O, history, time, storage, and execution belong to the

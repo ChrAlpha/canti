@@ -2,7 +2,7 @@ name: Set up cached Go
 description: Use setup-go's native cache with separate workload snapshots
 inputs:
   scope:
-    description: Cache scope (standard, quality, commits, race, integration, or pty)
+    description: Cache scope (standard, quality, commits, race, integration, pty, or native)
     required: true
 runs:
   using: composite
@@ -16,10 +16,11 @@ runs:
       run: echo "GOCACHE=$RUNNER_TEMP/go-build-$SCOPE" >> "$GITHUB_ENV"
     - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
       with:
-        go-version: '1.25.x'
+        go-version: '1.26.x'
         cache: true
         cache-dependency-path: |
           runtime/go.sum
           sdk/go/go.sum
           apps/tui/go.sum
+          apps/tui/third_party/*/go.sum
           go.work.sum

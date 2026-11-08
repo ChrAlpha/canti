@@ -3,8 +3,10 @@
 
 import copy
 import importlib.util
+import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -68,7 +70,7 @@ class ChangeTests(unittest.TestCase):
 class GateTests(unittest.TestCase):
     def results(self, code="true", event="pull_request"):
         needs = {"changes": {"result": "success", "outputs": {"code": code}}}
-        for name in ("quality", "lint", "unit", "integration", "long", "pty", "commits"):
+        for name in ("quality", "lint", "unit", "integration", "long", "pty", "native-deps", "module-minimum", "commits"):
             result = "success"
             if (name == "commits" and event != "pull_request") or (
                 name not in ("quality", "commits", "integration", "long") and code == "false"
@@ -152,6 +154,115 @@ class ShardTests(unittest.TestCase):
             '{"Action":"output","Output":"ok package\\n"}',
         ])
         self.assertEqual(shard.test_names(events), ["Example", "ExampleRun", "FuzzDecode", "TestOne"])
+
+
+class LaneTests(unittest.TestCase):
+    def test_workflow_requires_native_provenance_and_independent_minimum(self):
+        root = pathlib.Path(__file__).resolve().parent.parent
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        sections = re.split(r"^  ([a-z][a-z-]*):\n", workflow, flags=re.MULTILINE)
+        jobs = dict(zip(sections[1::2], sections[2::2]))
+        for job, target in (("native-deps", "native-deps"), ("module-minimum", "isolation")):
+            self.assertIn("if: needs.changes.outputs.code == 'true'", jobs[job])
+            self.assertIn("run: make " + target, jobs[job])
+            self.assertEqual(workflow.count("run: make " + target), 1)
+            required = re.search(r"needs: \[([^]]+)\]", jobs["check"]).group(1)
+            self.assertIn(job, [name.strip() for name in required.split(',')])
+        self.assertIn("go-version: '1.25.x'", jobs["module-minimum"])
+        self.assertIn("GOTOOLCHAIN: local", jobs["module-minimum"])
+        setup = (root / ".github/actions/setup-go/action.yml").read_text()
+        self.assertIn("go-version: '1.26.x'", setup)
+        self.assertIn("apps/tui/third_party/*/go.sum", setup)
+
+    def test_make_lanes_partition_modules_and_executable_acceptance_once(self):
+        # Exercise Make -> module/acceptance orchestration -> shard discovery ->
+        # reporter. The fake compiler records selected tests, so this checks the
+        # actual call path without Docker, sibling builds, or expensive suites.
+        root = pathlib.Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            calls = temporary / "calls"
+            fake_go = temporary / "go"
+            fake_go.write_text(r"""#!/usr/bin/env python3
+import json, os, pathlib, re, sys
+args = sys.argv[1:]
+if not args or args[0] != 'test' or '-c' in args:
+    sys.exit(0)
+acceptance = './acceptance' in args
+module = pathlib.Path.cwd().relative_to(os.environ['CI_FIXTURE_ROOT']).as_posix()
+tags = args[args.index('-tags') + 1] if '-tags' in args else ''
+if acceptance:
+    names = ['TestAcceptanceOne', 'TestAcceptanceTwo', 'TestChatKeepsInheritedDescriptorsBlocking']
+    if 'integration' in tags:
+        names += ['TestChatStopsDockerWithBlockedStderr', 'TestSessionDialogueSurvivesHandoverRetryAndRestart']
+elif module == 'runtime':
+    names = ['TestRuntimeUnit']
+    if 'integration' in tags:
+        names += ['TestRuntimeIntegration', 'TestContextCaptureBoundsRejectedRetrievalAcrossReopen']
+elif module == 'sdk/go':
+    names = ['TestSDKUnit']
+else:
+    names = ['TestPTYNativeRawRestore']
+    if './...' in args:
+        names += ['TestAppUnit']
+if '-list' in args:
+    for name in names:
+        print(json.dumps({'Action': 'output', 'Output': name + '\n'}))
+else:
+    run, skip = '.', '^$'
+    for index, arg in enumerate(args):
+        if arg == '-run': run = args[index + 1]
+        if arg == '-skip': skip = args[index + 1]
+    names = [name for name in names if re.search(run, name) and not re.search(skip, name)]
+    if acceptance:
+        for var in ['CANTI_ACCEPTANCE_RUNTIME', 'CANTI_ACCEPTANCE_RUNTIME_FIXTURE', 'CANTI_ACCEPTANCE_TUI']:
+            assert pathlib.Path(os.environ[var]).is_absolute(), var
+    assert os.environ['GOWORK'] == 'off'
+    with open(os.environ['CI_FIXTURE_CALLS'], 'a') as output:
+        output.write(json.dumps({'module': module, 'acceptance': acceptance, 'tags': tags,
+                                 'names': names, 'args': args}) + '\n')
+""")
+            fake_go.chmod(0o755)
+            # Formatting JSON reports is outside this selection test's boundary.
+            fake_jq = temporary / "jq"
+            fake_jq.write_text('#!/bin/sh\ncat >/dev/null\n')
+            fake_jq.chmod(0o755)
+            env = dict(os.environ, PATH=str(temporary) + os.pathsep + os.environ["PATH"],
+                       CI_FIXTURE_ROOT=str(root), CI_FIXTURE_CALLS=str(calls))
+            for name in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL"):
+                env.pop(name, None)
+            cases = {
+                "ci-unit": (4, ['TestRuntimeUnit', 'TestSDKUnit', 'TestAppUnit',
+                                'TestAcceptanceOne', 'TestAcceptanceTwo']),
+                "ci-integration": (6, ['TestRuntimeUnit', 'TestRuntimeIntegration', 'TestSDKUnit',
+                                       'TestAppUnit', 'TestAcceptanceOne', 'TestAcceptanceTwo',
+                                       'TestChatStopsDockerWithBlockedStderr']),
+                "ci-long": (4, ['TestContextCaptureBoundsRejectedRetrievalAcrossReopen',
+                                'TestSessionDialogueSurvivesHandoverRetryAndRestart']),
+                "ci-pty": (1, ['TestPTYNativeRawRestore', 'TestChatKeepsInheritedDescriptorsBlocking']),
+            }
+            for target, (count, expected) in cases.items():
+                calls.write_text("")
+                for index in range(count):
+                    # PTY must override even an inherited nonzero shard index.
+                    values = ("6", "5") if target == "ci-pty" else (str(count), str(index))
+                    env.update(CI_SHARD_COUNT=values[0], CI_SHARD_INDEX=values[1])
+                    result = subprocess.run(['make', target], cwd=root, env=env,
+                                            stdin=subprocess.DEVNULL, text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+                flattened = [name for call in recorded for name in call['names']]
+                self.assertCountEqual(flattened, expected, (target, recorded))
+                self.assertEqual(len(flattened), len(set(flattened)), target)
+                acceptance = [call for call in recorded if call['acceptance']]
+                self.assertTrue(acceptance, target)
+                expected_tags = 'acceptance' if target == 'ci-unit' else 'acceptance,integration'
+                self.assertTrue(all(call['tags'] == expected_tags for call in acceptance), target)
+                if target == 'ci-pty':
+                    self.assertEqual(len(recorded), 2)
+                    self.assertTrue(all(call['args'][call['args'].index('-p') + 1] == '1'
+                                        for call in recorded))
 
 
 class CommitTests(unittest.TestCase):

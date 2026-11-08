@@ -1,5 +1,5 @@
 #!/bin/sh
-# Check production dependency boundaries, independent of go.work.
+# Check production and test dependency boundaries, independent of go.work.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -31,12 +31,12 @@ done
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/sdk" "$tmp/apps"
-for tags in default integration,live; do
+for tags in default acceptance,integration,live; do
 	for module in sdk/go apps/tui runtime; do
 		if [ "$tags" = default ]; then
-			(cd "$root/$module" && GOWORK=off go list -deps -f '{{.ImportPath}}' ./...) >"$tmp/$module-$tags"
+			(cd "$root/$module" && GOWORK=off go list -deps -test -f '{{.ImportPath}}' ./...) >"$tmp/$module-$tags"
 		else
-			(cd "$root/$module" && GOWORK=off go list -deps -tags "$tags" -f '{{.ImportPath}}' ./...) >"$tmp/$module-$tags"
+			(cd "$root/$module" && GOWORK=off go list -deps -test -tags "$tags" -f '{{.ImportPath}}' ./...) >"$tmp/$module-$tags"
 		fi
 	done
 	if grep -E '^github\.com/ChrAlpha/canti/(runtime|apps)(/|$)' "$tmp/sdk/go-$tags"; then
