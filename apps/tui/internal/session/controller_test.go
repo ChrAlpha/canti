@@ -317,7 +317,9 @@ func TestFirstOwnedInputLossRequestsStopAndAwaitsCleanup(t *testing.T) {
 
 func protocolHost(t *testing.T, handle func(hostrpc.Request) (hostrpc.Response, bool)) string {
 	t.Helper()
-	state, err := os.MkdirTemp("", "canti-protocol-")
+	// Only this protocol fixture needs a bounded Unix socket path. Leave the
+	// caller's TMPDIR unchanged for build output and all other fixture data.
+	state, err := os.MkdirTemp("/tmp", "canti-protocol-")
 	if err != nil {
 		t.Fatal(err)
 	}
