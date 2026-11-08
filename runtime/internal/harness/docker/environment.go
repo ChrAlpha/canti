@@ -23,6 +23,7 @@ import (
 
 const environmentFormat = 1
 const controlLabel = "io.canti.control"
+const authorityLabel = "io.canti.authority"
 const helperRoot = "/canti"
 const spoolRoot = "/var/lib/canti/jobs"
 
@@ -31,23 +32,42 @@ const spoolRoot = "/var/lib/canti/jobs"
 type Attachment struct {
 	Format                                       int
 	Directory, Endpoint, DaemonID, ContainerID   string
+	AuthorityID                                  string
+	Mounts                                       []EnvironmentMount
 	Incarnation                                  uint64
 	Helper, HelperDigest, User, Home, Path, Init string
 	AdmissionEpoch                               string
 }
 
+// EnvironmentMount is immutable Docker mount metadata, retained so a resumed
+// executor can reject an exposed journal before trusting local receipt files.
+type EnvironmentMount struct {
+	Type, Source, Target string
+	Writable             bool
+}
+
+func mountProjection(c preparedContainer) []EnvironmentMount {
+	out := make([]EnvironmentMount, 0, len(c.Mounts))
+	for _, m := range c.Mounts {
+		out = append(out, EnvironmentMount{m.Type, m.Source, m.Destination, m.RW})
+	}
+	return out
+}
+
 type environmentManifest struct {
 	Format, HelperProtocol int
 	Helper, Digest         string
+	AuthorityID            string
 }
 type environmentState struct {
-	Format                      int
-	Gate                        string
-	Generation, StartGeneration uint64
-	Active                      string
-	Requests                    []string
-	Pending                     string
-	LastStop                    string
+	Format                               int
+	Gate                                 string
+	Generation, StartGeneration          uint64
+	Active                               string
+	Requests                             []string
+	Pending                              string
+	LastStop                             string
+	AuthorityID, ActiveSpec, ActiveState string
 }
 
 type preparedContainer struct {
@@ -106,11 +126,18 @@ func InitEnvironment(directory, helper string) error {
 		return err
 	}
 	if exists {
-		return validateManifest(old)
+		_, _, err := readEnvironment(dir)
+		return err
 	}
-	if _, err := os.Stat(filepath.Join(dir, "authority", "environment.json")); err == nil {
-		return errors.New("docker: missing manifest of an existing attachment; authority cannot be reset")
+	if err = emptyEnvironmentInitialization(dir); err != nil {
+		return err
 	}
+	var identity [32]byte
+	if _, err = rand.Read(identity[:]); err != nil {
+		return err
+	}
+	authorityID := hex.EncodeToString(identity[:])
+
 	if err = checkPreparedHelper(helper); err != nil {
 		return err
 	}
@@ -142,14 +169,19 @@ func InitEnvironment(directory, helper string) error {
 	if err = syncDir(filepath.Dir(dest)); err != nil {
 		return err
 	}
-	manifest := environmentManifest{environmentFormat, jobrunner.Protocol, filepath.ToSlash(relative), digest}
-	if err = saveJSON(filepath.Join(dir, "authority", "state.json"), environmentState{Format: environmentFormat, Gate: "unattached"}, false); err != nil {
+	manifest := environmentManifest{Format: environmentFormat, HelperProtocol: jobrunner.Protocol, Helper: filepath.ToSlash(relative), Digest: digest, AuthorityID: authorityID}
+	if err = saveJSON(filepath.Join(dir, "authority", "state.json"), environmentState{Format: environmentFormat, Gate: "unattached", AuthorityID: authorityID}, false); err != nil {
 		return err
+	}
+	for _, dependency := range []string{filepath.Dir(filepath.Dir(dest)), filepath.Join(dir, "public"), dir} {
+		if err = syncDir(dependency); err != nil {
+			return err
+		}
 	}
 	return saveJSON(filepath.Join(dir, "authority", "manifest.json"), manifest, true)
 }
 func validateManifest(m environmentManifest) error {
-	if m.Format != environmentFormat || m.HelperProtocol != jobrunner.Protocol || m.Helper != "bin/"+m.Digest+"/canti-job" || len(m.Digest) != 64 {
+	if !canonicalDigest(m.AuthorityID) || m.Format != environmentFormat || m.HelperProtocol != jobrunner.Protocol || m.Helper != "bin/"+m.Digest+"/canti-job" || !canonicalDigest(m.Digest) {
 		return errors.New("docker: unsupported environment manifest")
 	}
 	return nil
@@ -180,11 +212,18 @@ func ReadAttachment(directory string) (Attachment, error) {
 	if a.Directory != dir {
 		return a, errors.New("docker: attachment directory identity changed")
 	}
+	m, _, err := readEnvironment(dir)
+	if err != nil {
+		return a, err
+	}
+	if m.AuthorityID != a.AuthorityID {
+		return a, errors.New("docker: attachment authority identity changed")
+	}
 	return a, a.validate()
 }
 func (a Attachment) validate() error {
 	u, err := url.Parse(a.Endpoint)
-	if err != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" || a.Format != environmentFormat || !canonicalDigest(a.HelperDigest) || !canonicalDigest(a.ContainerID) || filepath.Clean(a.Directory) != a.Directory || !filepath.IsAbs(a.Directory) || a.DaemonID == "" || len(a.ContainerID) != 64 || a.Incarnation == 0 || a.User == "" || !filepath.IsAbs(a.Home) || filepath.Clean(a.Home) != a.Home || a.Path == "" || a.Helper != "/canti/bin/"+a.HelperDigest+"/canti-job" {
+	if err != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" || !canonicalDigest(a.AuthorityID) || a.Format != environmentFormat || !canonicalDigest(a.HelperDigest) || !canonicalDigest(a.ContainerID) || filepath.Clean(a.Directory) != a.Directory || !filepath.IsAbs(a.Directory) || a.DaemonID == "" || len(a.ContainerID) != 64 || a.Incarnation == 0 || a.User == "" || !filepath.IsAbs(a.Home) || filepath.Clean(a.Home) != a.Home || a.Path == "" || a.Helper != "/canti/bin/"+a.HelperDigest+"/canti-job" {
 		return errors.New("docker: invalid pinned environment attachment")
 	}
 	return nil
@@ -253,10 +292,13 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	if err != nil {
 		return Attachment{}, err
 	}
-	if err = checkPrepared(dir, c); err != nil {
+	if err = checkPrepared(dir, m.AuthorityID, c); err != nil {
 		return Attachment{}, err
 	}
-	a := Attachment{Format: environmentFormat, Directory: dir, Endpoint: endpoint, DaemonID: backend, ContainerID: c.ID, Incarnation: 1, Helper: "/canti/" + m.Helper, HelperDigest: m.Digest, User: c.Config.User, Init: init, AdmissionEpoch: c.State.StartedAt.Format(time.RFC3339Nano)}
+	if err = x.solePreparedContainer(ctx, dir, c.ID); err != nil {
+		return Attachment{}, err
+	}
+	a := Attachment{Mounts: mountProjection(c), Format: environmentFormat, AuthorityID: m.AuthorityID, Directory: dir, Endpoint: endpoint, DaemonID: backend, ContainerID: c.ID, Incarnation: 1, Helper: "/canti/" + m.Helper, HelperDigest: m.Digest, User: c.Config.User, Init: init, AdmissionEpoch: c.State.StartedAt.Format(time.RFC3339Nano)}
 	for _, v := range c.Config.Env {
 		key, value, _ := strings.Cut(v, "=")
 		switch key {
@@ -296,8 +338,8 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	}
 	return a, nil
 }
-func checkPrepared(dir string, c preparedContainer) error {
-	if c.Config.Labels[controlLabel] != dir || !c.State.Running || c.State.Paused || c.State.Restarting || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
+func checkPrepared(dir, authorityID string, c preparedContainer) error {
+	if c.Config.Labels[authorityLabel] != authorityID || c.Config.Labels[controlLabel] != dir || !c.State.Running || c.State.Paused || c.State.Restarting || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
 		return errors.New("docker: prepared environment needs matching control label, running state, no auto-remove and no automatic restart")
 	}
 	public, spool := false, false
@@ -335,6 +377,22 @@ func readEnvironment(dir string) (environmentManifest, environmentState, error) 
 	}
 	if err := validateManifest(m); err != nil {
 		return m, s, err
+	}
+	if s.AuthorityID != m.AuthorityID {
+		return m, s, errors.New("docker: environment state has another authority identity")
+	}
+	if len(s.Requests) > 64 {
+		return m, s, errors.New("docker: too many unsettled request references")
+	}
+	seen := map[string]bool{}
+	for _, ref := range s.Requests {
+		if len(ref) != 32 || strings.Trim(ref, "0123456789abcdef") != "" || seen[ref] {
+			return m, s, errors.New("docker: invalid unsettled request references")
+		}
+		seen[ref] = true
+	}
+	if s.Active == "" && (s.ActiveSpec != "" || s.ActiveState != "") || s.Active != "" && (!canonicalDigest(s.ActiveSpec) || !filepath.IsAbs(s.ActiveState)) {
+		return m, s, errors.New("docker: incomplete active command origin")
 	}
 	if s.Format != environmentFormat || s.Gate != "unattached" && s.Gate != "open" && s.Gate != "stopped" && s.Gate != "stopping" && s.Gate != "starting" && s.Gate != "detached" && s.Gate != "quarantined" && s.Gate != "retiring" && s.Gate != "retired" {
 		return m, s, errors.New("docker: invalid environment control gate")
@@ -377,8 +435,11 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 	if err != nil {
 		return "", err
 	}
+	return pinnedEnvironmentWorkdir(Attachment{Mounts: mountProjection(c)}, workspace, state, requested)
+}
+func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) (string, error) {
 	var candidates []string
-	for _, m := range c.Mounts {
+	for _, m := range a.Mounts {
 		if m.Source != "" && (within(m.Source, state) || within(state, m.Source)) {
 			return "", errors.New("docker: environment mount exposes run state")
 		}
@@ -388,9 +449,9 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 		if within(m.Source, state) || within(state, m.Source) {
 			return "", errors.New("docker: environment mount exposes run state")
 		}
-		if m.RW && within(m.Source, workspace) {
+		if m.Writable && within(m.Source, workspace) {
 			rel, _ := filepath.Rel(m.Source, workspace)
-			candidates = append(candidates, filepath.Join(m.Destination, rel))
+			candidates = append(candidates, filepath.Join(m.Target, rel))
 		}
 	}
 	if len(candidates) != 1 {
@@ -413,7 +474,7 @@ func (x *Executor) checkAttachment(ctx context.Context, a Attachment) error {
 	if err != nil {
 		return err
 	}
-	if current.ContainerID != a.ContainerID || current.DaemonID != a.DaemonID || current.Incarnation != a.Incarnation || current.Endpoint != a.Endpoint {
+	if current.AuthorityID != a.AuthorityID || current.ContainerID != a.ContainerID || current.DaemonID != a.DaemonID || current.Incarnation != a.Incarnation || current.Endpoint != a.Endpoint {
 		return fmt.Errorf("%w: environment attachment changed", harness.ErrJobLost)
 	}
 	id, err := x.daemon(ctx)
@@ -427,7 +488,7 @@ func (x *Executor) checkAttachment(ctx context.Context, a Attachment) error {
 	if err != nil {
 		return err
 	}
-	if c.ID != a.ContainerID || c.Config.Labels[controlLabel] != a.Directory {
+	if c.Config.Labels[authorityLabel] != a.AuthorityID || c.ID != a.ContainerID || c.Config.Labels[controlLabel] != a.Directory {
 		return fmt.Errorf("%w: environment identity changed", harness.ErrJobLost)
 	}
 	return nil
@@ -441,6 +502,9 @@ func attachmentIncarnation(dir string, a Attachment, state environmentState) (At
 	}
 	if !found {
 		return a, false, nil
+	}
+	if old.AuthorityID != a.AuthorityID {
+		return a, false, errors.New("docker: stored attachment belongs to another authority")
 	}
 	if old.ContainerID == a.ContainerID && old.DaemonID == a.DaemonID && old.Init == a.Init && old.Endpoint == a.Endpoint && old.HelperDigest == a.HelperDigest && state.Gate != "detached" && state.Gate != "retired" {
 		return old, true, nil
@@ -478,4 +542,57 @@ func checkPreparedHelper(helper string) error {
 func canonicalDigest(value string) bool {
 	data, err := hex.DecodeString(value)
 	return err == nil && len(data) == sha256.Size && hex.EncodeToString(data) == value
+}
+
+func emptyEnvironmentInitialization(dir string) error {
+	entries, err := os.ReadDir(filepath.Join(dir, "authority"))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == "lock" {
+			continue
+		}
+		if entry.Name() == "jobs" && entry.IsDir() {
+			children, err := os.ReadDir(filepath.Join(dir, "authority", "jobs"))
+			if err == nil && len(children) == 0 {
+				continue
+			}
+		}
+		return errors.New("docker: incomplete or damaged authority cannot be reset; initialize a new attachment directory and provision a new container")
+	}
+	for _, name := range []string{"public", "spool"} {
+		entries, err := os.ReadDir(filepath.Join(dir, name))
+		if err != nil {
+			return err
+		}
+		if len(entries) != 0 {
+			return errors.New("docker: retained environment data prevents fresh authority initialization")
+		}
+	}
+	return nil
+}
+
+// EnvironmentIdentity is the initialization token provisioning must place in
+// the container's immutable io.canti.authority label. It is not a filesystem hash.
+func EnvironmentIdentity(directory string) (string, error) {
+	dir, err := resolve(directory)
+	if err != nil {
+		return "", err
+	}
+	m, _, err := readEnvironment(dir)
+	return m.AuthorityID, err
+}
+
+func (x *Executor) solePreparedContainer(ctx context.Context, directory, id string) error {
+	filters, _ := marshal(map[string][]string{"label": {controlLabel + "=" + directory}})
+	var containers []struct{ ID string }
+	err := x.api(ctx, "environment-claims", http.MethodGet, "/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil, decodeResponse(&containers))
+	if err != nil {
+		return err
+	}
+	if len(containers) != 1 || containers[0].ID != id {
+		return errors.New("docker: another prepared container claims this control directory; remove the exact old container before attachment")
+	}
+	return nil
 }

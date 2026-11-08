@@ -80,6 +80,7 @@ const (
 // Generation is the authority's command slot generation, not an OS process ID.
 type EnvironmentBinding struct {
 	BackendID, EnvironmentID, StartEpoch string
+	AuthorityID                          string
 	Incarnation, Generation              uint64
 }
 
@@ -87,6 +88,7 @@ type EnvironmentBinding struct {
 // ConfirmedAt is an observation time; it is not the command's unknown exit time.
 type Cessation struct {
 	BackendID, EnvironmentID, StartEpoch string
+	AuthorityID                          string
 	EffectID, Spec, OwnerID, StopIntent  string
 	Incarnation, Generation              uint64
 	Kind                                 string
@@ -199,11 +201,11 @@ func (j Job) environmentShape() error {
 		return nil
 	}
 	b := j.Binding
-	if j.ID == "" || b.BackendID == "" || b.EnvironmentID == "" || b.StartEpoch == "" || b.Incarnation == 0 || b.Generation == 0 {
+	if j.ID == "" || b.AuthorityID == "" || b.BackendID == "" || b.EnvironmentID == "" || b.StartEpoch == "" || b.Incarnation == 0 || b.Generation == 0 {
 		return errors.New("harness: incomplete environment command binding")
 	}
 	if w := j.Cessation; w != nil {
-		if j.Status != JobCancelled || !j.Fenced || j.ExitCode != nil || !j.FinishedAt.IsZero() || w.BackendID != b.BackendID || w.Incarnation != b.Incarnation || w.EffectID != j.EffectID || w.Spec != j.Spec || w.OwnerID != j.ID || !digest(w.StopIntent) || w.EnvironmentID != b.EnvironmentID || w.StartEpoch != b.StartEpoch || w.Generation != b.Generation || w.RequestedAt.IsZero() || w.ConfirmedAt.Before(w.RequestedAt) || w.Kind != CessationStopped && w.Kind != CessationEpochEnded && w.Kind != CessationQuarantined {
+		if j.Status != JobCancelled || !j.Fenced || j.ExitCode != nil || !j.FinishedAt.IsZero() || w.AuthorityID != b.AuthorityID || w.BackendID != b.BackendID || w.Incarnation != b.Incarnation || w.EffectID != j.EffectID || w.Spec != j.Spec || w.OwnerID != j.ID || !digest(w.StopIntent) || w.EnvironmentID != b.EnvironmentID || w.StartEpoch != b.StartEpoch || w.Generation != b.Generation || w.RequestedAt.IsZero() || w.ConfirmedAt.Before(w.RequestedAt) || w.Kind != CessationStopped && w.Kind != CessationEpochEnded && w.Kind != CessationQuarantined {
 			return errors.New("harness: cessation does not establish this command's termination")
 		}
 	}

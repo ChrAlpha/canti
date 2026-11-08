@@ -13,7 +13,7 @@ import (
 )
 
 func fencedRequest(kind string) requestFence {
-	return requestFence{Format: 1, Kind: kind, BackendID: "daemon", EnvironmentID: "container", TargetID: "container", Incarnation: 1, Generation: 1}
+	return requestFence{Format: 1, AuthorityID: "authority", Kind: kind, BackendID: "daemon", EnvironmentID: "container", TargetID: "container", Incarnation: 1, Generation: 1}
 }
 
 func TestDelayedStopCannotBeSettledByALaterStoppedSample(t *testing.T) {

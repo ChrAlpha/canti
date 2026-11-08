@@ -73,6 +73,12 @@ func Run(c Config) (Record, error) {
 		return Record{}, err
 	}
 	defer out.Close()
+	// The collector can have a different host UID (for example root commands
+	// inside Docker). The private spool directory controls access; evidence files
+	// themselves must remain readable by that external collector.
+	if err = out.Chmod(0644); err != nil {
+		return Record{}, err
+	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return Record{}, err
@@ -198,6 +204,7 @@ func publish(root *os.Root, rec *Record) error {
 		return err
 	}
 	_, err = f.Write(data)
+	err = errors.Join(err, f.Chmod(0644))
 	err = errors.Join(err, f.Sync(), f.Close())
 	if err != nil {
 		return err

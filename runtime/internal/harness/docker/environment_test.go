@@ -41,3 +41,30 @@ func TestEnvironmentInitializationRefusesAnUnsupportedHelper(t *testing.T) {
 		t.Fatal("accepted unsupported helper protocol")
 	}
 }
+
+func TestEnvironmentInitializationDoesNotResetRetainedPartialAuthority(t *testing.T) {
+	dir := t.TempDir()
+	helper := filepath.Join(t.TempDir(), "canti-job")
+	os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555)
+	if err := InitEnvironment(dir, helper); err != nil {
+		t.Fatal(err)
+	}
+	_, before, err := readEnvironment(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.Gate, before.Active, before.ActiveSpec, before.ActiveState = "quarantined", "old-effect", "old-spec", "/old-state"
+	if err = saveEnvironmentState(dir, before); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(dir, "authority", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err = InitEnvironment(dir, helper); err == nil {
+		t.Fatal("missing manifest erased retained state")
+	}
+	var after environmentState
+	if _, err = readJSON(filepath.Join(dir, "authority", "state.json"), &after); err != nil || after.Gate != "quarantined" || after.Active != "old-effect" {
+		t.Fatalf("retained state=%+v: %v", after, err)
+	}
+}

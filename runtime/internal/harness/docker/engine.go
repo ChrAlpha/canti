@@ -61,7 +61,7 @@ func endpointEngine(path, endpoint string) *engine {
 }
 
 func newEngine(dial func(context.Context) (net.Conn, error)) *engine {
-	return &engine{gate: make(chan struct{}, 1), client: &http.Client{Transport: &http.Transport{
+	return &engine{gate: make(chan struct{}, 1), client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{
 		DialContext:         func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
@@ -131,7 +131,7 @@ func (e *engine) do(ctx context.Context, method, path string, body any, replay b
 		return err
 	}
 	defer res.Body.Close()
-	if res.StatusCode >= 400 {
+	if res.StatusCode >= 300 && res.StatusCode != http.StatusNotModified {
 		data, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
 		var msg struct{ Message string }
 		if json.Unmarshal(data, &msg) != nil || msg.Message == "" {

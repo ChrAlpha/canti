@@ -1,0 +1,127 @@
+//go:build integration
+
+package docker_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+)
+
+func TestAttachedDockerRetainsEnvironmentAcrossCommandsAndRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	control, workspace, state := t.TempDir(), t.TempDir(), t.TempDir()
+	helper := filepath.Join(t.TempDir(), "canti-job")
+	build := exec.CommandContext(ctx, "go", "build", "-o", helper, "github.com/ChrAlpha/canti/runtime/cmd/canti-job")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build capture helper: %v %s", err, out)
+	}
+	if err := docker.InitEnvironment(control, helper); err != nil {
+		t.Fatal(err)
+	}
+	authorityID, err := docker.EnvironmentIdentity(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := os.Getenv("DOCKER_HOST")
+	if endpoint == "" {
+		out, err := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		endpoint = strings.TrimSpace(string(out))
+	}
+	if !strings.HasPrefix(endpoint, "unix://") {
+		t.Skip("attached execution requires a local Unix Docker endpoint")
+	}
+	name := fmt.Sprintf("canti-attached-it-%d", time.Now().UnixNano())
+	args := []string{"--host", endpoint, "run", "-d", "--name", name, "--label", "io.canti.control=" + control, "--label", "io.canti.authority=" + authorityID, "--label", "io.canti.test=persistent-environment", "--mount", "type=bind,src=" + filepath.Join(control, "public") + ",dst=/canti,readonly", "--mount", "type=bind,src=" + filepath.Join(control, "spool") + ",dst=/var/lib/canti/jobs", "--mount", "type=bind,src=" + workspace + ",dst=/workspace", "--user", "0:0", "--env", "HOME=/root", "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--init", "alpine:3.23", "/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 1; done"}
+	output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("prepare task environment: %v %s", err, output)
+	}
+	id := strings.TrimSpace(string(output))
+	t.Cleanup(func() {
+		if out, err := exec.Command("docker", "--host", endpoint, "rm", "-f", id).CombinedOutput(); err != nil {
+			t.Errorf("remove task environment: %v %s", err, out)
+		}
+	})
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCommand := func(effect, command string) harness.Job {
+		e := harness.Effect{ID: effect, Command: command, Spec: x.Specification(command)}
+		if _, err := x.Drive(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			j, err := x.Drive(ctx, e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch j.Status {
+			case harness.JobSucceeded, harness.JobFailed:
+				return j
+			case harness.JobUnknown:
+				t.Fatalf("unknown command: %+v", j)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	first := runCommand("install", `printf '#!/bin/sh\nprintf persistent-tool' >/usr/local/bin/canti-test-tool; chmod +x /usr/local/bin/canti-test-tool; mkdir -p /root/.config/canti; printf private-config >/root/.config/canti/value; (while :; do printf tick >>/root/service.log; sleep 1; done) </dev/null >/root/service.stdout 2>&1 & echo $! >/root/service.pid; printf installed`)
+	if first.Status != harness.JobSucceeded || first.Preview != "installed" {
+		t.Fatalf("install=%+v", first)
+	}
+	second := runCommand("reuse", `kill -0 "$(cat /root/service.pid)" && canti-test-tool && cat /root/.config/canti/value`)
+	if second.Preview != "persistent-toolprivate-config" {
+		t.Fatalf("reuse=%+v", second)
+	}
+	before, err := os.ReadFile(filepath.Join(state, "artifacts", "install", "output"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != "installed" {
+		t.Fatalf("background service changed published output: %q", before)
+	}
+	sleeping := harness.Effect{ID: "cancel", Command: "sleep 60"}
+	sleeping.Spec = x.Specification(sleeping.Command)
+	if _, err = x.Drive(ctx, sleeping); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := x.Cancel(ctx, sleeping)
+	if err != nil || stopped.Status != harness.JobCancelled {
+		t.Fatalf("stop=%+v: %v", stopped, err)
+	}
+	if stopped.ExitCode == nil && stopped.Cessation == nil {
+		t.Fatal("missing exit code without confirmed cessation")
+	}
+	if _, err = docker.ControlEnvironment(ctx, control, "start"); err != nil {
+		t.Fatal(err)
+	}
+	after := runCommand("after_restart", `canti-test-tool; cat /root/.config/canti/value`)
+	if after.Preview != "persistent-toolprivate-config" {
+		t.Fatalf("restart lost filesystem: %+v", after)
+	}
+}

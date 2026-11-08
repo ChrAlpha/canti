@@ -618,8 +618,8 @@ func TestStopNeverDecodesASavedResponse(t *testing.T) {
 func TestCancellationWithoutAnExitCodeRequiresMatchingCessation(t *testing.T) {
 	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
 	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
-	binding := harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 2}
-	witness := harness.Cessation{BackendID: "daemon", Incarnation: 1, EffectID: e.ID, Spec: e.Spec, OwnerID: "exec", StopIntent: strings.Repeat("b", 64), EnvironmentID: "container", StartEpoch: "epoch", Generation: 2, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}
+	binding := harness.EnvironmentBinding{AuthorityID: "authority", BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 2}
+	witness := harness.Cessation{AuthorityID: "authority", BackendID: "daemon", Incarnation: 1, EffectID: e.ID, Spec: e.Spec, OwnerID: "exec", StopIntent: strings.Repeat("b", 64), EnvironmentID: "container", StartEpoch: "epoch", Generation: 2, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}
 	good := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobCancelled, Fenced: true, DispatchedAt: at, Binding: &binding, Cessation: &witness}
 	if err := good.Validate(e); err != nil {
 		t.Fatal(err)
@@ -657,7 +657,7 @@ func TestCancellationWithoutAnExitCodeRequiresMatchingCessation(t *testing.T) {
 
 func TestRunningEnvironmentCommandKeepsDispatchSeparateFromProcessTime(t *testing.T) {
 	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
-	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobRunning, DispatchedAt: created, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
+	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobRunning, DispatchedAt: created, Binding: &harness.EnvironmentBinding{AuthorityID: "authority", BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
 	if err := j.Validate(e); err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestRunningEnvironmentCommandKeepsDispatchSeparateFromProcessTime(t *testin
 
 func TestPendingReceiptCannotHaveConsumedItsDispatchLatch(t *testing.T) {
 	e := harness.Effect{ID: "effect_environment", Spec: strings.Repeat("a", 64)}
-	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobPending, DispatchedAt: created, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
+	j := harness.Job{EffectID: e.ID, Spec: e.Spec, ID: "exec", Status: harness.JobPending, DispatchedAt: created, Binding: &harness.EnvironmentBinding{AuthorityID: "authority", BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}}
 	if err := j.Validate(e); err == nil {
 		t.Fatal("post-dispatch evidence was accepted as indefinitely pending")
 	}

@@ -19,6 +19,7 @@ import (
 type requestFence struct {
 	Format                                   int
 	Kind, BackendID, EnvironmentID, TargetID string
+	AuthorityID                              string
 	Incarnation, Generation                  uint64
 }
 
@@ -65,11 +66,16 @@ func beginRequest(authority string, request requestFence) (string, error) {
 }
 
 func (r requestFence) validate() error {
-	if r.Format != 1 || r.BackendID == "" || r.EnvironmentID == "" || r.TargetID == "" || r.Incarnation == 0 || r.Generation == 0 {
+	if r.AuthorityID == "" || r.Format != 1 || r.BackendID == "" || r.EnvironmentID == "" || r.TargetID == "" || r.Incarnation == 0 || r.Generation == 0 {
 		return errors.New("docker: incomplete request fence")
 	}
 	switch r.Kind {
-	case "exec_start", "environment_stop", "environment_start":
+	case "exec_start":
+		return nil
+	case "environment_stop", "environment_start":
+		if r.TargetID != r.EnvironmentID {
+			return errors.New("docker: lifecycle target differs from pinned environment")
+		}
 		return nil
 	}
 	return errors.New("docker: unsupported fenced request")

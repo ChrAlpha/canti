@@ -1,7 +1,8 @@
-// Package docker runs harness effects as Docker containers through the
-// Docker Engine API, over connections that the docker CLI opens.
+// Package docker runs harness effects in per-effect containers or as distinct
+// execs in a prepared environment, through the Docker Engine API over
+// connections that the docker CLI opens.
 //
-// A finished job's container, with its Docker log, is removed once its result
+// An ephemeral job's container, with its Docker log, is removed once its result
 // and output are durably recorded, so host disk holds
 // at most Config.OutputLimit bytes of retained output per job, plus the Docker
 // log of each job still running or awaiting capture, bounded only by its

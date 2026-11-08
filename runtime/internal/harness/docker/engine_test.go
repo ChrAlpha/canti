@@ -24,11 +24,18 @@ func TestMain(m *testing.M) {
 	if addr := os.Getenv("CANTI_TEST_DIAL"); addr != "" {
 		os.Exit(dialFake(addr))
 	}
+	if worker := os.Getenv("CANTI_ATTACHED_WORKER"); worker != "" {
+		os.Exit(attachedWorker(worker))
+	}
 	os.Exit(m.Run())
 }
 
 func dialFake(addr string) int {
-	if !slices.Equal(os.Args[1:], []string{"system", "dial-stdio"}) {
+	args := os.Args[1:]
+	if len(args) >= 2 && args[0] == "--host" {
+		args = args[2:]
+	}
+	if !slices.Equal(args, []string{"system", "dial-stdio"}) {
 		fmt.Fprintf(os.Stderr, "unexpected arguments %q\n", os.Args[1:])
 		return 2
 	}
@@ -338,5 +345,24 @@ func TestPinnedEndpointOverridesAmbientDockerSelection(t *testing.T) {
 	}
 	if string(data) != "--host\nunix:///pinned.sock\nsystem\ndial-stdio\n" {
 		t.Fatalf("Docker arguments=%q", data)
+	}
+}
+
+func TestAttachedTransportNeverReplaysARedirectedMutation(t *testing.T) {
+	sends := 0
+	_, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, _ int) {
+		sends++
+		if sends == 1 {
+			w.Header().Set("Location", "/v"+apiMax+"/containers/c/stop")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := dialing(srv)
+	e.single = true
+	err := testEngineExecutor(e).api(t.Context(), "stop", http.MethodPost, "/containers/c/stop", map[string]any{}, nil)
+	if err == nil || sends != 1 {
+		t.Fatalf("redirected mutation: sends=%d err=%v", sends, err)
 	}
 }

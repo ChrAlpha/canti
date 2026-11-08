@@ -530,8 +530,8 @@ requests retain their exact bytes and provider/API provenance across restart.
 ## Execution
 
 The executor owns the physical lifecycle and its durable ordering.
-Docker computes a canonical specification over its effective configuration,
-command, wrapper and retention policy. It uses one named container per effect,
+The ephemeral Docker executor computes a canonical specification over its effective
+configuration, command, wrapper and retention policy. It uses one named container per effect,
 with effect/state/spec ownership labels. Configuration identity does not freeze
 workspace contents, image tags or daemon defaults. DOCKER_DEFAULT_PLATFORM is
 not an implicit create/pull override.
@@ -559,6 +559,33 @@ publication/capture failure retains the container for retry. The terminal receip
 is published before release by real owner ID, and remains unchanged across all
 later operations, including Cancel. Failed release is retried on a later sample
 of that effect; no unbounded cross-effect sweep is part of Drive.
+
+The attached executor instead pins an explicitly prepared container, local Unix
+endpoint, daemon, initialization authority ID, and attachment incarnation. The
+prepared container's immutable `io.canti.control` and `io.canti.authority` labels
+must match its host directory and initialization ID. Missing authority is never
+reset while state or evidence remains; a fresh initialization cannot reopen the
+old physical container. One foreground slot survives released process locks and
+controller death across run state directories. Stored mount metadata rejects
+journal exposure without creating directories; dispatch also checks actual mounts.
+
+Every command has its own real Exec ID, start epoch, command generation, local
+reference/binding/latch mirrors and an authoritative record outside the writable
+environment. A versioned read-only `canti-job` helper captures bounded output in
+a separate writable spool. Its evidence is cross-checked with exact exec metadata;
+missing metadata never permits replay. Retained terminal receipts survive later
+container or authority loss. Helper evidence is collector-readable inside its
+private spool directory, including when command and collector UIDs differ.
+
+Raw start/stop requests are single-send and keep durable exact-request references.
+Only their specific successful acknowledgements, or positive exact-exec start
+evidence for a launch, settle those references. A stopped sample cannot reopen
+an ambiguous environment. Ordinary acknowledged cancellation stops the whole
+environment, including services, and explicit start retains its filesystem. A
+quarantined environment needs explicit old-ID removal, retirement, and attachment
+to a genuinely new ID. Retirement preserves old facts; it never invents a command
+exit. This protocol assumes Docker lifecycle changes use the controller; the
+same-user host authority and Docker daemon remain trusted.
 
 Docker calls have their own deadlines; pre-latch calls obey the caller's earlier
 deadline, while post-latch launch completion is synchronous and bounded. Inspect

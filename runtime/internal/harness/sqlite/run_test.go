@@ -613,7 +613,7 @@ func TestCommitPersistsConfirmedCessationWithoutInventingAnExit(t *testing.T) {
 			d := newDriver(t, s, createRun(t, s, "run-1", limits))
 			d.decide(execBody("sleep 10"), harness.Usage{})
 			at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
-			j := harness.Job{EffectID: d.snap.State.EffectID, Spec: receipt(d.snap.State, harness.Observation{}).Spec, ID: "exec", Fenced: true, Status: harness.JobCancelled, DispatchedAt: at, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}, Cessation: &harness.Cessation{BackendID: "daemon", Incarnation: 1, EffectID: d.snap.State.EffectID, Spec: receipt(d.snap.State, harness.Observation{}).Spec, OwnerID: "exec", StopIntent: strings.Repeat("b", 64), EnvironmentID: "container", StartEpoch: "epoch", Generation: 1, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}}
+			j := harness.Job{EffectID: d.snap.State.EffectID, Spec: receipt(d.snap.State, harness.Observation{}).Spec, ID: "exec", Fenced: true, Status: harness.JobCancelled, DispatchedAt: at, Binding: &harness.EnvironmentBinding{AuthorityID: "authority", BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", Incarnation: 1, Generation: 1}, Cessation: &harness.Cessation{AuthorityID: "authority", BackendID: "daemon", Incarnation: 1, EffectID: d.snap.State.EffectID, Spec: receipt(d.snap.State, harness.Observation{}).Spec, OwnerID: "exec", StopIntent: strings.Repeat("b", 64), EnvironmentID: "container", StartEpoch: "epoch", Generation: 1, Kind: harness.CessationStopped, RequestedAt: at, ConfirmedAt: at.Add(time.Second)}}
 			if bad {
 				j.Cessation.Generation++
 			}
