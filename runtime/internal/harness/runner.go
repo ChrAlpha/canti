@@ -139,6 +139,7 @@ func (f Facts) check(event core.Event, next core.State) error {
 		allowed.Failure, allowed.Receipt = f.Failure, f.Receipt
 	case core.StopRequested:
 		allowed.Failure, allowed.Response = f.Failure, f.Response
+		allowed.Rejection = f.Rejection
 	}
 	if f != allowed {
 		return fmt.Errorf("%w: records do not belong to %T", ErrFacts, event)
@@ -169,6 +170,28 @@ func (f Facts) checkWindows(step int) error {
 	}
 	if f.Window != nil {
 		return f.Window.Validate(step + 1)
+	}
+	return nil
+}
+
+// ValidateTransition checks the same transition and fact contract at a concrete
+// store boundary, including callers that did not construct it through Runner.
+func ValidateTransition(t Transition) error {
+	next, err := t.From.Next(t.Event)
+	if err != nil {
+		return err
+	}
+	if next != t.To {
+		return fmt.Errorf("%w: next state differs from core transition", ErrFacts)
+	}
+	if err := t.Facts.check(t.Event, t.To); err != nil {
+		return err
+	}
+	if err := t.Facts.checkWindows(t.From.Step); err != nil {
+		return fmt.Errorf("%w: %v", ErrFacts, err)
+	}
+	if _, stop := t.Event.(core.StopRequested); stop && (t.Facts.Response != nil || t.Facts.Rejection != nil) && t.From.Phase != core.PhaseRequestSent {
+		return fmt.Errorf("%w: a stopped model result must settle its sent attempt", ErrFacts)
 	}
 	return nil
 }

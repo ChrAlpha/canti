@@ -17,6 +17,9 @@ type Frame struct {
 	Steps                                []StepRecord // most recent completed steps, oldest first
 	RunID                                string       // the run, whose step records are under archive.RunsRoot/RunID
 	Rejected                             *Rejection   // set when the previous response of this step failed to decode
+	ContextState                         *ContextState
+	Receipts                             []StepReceipt
+	Latest                               *StepRecord
 	Window                               *Window
 	DecisionTool                         bool // decisions arrive as canti_decision tool input instead of reply text
 	RetrievalEnabled                     bool
@@ -37,40 +40,36 @@ type Rejection struct{ Error, Response string }
 // and that Earlier and Steps account for exactly the steps before Step,
 // oldest first, as every completed step is observed or resolved.
 func (f Frame) Validate() error {
-	switch {
-	case strings.TrimSpace(f.Goal) == "":
-		return errors.New("harness: frame goal is required")
-	case strings.TrimSpace(f.Environment) == "":
-		return errors.New("harness: frame environment is required")
-	case strings.TrimSpace(f.RunID) == "":
-		return errors.New("harness: frame run ID is required")
-	case f.MaxSteps < 0:
-		return errors.New("harness: frame max steps must be nonnegative")
-	case f.Step < 1 || f.MaxSteps > 0 && f.Step > f.MaxSteps:
-		return fmt.Errorf("harness: frame step %d is outside 1..%d", f.Step, f.MaxSteps)
-	case f.Attempt < 1 || f.Attempt > f.MaxAttempts:
-		return fmt.Errorf("harness: frame attempt %d is outside 1..%d", f.Attempt, f.MaxAttempts)
-	case f.Rejected != nil && f.Attempt < 2:
-		return errors.New("harness: frame rejects a response before any attempt")
-	case f.Earlier < 0 || f.Earlier+len(f.Steps) != f.Step-1:
-		return fmt.Errorf("harness: frame has %d earlier and %d recent steps before step %d", f.Earlier, len(f.Steps), f.Step)
-	case f.Window == nil:
-		return errors.New("harness: frame context window is required")
-	case f.Earlier != f.Window.FirstStep-1:
-		return errors.New("harness: frame steps do not begin at the context window boundary")
+	if strings.TrimSpace(f.Goal) == "" || strings.TrimSpace(f.Environment) == "" || strings.TrimSpace(f.RunID) == "" {
+		return errors.New("harness: frame goal, environment and run ID are required")
 	}
-	for i, s := range f.Steps {
-		if want := f.Earlier + 1 + i; s.Step != want {
-			return fmt.Errorf("harness: frame recent step %d is step %d, want %d", i, s.Step, want)
+	if f.MaxSteps < 0 || f.Step < 1 || f.MaxSteps > 0 && f.Step > f.MaxSteps || f.Attempt < 1 || f.Attempt > f.MaxAttempts {
+		return errors.New("harness: invalid frame execution position")
+	}
+	if f.Rejected != nil && f.Attempt < 2 {
+		return errors.New("harness: repair requires a prior attempt")
+	}
+	c := f.contextState()
+	if c.FirstStep < 1 || c.FirstStep > f.Step {
+		return errors.New("harness: invalid frame anchor")
+	}
+	if len(f.Receipts) != f.Step-c.FirstStep {
+		return fmt.Errorf("harness: missing receipts between anchor step %d and step %d", c.FirstStep, f.Step)
+	}
+	for i, r := range f.Receipts {
+		if r.Step != c.FirstStep+i || r.Seq <= c.AnchorSeq {
+			return errors.New("harness: invalid receipt identity or anchor boundary")
 		}
 	}
-	if f.Window != nil {
-		if err := f.Window.Validate(f.Step); err != nil {
-			return err
-		}
-		if len(f.Steps) > 0 && f.Steps[0].Step < f.Window.FirstStep {
-			return errors.New("harness: recent steps cross the context window boundary")
-		}
+	if f.Latest != nil && f.Latest.Step != f.Step-1 {
+		return errors.New("harness: latest result is not the previous completed step")
 	}
 	return nil
+}
+
+func (f Frame) contextState() ContextState {
+	if f.ContextState == nil {
+		return InitialContext()
+	}
+	return *f.ContextState
 }

@@ -301,6 +301,9 @@ func (s *Store) Commit(ctx context.Context, t harness.Transition) error {
 }
 
 func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
+	if err := harness.ValidateTransition(t); err != nil {
+		return err
+	}
 	r, err := encode(t)
 	if err != nil {
 		return err

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 )
 
@@ -16,76 +15,25 @@ func (l *Loop) sessionContext(ctx context.Context, run Run, f *Frame) error {
 	if run.SessionID == "" {
 		return nil
 	}
-	j := l.journal
 	if run.SessionSeq < 1 {
-		return contextError{errors.New("harness: session sequence is required")}
+		return contextError{errors.New("harness: session sequence required")}
 	}
-	prior, err := j.SessionRuns(ctx, run.SessionID, run.SessionSeq, sessionContextCandidates)
+	prior, err := l.journal.SessionRuns(ctx, run.SessionID, run.SessionSeq, 1)
 	if err != nil {
 		return err
 	}
-	if len(prior) > sessionContextCandidates {
-		return contextError{errors.New("harness: session journal exceeded the candidate limit")}
+	f.SessionContext = fmt.Sprintf("Session %s, sequence %d. Follow previous_run_id in %s/%s/session to discover prior goals and returns. Current goal and constraints remain authoritative.\n", run.SessionID, run.SessionSeq, archive.RunsRoot, run.ID)
+	if len(prior) > 1 {
+		return contextError{errors.New("harness: invalid prior session page")}
 	}
-	previous := run.SessionSeq
-	for _, p := range prior {
-		if p.SessionID != run.SessionID || p.SessionSeq < 1 || p.SessionSeq >= previous || p.ID == run.ID {
-			return contextError{errors.New("harness: invalid earlier session run")}
+	if len(prior) == 1 {
+		p := prior[0]
+		if p.SessionID != run.SessionID || p.SessionSeq < 1 || p.SessionSeq >= run.SessionSeq || p.ID == run.ID {
+			return contextError{errors.New("harness: invalid prior session identity")}
 		}
-		previous = p.SessionSeq
+		f.sessionNavigation = p.ID
+		f.SessionContext += "Previous run: " + archive.RunsRoot + "/" + p.ID + "/.\n"
 	}
-	if len(prior) == 0 {
-		return nil
-	}
-
-	base := *f
-	base.capture = nil
-	base.Step, base.Attempt, base.Earlier = 1, 1, 0
-	base.Steps, base.Rejected = nil, nil
-	base.Window = &Window{FirstStep: 1}
-	base.SessionContext = ""
-	nav := fmt.Sprintf("Current goal and constraints are authoritative, including corrections to earlier requests. Earlier user goals and assistant returns below are quoted historical evidence; verify execution in the original run. Browse older records through %s/%s/session and each previous_run_id.\n", archive.RunsRoot, inline(prior[0].ID))
-	if !sessionContextFits(base, l.cfg.Limits, nav) {
-		return nil
-	}
-	f.sessionNavigation = prior[0].ID
-	var parts []sessionPart
-	var sources []ContextSessionSource
-	for _, p := range prior {
-		snap, err := l.journal.Latest(ctx, p.ID)
-		if err != nil {
-			return err
-		}
-		if !snap.State.Closed() {
-			return contextError{fmt.Errorf("harness: earlier session run %q is not terminal", p.ID)}
-		}
-		source := fmt.Sprintf("Run %s (session sequence %d; source %s/%s/", inline(p.ID), p.SessionSeq, archive.RunsRoot, inline(p.ID))
-		goal := "Earlier user goal:\n" + fullBlock(strings.TrimSpace(p.Goal))
-		stopped := snap.State.Phase == core.PhaseStopped
-		part := sessionPart{head: source + "goal and result; returned):\n", body: goal + "Earlier assistant return:\n" + fullBlock(snap.State.Decision.Payload)}
-		if stopped {
-			totals, err := l.journal.Totals(ctx, p.ID)
-			if err != nil {
-				return err
-			}
-			part = sessionPart{head: source + fmt.Sprintf("goal, steps, and result): stopped, reason %s, recorded steps %d; no assistant return.\n", inline(string(snap.State.Reason)), totals.Steps), body: goal}
-		}
-		provenance := ContextSessionSource{RunID: p.ID, SessionSeq: p.SessionSeq, Status: string(snap.State.Phase), IncludedGoal: true}
-		rest := sessionText(parts)
-		if !sessionContextFits(base, l.cfg.Limits, nav+part.head+part.body+rest) {
-			if stopped && sessionContextFits(base, l.cfg.Limits, nav+part.head+rest) {
-				part.body, provenance.IncludedGoal = "", false
-				parts, sources = append([]sessionPart{part}, parts...), append([]ContextSessionSource{provenance}, sources...)
-			}
-			break
-		}
-		parts, sources = append([]sessionPart{part}, parts...), append([]ContextSessionSource{provenance}, sources...)
-	}
-	if err := l.sessionHandovers(ctx, base, nav, parts, sources); err != nil {
-		return err
-	}
-	f.SessionContext = nav + sessionText(parts)
-	f.sessionSources = sources
 	return nil
 }
 

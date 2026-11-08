@@ -760,3 +760,99 @@ func focusSnapshot(t *testing.T, f *fixture) harness.Snapshot {
 	}
 	return snap
 }
+
+func TestConfirmedOverflowResetsSameStepAndNeverExecutesPartialDecision(t *testing.T) {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("TRANSIENT_BEFORE_RESET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded", RequestID: "req_overflow"}
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"inspect"}`),
+		reply{body: `{"kind":"exec","payload":"MUST_NEVER_EXECUTE"}`, err: signal, usage: harness.Usage{InputTokens: 7, InputReported: true}},
+		reply{body: `{"wrong":"shape"}`}, returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	l := f.loop()
+	f.steps(l, 6)
+	rejected := f.last()
+	if rejected.Event.Kind() != "request_rejected" || rejected.To.Step != 2 || rejected.To.Attempt != 2 || rejected.To.RequestRev != 1 || rejected.Facts.ContextState == nil || rejected.Facts.ContextState.AnchorSeq != rejected.Seq {
+		t.Fatalf("rejection=%+v", rejected)
+	}
+	old := append([]byte(nil), f.frozen(2, 1)...)
+	f.run(f.fresh())
+	if !bytes.Equal(old, f.frozen(2, 1)) {
+		t.Fatal("reset rewrote frozen input")
+	}
+	for _, rev := range []int{2, 3} {
+		raw := f.frozen(2, rev)
+		if bytes.Contains(raw, []byte("TRANSIENT_BEFORE_RESET")) || !bytes.Contains(raw, []byte("Its result predates this anchor")) {
+			t.Fatalf("reset revision %d lost orientation or replayed body: %s", rev, raw)
+		}
+	}
+	if len(f.exec.calls) != 0 {
+		t.Fatalf("partial decision executed: %v", f.exec.calls)
+	}
+	var prepare []string
+	for _, tr := range f.transitions() {
+		if tr.Facts.Request != nil && tr.To.Step == 2 {
+			prepare = append(prepare, tr.Facts.Request.Context.Preparation)
+		}
+	}
+	if !slices.Equal(prepare, []string{"first_request", "request_rejected", "protocol_repair"}) {
+		t.Fatalf("preparation reasons=%v", prepare)
+	}
+	totals, err := f.store.Totals(context.Background(), runID)
+	if err != nil || totals.Coverage.Attempts != 4 || totals.Coverage.InputReports != 1 || totals.Usage.InputTokens != 207 {
+		t.Fatalf("usage=%+v error=%v", totals, err)
+	}
+}
+
+func TestLatestRetrievalSurvivesSameStepRetryAndRepairThenExpires(t *testing.T) {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("LATEST_RESULT_LIFETIME"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"inspect"}`),
+		reply{err: errors.New("transport interrupted")}, reply{body: `{"wrong":"shape"}`}, execReply("true"), returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	f.run(f.loop())
+	for _, rev := range []int{1, 2} {
+		if !bytes.Contains(f.frozen(2, rev), []byte("LATEST_RESULT_LIFETIME")) {
+			t.Fatalf("revision %d consumed result early", rev)
+		}
+	}
+	if !bytes.Equal(f.model.sent[1], f.model.sent[2]) {
+		t.Fatal("transport retry rebuilt input")
+	}
+	if bytes.Contains(f.frozen(3, 1), []byte("LATEST_RESULT_LIFETIME")) {
+		t.Fatal("completed step retained transient retrieval body")
+	}
+	// Receipts remain stable while the dynamic result is replaced.
+	a, b := f.model.prompts[1], f.model.prompts[2]
+	if !reflect.DeepEqual(a.Blocks[:a.Stable], b.Blocks[:b.Stable]) {
+		t.Fatal("repair changed the stable prefix")
+	}
+}
+
+func TestInitialRejectionAndFreshOrientationOverflowAreBounded(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{}, reply{body: `{}`, err: signal}, reply{body: `{}`, err: signal})
+	snap := f.run(f.loop())
+	if snap.State.Step != 1 || snap.State.Reason != core.StopUnrecoverable {
+		t.Fatalf("orientation overflow=%+v", snap)
+	}
+	resets := 0
+	for _, tr := range f.transitions() {
+		if tr.Event.Kind() == "request_rejected" {
+			resets++
+		}
+	}
+	if resets != 1 || len(f.model.sent) != 2 {
+		t.Fatalf("resets=%d sends=%d", resets, len(f.model.sent))
+	}
+	last := f.last()
+	if last.Facts.Rejection == nil || last.Facts.Response == nil {
+		t.Fatal("terminal orientation overflow lost provider evidence")
+	}
+}

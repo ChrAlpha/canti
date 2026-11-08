@@ -4,6 +4,12 @@ import "github.com/ChrAlpha/canti/runtime/internal/archive"
 
 type ContextCapture struct {
 	Bytes             ContextBytes
+	Anchor            ContextState
+	Focus             []EvidenceRef `json:",omitempty"`
+	LatestSeq         int64
+	LatestStep        int
+	Preparation       string
+	OrientationOnly   bool
 	Session           []ContextSessionSource `json:",omitempty"`
 	SessionNavigation string                 `json:",omitempty"`
 	Retrievals        []ContextRetrieval     `json:",omitempty"`
@@ -16,6 +22,7 @@ type ContextBytes struct {
 	Total, Limit, System, Goal, Constraints, Environment int
 	Session, Window, Handover, StepHeader, EmptySteps    int
 	Progress, HandoverRequired, Repair                   int
+	Anchor, Focus, Latest                                int
 	Carry                                                int                `json:",omitempty"`
 	Steps                                                []ContextStepBytes `json:",omitempty"`
 }

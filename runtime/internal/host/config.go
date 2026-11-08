@@ -49,7 +49,7 @@ type RunConfig struct {
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 16
+const ContextVersion = 17
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.

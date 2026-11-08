@@ -371,10 +371,13 @@ func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, erro
 	if err == nil && (!resp.Complete || len(resp.Body) == 0) {
 		err = errors.New("harness: model reported success without a complete response")
 	}
+	var limit *ContextLimitError
 	var stop *StopError
 	switch {
 	case err == nil:
 		return l.runner.Commit(ctx, snap, core.ResponseSaved{Step: s.Step, Attempt: attempt}, Facts{Response: &resp})
+	case errors.As(err, &limit):
+		return l.reject(ctx, snap, req, resp, limit)
 	case errors.As(err, &stop):
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: stop.Reason}, Facts{Failure: err.Error(), Response: &resp})
 	}

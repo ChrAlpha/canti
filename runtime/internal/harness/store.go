@@ -71,6 +71,7 @@ type Journal interface {
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
 	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
+	Receipts(ctx context.Context, runID string, before int64, limit int) ([]StepReceipt, error)
 	// Completion returns the step that the transition at seq completed, by a
 	// point read that needs no history scan: ErrNotFound when the run holds
 	// no transition at seq, and ErrIncompatible when the transition there
@@ -187,4 +188,15 @@ type Facts struct {
 	ContextState *ContextState      `json:",omitempty"`
 	Rejection    *ContextRejection  `json:",omitempty"`
 	Failure      string
+}
+
+// StepReceipt is the bounded historical projection needed by a request.
+// Whole commands and result/evidence bodies stay in the archive and journal.
+type StepReceipt struct {
+	Seq      int64
+	Step     int
+	Purpose  string
+	Status   string
+	ExitCode *int
+	Resolved bool
 }

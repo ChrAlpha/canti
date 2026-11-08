@@ -70,6 +70,13 @@ func CheckContextMutation(t Transition, current ContextState) error {
 		} else if next != nil {
 			return fmt.Errorf("%w: exhausted rejection cannot open a context", ErrFacts)
 		}
+	case core.StopRequested:
+		if rejection := t.Facts.Rejection; rejection != nil && (t.Facts.Response == nil || !rejection.Previous.Equal(current)) {
+			return fmt.Errorf("%w: terminal rejection differs from context head", ErrFacts)
+		}
+		if next != nil {
+			return fmt.Errorf("%w: a terminal failure cannot mutate context", ErrFacts)
+		}
 	case core.Performed:
 		if next != nil {
 			if next.AnchorSeq != current.AnchorSeq || next.FirstStep != current.FirstStep {
