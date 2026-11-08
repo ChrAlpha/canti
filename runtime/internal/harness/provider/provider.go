@@ -180,6 +180,24 @@ func ExactString(fields map[string]json.RawMessage, name string) string {
 	return value
 }
 
+// ExactField reads a canonical wire key and refuses case-variant aliases of
+// that same discriminator. Other, unrelated extension fields remain allowed.
+func ExactField(fields map[string]json.RawMessage, name string) json.RawMessage {
+	for key := range fields {
+		if key != name && strings.EqualFold(key, name) {
+			return nil
+		}
+	}
+	return fields[name]
+}
+
+// Discriminator reads an exact canonical string without case aliases.
+func Discriminator(fields map[string]json.RawMessage, name string) string {
+	var value string
+	_ = json.Unmarshal(ExactField(fields, name), &value)
+	return value
+}
+
 // Header returns the canonical headers of a JSON request with the extra
 // name-value pairs.
 func Header(pairs ...string) http.Header {

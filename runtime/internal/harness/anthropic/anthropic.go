@@ -222,13 +222,11 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 	if msg.Model != "" {
 		resp.Model = msg.Model
 	}
-	if req.Adapter == toolAdapter {
-		fields, ok := provider.ExactObject(resp.Body)
-		if !ok {
-			return resp, errors.New("anthropic: malformed tool response")
-		}
-		msg.StopReason = provider.ExactString(fields, "stop_reason")
+	fields, ok := provider.ExactObject(resp.Body)
+	if !ok {
+		return resp, errors.New("anthropic: malformed response envelope")
 	}
+	msg.StopReason = provider.Discriminator(fields, "stop_reason")
 	switch msg.StopReason {
 	case "model_context_window_exceeded":
 		return resp, &harness.ContextLimitError{Status: reply.Status, StopReason: msg.StopReason, RequestID: reply.Header.Get("request-id")}
@@ -278,10 +276,10 @@ func statusError(r provider.Reply) error {
 		RequestID string `json:"request_id"`
 	}
 	fields, exact := provider.ExactObject(r.Body)
-	_, nested := provider.ExactObject(fields["error"])
+	errorFields, nested := provider.ExactObject(provider.ExactField(fields, "error"))
 	decoded := json.Unmarshal(r.Body, &e) == nil
-	if exact && nested && decoded && r.Status == http.StatusBadRequest && e.Error.Type == "invalid_request_error" && strings.HasPrefix(e.Error.Message, "prompt is too long:") {
-		return &harness.ContextLimitError{Status: r.Status, Type: e.Error.Type, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id"))}
+	if exact && nested && decoded && r.Status == http.StatusBadRequest && provider.Discriminator(errorFields, "type") == "invalid_request_error" && strings.HasPrefix(provider.Discriminator(errorFields, "message"), "prompt is too long:") {
+		return &harness.ContextLimitError{Status: r.Status, Type: "invalid_request_error", Code: "prompt_too_long", RequestID: cmp.Or(provider.ExactString(fields, "request_id"), r.Header.Get("request-id"))}
 	}
 	return provider.StatusError("anthropic", r.Status, provider.Failure{
 		Type: e.Error.Type, Message: e.Error.Message, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id")),

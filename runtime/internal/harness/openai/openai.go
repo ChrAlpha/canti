@@ -200,15 +200,15 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		return resp, errors.New("openai: malformed response")
 	}
 	resp.Model = cmp.Or(r.Model, resp.Model)
-	switch status := provider.ExactString(fields, "status"); {
+	switch status := provider.Discriminator(fields, "status"); {
 	case status == "completed":
 		resp.Complete = true
 		return resp, nil
 	case status == "incomplete" && r.IncompleteDetails != nil:
 		return resp, fmt.Errorf("openai: incomplete response: %s", r.IncompleteDetails.Reason)
 	case status == "failed" && r.Error != nil:
-		if r.Error.Code == "context_length_exceeded" {
-			return resp, &harness.ContextLimitError{Status: reply.Status, Code: r.Error.Code, RequestID: reply.Header.Get("x-request-id")}
+		if errorFields, ok := provider.ExactObject(provider.ExactField(fields, "error")); ok && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
+			return resp, &harness.ContextLimitError{Status: reply.Status, Code: "context_length_exceeded", RequestID: reply.Header.Get("x-request-id")}
 		}
 		return resp, fmt.Errorf("openai: failed response: %s: %s", r.Error.Code, r.Error.Message)
 	default:
@@ -290,10 +290,10 @@ func statusError(r provider.Reply) error {
 		} `json:"error"`
 	}
 	fields, exact := provider.ExactObject(r.Body)
-	_, nested := provider.ExactObject(fields["error"])
+	errorFields, nested := provider.ExactObject(provider.ExactField(fields, "error"))
 	decoded := json.Unmarshal(r.Body, &e) == nil
-	if exact && nested && decoded && r.Status == http.StatusBadRequest && e.Error.Code == "context_length_exceeded" {
-		return &harness.ContextLimitError{Status: r.Status, Type: e.Error.Type, Code: e.Error.Code, RequestID: r.Header.Get("x-request-id")}
+	if exact && nested && decoded && r.Status == http.StatusBadRequest && provider.Discriminator(errorFields, "code") == "context_length_exceeded" {
+		return &harness.ContextLimitError{Status: r.Status, Type: provider.Discriminator(errorFields, "type"), Code: "context_length_exceeded", RequestID: r.Header.Get("x-request-id")}
 	}
 	return provider.StatusError("openai", r.Status, provider.Failure{
 		Type: cmp.Or(e.Error.Code, e.Error.Type), Message: e.Error.Message, RequestID: r.Header.Get("x-request-id"),
