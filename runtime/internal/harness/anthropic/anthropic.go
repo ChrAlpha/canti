@@ -21,8 +21,8 @@ const (
 	version        = "2023-06-01"
 	protocol       = "anthropic-messages/" + version
 	fallbackBeta   = "server-side-fallback-2026-07-01"
-	adapter        = "canti-anthropic/2"
-	toolAdapter    = "canti-anthropic/3-tool"
+	adapter        = "canti-anthropic/4"
+	toolAdapter    = "canti-anthropic/4-tool"
 	decisionFormat = `{"type":"json_schema","schema":` + harness.DecisionSchema + `}`
 	// decisionTool is strict, so a tool call always matches the decision
 	// schema. The tool choice is auto: current models reject a forced one,
@@ -228,6 +228,8 @@ func (m *Model) Complete(ctx context.Context, req harness.Request) (harness.Resp
 		msg.StopReason = provider.ExactString(fields, "stop_reason")
 	}
 	switch msg.StopReason {
+	case "model_context_window_exceeded":
+		return resp, &harness.ContextLimitError{Status: reply.Status, StopReason: msg.StopReason, RequestID: reply.Header.Get("request-id")}
 	case "end_turn", "stop_sequence", "refusal":
 		resp.Complete = true
 		return resp, nil
@@ -273,7 +275,12 @@ func statusError(r provider.Reply) error {
 		} `json:"error"`
 		RequestID string `json:"request_id"`
 	}
-	_ = json.Unmarshal(r.Body, &e)
+	fields, exact := provider.ExactObject(r.Body)
+	_, nested := provider.ExactObject(fields["error"])
+	decoded := json.Unmarshal(r.Body, &e) == nil
+	if exact && nested && decoded && r.Status == http.StatusBadRequest && e.Error.Type == "invalid_request_error" && strings.HasPrefix(e.Error.Message, "prompt is too long:") {
+		return &harness.ContextLimitError{Status: r.Status, Type: e.Error.Type, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id"))}
+	}
 	return provider.StatusError("anthropic", r.Status, provider.Failure{
 		Type: e.Error.Type, Message: e.Error.Message, RequestID: cmp.Or(e.RequestID, r.Header.Get("request-id")),
 		Exhausted: r.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(e.Error.Message), "credit balance"),

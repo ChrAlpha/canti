@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -73,3 +74,17 @@ type StopError struct {
 func (e *StopError) Error() string { return string(e.Reason) + ": " + e.Err.Error() }
 
 func (e *StopError) Unwrap() error { return e.Err }
+
+// ContextLimitError is a confirmed provider context rejection. Only a tested,
+// structured provider signal may construct it; output truncation is distinct.
+type ContextLimitError struct {
+	Status     int
+	Type       string
+	Code       string
+	StopReason string
+	RequestID  string
+}
+
+func (e *ContextLimitError) Error() string {
+	return fmt.Sprintf("provider context limit: status=%d type=%s code=%s stop_reason=%s request_id=%s", e.Status, e.Type, e.Code, e.StopReason, e.RequestID)
+}

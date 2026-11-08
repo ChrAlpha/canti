@@ -528,7 +528,7 @@ retryable; 402, or the API's exhausted-credit signal, is
 adapter is `StopError{unrecoverable}`.
 
 `anthropic.Model` implements `Model` for the non-streaming Messages API at
-API version `2023-06-01`, as adapter `canti-anthropic/2`: model, `max_tokens`
+API version `2023-06-01`, as adapter `canti-anthropic/4`: model, `max_tokens`
 (16,000 by default), the system prompt as a string, text blocks, optionally an
 `output_config` with the effort and a JSON-schema format for the decision
 object, and, with `-fallbacks`, server-side refusal fallbacks. The first and
@@ -541,7 +541,7 @@ budget. Usage is the provider-reported input tokens, including cache creation
 and reads, plus output tokens. `Decision` concatenates the text blocks.
 
 `openai.Model` implements `Model` for the non-streaming Responses API as
-adapter `canti-openai-responses/1`, protocol `openai-responses/v1`, posting to
+adapter `canti-openai-responses/2`, protocol `openai-responses/v1`, explicitly disabling truncation and posting to
 the base URL plus `/responses`: model, the system prompt as `instructions`,
 `input_text` parts, `max_output_tokens` (16,000 by default), optionally
 `reasoning.effort` and a strict `json_schema` text format, and `store: false`,
@@ -552,8 +552,8 @@ without breakpoints. A 2xx response is complete only with status `completed`;
 include cached ones, plus `output_tokens`. `Decision` concatenates the
 `output_text` parts of the message items, so a refusal holds no decision.
 
-With `-decision-format tool` the adapters are `canti-anthropic/3-tool` and
-`canti-openai-responses/1-tool`: the body offers one strict `canti_decision`
+With `-decision-format tool` the adapters are `canti-anthropic/4-tool` and
+`canti-openai-responses/2-tool`: the body offers one strict `canti_decision`
 tool whose input schema is the decision object, instead of the output format,
 with tool choice `auto` and no parallel calls. A response that calls the tool
 is complete, and `Decision` returns the input of its single `canti_decision`

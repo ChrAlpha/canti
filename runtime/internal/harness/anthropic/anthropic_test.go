@@ -25,7 +25,7 @@ const (
 	authToken    = "sk-ant-oat-SECRET-token"
 	protocol     = "anthropic-messages/2023-06-01"
 	fallbackBeta = "server-side-fallback-2026-07-01"
-	adapter      = "canti-anthropic/2"
+	adapter      = "canti-anthropic/4"
 	cached       = `,"cache_control":{"type":"ephemeral"}`
 	purposeField = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
 	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},` + purposeField + `,"payload":{"type":"string"}},"required":["kind","payload","purpose"],"additionalProperties":false}}}`
@@ -655,5 +655,35 @@ func TestDecision(t *testing.T) {
 				t.Fatalf("core.Decode(%s) = %v", got, err)
 			}
 		})
+	}
+}
+
+func TestConfirmedContextLimitSignals(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name     string
+			status   int
+			body     string
+			overflow bool
+		}{
+			{"prompt", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"},"request_id":"req_reset"}`, true},
+			{"stop", 200, `{"model":"m","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"unsafe\"}"}],"usage":{"input_tokens":12,"output_tokens":3}}`, true},
+			{"generic", 400, `{"error":{"type":"invalid_request_error","message":"invalid prompt"}}`, false},
+			{"unstructured", 400, `{"message":"prompt is too long: 200001 tokens"}`, false},
+			{"output", 200, `{"stop_reason":"max_tokens"}`, false},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				srv := serve(t, reply(tc.status, tc.body))
+				m := newModel(t, srv.URL, func(c *anthropic.Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) != tc.overflow || err == nil || resp.Complete || string(resp.Body) != tc.body {
+					t.Fatalf("response=%+v error=%v", resp, err)
+				}
+				if tc.name == "stop" && resp.Usage.InputTokens != 12 {
+					t.Fatalf("lost partial usage: %+v", resp.Usage)
+				}
+			})
+		}
 	}
 }

@@ -108,12 +108,12 @@ func TestFreeze(t *testing.T) {
 		body    string
 		adapter string
 	}{
-		{"plain", nil, base + `,"store":false}`, adapter},
-		{"structured output", func(c *Config) { c.StructuredOutput = true }, base + `,"text":` + decisionFormat + `,"store":false}`, adapter},
+		{"plain", nil, base + `,"truncation":"disabled","store":false}`, adapter},
+		{"structured output", func(c *Config) { c.StructuredOutput = true }, base + `,"text":` + decisionFormat + `,"truncation":"disabled","store":false}`, adapter},
 		{"effort and max tokens", func(c *Config) { c.Effort, c.MaxTokens = "xhigh", 512 },
-			strings.Replace(base, "16000", "512", 1) + `,"reasoning":{"effort":"xhigh"},"store":false}`, adapter},
+			strings.Replace(base, "16000", "512", 1) + `,"reasoning":{"effort":"xhigh"},"truncation":"disabled","store":false}`, adapter},
 		{"tool", func(c *Config) { c.DecisionFormat, c.StructuredOutput, c.Effort = "tool", true, "high" },
-			base + `,"reasoning":{"effort":"high"},"tools":` + decisionTool + `,"tool_choice":"auto","parallel_tool_calls":false,"store":false}`, toolAdapter},
+			base + `,"reasoning":{"effort":"high"},"tools":` + decisionTool + `,"tool_choice":"auto","parallel_tool_calls":false,"truncation":"disabled","store":false}`, toolAdapter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := freeze(t, newModel(t, "https://unused.test/v1", tc.edit))
@@ -263,7 +263,7 @@ func TestCompleteRefusesAnotherProtocolOrAdapter(t *testing.T) {
 	m := newModel(t, "https://unused.test/v1", nil)
 	for _, req := range []harness.Request{
 		{Body: []byte(`{}`), Protocol: "anthropic-messages/2023-06-01", Adapter: adapter},
-		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/2"},
+		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/4"},
 	} {
 		if _, err := m.Complete(context.Background(), req); stopReason(err) != core.StopUnrecoverable {
 			t.Errorf("Complete(%s %s) = %v, want unrecoverable", req.Protocol, req.Adapter, err)
@@ -277,7 +277,7 @@ func TestDecisionWithoutTextReturnsTheBody(t *testing.T) {
 	if got := string(m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: adapter})); got != refusal {
 		t.Fatalf("Decision = %s", got)
 	}
-	if got := m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/2"}); got != nil {
+	if got := m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/4"}); got != nil {
 		t.Fatalf("Decision of another adapter = %s", got)
 	}
 }
@@ -308,5 +308,35 @@ func TestToolDecision(t *testing.T) {
 				t.Fatalf("Decision = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfirmedContextLimitSignals(t *testing.T) {
+	for _, format := range []string{"text", "tool"} {
+		for _, tc := range []struct {
+			name     string
+			status   int
+			body     string
+			overflow bool
+		}{
+			{"http", 400, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too large"}}`, true},
+			{"failed", 200, `{"status":"failed","error":{"code":"context_length_exceeded","message":"too large"},"usage":{"input_tokens":12,"output_tokens":3}}`, true},
+			{"incomplete", 200, `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12,"output_tokens":3}}`, false},
+			{"unstructured", 400, `{"message":"context_length_exceeded"}`, false},
+			{"generic", 400, `{"error":{"code":"invalid_value","message":"context_length_exceeded"}}`, false},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				srv := serve(t, reply(tc.status, tc.body))
+				m := newModel(t, srv.URL, func(c *Config) { c.DecisionFormat = format })
+				resp, err := m.Complete(context.Background(), freeze(t, m))
+				var limit *harness.ContextLimitError
+				if errors.As(err, &limit) != tc.overflow || err == nil || resp.Complete || string(resp.Body) != tc.body {
+					t.Fatalf("response=%+v error=%v", resp, err)
+				}
+				if tc.name == "failed" && resp.Usage.InputTokens != 12 {
+					t.Fatalf("lost partial usage: %+v", resp.Usage)
+				}
+			})
+		}
 	}
 }

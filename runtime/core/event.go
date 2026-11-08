@@ -69,6 +69,13 @@ type ResponseIncomplete struct {
 	Attempt int
 }
 
+// RequestRejected ends an attempt whose input must be prepared again.
+// It keeps the unfinished step and distinguishes rebuilding from resending.
+type RequestRejected struct {
+	Step    int
+	Attempt int
+}
+
 // ResponseLoaded carries the saved response body of the named attempt for
 // decoding.
 type ResponseLoaded struct {
@@ -111,6 +118,7 @@ func (RequestFrozen) event()      {}
 func (AttemptStarted) event()     {}
 func (ResponseSaved) event()      {}
 func (ResponseIncomplete) event() {}
+func (RequestRejected) event()    {}
 func (ResponseLoaded) event()     {}
 func (EffectRecovered) event()    {}
 func (Observed) event()           {}
@@ -123,6 +131,7 @@ func (RequestFrozen) Kind() string      { return "request_frozen" }
 func (AttemptStarted) Kind() string     { return "attempt_started" }
 func (ResponseSaved) Kind() string      { return "response_saved" }
 func (ResponseIncomplete) Kind() string { return "response_incomplete" }
+func (RequestRejected) Kind() string    { return "request_rejected" }
 func (ResponseLoaded) Kind() string     { return "response_loaded" }
 func (EffectRecovered) Kind() string    { return "effect_recovered" }
 func (Observed) Kind() string           { return "observed" }
@@ -135,7 +144,7 @@ func (Resolved) Kind() string           { return "resolved" }
 func Events() []Event {
 	return []Event{
 		RequestFrozen{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
-		ResponseLoaded{}, EffectRecovered{}, Observed{}, Performed{},
+		RequestRejected{}, ResponseLoaded{}, EffectRecovered{}, Observed{}, Performed{},
 		OutcomeUnknown{}, StopRequested{}, Resolved{},
 	}
 }
