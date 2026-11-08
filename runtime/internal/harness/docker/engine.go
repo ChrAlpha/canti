@@ -47,6 +47,16 @@ func cliEngine(path string) *engine {
 	return e.(*engine)
 }
 
+// endpointEngine never follows a later ambient Docker context change.
+func endpointEngine(path, endpoint string) *engine {
+	key := path + "\x00" + endpoint
+	if e, ok := engines.Load(key); ok {
+		return e.(*engine)
+	}
+	e, _ := engines.LoadOrStore(key, newEngine(func(ctx context.Context) (net.Conn, error) { return dialDocker(ctx, path, endpoint) }))
+	return e.(*engine)
+}
+
 func newEngine(dial func(context.Context) (net.Conn, error)) *engine {
 	return &engine{gate: make(chan struct{}, 1), client: &http.Client{Transport: &http.Transport{
 		DialContext:         func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
@@ -80,9 +90,9 @@ func status(err error) int {
 // api sends one request of operation op under the operation's own deadline,
 // and handles a successful response, if handle is set, within it. Once ctx is
 // done it returns ctx's error; a call past only its own deadline fails with an
-// ordinary error, never mistaken for the caller's shutdown. Every request but
-// a start may be sent again on a fresh connection when its first connection
-// broke before an answer: a start sent twice could rerun a job that exited.
+// ordinary error, never mistaken for the caller's shutdown. Reads and deterministic
+// create/remove requests may be retried on a fresh connection. Start and stop
+// are never replayed: a delayed duplicate could disturb a later start epoch.
 func (x *Executor) api(ctx context.Context, op, method, path string, body any, handle func(*http.Response) error) error {
 	limit := x.timeouts.call
 	switch op {
@@ -93,7 +103,7 @@ func (x *Executor) api(ctx context.Context, op, method, path string, body any, h
 	}
 	call, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	err := x.engine.do(call, method, path, body, op != "start", handle)
+	err := x.engine.do(call, method, path, body, op != "start" && op != "stop", handle)
 	switch {
 	case err == nil:
 		return nil
@@ -216,10 +226,18 @@ type stdioConn struct {
 }
 
 func dialStdio(ctx context.Context, docker string) (net.Conn, error) {
+	return dialDocker(ctx, docker, "")
+}
+
+func dialDocker(ctx context.Context, docker, endpoint string) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(docker, "system", "dial-stdio")
+	args := []string{"system", "dial-stdio"}
+	if endpoint != "" {
+		args = append([]string{"--host", endpoint}, args...)
+	}
+	cmd := exec.Command(docker, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	c := &stdioConn{cmd: cmd, stderr: &tail{}}
