@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "directory": "tea",
+      "module": "charm.land/bubbletea/v2",
+      "version": "v2.1.1",
+      "revision": "67b4c7a8a2b34a0b1ce15261b0c705bc7e1a04b7",
+      "upstream_sum": "h1:S1S9l37pCZGrj1JexBcr9x4Nr3MVeM42InqCYM/tDpU=",
+      "license": "MIT",
+      "changed_files": [
+        "go.mod",
+        "input.go",
+        "options.go",
+        "tea.go",
+        "tty.go"
+      ]
+    },
+    {
+      "directory": "uv",
+      "module": "github.com/charmbracelet/ultraviolet",
+      "version": "v0.0.0-20261008173134-6b8d4baf91b4",
+      "revision": "6b8d4baf91b4c933e6613b0eefc8f180f6eda002",
+      "upstream_sum": "h1:hISLzUbwcvJbGoNR6A3L/TpguRRnACBmZOee8LcHLJw=",
+      "license": "MIT",
+      "changed_files": [
+        "input_limits_test.go",
+        "terminal_reader.go"
+      ]
+    }
+  ],
+  "patch_sha256": "993409fbff0a01b878df20439f4069343b8cb223d07a125c2a1ebd222c1051e7"
+}

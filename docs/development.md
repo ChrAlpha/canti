@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.25 or newer; each module’s `go.mod` declares the minimum version.
+- Go 1.26 or newer for the workspace and TUI; runtime and SDK declare their independent minimums in `go.mod`.
 - Make and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
   targets.
 - A C compiler and a supported platform for Go's race detector.

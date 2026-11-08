@@ -18,6 +18,8 @@ LONG_TESTS = \
 	TestUnlimitedStepsAcrossCrashHandoverAndRestart
 
 PTY_TESTS = \
+	TestPTYNativeRawRestore \
+	TestNativeInitFailureRestoresPTY \
 	TestChatInputContinuesDroppingPageKeyAcrossRunCompletion \
 	TestChatInputContinuesDroppingPasteAcrossRunCompletion \
 	TestChatInputDrainedInterruptReachesProgram \
@@ -53,6 +55,9 @@ CI_TEST = $(CURDIR)/scripts/test-report.sh go test -json -count=1 -race
 GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
 check: fmt graph vet test-names test
+
+native-deps:
+	scripts/check-tui-deps.sh
 
 fmt:
 	test -z "$$(find runtime sdk/go apps/tui -name '*.go' -type f -exec gofmt -l {} +)"
@@ -97,7 +102,7 @@ ci-long:
 
 ci-pty:
 	cd runtime && GOWORK=off $(CI_TEST) -p 1 -timeout=5m -tags integration -run '$(PTY)' ./cmd/canti
-	cd apps/tui && GOWORK=off $(CI_TEST) -p 1 -timeout=5m -tags integration -run '$(PTY)' ./cmd/canti-tui
+	cd apps/tui && GOWORK=off $(CI_TEST) -p 1 -timeout=5m -tags integration -run '$(PTY)' ./cmd/canti-tui ./internal/terminal
 
 test-names:
 	LONG='$(LONG)' PTY='$(PTY)' scripts/check-test-names.sh

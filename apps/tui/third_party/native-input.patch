@@ -1,0 +1,663 @@
+--- a/tea/go.mod
++++ b/tea/go.mod
+@@ -26,3 +26,5 @@
+ 	github.com/xo/terminfo v1.0.0 // indirect
+ 	golang.org/x/sync v0.22.0 // indirect
+ )
++
++replace github.com/charmbracelet/ultraviolet => ../uv
+--- a/tea/input.go
++++ b/tea/input.go
+@@ -3,6 +3,12 @@
+ import (
+ 	uv "github.com/charmbracelet/ultraviolet"
+ )
++
++// InputClosedMsg reports input EOF without forcing a shutdown policy.
++type InputClosedMsg struct{ Err error }
++
++// PasteOverflowMsg reports that the native reader rejected a whole paste.
++type PasteOverflowMsg struct{ Limit int }
+ 
+ // translateInputEvent translates an input event into a Bubble Tea Msg.
+ func (p *Program) translateInputEvent(e uv.Event) Msg {
+@@ -33,6 +39,8 @@
+ 		return MouseReleaseMsg(e)
+ 	case uv.MouseWheelEvent:
+ 		return MouseWheelMsg(e)
++	case uv.PasteOverflowEvent:
++		return PasteOverflowMsg(e)
+ 	case uv.PasteEvent:
+ 		return PasteMsg(e)
+ 	case uv.PasteStartEvent:
+--- a/tea/options.go
++++ b/tea/options.go
+@@ -22,6 +22,15 @@
+ func WithContext(ctx context.Context) ProgramOption {
+ 	return func(p *Program) {
+ 		p.externalCtx = ctx
++	}
++}
++
++// WithInputLimits bounds native pending sequences and paste bytes.
++// Non-positive values select the native reader defaults.
++func WithInputLimits(sequenceBytes, pasteBytes int) ProgramOption {
++	return func(p *Program) {
++		p.inputSequenceLimit = sequenceBytes
++		p.inputPasteLimit = pasteBytes
+ 	}
+ }
+ 
+--- a/tea/tea.go
++++ b/tea/tea.go
+@@ -546,6 +546,8 @@
+ 	// ttyInput is null if input is not a TTY.
+ 	ttyInput              term.File
+ 	previousTtyInputState *term.State
++	inputSequenceLimit    int
++	inputPasteLimit       int
+ 	cancelReader          cancelreader.CancelReader
+ 	inputScanner          *uv.TerminalReader
+ 	readLoopDone          chan struct{}
+@@ -1065,6 +1067,7 @@
+ 
+ 	// Check if output is a TTY before entering raw mode, hiding the cursor and
+ 	// so on.
++	defer p.shutdown(true)
+ 	if err := p.initTerminal(); err != nil {
+ 		return p.initialModel, err
+ 	}
+@@ -1297,9 +1300,7 @@
+ 		if p.cancelReader != nil {
+ 			// Wait for input loop to finish.
+ 			if p.cancelReader.Cancel() {
+-				if !kill {
+-					p.waitForReadLoop()
+-				}
++				p.waitForReadLoop()
+ 			}
+ 			_ = p.cancelReader.Close()
+ 		}
+--- a/tea/tty.go
++++ b/tea/tty.go
+@@ -1,7 +1,9 @@
+ package tea
+ 
+ import (
++	"errors"
+ 	"fmt"
++	"io"
+ 	"os"
+ 	"strconv"
+ 	"time"
+@@ -73,6 +75,9 @@
+ 	}
+ 
+ 	drv := uv.NewTerminalReader(p.cancelReader, term)
++	drv.MaxSequenceBytes = p.inputSequenceLimit
++	drv.MaxPasteBytes = p.inputPasteLimit
++	drv.ReportEOF = true
+ 	drv.SetLogger(p.logger)
+ 	p.inputScanner = drv
+ 	p.readLoopDone = make(chan struct{})
+@@ -86,11 +91,10 @@
+ 	defer close(p.readLoopDone)
+ 
+ 	if err := p.inputScanner.StreamEvents(p.ctx, p.msgs); err != nil {
+-		select {
+-		case <-p.ctx.Done():
+-			return
+-		case p.errs <- err:
++		if errors.Is(err, io.EOF) {
++			err = nil
+ 		}
++		p.Send(InputClosedMsg{Err: err})
+ 	}
+ }
+ 
+--- /dev/null
++++ b/uv/input_limits_test.go
+@@ -0,0 +1,97 @@
++package uv
++
++import (
++	"context"
++	"errors"
++	"io"
++	"os"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestInputRecoveryBounds(t *testing.T) {
++	for _, tt := range []struct {
++		name, input string
++		want        error
++	}{
++		{"paste discard bytes", "\x1b[200~" + strings.Repeat("a", DefaultDiscardLimit+20), ErrInputLimit},
++		{"paste recovery deadline", "\x1b[200~123456789", ErrInputTimeout},
++		{"unterminated paste", "\x1b[200~ok", ErrInputTimeout},
++		{"unterminated OSC", "\x1b]title", ErrInputTimeout},
++		{"unterminated CSI", "\x1b[123;", ErrInputTimeout},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			r, w, err := os.Pipe()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer r.Close()
++			defer w.Close()
++			cr, err := NewCancelReader(r)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer cr.Close()
++			reader := NewTerminalReader(cr, "xterm")
++			reader.MaxPasteBytes = 8
++			events := make(chan Event, 16)
++			done := make(chan error, 1)
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			go func() { done <- reader.StreamEvents(ctx, events) }()
++			go func() { _, _ = io.WriteString(w, tt.input) }()
++			select {
++			case err := <-done:
++				if !errors.Is(err, tt.want) {
++					t.Fatalf("got %v want %v", err, tt.want)
++				}
++			case <-time.After(3 * time.Second):
++				t.Fatal("input did not terminate within bound")
++			}
++			for len(events) > 0 {
++				e := <-events
++				if _, ok := e.(KeyPressEvent); ok {
++					t.Fatalf("malformed input escaped as key: %#v", e)
++				}
++			}
++		})
++	}
++}
++
++func TestInputReadPreservesBytesWithEOF(t *testing.T) {
++	reader := NewTerminalReader(&lastRead{}, "xterm")
++	reader.ReportEOF = true
++	events := make(chan Event, 8)
++	if err := reader.StreamEvents(context.Background(), events); !errors.Is(err, io.EOF) {
++		t.Fatal(err)
++	}
++	if e := <-events; e.(KeyPressEvent).Text != "x" {
++		t.Fatal(e)
++	}
++}
++
++type lastRead struct{}
++
++func (*lastRead) Read(p []byte) (int, error) { p[0] = 'x'; return 1, io.EOF }
++
++func TestPasteOverflowScannerBoundsAndRecovers(t *testing.T) {
++	s := newEventScanner()
++	s.maxPasteBytes = 8
++	buf := []byte("\x1b[200~123456789\x1b[2")
++	n, e := s.scanEvents(buf, false)
++	if len(s.paste) > 8 || !s.pasteOverflow || len(e) != 1 {
++		t.Fatalf("overflow: %d %#v", len(s.paste), e)
++	}
++	tail := append(append([]byte{}, buf[n:]...), []byte("01~y")...)
++	_, e = s.scanEvents(tail, false)
++	if len(e) != 2 {
++		t.Fatalf("events %#v", e)
++	}
++	if _, ok := e[0].(PasteOverflowEvent); !ok {
++		t.Fatal(e)
++	}
++	if k, ok := e[1].(KeyPressEvent); !ok || k.Text != "y" {
++		t.Fatal(e)
++	}
++}
+--- a/uv/terminal_reader.go
++++ b/uv/terminal_reader.go
+@@ -8,7 +8,6 @@
+ 	"io"
+ 	"strconv"
+ 	"strings"
+-	"sync"
+ 	"time"
+ 	"unicode"
+ 	"unicode/utf16"
+@@ -25,6 +24,24 @@
+ // DefaultEscTimeout is the default timeout at which the [TerminalReader] will
+ // process ESC sequences. It is set to 50 milliseconds.
+ const DefaultEscTimeout = 50 * time.Millisecond
++
++// DefaultInputLimit bounds native pending sequences and completed paste data.
++const DefaultInputLimit = 64 << 10
++
++// ErrInputLimit reports an input sequence that exceeds the configured bound.
++var ErrInputLimit = errors.New("terminal input sequence exceeds limit")
++
++// ErrInputTimeout reports an unterminated sequence or paste.
++var ErrInputTimeout = errors.New("terminal input recovery deadline exceeded")
++
++// DefaultDiscardLimit bounds additional bytes consumed after paste overflow.
++const DefaultDiscardLimit = 64 << 10
++
++// DefaultInputTimeout bounds incomplete input and overflow recovery.
++const DefaultInputTimeout = 2 * time.Second
++
++// PasteOverflowEvent rejects a whole paste after its closing delimiter.
++type PasteOverflowEvent struct{ Limit int }
+ 
+ // TerminalReader represents an input event loop that reads input events from
+ // a reader and parses them into human-readable events. It supports
+@@ -47,6 +64,13 @@
+ 	//
+ 	// By default, this is set to [DefaultEscTimeout] (50 milliseconds).
+ 	EscTimeout time.Duration
++
++	// MaxSequenceBytes and MaxPasteBytes bound native accumulation. Zero uses defaults.
++	MaxSequenceBytes int
++	MaxPasteBytes    int
++
++	// ReportEOF lets the owner distinguish input closure from cancellation.
++	ReportEOF bool
+ 
+ 	r     io.Reader
+ 	table map[string]Key // table is a lookup table for key sequences.
+@@ -122,104 +146,131 @@
+ 	for {
+ 		var readBuf [readBufSize]byte
+ 		n, err := d.r.Read(readBuf[:])
++		if n > 0 {
++			select {
++			case <-ctx.Done():
++				return nil
++			case readc <- readBuf[:n]:
++			}
++		}
+ 		if err != nil {
+-			return err //nolint:wrapcheck
+-		}
+-
++			return err
++		}
++	}
++}
++
++// StreamEvents sends events to the provided channel. It stops when the context
++// is closed or when an error occurs.
++func (d *TerminalReader) StreamEvents(ctx context.Context, eventc chan<- Event) error {
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	if d.MaxSequenceBytes <= 0 {
++		d.MaxSequenceBytes = DefaultInputLimit
++	}
++	if d.MaxPasteBytes <= 0 {
++		d.MaxPasteBytes = DefaultInputLimit
++	}
++	d.eventScanner.maxPasteBytes = d.MaxPasteBytes
++	errc := make(chan error, 1)
++	readc := make(chan []byte)
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		errc <- d.streamData(ctx, readc)
++	}()
++	defer func() {
++		cancel()
++		// Arbitrary io.Readers cannot always be interrupted. Native terminal readers
++		// can, and their read goroutine must finish before its descriptors close.
++		if reader, ok := d.r.(cancelreader.CancelReader); ok && reader.Cancel() {
++			<-done
++		}
++	}()
++	return d.readEvents(ctx, eventc, readc, errc)
++}
++
++func (d *TerminalReader) readEvents(ctx context.Context, eventc chan<- Event, readc <-chan []byte, errc <-chan error) error {
++	var buf bytes.Buffer
++	var pendingSince, lastRead time.Time
++	interval := d.EscTimeout
++	if interval <= 0 {
++		interval = DefaultEscTimeout
++	}
++	tick := time.NewTicker(min(interval, 50*time.Millisecond))
++	defer tick.Stop()
++	for {
+ 		select {
+ 		case <-ctx.Done():
+ 			return nil
+-		case readc <- readBuf[:n]:
+-		}
+-	}
+-}
+-
+-// StreamEvents sends events to the provided channel. It stops when the context
+-// is closed or when an error occurs.
+-func (d *TerminalReader) StreamEvents(ctx context.Context, eventc chan<- Event) error {
+-	var buf bytes.Buffer
+-	errc := make(chan error, 1)
+-	readc := make(chan []byte)
+-	timeout := time.NewTimer(d.EscTimeout)
+-	ttimeout := time.Now().Add(d.EscTimeout)
+-
+-	var wg sync.WaitGroup
+-	wg.Add(1)
+-
+-	go func() {
+-		defer wg.Done()
+-		if err := d.streamData(ctx, readc); err != nil {
+-			if errors.Is(err, io.EOF) || errors.Is(err, cancelreader.ErrCanceled) {
+-				errc <- nil
+-				return
+-			}
+-			errc <- err
+-			return
+-		}
+-	}()
+-
+-	for {
+-		select {
+-		case <-ctx.Done():
+-			d.sendEvents(eventc, buf.Bytes(), true)
+-			wg.Wait()
+-			return nil
+ 		case err := <-errc:
+-			d.sendEvents(eventc, buf.Bytes(), true)
+-			wg.Wait()
+-			return err // return the first error encountered
+-		case <-timeout.C:
+-			d.logf("timeout reached")
+-
+-			// Timeout reached process the buffer including any incomplete sequences.
+-			var n int // n is the number of bytes processed
+-			timedout := time.Now().After(ttimeout)
+-			if buf.Len() > 0 && timedout {
+-				d.logf("timeout expired, processing buffer")
+-				n = d.sendEvents(eventc, buf.Bytes(), true)
+-			}
+-
+-			if n > 0 {
++			if ctx.Err() != nil || errors.Is(err, cancelreader.ErrCanceled) {
++				return nil
++			}
++			if d.eventScanner.paste != nil || pendingControl(buf.Bytes()) {
++				return io.ErrUnexpectedEOF
++			}
++			d.sendEvents(ctx, eventc, buf.Bytes(), true)
++			if errors.Is(err, io.EOF) && !d.ReportEOF {
++				return nil
++			}
++			return err
++		case now := <-tick.C:
++			if d.eventScanner.pasteOverflow && now.Sub(d.eventScanner.overflowAt) >= DefaultInputTimeout {
++				return ErrInputTimeout
++			}
++			if !pendingSince.IsZero() && now.Sub(pendingSince) >= DefaultInputTimeout {
++				return ErrInputTimeout
++			}
++			if d.eventScanner.paste != nil && now.Sub(lastRead) >= DefaultInputTimeout {
++				return ErrInputTimeout
++			}
++			if buf.Len() > 0 && now.Sub(lastRead) >= interval && !pendingControl(buf.Bytes()) && d.eventScanner.paste == nil {
++				buf.Next(d.sendEvents(ctx, eventc, buf.Bytes(), true))
++				if buf.Len() == 0 {
++					pendingSince = time.Time{}
++				}
++			}
++		case read := <-readc:
++			lastRead = time.Now()
++			for len(read) > 0 {
++				remaining := d.MaxSequenceBytes - buf.Len()
++				if remaining <= 0 {
++					return ErrInputLimit
++				}
++				take := min(len(read), remaining)
++				buf.Write(read[:take])
++				read = read[take:]
++				n := d.sendEvents(ctx, eventc, buf.Bytes(), false)
+ 				buf.Next(n)
+-			}
+-
+-			if buf.Len() > 0 {
+-				if !timeout.Stop() {
+-					// drain the channel if it was already running
+-					select {
+-					case <-timeout.C:
+-					default:
+-					}
+-				}
+-
+-				d.logf("resetting timeout for remaining buffer")
+-				timeout.Reset(d.EscTimeout)
+-			}
+-
+-		case read := <-readc:
+-			d.logf("input: %q", read)
+-			buf.Write(read)
+-			ttimeout = time.Now().Add(d.EscTimeout)
+-			n := d.sendEvents(eventc, buf.Bytes(), false)
+-			if !timeout.Stop() {
+-				// drain the channel if it was already running
+-				select {
+-				case <-timeout.C:
+-				default:
+-				}
+-			}
+-
+-			if n > 0 {
+-				d.logf("processed %d bytes from buffer", n)
+-				buf.Next(n)
+-			}
+-
+-			if buf.Len() > 0 {
+-				d.logf("resetting timeout for remaining buffer after parse")
+-				timeout.Reset(d.EscTimeout)
+-			}
+-		}
+-	}
++				if d.eventScanner.limitErr != nil {
++					return d.eventScanner.limitErr
++				}
++				if ctx.Err() != nil {
++					return nil
++				}
++				if buf.Len() == 0 {
++					pendingSince = time.Time{}
++				} else if pendingSince.IsZero() || n > 0 {
++					pendingSince = lastRead
++				}
++			}
++		}
++	}
++}
++
++// A control string or partial CSI is never converted to editable text merely
++// because the escape-key ambiguity timer expired.
++func pendingControl(b []byte) bool {
++	if len(b) < 2 || b[0] != 0x1b {
++		return false
++	}
++	switch b[1] {
++	case ']', 'P', '_', '^', 'X':
++		return true
++	case '[':
++		return len(b) > 2
++	}
++	return false
+ }
+ 
+ // SetLogger sets the logger to use for debugging. If nil, no logging will be
+@@ -228,10 +279,14 @@
+ 	d.logger = logger
+ }
+ 
+-func (d *TerminalReader) sendEvents(eventc chan<- Event, buf []byte, expired bool) int {
++func (d *TerminalReader) sendEvents(ctx context.Context, eventc chan<- Event, buf []byte, expired bool) int {
+ 	n, events := d.eventScanner.scanEvents(buf, expired)
+ 	for _, event := range events {
+-		eventc <- event
++		select {
++		case eventc <- event:
++		case <-ctx.Done():
++			return n
++		}
+ 	}
+ 	return n
+ }
+@@ -240,18 +295,23 @@
+ type eventScanner struct {
+ 	EventDecoder
+ 
+-	utf16Half   [2]bool    // 0 key up, 1 key down
+-	utf16Buf    [2][2]rune // 0 key up, 1 key down
+-	graphemeBuf [2][]rune  // 0 key up, 1 key down
+-	paste       []byte
+-	table       map[string]Key
+-	lookup      bool
+-	logger      Logger
++	utf16Half     [2]bool    // 0 key up, 1 key down
++	utf16Buf      [2][2]rune // 0 key up, 1 key down
++	graphemeBuf   [2][]rune  // 0 key up, 1 key down
++	paste         []byte
++	maxPasteBytes int
++	pasteOverflow bool
++	discardBytes  int
++	overflowAt    time.Time
++	limitErr      error
++	table         map[string]Key
++	lookup        bool
++	logger        Logger
+ }
+ 
+ // newEventScanner creates a new event scanner.
+ func newEventScanner() *eventScanner {
+-	return &eventScanner{}
++	return &eventScanner{maxPasteBytes: DefaultInputLimit}
+ }
+ 
+ // setLogger sets the logger to use for debugging. If nil, no logging will be
+@@ -283,6 +343,26 @@
+ 
+ 	// total is the total number of bytes processed
+ 	for len(buf) > 0 {
++		if d.limitErr != nil {
++			return total, events
++		}
++		if d.pasteOverflow {
++			n, complete := d.discardPaste(buf)
++			total += n
++			buf = buf[n:]
++			if !complete {
++				return total, events
++			}
++			events = append(events, PasteOverflowEvent{Limit: d.maxPasteBytes})
++			continue
++		}
++		if !utf8.FullRune(buf) {
++			return total, events
++		}
++		// A paste delimiter may span slow reads; it is not an ambiguous Escape key.
++		if d.paste != nil && len(buf) < len("\x1b[201~") && bytes.HasPrefix([]byte("\x1b[201~"), buf) {
++			return total, events
++		}
+ 		esc := buf[0] == ansi.ESC
+ 		n, event := d.Decode(buf)
+ 
+@@ -292,7 +372,7 @@
+ 				switch event := event.(type) {
+ 				case KeyPressEvent:
+ 					if len(event.Text) > 0 {
+-						d.paste = append(d.paste, event.Text...)
++						d.appendPaste(event.Text)
+ 					} else {
+ 						seq := string(buf[:n])
+ 						isWin32 := strings.HasPrefix(seq, "\x1b[") && strings.HasSuffix(seq, "_")
+@@ -302,10 +382,10 @@
+ 							// win32-input-mode encodes newlines and other keys
+ 							// as keypress events. We need to encode them as
+ 							// their respective values.
+-							d.paste = append(d.paste, '\n')
++							d.appendPaste("\n")
+ 						case isWin32 && unicode.IsControl(event.Code) && event.Code == event.BaseCode:
+ 							// This handles other cases such as tabs, escapes, etc.
+-							d.paste = append(d.paste, string(event.Code)...)
++							d.appendPaste(string(event.Code))
+ 						case !isWin32:
+ 							// We ignore all other non-text win32-input-mode events.
+ 							if esc && n <= 2 && !expired {
+@@ -314,7 +394,7 @@
+ 								// input.
+ 								return total, events
+ 							}
+-							d.paste = append(d.paste, seq...)
++							d.appendPaste(seq)
+ 						}
+ 					}
+ 				case UnknownEvent:
+@@ -352,7 +432,14 @@
+ 			events = append(events, event)
+ 		case PasteStartEvent:
+ 			d.paste = []byte{} // reset the paste buffer
++			d.pasteOverflow = false
+ 		case PasteEndEvent:
++			if d.pasteOverflow {
++				d.paste = nil
++				d.pasteOverflow = false
++				events = append(events, PasteOverflowEvent{Limit: d.maxPasteBytes})
++				break
++			}
+ 			var paste []rune
+ 			for len(d.paste) > 0 {
+ 				r, w := utf8.DecodeRune(d.paste)
+@@ -385,6 +472,50 @@
+ 	}
+ 
+ 	return total, events
++}
++
++func (d *eventScanner) appendPaste(text string) {
++	if d.pasteOverflow {
++		return
++	}
++	if len(text) > d.maxPasteBytes-len(d.paste) {
++		d.paste = []byte{}
++		d.pasteOverflow = true
++		d.discardBytes = 0
++		d.overflowAt = time.Now()
++		return
++	}
++	d.paste = append(d.paste, text...)
++}
++
++// discardPaste retains at most a split end marker, and counts raw bytes rather
++// than decoded characters. No escape sequence inside rejected text can escape
++// into the application as a key or interrupt.
++func (d *eventScanner) discardPaste(buf []byte) (int, bool) {
++	const end = "\x1b[201~"
++	n := bytes.Index(buf, []byte(end))
++	complete := n >= 0
++	if complete {
++		n += len(end)
++	} else {
++		n = len(buf)
++		for tail := min(len(buf), len(end)-1); tail > 0; tail-- {
++			if bytes.Equal(buf[len(buf)-tail:], []byte(end[:tail])) {
++				n -= tail
++				break
++			}
++		}
++	}
++	if n > DefaultDiscardLimit-d.discardBytes {
++		d.limitErr = ErrInputLimit
++		return 0, false
++	}
++	d.discardBytes += n
++	if complete {
++		d.paste = nil
++		d.pasteOverflow = false
++	}
++	return n, complete
+ }
+ 
+ func (d *eventScanner) encodeGraphemeBufs() []byte {

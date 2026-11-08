@@ -36,8 +36,8 @@ while read -r name; do
 		problem "LONG: $name is not a test with -tags integration"
 done <"$tmp/long"
 while read -r name; do
-	awk -v n="$name" '$2 == n { if ($1 ~ /\/(runtime\/cmd\/canti|apps\/tui\/cmd\/canti-tui)$/) found++; else other = 1 } END { exit found != 1 || other }' "$tmp/integration" ||
-		problem "PTY: $name must exist once in runtime/cmd/canti or apps/tui/cmd/canti-tui with -tags integration"
+	awk -v n="$name" '$2 == n { if ($1 ~ /\/(runtime\/cmd\/canti|apps\/tui\/(cmd\/canti-tui|internal\/terminal))$/) found++; else other = 1 } END { exit found != 1 || other }' "$tmp/integration" ||
+		problem "PTY: $name must exist once in an approved terminal test package with -tags integration"
 done <"$tmp/pty"
 sort "$tmp/long" "$tmp/pty" | uniq -d >"$tmp/both"
 while read -r name; do

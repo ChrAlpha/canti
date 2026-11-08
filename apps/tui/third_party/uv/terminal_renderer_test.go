@@ -1,0 +1,2326 @@
+package uv
+
+import (
+	"bytes"
+	"fmt"
+	"image/color"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/x/ansi"
+)
+
+func TestSimpleRendererOutput(t *testing.T) {
+	const w, h = 5, 3
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{
+		"TERM=xterm-256color", // This will enable 256 colors for the renderer
+		"COLORTERM=truecolor", // This will enable true color support for the renderer
+	})
+
+	r.SetFullscreen(true)
+	r.SetRelativeCursor(false)
+	r.SaveCursor()
+	r.Erase()
+
+	// r.SetTabStops(5) // Use tab character \t for cursor movements.
+	// r.SetBackspace(true) // Use backspace character \b for cursor movements.
+	// r.SetMapNewline(true) // Map newline characters to \r\n for proper line endings.
+	r.Resize(w, h)
+
+	cellbuf := NewRenderBuffer(5, 3)
+	// 'X', ' ', ' ', ' ', ' '
+	// ' ', 'X', ' ', ' ', ' '
+	// ' ', ' ', 'X', ' ', ' '
+
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+	cellbuf.SetCell(1, 1, &cell)
+	cellbuf.SetCell(2, 2, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	expected := "\x1b[H\x1b[2JX\nX\nX"
+	if buf.String() != expected {
+		t.Errorf("expected output:\n%q\nbut got:\n%q", expected, buf.String())
+	}
+}
+
+func TestInlineRendererOutput(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{
+		"TERM=xterm-256color", // This will enable 256 colors for the renderer
+		"COLORTERM=truecolor", // This will enable true color support for the renderer
+	})
+
+	r.SetRelativeCursor(true) // Use relative cursor movements.
+
+	const physicalWidth, physicalHeight = 80, 24 // Terminal width
+	const width, height = 80, 3                  // Application width
+	r.Resize(physicalWidth, physicalHeight)
+	cellbuf := NewRenderBuffer(physicalWidth, height)
+
+	for i, r := range "Hello, World!" {
+		cell := Cell{Content: string(r), Width: 1}
+		cellbuf.SetCell(i, 0, &cell)
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	expected := "\rHello, World!"
+	if buf.String() != expected {
+		t.Errorf("expected output:\n%q\nbut got:\n%q", expected, buf.String())
+	}
+}
+
+func TestRendererColorProfile(t *testing.T) {
+	tests := []struct {
+		name     string
+		profile  colorprofile.Profile
+		env      []string
+		expected colorprofile.Profile
+	}{
+		{
+			name:     "truecolor",
+			profile:  colorprofile.TrueColor,
+			env:      []string{"COLORTERM=truecolor"},
+			expected: colorprofile.TrueColor,
+		},
+		{
+			name:     "256 color",
+			profile:  colorprofile.ANSI256,
+			env:      []string{"TERM=xterm-256color"},
+			expected: colorprofile.ANSI256,
+		},
+		{
+			name:     "16 color",
+			profile:  colorprofile.ANSI,
+			env:      []string{"TERM=xterm"},
+			expected: colorprofile.ANSI,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, tt.env)
+			r.SetColorProfile(tt.profile)
+
+			// Test that the profile was set correctly by rendering a colored cell
+			cellbuf := NewRenderBuffer(1, 1)
+			cell := Cell{
+				Content: "X",
+				Width:   1,
+				Style:   Style{Fg: color.RGBA{R: 255, G: 0, B: 0, A: 255}},
+			}
+			cellbuf.SetCell(0, 0, &cell)
+
+			r.Render(cellbuf)
+			if err := r.Flush(); err != nil {
+				t.Fatalf("failed to flush renderer: %v", err)
+			}
+
+			// The output should contain color sequences appropriate for the profile
+			output := buf.String()
+			if !strings.Contains(output, "X") {
+				t.Errorf("expected output to contain 'X', got: %q", output)
+			}
+		})
+	}
+}
+
+func TestRendererPosition(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Initial position should be -1, -1
+	x, y := r.Position()
+	if x != -1 || y != -1 {
+		t.Errorf("expected initial position (-1, -1), got (%d, %d)", x, y)
+	}
+
+	// Set position
+	r.SetPosition(5, 10)
+	x, y = r.Position()
+	if x != 5 || y != 10 {
+		t.Errorf("expected position (5, 10), got (%d, %d)", x, y)
+	}
+}
+
+func TestRendererMoveTo(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.MoveTo(5, 3)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Should contain cursor positioning sequence
+	output := buf.String()
+	if !strings.Contains(output, "\x1b[") {
+		t.Errorf("expected cursor positioning sequence in output: %q", output)
+	}
+}
+
+func TestRendererWriteString(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	n, err := r.WriteString("Hello, World!")
+	if err != nil {
+		t.Fatalf("failed to write string: %v", err)
+	}
+
+	if n != 13 {
+		t.Errorf("expected to write 13 bytes, wrote %d", n)
+	}
+
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Hello, World!") {
+		t.Errorf("expected output to contain 'Hello, World!', got: %q", output)
+	}
+}
+
+func TestRendererWrite(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	data := []byte("Hello, World!")
+	n, err := r.Write(data)
+	if err != nil {
+		t.Fatalf("failed to write bytes: %v", err)
+	}
+
+	if n != len(data) {
+		t.Errorf("expected to write %d bytes, wrote %d", len(data), n)
+	}
+
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Hello, World!") {
+		t.Errorf("expected output to contain 'Hello, World!', got: %q", output)
+	}
+}
+
+func TestRendererRedraw(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(3, 1)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+
+	// First render
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	firstOutput := buf.String()
+	buf.Reset()
+
+	// Redraw should force a full redraw
+	r.Redraw(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	secondOutput := buf.String()
+
+	// Both outputs should contain the cell content
+	if !strings.Contains(firstOutput, "X") {
+		t.Errorf("expected first output to contain 'X', got: %q", firstOutput)
+	}
+	if !strings.Contains(secondOutput, "X") {
+		t.Errorf("expected second output to contain 'X', got: %q", secondOutput)
+	}
+}
+
+func TestRendererErase(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(3, 1)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+
+	// Mark for erase
+	r.Erase()
+
+	// Render should perform a full clear
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+}
+
+func TestRendererResize(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Test resize
+	r.Resize(80, 24)
+
+	// Should not crash and should handle the resize
+	cellbuf := NewRenderBuffer(80, 24)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+func TestRendererPrependString(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.Resize(10, 5)
+	cellbuf := NewRenderBuffer(10, 5)
+
+	r.PrependString(cellbuf, "Prepended line")
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Prepended line") {
+		t.Errorf("expected output to contain 'Prepended line', got: %q", output)
+	}
+}
+
+func TestRendererPrependLines(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.Resize(10, 5)
+	cellbuf := NewRenderBuffer(10, 5)
+
+	// Create a line to prepend
+	line := make(Line, 5)
+	for i, ch := range "Hello" {
+		line[i] = Cell{Content: string(ch), Width: 1}
+	}
+
+	r.PrependString(cellbuf, line.Render())
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Hello") {
+		t.Errorf("expected output to contain 'Hello', got: %q", output)
+	}
+}
+
+func TestRendererCapabilities(t *testing.T) {
+	tests := []struct {
+		name string
+		term string
+		test func(*testing.T, *TerminalRenderer)
+	}{
+		{
+			name: "xterm capabilities",
+			term: "xterm-256color",
+			test: func(t *testing.T, r *TerminalRenderer) {
+				// xterm should support all capabilities
+				if !r.caps.Contains(capCHA) {
+					t.Error("expected xterm to support CHA")
+				}
+				// NOTE: We have disabled HPA for xterm due to some terminals
+				// not supporting it correctly i.e. Konsole.
+				// if !r.caps.Contains(capHPA) {
+				// 	t.Error("expected xterm to support HPA")
+				// }
+			},
+		},
+		{
+			name: "linux terminal capabilities",
+			term: "linux",
+			test: func(t *testing.T, r *TerminalRenderer) {
+				// linux terminal has limited capabilities
+				if !r.caps.Contains(capVPA) {
+					t.Error("expected linux to support VPA")
+				}
+				if !r.caps.Contains(capHPA) {
+					t.Error("expected linux to support HPA")
+				}
+				if r.caps.Contains(capREP) {
+					t.Error("expected linux to not support REP")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, []string{"TERM=" + tt.term})
+			tt.test(t, r)
+		})
+	}
+}
+
+func TestRendererTabStops(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Enable tab stops
+	r.SetTabStops(8)
+
+	// Test that tab stops are set
+	cellbuf := NewRenderBuffer(20, 1)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Disable tab stops
+	r.SetTabStops(-1)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+func TestRendererBackspace(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Enable backspace optimization
+	r.SetBackspace(true)
+
+	cellbuf := NewRenderBuffer(10, 1)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Disable backspace optimization
+	r.SetBackspace(false)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+func TestRendererMapNewline(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Enable newline mapping
+	r.SetMapNewline(true)
+
+	cellbuf := NewRenderBuffer(10, 2)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Disable newline mapping
+	r.SetMapNewline(false)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+func TestRendererTouched(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(5, 3)
+
+	// Initially, no lines should be touched (empty buffer)
+	touched := cellbuf.TouchedLines()
+	if touched != 0 {
+		t.Errorf("expected 0 touched lines initially, got %d", touched)
+	}
+
+	// Mark some lines as touched by setting cells
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+	cellbuf.SetCell(0, 2, &cell)
+
+	// Should have touched lines where we set cells
+	touched = cellbuf.TouchedLines()
+	if touched != 2 {
+		t.Errorf("expected 2 touched lines after setting cells, got %d", touched)
+	}
+
+	// After rendering, the Touched method still counts all lines as touched
+	// because the renderer sets all LineData to non-nil (even with FirstCell: -1, LastCell: -1)
+	// This is the actual behavior of the renderer
+	r.Render(cellbuf)
+	touched = cellbuf.TouchedLines()
+	if touched != 3 {
+		t.Errorf("expected 3 touched lines after render (all lines have LineData), got %d", touched)
+	}
+
+	// But if we check the actual touched state by looking at FirstCell/LastCell
+	actualTouched := 0
+	for _, lineData := range cellbuf.Touched {
+		if lineData != nil && (lineData.FirstCell != -1 || lineData.LastCell != -1) {
+			actualTouched++
+		}
+	}
+	if actualTouched != 0 {
+		t.Errorf("expected 0 actually touched lines after render, got %d", actualTouched)
+	}
+}
+
+// Test wide character handling
+func TestRendererWideCharacters(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Test wide characters (emoji, CJK characters)
+	wideChars := []string{"🌟", "中", "文", "字"}
+	for i, char := range wideChars {
+		cell := Cell{Content: char, Width: 2} // Wide characters typically have width 2
+		cellbuf.SetCell(i*2, 0, &cell)
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	for _, char := range wideChars {
+		if !strings.Contains(output, char) {
+			t.Errorf("expected output to contain wide character '%s', got: %q", char, output)
+		}
+	}
+}
+
+// Test zero-width characters
+func TestRendererZeroWidthCharacters(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(5, 1)
+
+	// Test zero-width characters (combining marks, etc.)
+	cell := Cell{Content: "a\u0301", Width: 1} // 'a' with combining acute accent
+	cellbuf.SetCell(0, 0, &cell)
+
+	// Zero-width cell
+	zeroCell := Cell{Content: "\u200B", Width: 0} // Zero-width space
+	cellbuf.SetCell(1, 0, &zeroCell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "a\u0301") {
+		t.Errorf("expected output to contain combining character, got: %q", output)
+	}
+}
+
+// Test styled text rendering
+func TestRendererStyledText(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Test various styles
+	styles := []Style{
+		{Attrs: AttrBold},
+		{Fg: color.RGBA{R: 255, G: 0, B: 0, A: 255}},
+		{Bg: color.RGBA{R: 0, G: 255, B: 0, A: 255}},
+		{Attrs: AttrBold, Fg: color.RGBA{R: 0, G: 0, B: 255, A: 255}},
+	}
+
+	for i, style := range styles {
+		cell := Cell{Content: "X", Width: 1, Style: style}
+		cellbuf.SetCell(i, 0, &cell)
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	// Should contain ANSI escape sequences for styling
+	if !strings.Contains(output, "\x1b[") {
+		t.Errorf("expected output to contain ANSI escape sequences, got: %q", output)
+	}
+}
+
+// Test hyperlink rendering
+func TestRendererHyperlinks(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Test hyperlink
+	link := NewLink("https://example.com")
+	cell := Cell{Content: "link", Width: 4, Link: link}
+	cellbuf.SetCell(0, 0, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "link") {
+		t.Errorf("expected output to contain 'link', got: %q", output)
+	}
+}
+
+// Moving between rows resets the pen, which closes any open hyperlink. Every
+// row the link covers has to reopen it, or only the first row stays clickable.
+func TestRendererHyperlinkReopensOnEachRow(t *testing.T) {
+	const w, h = 4, 2
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetColorProfile(colorprofile.TrueColor)
+
+	cellbuf := NewRenderBuffer(w, h)
+	link := NewLink("https://example.com")
+	for y := range h {
+		for x := range w {
+			cellbuf.SetCell(x, y, &Cell{Content: "a", Width: 1, Link: link})
+		}
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	opens := strings.Count(output, ansi.SetHyperlink(link.URL, link.Params))
+	if opens != h {
+		t.Errorf("expected the link to open once per row (%d), got %d: %q", h, opens, output)
+	}
+}
+
+func TestRendererSwitchBuffer(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Start with small buffer
+	cellbuf := NewRenderBuffer(5, 3)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Resize to larger buffer
+	largeBuf := NewRenderBuffer(10, 6)
+	largeBuf.SetCell(0, 1, &cell) // Place at visible position
+
+	r.Render(largeBuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	// Home, draw X at (0,0); erase it, since the new frame's row 0 is blank;
+	// newline, draw X at (0,1); pad cursor to row 5.
+	expected := "\x1b[HX\r\x1b[K\nX\r\n\n\n\n"
+	if output != expected {
+		t.Errorf("expected output after resize to be %q, got: %q", expected, output)
+	}
+}
+
+// Test relative cursor movement
+func TestRendererRelativeCursor(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.SetRelativeCursor(true)
+
+	cellbuf := NewRenderBuffer(10, 3)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(5, 1, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+
+	// Test disabling relative cursor
+	r.SetRelativeCursor(false)
+	buf.Reset()
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+// Test logger functionality
+func TestRendererLogger(t *testing.T) {
+	var buf bytes.Buffer
+	var logBuf bytes.Buffer
+
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Create a simple logger
+	logger := &testLogger{buf: &logBuf}
+	r.SetLogger(logger)
+
+	cellbuf := NewRenderBuffer(3, 1)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Should have logged output
+	if logBuf.Len() == 0 {
+		t.Error("expected logger to have recorded output")
+	}
+
+	// Test removing logger
+	r.SetLogger(nil)
+	logBuf.Reset()
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Should not have logged anything
+	if logBuf.Len() != 0 {
+		t.Error("expected no logging after removing logger")
+	}
+}
+
+// Test scroll optimization
+func TestRendererScrollOptimization(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.SetFullscreen(true) // Scroll optimization is enabled in alt screen mode
+
+	cellbuf := NewRenderBuffer(10, 5)
+
+	// Fill buffer with content
+	for y := 0; y < 5; y++ {
+		for x := 0; x < 10; x++ {
+			cell := Cell{Content: string(rune('A' + y)), Width: 1}
+			cellbuf.SetCell(x, y, &cell)
+		}
+	}
+
+	// First render
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	buf.Reset()
+
+	// Simulate scrolling by shifting content up
+	newBuf := NewRenderBuffer(10, 5)
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 10; x++ {
+			cell := Cell{Content: string(rune('A' + y + 1)), Width: 1}
+			newBuf.SetCell(x, y, &cell)
+		}
+	}
+	// Add new line at bottom
+	for x := 0; x < 10; x++ {
+		cell := Cell{Content: "F", Width: 1}
+		newBuf.SetCell(x, 4, &cell)
+	}
+
+	r.Render(newBuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "F") {
+		t.Errorf("expected output to contain new content 'F', got: %q", output)
+	}
+}
+
+// Test multiple prepend operations
+func TestRendererMultiplePrepends(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.Resize(20, 10)
+	cellbuf := NewRenderBuffer(20, 10)
+
+	// Prepend multiple strings
+	r.PrependString(cellbuf, "First line")
+	r.PrependString(cellbuf, "Second line")
+
+	// Prepend multiple lines
+	line1 := make(Line, 10)
+	line2 := make(Line, 10)
+	for i, ch := range "Third line" {
+		if i < len(line1) {
+			line1[i] = Cell{Content: string(ch), Width: 1}
+		}
+	}
+	for i, ch := range "Fourth lin" {
+		if i < len(line2) {
+			line2[i] = Cell{Content: string(ch), Width: 1}
+		}
+	}
+
+	r.PrependString(cellbuf, strings.Join([]string{line1.Render(), line2.Render()}, "\n"))
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	expectedStrings := []string{"First line", "Second line", "Third line", "Fourth lin"}
+	for _, expected := range expectedStrings {
+		if !strings.Contains(output, expected) {
+			t.Errorf("expected output to contain '%s', got: %q", expected, output)
+		}
+	}
+}
+
+// Test error conditions and edge cases
+func TestRendererEdgeCases(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Test with empty buffer
+	emptyBuf := NewRenderBuffer(0, 0)
+	r.Render(emptyBuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer with empty buffer: %v", err)
+	}
+
+	// Test with nil cells
+	cellbuf := NewRenderBuffer(3, 3)
+	cellbuf.SetCell(1, 1, nil) // Set nil cell
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer with nil cells: %v", err)
+	}
+
+	// Test with very large buffer
+	largeBuf := NewRenderBuffer(1000, 1000)
+	cell := Cell{Content: "X", Width: 1}
+	largeBuf.SetCell(999, 999, &cell)
+
+	r.Render(largeBuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer with large buffer: %v", err)
+	}
+}
+
+// Test terminal-specific optimizations
+func TestRendererTerminalOptimizations(t *testing.T) {
+	tests := []struct {
+		name string
+		term string
+		test func(*testing.T, *TerminalRenderer)
+	}{
+		{
+			name: "alacritty optimizations",
+			term: "alacritty",
+			test: func(t *testing.T, r *TerminalRenderer) {
+				// Alacritty has specific capability limitations
+				if r.caps.Contains(capCHT) {
+					t.Error("expected alacritty to not support CHT")
+				}
+			},
+		},
+		{
+			name: "screen optimizations",
+			term: "screen",
+			test: func(t *testing.T, r *TerminalRenderer) {
+				// Screen terminal has specific limitations
+				if r.caps.Contains(capREP) {
+					t.Error("expected screen to not support REP")
+				}
+			},
+		},
+		{
+			name: "tmux optimizations",
+			term: "tmux",
+			test: func(t *testing.T, r *TerminalRenderer) {
+				// tmux should support most capabilities
+				if !r.caps.Contains(capVPA) {
+					t.Error("expected tmux to support VPA")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, []string{"TERM=" + tt.term})
+			tt.test(t, r)
+		})
+	}
+}
+
+// Test cursor movement optimizations
+func TestRendererCursorMovementOptimizations(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	// Test tab optimization
+	r.SetTabStops(8)
+	cellbuf := NewRenderBuffer(20, 1)
+
+	// Place content at tab stops
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(8, 0, &cell)  // First tab stop
+	cellbuf.SetCell(16, 0, &cell) // Second tab stop
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+}
+
+// Test backspace optimization
+func TestRendererBackspaceOptimization(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.SetBackspace(true)
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Place content that would benefit from backspace optimization
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(5, 0, &cell)
+
+	// Move cursor to position that would use backspace
+	r.MoveTo(8, 0)
+	r.MoveTo(3, 0) // Should use backspace to move left
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+}
+
+// Test newline mapping
+func TestRendererNewlineMapping(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.SetMapNewline(true)
+	r.SetRelativeCursor(true)
+
+	cellbuf := NewRenderBuffer(10, 3)
+	cell := Cell{Content: "X", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+	cellbuf.SetCell(0, 1, &cell)
+	cellbuf.SetCell(0, 2, &cell)
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	// Should contain newlines for multi-line content
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+}
+
+// Test underline styles
+func TestRendererUnderlineStyles(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Test different underline styles
+	styles := []Style{
+		{Underline: UnderlineStyleSingle},
+		{Underline: UnderlineStyleDouble},
+		{Underline: UnderlineStyleCurly},
+		{Underline: UnderlineStyleDotted},
+		{Underline: UnderlineStyleDashed},
+	}
+
+	for i, style := range styles {
+		if i < cellbuf.Width() {
+			cell := Cell{Content: "U", Width: 1, Style: style}
+			cellbuf.SetCell(i, 0, &cell)
+		}
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "U") {
+		t.Errorf("expected output to contain 'U', got: %q", output)
+	}
+}
+
+// Test italic and other text attributes
+func TestRendererTextAttributes(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 1)
+
+	// Test various text attributes
+	styles := []Style{
+		{Attrs: AttrItalic},
+		{Attrs: AttrFaint},
+		{Attrs: AttrBlink},
+		{Attrs: AttrReverse},
+		{Attrs: AttrStrikethrough},
+	}
+
+	for i, style := range styles {
+		if i < cellbuf.Width() {
+			cell := Cell{Content: "A", Width: 1, Style: style}
+			cellbuf.SetCell(i, 0, &cell)
+		}
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "A") {
+		t.Errorf("expected output to contain 'A', got: %q", output)
+	}
+}
+
+// Test color downsampling
+func TestRendererColorDownsampling(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile colorprofile.Profile
+	}{
+		{"TrueColor", colorprofile.TrueColor},
+		{"ANSI256", colorprofile.ANSI256},
+		{"ANSI", colorprofile.ANSI},
+		{"Ascii", colorprofile.Ascii},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+			r.SetColorProfile(tt.profile)
+
+			cellbuf := NewRenderBuffer(3, 1)
+
+			// Test with high-precision color that needs downsampling
+			cell := Cell{
+				Content: "C",
+				Width:   1,
+				Style:   Style{Fg: color.RGBA{R: 123, G: 234, B: 45, A: 255}},
+			}
+			cellbuf.SetCell(0, 0, &cell)
+
+			r.Render(cellbuf)
+			if err := r.Flush(); err != nil {
+				t.Fatalf("failed to flush renderer: %v", err)
+			}
+
+			output := buf.String()
+			if !strings.Contains(output, "C") {
+				t.Errorf("expected output to contain 'C', got: %q", output)
+			}
+		})
+	}
+}
+
+// Test phantom cursor handling
+func TestRendererPhantomCursor(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetColorProfile(colorprofile.TrueColor)
+
+	r.SetFullscreen(true) // Use fullscreen rendering optimizations
+	r.SetRelativeCursor(false)
+	cellbuf := NewRenderBuffer(5, 3)
+
+	// Fill the last column to trigger phantom cursor behavior
+	cell := Cell{Content: "X", Width: 1}
+	for y := 0; y < cellbuf.Height(); y++ {
+		cellbuf.SetCell(4, y, &cell) // Last column
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	expected := "\x1b[1;5HX\r\n\x1b[5GX\r\n\x1b[5G\x1b[?7lX\x1b[?7h"
+	if output != expected {
+		t.Errorf("expected no output for phantom cursor case, got: %q", output)
+	}
+}
+
+// Test line clearing optimizations
+func TestRendererLineClearingOptimizations(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(10, 3)
+
+	// Fill first line completely
+	cell := Cell{Content: "X", Width: 1}
+	for x := 0; x < 10; x++ {
+		cellbuf.SetCell(x, 0, &cell)
+	}
+
+	// First render
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	buf.Reset()
+
+	// Clear the line by creating new buffer with empty line
+	newBuf := NewRenderBuffer(10, 3)
+	// Only set one cell, leaving the rest empty
+	newBuf.SetCell(0, 0, &cell)
+
+	r.Render(newBuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "X") {
+		t.Errorf("expected output to contain 'X', got: %q", output)
+	}
+}
+
+// Test repeat character optimization
+func TestRendererRepeatCharacterOptimization(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(20, 1)
+
+	// Fill with repeated characters that should trigger REP optimization
+	cell := Cell{Content: "A", Width: 1}
+	for x := 0; x < 15; x++ {
+		cellbuf.SetCell(x, 0, &cell)
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "A") {
+		t.Errorf("expected output to contain 'A', got: %q", output)
+	}
+}
+
+// Test erase character optimization
+func TestRendererEraseCharacterOptimization(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	cellbuf := NewRenderBuffer(20, 1)
+
+	// Add some non-space content first
+	cell := Cell{Content: "A", Width: 1}
+	cellbuf.SetCell(0, 0, &cell)
+
+	// Fill with spaces that should trigger ECH optimization
+	spaceCell := Cell{Content: " ", Width: 1}
+	for x := 5; x < 15; x++ {
+		cellbuf.SetCell(x, 0, &spaceCell)
+	}
+
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// The output should use erase character optimization for consecutive spaces
+	output := buf.String()
+	// Just verify it doesn't crash and produces some output with our content
+	if !strings.Contains(output, "A") {
+		t.Errorf("expected output to contain 'A', got: %q", output)
+	}
+}
+
+func TestRendererUpdates(t *testing.T) {
+	cases := []struct {
+		name     string
+		frames   []string
+		expected []string // expected ANSI escape sequence after each frame
+	}{
+		{
+			name: "simple style change",
+			frames: []string{
+				"A",
+				"\x1b[1mA",
+			},
+			expected: []string{
+				"\rA",
+				"\r\x1b[1mA\x1b[m",
+			},
+		},
+		{
+			name:   "style and link change",
+			frames: []string{"A", "\x1b[31m\x1b]8;;https://example.com\x1b\\A\x1b]8;;\x1b\\"}, // red + link
+			expected: []string{
+				"\rA",
+				"\r\x1b[31m\x1b]8;;https://example.com\aA\x1b[m\x1b]8;;\a",
+			},
+		},
+		{
+			// Covers comparing stored downsampled colors vs new true color styles
+			// See commit 75d1e37ff1bb
+			name: "the same true color style frames",
+			frames: []string{
+				" \x1b[38;2;255;128;0mABC\n DEF", // orange
+				" \x1b[38;2;255;128;0mABC\n DEF", // orange
+				" \x1b[38;2;255;128;0mABC\n DEF", // orange
+			},
+			expected: []string{
+				"\r \x1b[38;5;208mABC\x1b[m\r\n\x1b[38;5;208m DEF\x1b[m",
+				"",
+				"",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color", "TTY_FORCE=1"})
+			t.Logf("Profile: %v", r.profile)
+			r.SetRelativeCursor(true) // Use absolute cursor movements since we're drawing fullscreen
+
+			scr := NewScreenBuffer(5, 3)
+			for i, frameStr := range tc.frames {
+				NewStyledString(frameStr).Draw(scr, scr.Bounds())
+				r.Render(scr.RenderBuffer)
+				if err := r.Flush(); err != nil {
+					t.Fatalf("failed to flush renderer: %v", err)
+				}
+
+				output := buf.String()
+				expected := tc.expected[i]
+				if output != expected {
+					t.Errorf("frame %d: expected output %q, got %q", i, expected, output)
+				}
+
+				buf.Reset()
+			}
+		})
+	}
+}
+
+func TestRendererPrependOneLine(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+
+	r.Resize(10, 5)
+	cellbuf := NewScreenBuffer(10, 5)
+	NewStyledString("This-is-a .").Draw(cellbuf, cellbuf.Bounds())
+	r.Render(cellbuf.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	NewStyledString("This-is-a .").Draw(cellbuf, cellbuf.Bounds())
+	r.PrependString(cellbuf.RenderBuffer, "Prepended-a-new-line")
+	r.Render(cellbuf.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	expected := "\x1b[HThis-is-a\r\n\n\n\n\n\n\x1b[H\x1b[2LPrepended-a-new-line\r\n"
+	if output != expected {
+		t.Errorf("expected output to be %q, got: %q", expected, output)
+	}
+}
+
+func TestRendererEnterExitAltScreen(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	cellbuf := NewRenderBuffer(3, 3)
+
+	// Simulate cursor change
+	r.MoveTo(1, 1)
+
+	// Save cursor to compare later
+	cur := r.cur
+	if cur.X != 1 || cur.Y != 1 {
+		t.Errorf("expected cursor to be at (1,1), got (%d,%d)", cur.X, cur.Y)
+	}
+
+	// Enter alt screen
+	r.EnterAltScreen()
+
+	// Ensure we render before processing further
+	r.Render(cellbuf)
+
+	// Check fullscreen is enabled
+	if !r.Fullscreen() {
+		t.Errorf("expected fullscreen to be enabled in alt screen mode")
+	}
+
+	// Check cursor position reset
+	if r.cur.X != 0 || r.cur.Y != 0 {
+		t.Errorf("expected cursor to be reset to (0,0) in alt screen mode, got (%d,%d)", r.cur.X, r.cur.Y)
+	}
+
+	// Exit alt screen
+	r.ExitAltScreen()
+
+	// Check relative cursor are disabled
+	if !r.flags.Contains(tRelativeCursor) {
+		t.Errorf("expected relative cursor to be enabled after exiting alt screen mode")
+	}
+
+	// Check cursor position restored
+	if r.cur.X != 1 || r.cur.Y != 1 {
+		t.Errorf("expected cursor to be restored to (1,1) after exiting alt screen mode, got (%d,%d)", r.cur.X, r.cur.Y)
+	}
+
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	output := buf.String()
+	expected := "\x1b[2;2H\x1b[?1049h\x1b[H\x1b[2J\x1b[?1049l"
+	if output != expected {
+		t.Errorf("expected output to be %q, got: %q", expected, output)
+	}
+}
+
+// Helper type for testing logger
+type testLogger struct {
+	buf *bytes.Buffer
+}
+
+func (l *testLogger) Printf(format string, args ...interface{}) {
+	l.buf.WriteString("LOG: ")
+	l.buf.WriteString(format)
+	l.buf.WriteByte('\n')
+}
+
+// Steady-state render of a small changed region, no resize. The common
+// per-frame path.
+func BenchmarkRenderFrame(b *testing.B) {
+	r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	buf := NewScreenBuffer(80, 24)
+	text := NewStyledString(strings.Repeat("x", 79))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		text.Draw(buf, Rect(0, i%24, 80, 1))
+		r.Render(buf.RenderBuffer)
+	}
+}
+
+// Render across alternating grow/shrink resizes, exercising the early curbuf
+// resize and the forced clear on shrink. The buffers are built up front so the
+// measurement is the renderer's resize handling and not ScreenBuffer.Resize
+// reallocating a grid every iteration.
+func BenchmarkRenderResize(b *testing.B) {
+	sizes := [][2]int{{100, 30}, {60, 20}, {120, 40}, {80, 24}}
+	bufs := make([]ScreenBuffer, len(sizes))
+	for i, sz := range sizes {
+		bufs[i] = NewScreenBuffer(sz[0], sz[1])
+	}
+
+	r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	text := NewStyledString(strings.Repeat("x", 40))
+	text.Draw(bufs[0], Rect(0, 0, sizes[0][0], 1))
+	r.Render(bufs[0].RenderBuffer)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		n := i % len(sizes)
+		sz, buf := sizes[n], bufs[n]
+		r.Resize(sz[0], sz[1])
+		text.Draw(buf, Rect(0, 0, sz[0], 1))
+		r.Render(buf.RenderBuffer)
+	}
+}
+
+// Resizes that report the size the terminal already is, with a frame shorter
+// than the screen. Applications are told the size on a schedule rather than only
+// when it changes, so this is the steady state, not an edge case: a duplicate
+// SIGWINCH, or a handler that reports on every frame.
+//
+// The measurement is how little a resize that changed nothing costs. Comparing
+// the reported size against the model instead of against the last report makes
+// this repaint the whole screen every iteration, which the other resize
+// benchmark cannot see because it always resizes to exactly the frame size.
+func BenchmarkResizeSteadyShortFrame(b *testing.B) {
+	r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(80, 24)
+
+	buf := NewScreenBuffer(80, 23) // one row shorter than the screen
+	text := NewStyledString(strings.Repeat("x", 40))
+	text.Draw(buf, Rect(0, 0, 80, 1))
+	r.Render(buf.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		b.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r.Resize(80, 24)
+		text.Draw(buf, Rect(0, i%23, 80, 1))
+		r.Render(buf.RenderBuffer)
+		if err := r.Flush(); err != nil {
+			b.Fatalf("failed to flush renderer: %v", err)
+		}
+	}
+}
+
+// A resize invalidates the renderer's cursor model so the next move is
+// absolute. In relative cursor mode there is no absolute move, and -1 there
+// means "first move, assume the origin", so invalidating would assert a
+// position rather than forget one and every later row would land low.
+func TestRendererInlineResizeKeepsCursorModel(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(80, 24)
+
+	cellbuf := NewRenderBuffer(80, 3)
+	for y := range 3 {
+		cellbuf.SetCell(0, y, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// A resize event that changes nothing, as a SIGWINCH handler would send.
+	r.Resize(80, 24)
+	cellbuf.SetCell(0, 0, &Cell{Content: "b", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Cursor is on row 2 after the first render, so reaching row 0 has to move
+	// up. Without the two-row move the "b" lands on row 2.
+	expected := "\r\x1b[2Ab"
+	if output := buf.String(); output != expected {
+		t.Errorf("expected output after resize to be %q, got: %q", expected, output)
+	}
+}
+
+// A shrink forces a full repaint so the renderer does not diff against a model
+// the terminal has reflowed underneath it. Inline mode shares the screen with
+// whatever came before, so it keeps the narrower partial clear instead.
+func TestRendererInlineShrinkClearsPartially(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(80, 24)
+
+	cellbuf := NewRenderBuffer(80, 3)
+	for y := range 3 {
+		cellbuf.SetCell(0, y, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// The application gives up a row.
+	cellbuf.Resize(80, 2)
+	r.Resize(80, 24)
+	cellbuf.SetCell(0, 1, &Cell{Content: "b", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Erase from row 2, the row the frame gave up, then up to row 1 to write the
+	// cell that changed. The erase no longer reaches into the frame, so row 1 is
+	// written because the application drew into it, not to put it back.
+	expected := "\r\x1b[J\x1bMb\r"
+	if output := buf.String(); output != expected {
+		t.Errorf("expected output after shrink to be %q, got: %q", expected, output)
+	}
+}
+
+// The rows an inline frame gives up have to be erased whether or not the width
+// moved at the same time. A terminal that changes width rewraps what it holds,
+// which spreads the abandoned rows further than the model can account for
+// rather than tidying them away, so a width change is the case that needs the
+// erase most.
+//
+// The fuzzer found this one the first time it was allowed to draw inline
+// frames: a row painted outside the new frame survived a resize that shrank the
+// screen and widened it in the same step.
+func TestRendererInlineShrinkErasesAcrossAWidthChange(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(6, 10)
+
+	cellbuf := NewRenderBuffer(6, 4)
+	cellbuf.SetCell(0, 2, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// Two rows shorter and much wider, the shape of a terminal resize the
+	// application reflowed its view for.
+	cellbuf.Resize(23, 2)
+	r.Resize(23, 10)
+	cellbuf.SetCell(0, 0, &Cell{Content: "b", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, ansi.EraseScreenBelow) {
+		t.Errorf("shrink should erase the rows the frame gave up, got: %q", out)
+	}
+}
+
+// That erase starts at the last row of the new frame, so it takes that row with
+// it on the way down. The row still belongs to the frame and still holds what
+// it held before, and the application has no reason to draw into a row it did
+// not change, so nothing marks it for the diff loop to visit.
+//
+// The result is residue in reverse: not old content surviving, but current
+// content erased and never put back.
+func TestRendererInlineShrinkLeavesItsOwnRowsAlone(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(6, 10)
+
+	cellbuf := NewRenderBuffer(6, 8)
+	cellbuf.SetCell(0, 1, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// Six rows shorter. Row 1 survives the shrink and is not drawn into.
+	cellbuf.Resize(6, 2)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, ansi.EraseScreenBelow) {
+		t.Fatalf("expected the shrink to erase below the frame, got: %q", out)
+	}
+	if strings.Contains(out, "a") {
+		t.Errorf("row 1 survives the shrink, so the erase should have left it alone "+
+			"rather than taking it and painting it back: %q", out)
+	}
+}
+
+// A frame can collapse to nothing, and a buffer resized to zero rows reports
+// zero columns too, so the erase below it has no row of its own to start from.
+// Starting one row higher would reach above the frame, into rows that belong to
+// whatever shared the screen first: a shell's output, another frame, scrollback.
+// The renderer never wrote them and does not get to erase them.
+func TestRendererInlineCollapseStaysBelowItsOrigin(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(10, 20)
+
+	cellbuf := NewRenderBuffer(10, 4)
+	cellbuf.SetCell(0, 0, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	cellbuf.Resize(10, 0)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Cursor up from the frame's first row would leave the frame entirely, and
+	// the erase that follows would take the row above with it.
+	if out := buf.String(); strings.Contains(out, ansi.CUU1) || strings.Contains(out, "\x1b[1A") {
+		t.Errorf("collapsing the frame moved above its first row: %q", out)
+	}
+	if _, y := r.Position(); y < 0 {
+		t.Errorf("collapsing the frame left the cursor model at row %d", y)
+	}
+}
+
+// The same shrink, but through the full-erase path an application takes when it
+// knows the frame changed shape. The erase covers from the cursor to the end of
+// the screen, so where the cursor is decides how much of the old frame it
+// reaches, and the cursor is still on the last row of the frame that just ended.
+//
+// Clamping the remembered row to the new frame's height leaves the model
+// claiming the cursor is already at the top. The move up is then computed as
+// nothing, the erase runs from the bottom of the old frame, and every row above
+// it survives into the new one.
+func TestRendererInlineShrinkErasesFromTheTop(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(80, 24)
+
+	cellbuf := NewRenderBuffer(80, 3)
+	for y := range 3 {
+		cellbuf.SetCell(0, y, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// Two rows shorter, painted from scratch rather than diffed.
+	r.Erase()
+	cellbuf.Touched = nil
+	cellbuf.Resize(80, 1)
+	cellbuf.Clear()
+	cellbuf.SetCell(0, 0, &Cell{Content: "b", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// Up two rows from row 2, erase what the old frame left, draw row 0.
+	expected := "\r\x1b[2A\x1b[Jb\r"
+	if output := buf.String(); output != expected {
+		t.Errorf("expected output after shrink to be %q, got: %q", expected, output)
+	}
+}
+
+// Rows added by a grow have to be diffed like any other. The model is resized
+// before the diff loop runs so the loop walks them; otherwise content drawn
+// into a new row never reaches the terminal.
+//
+// The grow repaints the screen rather than diffing it. The terminal fills rows
+// it gains from its own scrollback, and those lines arrive at the top and push
+// the rest down, so no row keeps its meaning across the resize.
+func TestRendererGrowPaintsNewRows(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(10, 3)
+
+	cellbuf := NewRenderBuffer(10, 3)
+	cellbuf.SetCell(0, 0, &Cell{Content: "A", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	cellbuf.Resize(10, 6)
+	r.Resize(10, 6)
+	cellbuf.SetCell(0, 5, &Cell{Content: "Z", Width: 1}) // a row the grow added
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	expected := "\x1b[H\x1b[2JA\r\x1b[6dZ"
+	if output := buf.String(); output != expected {
+		t.Errorf("expected output after grow to be %q, got: %q", expected, output)
+	}
+}
+
+// A fullscreen shrink scrolls the terminal to keep the cursor visible, moving
+// every row the model has an opinion about. The next render has to repaint
+// rather than diff against a model the terminal moved underneath it, and
+// growing back does not undo the move.
+//
+// [TerminalRenderer.Render] catches a shrink it can see in the buffer
+// dimensions. This one it cannot: the screen shrinks and grows back with no
+// render in between, so only the resize itself can report it.
+func TestRendererFullscreenShrinkRepaints(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(10, 4)
+
+	cellbuf := NewRenderBuffer(10, 4)
+	cellbuf.SetCell(0, 2, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	r.Resize(10, 2)
+	r.Resize(10, 4)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, ansi.EraseEntireScreen) {
+		t.Errorf("shrink should force a repaint, got: %q", out)
+	}
+}
+
+// Losing columns is the same story told sideways: the terminal clips or
+// rewraps every row to fit the narrower screen, and the model records none of
+// it. Widening back restores the columns but not the content, so the model
+// still claims cells the terminal no longer shows.
+//
+// The fuzzer found this one as residue: a row of clusters painted at the old
+// width, narrowed and widened with no render in between, and the tail of the
+// row still on screen afterwards.
+func TestRendererFullscreenNarrowRepaints(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(20, 2)
+
+	cellbuf := NewRenderBuffer(20, 2)
+	for x := range 20 {
+		cellbuf.SetCell(x, 0, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	r.Resize(8, 2)
+	r.Resize(20, 2)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, ansi.EraseEntireScreen) {
+		t.Errorf("narrowing should force a repaint, got: %q", out)
+	}
+}
+
+// The repaint a resize forces belongs to resizes that changed something. An
+// application is free to draw a frame smaller than the screen, so comparing the
+// reported size against the model would differ on every call and repaint the
+// screen each time the renderer was told a size it already knew. A duplicate
+// SIGWINCH costs nothing and a steady screen stays quiet.
+func TestRendererResizeLatchesOnlyRealChanges(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(20, 8)
+
+	// A frame two rows shorter than the screen, so the model and the reported
+	// size disagree for as long as the application keeps drawing it.
+	scr := NewScreenBuffer(20, 6)
+	NewStyledString("hello").Draw(scr, Rect(0, 0, 20, 1))
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	for range 3 {
+		buf.Reset()
+		r.Resize(20, 8) // the size it already is
+		r.Render(scr.RenderBuffer)
+		if err := r.Flush(); err != nil {
+			t.Fatalf("failed to flush renderer: %v", err)
+		}
+		if out := buf.String(); strings.Contains(out, ansi.EraseEntireScreen) {
+			t.Fatalf("a resize that changed nothing repainted the screen: %q", out)
+		}
+	}
+
+	// A real change still latches, and still survives the grow back.
+	buf.Reset()
+	r.Resize(20, 4)
+	r.Resize(20, 8)
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, ansi.EraseEntireScreen) {
+		t.Errorf("a shrink and grow back should repaint, got: %q", out)
+	}
+}
+
+// A drift-prone line is painted with autowrap off. A terminal that measures a
+// cluster wider than the model does would otherwise run past the right margin,
+// spilling the line onto the next row, or scrolling the whole screen when the
+// line is the last one. Neither shows up in the model, so the residue outlives
+// every later frame.
+func TestRendererNoWrapOnDriftLine(t *testing.T) {
+	render := func(content string, width, y int) string {
+		var buf bytes.Buffer
+		r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+		r.SetFullscreen(true)
+		r.Resize(width, 2)
+
+		scr := NewScreenBuffer(width, 2)
+		NewStyledString(content).Draw(scr, Rect(0, y, width, 1))
+		r.Render(scr.RenderBuffer)
+		if err := r.Flush(); err != nil {
+			t.Fatalf("failed to flush renderer: %v", err)
+		}
+		return buf.String()
+	}
+
+	for _, y := range []int{0, 1} {
+		wide := render("世界", 6, y)
+		if !strings.Contains(wide, ansi.ResetModeAutoWrap) || !strings.Contains(wide, ansi.SetModeAutoWrap) {
+			t.Errorf("drift-prone row %d should paint with autowrap off, got: %q", y, wide)
+		}
+	}
+
+	// A row of plain cells cannot overflow, so it pays nothing.
+	narrow := render("abc", 6, 1)
+	if strings.Contains(narrow, ansi.ResetModeAutoWrap) {
+		t.Errorf("plain row should not touch autowrap, got: %q", narrow)
+	}
+}
+
+// The repaint a height change forces belongs to fullscreen mode and to actual
+// changes. Inline frames are shorter than the terminal by design, and a render
+// that resizes nothing has nothing to distrust.
+func TestHeightRepaintScope(t *testing.T) {
+	render := func(r *TerminalRenderer, w, h int, mark string) {
+		cb := NewRenderBuffer(w, h)
+		cb.SetCell(0, 0, &Cell{Content: mark, Width: 1})
+		r.Render(cb)
+		if err := r.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+	}
+
+	t.Run("inline mode leaves the height alone", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+		r.SetRelativeCursor(true)
+		render(r, 10, 2, "a")
+		buf.Reset()
+		render(r, 10, 5, "a")
+		if strings.Contains(buf.String(), ansi.EraseEntireScreen) {
+			t.Errorf("inline mode repainted on a height change: %q", buf.String())
+		}
+	})
+
+	t.Run("a steady size does not repaint", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+		r.SetFullscreen(true)
+		render(r, 10, 3, "a")
+		buf.Reset()
+		render(r, 10, 3, "b")
+		if strings.Contains(buf.String(), ansi.EraseEntireScreen) {
+			t.Errorf("repainted without a resize: %q", buf.String())
+		}
+	})
+
+	t.Run("degenerate sizes do not panic", func(t *testing.T) {
+		for _, size := range [][2]int{{0, 0}, {10, 0}, {0, 5}, {1, 1}} {
+			var buf bytes.Buffer
+			r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+			r.SetFullscreen(true)
+			render(r, 10, 3, "a")
+			r.Resize(size[0], size[1])
+			r.Render(NewRenderBuffer(size[0], size[1]))
+			if err := r.Flush(); err != nil {
+				t.Fatalf("size %v: Flush: %v", size, err)
+			}
+		}
+	})
+}
+
+// A carried sequence has to reach the terminal, and only when its cell changes.
+// Re-sending it every frame would have an image protocol retransmit the image
+// at the frame rate.
+func TestPassThroughSequenceReachesTerminalOnce(t *testing.T) {
+	const apc = "\x1b_Ga=T\x1b\\"
+
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+
+	scr := NewScreenBuffer(10, 2)
+	NewStyledString(apc+"hi").Draw(scr, Rect(0, 0, 10, 1))
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if n := strings.Count(buf.String(), apc); n != 1 {
+		t.Errorf("first render sent the sequence %d times, want 1: %q", n, buf.String())
+	}
+
+	buf.Reset()
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if n := strings.Count(buf.String(), apc); n != 0 {
+		t.Errorf("an unchanged render re-sent the sequence %d times: %q", n, buf.String())
+	}
+}
+
+// The ASCII short-circuit in lineHasDrift must never change its answer.
+// Compare against the unoptimised definition over everything the conformance
+// fuzzer can draw, plus every single byte.
+func TestDriftShortCircuitAgreesWithFullCheck(t *testing.T) {
+	full := func(m ansi.Method, c *Cell) bool {
+		return c.Width > 1 || m.StringWidth(c.Content) != ansi.StringWidth(c.Content)
+	}
+
+	var contents []string
+	for b := 0; b < 256; b++ {
+		contents = append(contents, string([]byte{byte(b)}))
+	}
+	contents = append(contents,
+		"a", "\u4e16", "\uac00", "\U0001fae0", "e\u0301", "n\u0303",
+		"\u2639\ufe0e", "\u2639\ufe0f", "\u2764\ufe0f", "\u2708\ufe0f",
+		"\U0001f469\u200d\U0001f4bb", "\U0001f426\u200d\U0001f525",
+		"\U0001f44d\U0001f3fd", "\U0001f44b\U0001f3ff",
+		"\u26d3\ufe0f\u200d\U0001f4a5", "\U0001f1fa", "\U0001f1fa\U0001f1f8",
+		"\U0001f1ef\U0001f1f5", "1\ufe0f\u20e3", "", " ", "\x1b_x\x1b\\a",
+	)
+
+	for _, m := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		for _, content := range contents {
+			for _, w := range []int{0, 1, 2} {
+				c := &Cell{Content: content, Width: w}
+				line := Line{*c}
+				got := lineHasDrift(m, line)
+				want := false
+				if c.Width != 0 && len(c.Content) != 0 {
+					want = full(m, c)
+				}
+				if got != want {
+					t.Errorf("method=%v content=%q width=%d: short-circuit says %v, full check says %v",
+						m, content, w, got, want)
+				}
+			}
+		}
+	}
+}
+
+// A grapheme cluster at the right margin is written with autowrap on, even in
+// the lower right corner where a plain cell is not. With autowrap off the
+// terminal never advances past the margin, so it reads the combining
+// codepoints as part of the cell to the left: the mark moves one column back
+// and the base rune is left alone at the margin. Both reference emulators
+// place the cluster correctly when autowrap stays on.
+func TestRendererMarginClusterKeepsAutowrap(t *testing.T) {
+	paint := func(content string, y int) string {
+		var buf bytes.Buffer
+		r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+		r.SetFullscreen(true)
+		r.Resize(6, 2)
+
+		scr := NewScreenBuffer(6, 2)
+		NewStyledString(content).Draw(scr, Rect(0, y, 6, 1))
+		r.Render(scr.RenderBuffer)
+		if err := r.Flush(); err != nil {
+			t.Fatalf("failed to flush renderer: %v", err)
+		}
+		return buf.String()
+	}
+
+	// e + U+0301. Two codepoints, one column.
+	const cluster = "e\u0301"
+
+	for _, y := range []int{0, 1} {
+		out := paint("###"+cluster+cluster+cluster, y)
+		if strings.Contains(out, ansi.ResetModeAutoWrap) {
+			t.Errorf("row %d: cluster at the margin painted with autowrap off: %q", y, out)
+		}
+	}
+
+	// The corner still gets the autowrap dance when nothing can be split.
+	if out := paint("######", 1); !strings.Contains(out, ansi.ResetModeAutoWrap) {
+		t.Errorf("plain corner cell should paint with autowrap off, got: %q", out)
+	}
+}
+
+// A hardware scroll moves every row in its range, including rows the
+// application never drew into this frame. The diff loop only visits rows the
+// application touched, so without marking the range those rows keep the model's
+// old opinion of them and the content the scroll carried away never comes back.
+//
+// Here the scroll puts row 2 where row 0 belongs, which is what makes it worth
+// doing, and takes row 1 off the top of the screen on the way. Row 1 has to be
+// painted again even though nothing drew into it.
+func TestRendererScrollRepaintsRowsItMoved(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.SetScrollOptim(true)
+	r.Resize(4, 8)
+
+	scr := NewScreenBuffer(4, 8)
+	NewStyledString("aa").Draw(scr, Rect(0, 1, 4, 1))
+	NewStyledString("bb").Draw(scr, Rect(0, 2, 4, 1))
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	// Row 1 keeps its "aa" from the frame before and is not drawn into.
+	NewStyledString("bb").Draw(scr, Rect(0, 0, 4, 1))
+	NewStyledString("aa").Draw(scr, Rect(0, 2, 4, 1))
+	r.Render(scr.RenderBuffer)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, ansi.ScrollUp(2)) {
+		t.Fatalf("expected a hardware scroll, got: %q", out)
+	}
+	if n := strings.Count(out, "aa"); n != 2 {
+		t.Errorf("scrolled rows painted %d times, want 2 (rows 1 and 2): %q", n, out)
+	}
+}
+
+func TestRendererInlineNarrowRepaints(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.Resize(20, 2)
+
+	cellbuf := NewRenderBuffer(20, 2)
+	for x := range 20 {
+		cellbuf.SetCell(x, 0, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+	buf.Reset()
+
+	r.Resize(8, 2)
+	r.Resize(20, 2)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, "a") {
+		t.Errorf("a terminal that narrowed and grew back rewrapped the frame, so it has to be repainted, got: %q", out)
+	}
+}
+
+func TestRendererCornerClusterLeavesNoPendingWrap(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.Resize(6, 2)
+
+	cellbuf := NewRenderBuffer(6, 2)
+	for x := range 6 {
+		cellbuf.SetCell(x, 1, &Cell{Content: "#", Width: 1})
+	}
+	cellbuf.SetCell(5, 1, &Cell{Content: "e\u0301", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if x, _ := r.Position(); x >= cellbuf.Width() {
+		t.Errorf("a frame that ends in pending wrap on the last row scrolls the screen on the next print: cursor x=%d, width=%d", x, cellbuf.Width())
+	}
+}
+
+// The renderer's account of the rows it disturbed itself is sized to the screen
+// it is about to paint, so a row that cannot be painted cannot be damaged and no
+// reader has to bounds-check the record.
+func TestRendererDamageIsSizedToTheScreen(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+
+	tall := NewRenderBuffer(4, 6)
+	tall.SetCell(0, 5, &Cell{Content: "a", Width: 1})
+	r.Render(tall)
+	if got := len(r.damaged); got != 6 {
+		t.Errorf("record holds %d rows for a 6-row screen, want 6", got)
+	}
+
+	// Out of range either way is dropped, rather than growing the record to fit
+	// rows the screen does not have.
+	r.damage(-3, 2)
+	r.damage(6, 99)
+	if got := len(r.damaged); got != 6 {
+		t.Errorf("damage outside the screen resized the record to %d, want 6", got)
+	}
+	for y, damaged := range r.damaged {
+		if damaged {
+			t.Errorf("row %d is damaged, but every damage call was outside the screen", y)
+		}
+	}
+
+	// A shorter frame gets a shorter record, and carries nothing over from the
+	// taller frame it replaced.
+	r.damage(4, 2)
+	short := NewRenderBuffer(4, 2)
+	short.SetCell(0, 0, &Cell{Content: "b", Width: 1})
+	r.Render(short)
+	if got := len(r.damaged); got != 2 {
+		t.Errorf("record holds %d rows for a 2-row screen, want 2", got)
+	}
+}
+
+// BenchmarkRenderFrameByHeight pins the shape of the win, not just its size.
+//
+// The cost of a frame used to scale with the height of the screen, because every
+// render replaced one touch record per row. Reusing the records made it flat, and
+// a benchmark at a single height cannot tell the two apart: run a few heights and
+// the allocations per frame should not follow them.
+func BenchmarkRenderFrameByHeight(b *testing.B) {
+	for _, height := range []int{24, 100, 400} {
+		b.Run(fmt.Sprintf("h%d", height), func(b *testing.B) {
+			r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+			r.SetFullscreen(true)
+			buf := NewScreenBuffer(80, height)
+			text := NewStyledString(strings.Repeat("x", 79))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				text.Draw(buf, Rect(0, i%height, 80, 1))
+				r.Render(buf.RenderBuffer)
+			}
+		})
+	}
+}
+
+// TestRenderAllocationsDoNotFollowScreenHeight guards the property the record
+// reuse bought, which a benchmark at one height cannot express.
+//
+// Every render used to replace one touch record per row, so the cost of a frame
+// grew with the screen. A tall screen and a short one should now allocate the
+// same amount per frame.
+func TestRenderAllocationsDoNotFollowScreenHeight(t *testing.T) {
+	perFrame := func(height int) float64 {
+		r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+		r.SetFullscreen(true)
+		buf := NewScreenBuffer(80, height)
+		text := NewStyledString(strings.Repeat("x", 79))
+
+		row := 0
+		draw := func() {
+			row = (row + 1) % height
+			text.Draw(buf, Rect(0, row, 80, 1))
+			r.Render(buf.RenderBuffer)
+		}
+
+		// Every row has to be drawn at least once first: a record is created on
+		// first touch, and counting that one-off as per-frame cost would make a
+		// tall screen look like it still scales.
+		for range height * 2 {
+			draw()
+		}
+		return testing.AllocsPerRun(256, draw)
+	}
+
+	short, tall := perFrame(24), perFrame(400)
+	if tall > short+8 {
+		t.Errorf("a 400-row screen allocates %.0f per frame against %.0f for 24 rows, so the cost still follows the height",
+			tall, short)
+	}
+}
+
+// A touch list shorter than the screen used to crash the scroll optimisation,
+// which walked every row of the screen through it. An application can reach that
+// state: the list is exported, so it can drop it and touch a single row.
+//
+// Enforced rather than tolerated, so the assertion is that the state cannot be
+// built, not that a bounds check catches it. Every reader indexes the list by
+// screen row, and there were five separate length checks standing in for this.
+func TestRenderBufferTouchedCoversEveryRow(t *testing.T) {
+	buf := NewRenderBuffer(5, 4)
+
+	if got := len(buf.Touched); got != buf.Height() {
+		t.Errorf("a new buffer has %d touch entries for %d rows", got, buf.Height())
+	}
+
+	// Dropping the list and touching one row restores the full length.
+	buf.Touched = nil
+	buf.SetCell(0, 0, &Cell{Content: "a", Width: 1})
+	if got := len(buf.Touched); got != buf.Height() {
+		t.Errorf("after dropping the list and touching one row, %d entries for %d rows", got, buf.Height())
+	}
+
+	// And so does touching a row of a screen that has since grown.
+	buf.Touched = buf.Touched[:1]
+	buf.Resize(7, 9)
+	buf.SetCell(0, 8, &Cell{Content: "c", Width: 1})
+	if got := len(buf.Touched); got < buf.Height() {
+		t.Errorf("after growing to %d rows and touching the last one, %d touch entries", buf.Height(), got)
+	}
+}
+
+// The crash itself: a short list reaching the scroll optimisation, which indexed
+// it by screen row and ran off the end.
+func TestRendererSurvivesAShortTouchList(t *testing.T) {
+	r := NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"})
+	r.SetFullscreen(true)
+	r.SetScrollOptim(true)
+
+	cellbuf := NewRenderBuffer(5, 4)
+	cellbuf.SetCell(0, 0, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	cellbuf.Touched = nil
+	cellbuf.SetCell(0, 0, &Cell{Content: "b", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+}
+
+// A frame an application hands over with no touches recorded still has to be
+// repainted when the terminal resized under it.
+//
+// The touch list is exported, so an application is free to drop it, and a fresh
+// list records nothing. Both make TouchedLines report zero, which is otherwise
+// the renderer's signal that there is nothing to do. A resize latched in the
+// meantime has to override that, or the rows the terminal rewrapped stay put.
+func TestRendererRepaintsAResizeWithNoTouches(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.Resize(20, 2)
+
+	cellbuf := NewRenderBuffer(20, 2)
+	for x := range 20 {
+		cellbuf.SetCell(x, 0, &Cell{Content: "a", Width: 1})
+	}
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	// The application drops the list, so the next frame reports no touches.
+	cellbuf.Touched = nil
+	if got := cellbuf.TouchedLines(); got != 0 {
+		t.Fatalf("expected a frame reporting no touches, got %d", got)
+	}
+
+	buf.Reset()
+	r.Resize(8, 2)
+	r.Resize(20, 2)
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, "a") {
+		t.Errorf("a resize has to repaint even a frame reporting no touches, got: %q", out)
+	}
+}
+
+// A frame that collapses and grows back to its old size between renders must
+// erase what it last drew. The renderer sees no size change, so only the
+// buffer can say those rows changed.
+func TestRendererClearsRowsAFrameGotBack(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewTerminalRenderer(&buf, []string{"TERM=xterm-256color"})
+	r.SetRelativeCursor(true)
+	r.Resize(6, 10)
+
+	cellbuf := NewRenderBuffer(6, 2)
+	cellbuf.SetCell(0, 0, &Cell{Content: "a", Width: 1})
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	cellbuf.Resize(6, 0)
+	cellbuf.Resize(6, 2)
+	cellbuf.SetCell(0, 1, &Cell{Content: "b", Width: 1})
+	buf.Reset()
+	r.Render(cellbuf)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("failed to flush renderer: %v", err)
+	}
+
+	if out := buf.String(); !strings.Contains(out, ansi.EraseLineRight) {
+		t.Errorf("row 0 was never erased, wrote %q", out)
+	}
+}
