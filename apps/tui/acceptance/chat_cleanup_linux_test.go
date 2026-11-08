@@ -19,41 +19,17 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	writeFD, readFD := int(w.Fd()), int(r.Fd())
+	writeFD := int(w.Fd())
 	p := startPTYChat(t, f, w)
 	p.awaitRaw(t)
-	if err := unix.SetNonblock(readFD, true); err != nil {
-		t.Fatal(err)
-	}
-	awaitFrame := func(needle string) {
-		t.Helper()
-		var output []byte
-		var chunk [4096]byte
-		deadline := time.Now().Add(5 * time.Second)
-		for p.status() != needle {
-			n, err := readPTYOutput(p, readFD, chunk[:])
-			if n > 0 {
-				output = append(output, chunk[:n]...)
-			}
-			if err != nil && err != unix.EAGAIN {
-				t.Fatal(err)
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("TUI never showed %q: %q", needle, output)
-			}
-			if n <= 0 {
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
-	}
-	awaitFrame("ready")
+	ready := p.awaitRedirectedStatus(t, r, "ready", 0)
 	p.send(t, "first\r")
+	p.awaitRedirectedStatus(t, r, "running", ready)
 	select {
 	case <-held:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not reach provider")
 	}
-	awaitFrame("running")
 	releaseLock := holdWriteLock(t, f)
 	defer releaseLock()
 	if err := unix.SetNonblock(writeFD, true); err != nil {

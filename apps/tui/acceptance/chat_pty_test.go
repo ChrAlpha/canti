@@ -283,6 +283,34 @@ func readPTYOutput(p *ptyChat, fd int, buf []byte) (int, error) {
 	return n, err
 }
 
+// awaitRedirectedStatus consumes the actual display pipe until a fresh exact
+// phase is visible. Raw termios only proves initInput ran, before Tea creates
+// the reader, initializes the model, and renders its first view.
+func (p *ptyChat) awaitRedirectedStatus(t *testing.T, r *os.File, status string, after frameCursor) frameCursor {
+	t.Helper()
+	if err := r.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer r.SetReadDeadline(time.Time{})
+	var chunk [4096]byte
+	for {
+		p.mu.Lock()
+		frame, ok := p.frameAfter(after, func(screen string) bool { return screenStatus(screen) == status })
+		screen := p.screen.String()
+		p.mu.Unlock()
+		if ok {
+			return frame
+		}
+		n, err := r.Read(chunk[:])
+		if n > 0 {
+			p.capture(chunk[:n])
+		}
+		if err != nil {
+			t.Fatalf("redirected display never showed status %q after frame %d: %v; screen: %q", status, after, err, screen)
+		}
+	}
+}
+
 func (p *ptyChat) send(t *testing.T, input string) {
 	t.Helper()
 	if _, err := io.WriteString(p.master, input); err != nil {
@@ -692,7 +720,9 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 	writeFD := int(w.Fd())
 	p := startPTYChatWithEnv(t, f, w, []string{"CANTI_TEST_CRASH=block:stop_requested", "CANTI_TEST_BLOCKED=" + marker})
 	p.awaitRaw(t)
+	ready := p.awaitRedirectedStatus(t, r, "ready", 0)
 	p.send(t, "request needing cleanup\r")
+	p.awaitRedirectedStatus(t, r, "running", ready)
 	select {
 	case <-held:
 	case <-time.After(5 * time.Second):
