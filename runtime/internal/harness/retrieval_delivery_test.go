@@ -117,3 +117,57 @@ func TestStepRendersDiscoveryCoverage(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishedEvidenceUsesFrozenBytesAndRepairsMissingFiles(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "original")
+	if err := os.WriteFile(source, []byte("observed original bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := archive.Reader{Imports: root}
+	retrieval := retrieveOK(t, reader, archive.RetrievalQuery{Operation: "read", Path: archive.ImportsRoot + "/original", Reason: "capture"})
+	record := StepRecord{Seq: 9, Step: 1, Command: `canti:retrieve {}`, Outcome: &Outcome{Status: OutcomeDone, Retrieval: &retrieval}}
+	dir := t.TempDir()
+	steps := filepath.Join(dir, archive.StepsDir)
+	if err := os.Mkdir(steps, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := putStep(dir, steps, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(steps, archive.StepDir(1))
+	evidence := filepath.Join(target, archive.EvidencePath(0))
+	body, err := os.ReadFile(evidence)
+	if err != nil || string(body) != "observed original bytes" {
+		t.Fatalf("evidence=%q %v", body, err)
+	}
+	var manifest archive.EvidenceManifest
+	raw, err := os.ReadFile(filepath.Join(target, archive.EvidenceFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.Seq != 9 || len(manifest.Sources) != 1 || manifest.Sources[0].SHA256 != retrieval.Sources[0].SHA256 {
+		t.Fatalf("manifest=%+v %v", manifest, err)
+	}
+	for _, name := range []string{evidence, filepath.Join(target, archive.EvidenceFile)} {
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := putStep(dir, steps, record); err != nil {
+		t.Fatal(err)
+	}
+	body, err = os.ReadFile(evidence)
+	if err != nil || string(body) != "observed original bytes" {
+		t.Fatalf("repaired=%q %v", body, err)
+	}
+	if err := os.WriteFile(evidence, []byte("conflicting evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := putStep(dir, steps, record); err == nil {
+		t.Fatal("conflict accepted")
+	}
+}

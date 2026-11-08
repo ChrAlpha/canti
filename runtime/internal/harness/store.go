@@ -64,6 +64,8 @@ type Journal interface {
 	Store
 	Run(ctx context.Context, runID string) (Run, error)
 	Latest(ctx context.Context, runID string) (Snapshot, error)
+	// Context reads the head and context pointer in one snapshot, rejecting a stale expected position.
+	Context(ctx context.Context, expected Snapshot) (ContextState, error)
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
@@ -173,14 +175,16 @@ type Transition struct {
 // belongs to the ResponseLoaded that accepts an exec decision; Outcome and
 // Window, the window the next step renders when it changes, to Performed.
 type Facts struct {
-	Request     *Request
-	Response    *Response
-	Observation *Observation
-	Action      *Action            `json:",omitempty"`
-	Execution   *ExecutionIdentity `json:",omitempty"`
-	Receipt     *Job               `json:",omitempty"`
-	Resolution  *Resolution        `json:",omitempty"`
-	Outcome     *Outcome           `json:",omitempty"`
-	Window      *Window            `json:",omitempty"`
-	Failure     string
+	Request      *Request
+	Response     *Response
+	Observation  *Observation
+	Action       *Action            `json:",omitempty"`
+	Execution    *ExecutionIdentity `json:",omitempty"`
+	Receipt      *Job               `json:",omitempty"`
+	Resolution   *Resolution        `json:",omitempty"`
+	Outcome      *Outcome           `json:",omitempty"`
+	Window       *Window            `json:",omitempty"`
+	ContextState *ContextState      `json:",omitempty"`
+	Rejection    *ContextRejection  `json:",omitempty"`
+	Failure      string
 }

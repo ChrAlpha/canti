@@ -224,8 +224,8 @@ whether it was set by explicit resolution, the output's container path or
 preview verbatim, so the command and purpose are whole where the prompt cuts
 them, and the preview holds the output's head and true tail even when its
 artifact kept only a prefix. `purpose` is empty when the decision had none; a
-step directory published before canti recorded purposes has no `purpose`,
-and no publication adds one. A step the harness performed itself ran no
+historical imported step directory may lack `purpose`. Publication repairs a
+missing derived purpose from the committed decision. A step the harness performed itself ran no
 process; its `meta` and `preview` present its outcome as context version 12
 presented the same action, `exited` with exit code 0 when done or 1 when
 failed and `failed_to_start` when refused, a rendering rule of the context
@@ -457,8 +457,11 @@ each source with the step's observation, at most the query's byte limit.
 Every later request of the window renders that frozen evidence, so a
 source changed or removed after the retrieval changes no request, and the
 context reserves no growth for evidence that might change. The step's
-published preview keeps the references only: reading a past retrieval
-returns references rather than recursively duplicating history. Frozen
+published preview keeps the references only. Each retrieval step also publishes
+`evidence.json`, with its transition sequence, source indexes, original ranges,
+hashes and continuation, plus `evidence/0000` and subsequent files containing
+the exact observed bytes. Missing derived evidence is repaired from the
+journal; conflicting content is an integrity failure. Frozen
 request bodies still retain the actual bytes sent for exact retry. Old pages
 remain accessible through explicit retrieval, including imported history
 when configured. Retrieved evidence and handover text are not authoritative

@@ -574,3 +574,34 @@ func TestDiscoveryStopsBeforeAnUndecidedCommandItCannotPayFor(t *testing.T) {
 		t.Fatalf("the continuation did not skip step 2 and scan step 1: %+v", next)
 	}
 }
+
+func TestDiscoverySearchesOriginalPurposeAndContinuesItsField(t *testing.T) {
+	r := discoveryFixture(t)
+	discoveryStep(t, r, 1, "execute original", "unrelated preview", "unrelated output", true)
+	purpose := filepath.Join(r.History, "run", "steps", StepDir(1), PurposeFile)
+	if err := os.WriteFile(purpose, []byte("needle original purpose"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := retrieveOK(t, r, discoveryQuery())
+	texts := discoveryTexts(t, r, result)
+	if result.More || result.Incomplete || !strings.Contains(texts[RunsRoot+"/run/steps/00000001/purpose"], "original purpose") {
+		t.Fatalf("purpose candidates=%+v %v", result, texts)
+	}
+	// A cursor can address the fourth possible field (artifact after an
+	// incomplete preview), while arbitrary out-of-range fields are refused.
+	q := discoveryQuery()
+	c, err := discoveryStart(q, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Field = 3
+	q.Cursor = encodeCursor(c)
+	if _, err := discoveryStart(q, 1); err != nil {
+		t.Fatalf("valid purpose-aware cursor rejected: %v", err)
+	}
+	c.Field = 4
+	q.Cursor = encodeCursor(c)
+	if _, err := discoveryStart(q, 1); err == nil {
+		t.Fatal("invalid cursor field accepted")
+	}
+}

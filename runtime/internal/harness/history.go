@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -164,13 +165,10 @@ func rebuild(ctx context.Context, j Journal, dir, runID string) error {
 // them in a temporary directory of dir.
 func putStep(dir, steps string, r StepRecord) error {
 	target := filepath.Join(steps, archive.StepDir(r.Step))
-	if found, err := exists(target, true); err != nil || found {
-		for _, name := range [...]string{archive.MetaFile, archive.CommandFile, archive.PurposeFile, archive.PreviewFile} {
-			if err == nil {
-				_, err = exists(filepath.Join(target, name), false)
-			}
-		}
+	if found, err := exists(target, true); err != nil {
 		return err
+	} else if found {
+		return repairStep(target, r)
 	}
 	tmp, err := os.MkdirTemp(dir, ".tmp-")
 	if err != nil {
@@ -188,7 +186,16 @@ func writeStep(path string, r StepRecord) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	for _, file := range [...]struct{ name, data string }{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PurposeFile, r.Purpose}, {archive.PreviewFile, r.presented().Preview}} {
+	files, err := stepFiles(r)
+	if err != nil {
+		return err
+	}
+	if r.retrieval() != nil {
+		if err := os.Mkdir(filepath.Join(path, archive.EvidenceDir), 0o755); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
 		f, err := os.Create(filepath.Join(path, file.name))
 		if err == nil {
 			err = fill(f, file.data)
@@ -197,7 +204,84 @@ func writeStep(path string, r StepRecord) error {
 			return err
 		}
 	}
+	if r.retrieval() != nil {
+		if err := syncDir(filepath.Join(path, archive.EvidenceDir)); err != nil {
+			return err
+		}
+	}
 	return syncDir(path)
+}
+
+type recordFile struct{ name, data string }
+
+func stepFiles(r StepRecord) ([]recordFile, error) {
+	files := []recordFile{{archive.MetaFile, meta(r)}, {archive.CommandFile, r.Command}, {archive.PurposeFile, r.Purpose}, {archive.PreviewFile, r.presented().Preview}}
+	retrieval := r.retrieval()
+	if retrieval == nil {
+		return files, nil
+	}
+	if len(retrieval.Sources) > archive.MaxSources || len(retrieval.Sources) != len(retrieval.Evidence) {
+		return nil, newIntegrityError("retrieval evidence shape at sequence %d", r.Seq)
+	}
+	manifest := archive.EvidenceManifest{Seq: r.Seq, Query: retrieval.Query, Entries: retrieval.Entries,
+		NextOffset: retrieval.NextOffset, NextCursor: retrieval.NextCursor, More: retrieval.More, Incomplete: retrieval.Incomplete,
+		SkippedCount: retrieval.SkippedCount, Skipped: retrieval.Skipped, Error: retrieval.Error}
+	for i, source := range retrieval.Sources {
+		text := retrieval.Evidence[i]
+		if len(text) != source.Length || len(text) > archive.MaxBytes || fmt.Sprintf("%x", sha256.Sum256([]byte(text))) != source.SHA256 {
+			return nil, newIntegrityError("retrieval source %d at sequence %d", i, r.Seq)
+		}
+		name := archive.EvidencePath(i)
+		manifest.Sources = append(manifest.Sources, archive.EvidenceSource{SourceRange: source, Source: i, File: name})
+		files = append(files, recordFile{name, text})
+	}
+	body, err := json.Marshal(manifest)
+	return append(files, recordFile{archive.EvidenceFile, string(body) + "\n"}), err
+}
+
+// Existing derived records can be repaired from committed facts. Any differing
+// bytes fail integrity rather than silently replacing a historical observation.
+func repairStep(dir string, r StepRecord) error {
+	files, err := stepFiles(r)
+	if err != nil {
+		return err
+	}
+	if r.retrieval() != nil {
+		evidence := filepath.Join(dir, archive.EvidenceDir)
+		if _, err := exists(evidence, true); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(evidence, 0o755); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		target := filepath.Join(dir, file.name)
+		found, err := exists(target, false)
+		if err != nil {
+			return err
+		}
+		if !found {
+			if err := putFile(filepath.Dir(target), filepath.Base(target), file.data); err != nil {
+				return err
+			}
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			return err
+		}
+		if info.Size() != int64(len(file.data)) {
+			return newIntegrityError("published record %s has conflicting size", target)
+		}
+		body, err := os.ReadFile(target)
+		if err != nil {
+			return err
+		}
+		if string(body) != file.data {
+			return newIntegrityError("published record %s has conflicting bytes", target)
+		}
+	}
+	return syncDir(dir)
 }
 
 // putFile publishes data as dir/name unless it exists.

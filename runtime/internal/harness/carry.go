@@ -103,6 +103,12 @@ func evidenceOf(rec StepRecord, ref EvidenceRef) (CarriedEvidence, error) {
 		More: r.More, NextOffset: r.NextOffset, Incomplete: r.Incomplete, Bytes: text}, nil
 }
 
+// ValidateEvidence checks a reference against the exact committed observation.
+func ValidateEvidence(record StepRecord, ref EvidenceRef) error {
+	_, err := evidenceOf(record, ref)
+	return err
+}
+
 // carriedEvidence resolves refs, references a committed transition of this
 // run admitted, to their committed evidence, from known step records by
 // sequence or else by one point read per transition. A reference whose

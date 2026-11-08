@@ -272,7 +272,7 @@ func TestPublishHistoryAddsOnlyTheLatestStep(t *testing.T) {
 	wantTree(t, dir, want)
 }
 
-func TestPublishHistoryKeepsAStepPublishedWithoutAPurpose(t *testing.T) {
+func TestPublishHistoryRepairsMissingDerivedPurpose(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{})
 	r, dir := runner(t, f), filepath.Join(f.cfg.History, runID)
 	ok := 0
@@ -282,6 +282,7 @@ func TestPublishHistoryKeepsAStepPublishedWithoutAPurpose(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := tree(t, dir)
+	want["steps/00000001/purpose"] = "Check the shell."
 	publish(t, f, f.store, runID)
 	wantTree(t, dir, want)
 

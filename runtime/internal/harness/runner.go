@@ -100,6 +100,7 @@ func (f Facts) check(event core.Event, next core.State) error {
 			return fmt.Errorf("%w: rejected response and reason required", ErrFacts)
 		}
 		allowed.Response, allowed.Failure = f.Response, f.Failure
+		allowed.ContextState, allowed.Rejection = f.ContextState, f.Rejection
 	case core.ResponseLoaded:
 		if next.Phase == core.PhaseEffectSaved {
 			if _, err := Acceptance(core.SemanticsVersion, f.Action, f.Execution); err != nil {
@@ -115,6 +116,7 @@ func (f Facts) check(event core.Event, next core.State) error {
 			return fmt.Errorf("%w: %v", ErrFacts, err)
 		}
 		allowed.Outcome, allowed.Window = f.Outcome, f.Window
+		allowed.ContextState = f.ContextState
 	case core.Observed:
 		if err := f.checkObservation(e.Execution); err != nil {
 			return err

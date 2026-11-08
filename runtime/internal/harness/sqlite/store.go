@@ -337,12 +337,20 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if r.semantics != core.SemanticsVersion {
 		return fmt.Errorf("sqlite: a new transition of semantics version %d, want %d", r.semantics, core.SemanticsVersion)
 	}
+	if err := s.checkContext(ctx, tx, t); err != nil {
+		return err
+	}
 	if err := s.checkEffect(ctx, tx, t); err != nil {
 		return err
 	}
 	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
+	}
+	if t.Facts.ContextState != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET context_seq=? WHERE id=?`, t.Seq, r.run); err != nil {
+			return err
+		}
 	}
 	return s.addTotals(ctx, tx, r.run, delta(t))
 }

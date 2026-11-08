@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	sqldriver "database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -89,5 +90,74 @@ func TestContextRecordsRequestQueriesUseIndexedRanges(t *testing.T) {
 		if len(details) != 1 || !strings.Contains(details[0], "SEARCH transitions USING INDEX transitions_request") {
 			t.Fatalf("query %s plan = %v; want one indexed search without sort", tc.selection, details)
 		}
+	}
+}
+
+func TestContextHeadResetIsAtomicAndRejectsStaleReaders(t *testing.T) {
+	ctx := context.Background()
+	path := tempPath(t)
+	s := open(t, path)
+	d := newDriver(t, s, createRun(t, s, "anchor", core.Limits{MaxAttempts: 3}))
+	initial := d.snap
+	if c, err := s.Context(ctx, initial); err != nil || !c.Equal(harness.InitialContext()) {
+		t.Fatalf("initial=%+v %v", c, err)
+	}
+	d.freeze()
+	d.send()
+	before := d.snap
+	rejection := &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{"error":{"code":"context_length_exceeded"}}`)}, Failure: "confirmed overflow", Rejection: rejection, ContextState: &next}
+	bad := facts
+	invalid := next
+	invalid.AnchorSeq++
+	bad.ContextState = &invalid
+	if err := d.try(core.RequestRejected{Step: 1, Attempt: 1}, bad); !errors.Is(err, harness.ErrFacts) {
+		t.Fatalf("bad anchor error=%v", err)
+	}
+	if got := latestOf(t, s, "anchor"); got != before {
+		t.Fatal("failed reset advanced state")
+	}
+	d.do(core.RequestRejected{Step: 1, Attempt: 1}, facts)
+	committed := d.commits[len(d.commits)-1]
+	if err := s.Commit(ctx, committed); err != nil {
+		t.Fatal(err)
+	}
+	reopened := open(t, path)
+	if c, err := reopened.Context(ctx, d.snap); err != nil || !c.Equal(next) {
+		t.Fatalf("reopened=%+v %v", c, err)
+	}
+	if _, err := reopened.Context(ctx, before); !errors.Is(err, harness.ErrStaleSnapshot) {
+		t.Fatalf("stale context error=%v", err)
+	}
+	if got := totalsOf(t, s, "anchor"); got.Coverage.Attempts != 1 {
+		t.Fatalf("reset report counted twice: %+v", got)
+	}
+	request := requestFor(d.snap.State)
+	wrong := harness.InitialContext()
+	request.ContextState = &wrong
+	if err := d.try(core.RequestFrozen{}, harness.Facts{Request: request}); !errors.Is(err, harness.ErrFacts) {
+		t.Fatalf("old context accepted: %v", err)
+	}
+	request.ContextState = &next
+	d.do(core.RequestFrozen{}, harness.Facts{Request: request})
+}
+
+func TestExhaustedRejectionDoesNotOpenContext(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "exhausted", core.Limits{MaxAttempts: 1}))
+	d.freeze()
+	d.send()
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}}
+	next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
+	facts.ContextState = &next
+	if err := d.try(core.RequestRejected{Step: 1, Attempt: 1}, facts); !errors.Is(err, harness.ErrFacts) {
+		t.Fatalf("opened exhausted context: %v", err)
+	}
+	facts.ContextState = nil
+	d.do(core.RequestRejected{Step: 1, Attempt: 1}, facts)
+	if c, err := s.Context(ctx, d.snap); err != nil || !c.Equal(harness.InitialContext()) {
+		t.Fatalf("exhausted context=%+v %v", c, err)
 	}
 }

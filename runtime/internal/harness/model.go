@@ -40,12 +40,13 @@ func (p Prompt) User() string { return strings.Join(p.Blocks, "") }
 // Request is the frozen, provider-facing input for one step. Its identity
 // comes from the run state it is committed with.
 type Request struct {
-	Body     []byte
-	Model    string
-	Protocol string
-	Adapter  string
-	Window   *Window         `json:",omitempty"`
-	Context  *ContextCapture `json:",omitempty"`
+	Body         []byte
+	Model        string
+	Protocol     string
+	Adapter      string
+	ContextState *ContextState   `json:",omitempty"`
+	Window       *Window         `json:",omitempty"`
+	Context      *ContextCapture `json:",omitempty"`
 }
 
 // Response is the raw model result before core decoding. Complete reports

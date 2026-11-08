@@ -292,7 +292,11 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 // completes no step or does not decode as a step its version records; a
 // done context and a failed read are returned as they are.
 func (s *Store) Completion(ctx context.Context, runID string, seq int64) (harness.StepRecord, error) {
-	rows, err := s.stmts[completionSQL].QueryContext(ctx, runID, seq)
+	return s.completion(ctx, nil, runID, seq)
+}
+
+func (s *Store) completion(ctx context.Context, tx *sql.Tx, runID string, seq int64) (harness.StepRecord, error) {
+	rows, err := s.stmt(ctx, tx, completionSQL).QueryContext(ctx, runID, seq)
 	if err != nil {
 		return harness.StepRecord{}, err
 	}

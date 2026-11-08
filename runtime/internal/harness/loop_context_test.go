@@ -699,3 +699,64 @@ func TestPreparationRefusesAWindowItsRequestDoesNotExplain(t *testing.T) {
 		})
 	}
 }
+
+func TestFocusReplacesFrozenSelectionAndInvalidSelectionPreservesIt(t *testing.T) {
+	imported := t.TempDir()
+	for name, text := range map[string]string{"a": "ORIGINAL_A", "b": "ORIGINAL_B"} {
+		if err := os.WriteFile(filepath.Join(imported, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 10, MaxAttempts: 3}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/a","reason":"a"}`),
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/b","reason":"b"}`),
+		execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`),
+		execReply(`canti:focus {"sources":[{"seq":10,"source":0}]}`),
+		execReply(`canti:focus {"sources":[{"seq":10,"source":0},{"seq":10,"source":0}]}`),
+		execReply(`canti:focus {"sources":[]}`), returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	f.steps(f.loop(), 12)
+	first, err := f.store.Context(context.Background(), focusSnapshot(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Focus) != 1 || first.Focus[0].SourceSeq != 5 {
+		t.Fatalf("first selection=%+v", first)
+	}
+	if err := os.RemoveAll(imported); err != nil {
+		t.Fatal(err)
+	}
+	f.steps(f.fresh(), 4)
+	second, err := f.store.Context(context.Background(), focusSnapshot(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Focus) != 1 || second.Focus[0].SourceSeq != 10 {
+		t.Fatalf("replacement=%+v", second)
+	}
+	f.steps(f.fresh(), 4)
+	invalid, err := f.store.Context(context.Background(), focusSnapshot(t, f))
+	if err != nil || !invalid.Equal(second) {
+		t.Fatalf("invalid changed selection=%+v %v", invalid, err)
+	}
+	if got := f.last().Facts.Outcome; got == nil || got.Status != harness.OutcomeFailed {
+		t.Fatalf("duplicate selection result=%+v", got)
+	}
+	f.run(f.fresh())
+	cleared, err := f.store.Context(context.Background(), focusSnapshot(t, f))
+	if err != nil || len(cleared.Focus) != 0 || cleared.AnchorSeq != 0 {
+		t.Fatalf("clear=%+v %v", cleared, err)
+	}
+	if len(f.exec.calls) != 0 {
+		t.Fatalf("focus reached executor: %v", f.exec.calls)
+	}
+}
+
+func focusSnapshot(t *testing.T, f *fixture) harness.Snapshot {
+	t.Helper()
+	snap, err := f.store.Latest(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}

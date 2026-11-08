@@ -65,7 +65,16 @@ func (l *Loop) perform(ctx context.Context, run Run, snap Snapshot, a Action) (S
 	if ctx.Err() != nil {
 		return snap, ctx.Err()
 	}
-	return l.runner.Commit(ctx, snap, core.Performed{EffectID: s.EffectID}, Facts{Outcome: &o, Window: windowAfter(s.Step, source, o)})
+	facts := Facts{Outcome: &o, Window: windowAfter(s.Step, source, o)}
+	if o.Focus != nil {
+		current, err := l.journal.Context(ctx, snap)
+		if err != nil {
+			return snap, err
+		}
+		current.Focus = o.Focus.Sources
+		facts.ContextState = &current
+	}
+	return l.runner.Commit(ctx, snap, core.Performed{EffectID: s.EffectID}, facts)
 }
 
 // outcome performs a, accepted at the step of snap under the window source
@@ -83,6 +92,9 @@ func (l *Loop) outcome(ctx context.Context, run Run, snap Snapshot, a Action, so
 	args, err := a.arguments(s.Decision.Payload)
 	if err != nil {
 		return failed(err), nil
+	}
+	if a.Name == ActionFocus {
+		return l.focus(ctx, snap, args)
 	}
 	if a.Name == ActionRetrieve {
 		return l.retrieve(ctx, args)

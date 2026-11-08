@@ -13,11 +13,13 @@ import (
 // CommandFile, the whole decision purpose as PurposeFile, and the preview as
 // PreviewFile. A step published before PurposeFile existed lacks it.
 const (
-	StepsDir    = "steps"
-	MetaFile    = "meta"
-	CommandFile = "command"
-	PurposeFile = "purpose"
-	PreviewFile = "preview"
+	StepsDir     = "steps"
+	MetaFile     = "meta"
+	CommandFile  = "command"
+	PurposeFile  = "purpose"
+	PreviewFile  = "preview"
+	EvidenceFile = "evidence.json"
+	EvidenceDir  = "evidence"
 )
 
 const unavailable = "unavailable"
@@ -77,3 +79,27 @@ func decodeOutput(meta []byte, step int) (string, int64, bool, error) {
 	}
 	return fields["output"], bytes, complete, nil
 }
+
+// EvidenceManifest makes the exact retrieval observation independently
+// navigable in the archive. Files contain the committed bytes, never rereads.
+type EvidenceManifest struct {
+	Seq          int64            `json:"seq"`
+	Query        RetrievalQuery   `json:"query"`
+	Sources      []EvidenceSource `json:"sources"`
+	Entries      []string         `json:"entries,omitempty"`
+	NextOffset   int64            `json:"next_offset"`
+	NextCursor   string           `json:"next_cursor,omitempty"`
+	More         bool             `json:"more"`
+	Incomplete   bool             `json:"incomplete,omitempty"`
+	SkippedCount int              `json:"skipped_count,omitempty"`
+	Skipped      []Skip           `json:"skipped,omitempty"`
+	Error        string           `json:"error,omitempty"`
+}
+
+type EvidenceSource struct {
+	SourceRange
+	Source int    `json:"source"`
+	File   string `json:"file"`
+}
+
+func EvidencePath(source int) string { return fmt.Sprintf("%s/%04d", EvidenceDir, source) }

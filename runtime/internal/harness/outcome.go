@@ -28,6 +28,7 @@ type Outcome struct {
 	Status    OutcomeStatus
 	Detail    string             `json:",omitempty"`
 	Retrieval *archive.Retrieval `json:",omitempty"`
+	Focus     *FocusSelection    `json:",omitempty"`
 	Handover  *Handover          `json:",omitempty"`
 }
 
@@ -48,6 +49,11 @@ func failed(err error) Outcome {
 func (o Outcome) Validate() error {
 	shape := fmt.Sprintf("%s outcome with detail %v, retrieval %v, handover %v", o.Status, o.Detail != "", o.Retrieval != nil, o.Handover != nil)
 	switch {
+	case o.Focus != nil:
+		if o.Status != OutcomeDone || o.Detail != "" || o.Retrieval != nil || o.Handover != nil {
+			return errors.New("harness: invalid focus outcome")
+		}
+		return nil
 	case len(o.Detail) > maxDetailBytes:
 		return fmt.Errorf("harness: outcome detail of %d bytes exceeds %d", len(o.Detail), maxDetailBytes)
 	case o.Status == OutcomeDone && o.Detail == "" && (o.Retrieval != nil) != (o.Handover != nil) && (o.Retrieval == nil || o.Retrieval.Error == ""):
@@ -79,6 +85,8 @@ func (r StepRecord) presented() Observation {
 	switch {
 	case o.Detail != "":
 		p.Preview = actionFailure + o.Detail
+	case o.Focus != nil:
+		p.Preview = fmt.Sprintf("Focus replaced with %d frozen source ranges.", len(o.Focus.Sources))
 	case o.Retrieval != nil:
 		refs := *o.Retrieval
 		refs.Evidence = nil

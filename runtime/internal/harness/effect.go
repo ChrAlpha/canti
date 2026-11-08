@@ -160,7 +160,9 @@ func checkPerformed(t Transition, a Action, w Window) error {
 	case a.Invalid != "":
 		ok = o.Status == OutcomeFailed && o.Detail == problemText(a.Invalid) && o.Retrieval == nil
 	case a.Name == ActionRetrieve:
-		ok = o.Status != OutcomeRefused && o.Handover == nil
+		ok = o.Status != OutcomeRefused && o.Handover == nil && o.Focus == nil
+	case a.Name == ActionFocus:
+		ok = o.Status != OutcomeRefused && o.Retrieval == nil && o.Handover == nil && ((o.Status == OutcomeDone) == (o.Focus != nil)) && ((o.Status == OutcomeDone) == (t.Facts.ContextState != nil))
 	case a.Name.handover():
 		ok = o.Status != OutcomeRefused && o.Retrieval == nil
 		if ok && o.Status == OutcomeDone {
