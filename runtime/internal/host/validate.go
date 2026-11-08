@@ -11,6 +11,12 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
 
+// CanonicalState resolves the effective directory used for admission, host
+// identity and every state write, including when its leaf does not yet exist.
+func CanonicalState(workspace, state string) (string, error) {
+	return docker.ResolveState(workspace, state)
+}
+
 // Validate checks a prospective submission without creating state or durable
 // facts. Submit remains the authoritative admission point under the host lock.
 func Validate(ctx context.Context, state string, sub Submission) error {

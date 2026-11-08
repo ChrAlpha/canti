@@ -496,6 +496,10 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 // Recovery checks the same physical mapping even when admission is closed: it
 // must remain possible to reconcile old work in a stopped/quarantined environment.
 func observedEnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, requested string) (string, preparedContainer, error) {
+	state, err := ResolveState(workspace, state)
+	if err != nil {
+		return "", preparedContainer{}, err
+	}
 	x := environmentEngine(a.Endpoint)
 	if err := x.checkAttachment(ctx, a); err != nil {
 		return "", preparedContainer{}, err

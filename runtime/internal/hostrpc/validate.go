@@ -21,12 +21,19 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 	if err != nil {
 		return nil, host.SpecError{Err: err}
 	}
+	if h != nil && spec.Config.Workspace != h.Workspace() {
+		return nil, h.CheckLocation(spec.Config.Workspace, v.State)
+	}
+	state, err := host.CanonicalState(spec.Config.Workspace, v.State)
+	if err != nil {
+		return nil, err
+	}
 	if h != nil {
-		if err := h.CheckLocation(spec.Config.Workspace, v.State); err != nil {
+		if err := h.CheckLocation(spec.Config.Workspace, state); err != nil {
 			return nil, err
 		}
 	}
-	if err := host.ValidateLayout(spec.Config.Workspace, v.State, v.Submission.SessionID); err != nil {
+	if err := host.ValidateLayout(spec.Config.Workspace, state, v.Submission.SessionID); err != nil {
 		return nil, err
 	}
 	if spec.Config.ContextVersion == 0 {
@@ -43,7 +50,7 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 		if h != nil {
 			constraints, err = h.InheritedConstraints(ctx, v.Submission.SessionID)
 		} else {
-			constraints, err = readInherited(ctx, v.State, v.Submission.SessionID)
+			constraints, err = readInherited(ctx, state, v.Submission.SessionID)
 		}
 		if err != nil {
 			return nil, err
@@ -51,14 +58,14 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 	}
 	b := BindingFrom(&v.Binding)
 	sub := host.Submission{SessionID: v.Submission.SessionID, Goal: v.Submission.Goal, Constraints: constraints, Spec: spec, Binding: b}
-	if err := host.Validate(ctx, v.State, sub); err != nil {
+	if err := host.Validate(ctx, state, sub); err != nil {
 		return nil, err
 	}
-	if err := validateCredential(ctx, v.State, spec.Config, b, h); err != nil {
+	if err := validateCredential(ctx, state, spec.Config, b, h); err != nil {
 		return nil, err
 	}
 	l := harness.DefaultPromptLimits()
-	return &Validated{State: v.State, Spec: SpecOf(spec), Constraints: constraints, GoalLimit: l.Goal, ConstraintsLimit: l.Constraints}, nil
+	return &Validated{State: state, Spec: SpecOf(spec), Constraints: constraints, GoalLimit: l.Goal, ConstraintsLimit: l.Constraints}, nil
 }
 
 func readInherited(ctx context.Context, state, session string) (string, error) {

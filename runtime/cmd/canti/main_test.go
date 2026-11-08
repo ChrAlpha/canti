@@ -1149,14 +1149,56 @@ func TestAResumedRunCallsTheProviderItStores(t *testing.T) {
 func TestRunExecutionModeAndProvisioningFlagsFailBeforeStateCreation(t *testing.T) {
 	for _, mode := range [][]string{nil, {"-ephemeral", "-environment", "/missing"}, {"-environment", "/missing", "-image", "alpine"}, {"-environment", "/missing"}, {"-ephemeral", "-environment-workdir", "/workspace"}} {
 		root := t.TempDir()
+		workspace := filepath.Join(root, "workspace")
+		if err := os.Mkdir(workspace, 0700); err != nil {
+			t.Fatal(err)
+		}
 		state := filepath.Join(root, "state")
-		args := append([]string{"run", "-workspace", root, "-state", state, "-goal", "goal", "-api", "openai-responses", "-model", "fixture"}, mode...)
+		args := append([]string{"run", "-workspace", workspace, "-state", state, "-goal", "goal", "-api", "openai-responses", "-model", "fixture"}, mode...)
 		r := runCLI(t, []string{"OPENAI_API_KEY=fixture"}, args...)
 		if r.code != exitUsage {
 			t.Fatalf("mode %v = %d: %s", mode, r.code, r.stderr)
 		}
 		if _, err := os.Stat(state); !os.IsNotExist(err) {
 			t.Fatalf("mode %v created state: %v", mode, err)
+		}
+	}
+}
+
+func TestCLIUsesCanonicalProspectiveState(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	parent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "safe-state-alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(alias, "missing", "state")
+	got := f.cli(nil, "run", "-state", state, "-goal", "safe outside State")
+	if got.code != exitOK {
+		t.Fatalf("safe State alias: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "missing", "state", "canti.db")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.status("-state", state); got.Run.ID == "" {
+		t.Fatal("alias did not reach the canonical journal")
+	}
+	for _, kind := range []string{"dangling", "loop"} {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "link")
+		target := link
+		if kind == "dangling" {
+			target = filepath.Join(dir, "absent")
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got := f.cli(nil, "run", "-state", filepath.Join(link, "missing", "state"), "-goal", "reject unresolved ancestor")
+		if got.code != exitError {
+			t.Fatalf("unresolved State ancestor accepted: %+v", got)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "absent")); !os.IsNotExist(err) {
+			t.Fatalf("unresolved ancestor was recreated: %v", err)
 		}
 	}
 }

@@ -219,8 +219,15 @@ func (a *app) locate(workspace, state string) error {
 	} else {
 		state, err = filepath.Abs(state)
 	}
+	if err != nil {
+		return err
+	}
+	state, err = host.CanonicalState(ws, state)
+	if err != nil {
+		return err
+	}
 	a.workspace, a.state = ws, state
-	return err
+	return nil
 }
 
 func runFlag(fs *flag.FlagSet, a *app) {

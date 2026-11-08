@@ -100,6 +100,7 @@ func (c *Controller) Setup(ctx, shutdown context.Context) error {
 		return err
 	}
 	c.cfg.Spec = v.Spec
+	c.cfg.State, c.runtime.state = v.State, v.State
 	c.GoalLimit = v.GoalLimit
 	_, err = c.runtime.connect(ctx)
 	if c.Owned() {

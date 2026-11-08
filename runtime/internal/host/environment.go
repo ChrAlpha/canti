@@ -37,6 +37,10 @@ func CheckExecutionMode(c RunConfig) error {
 // ResolveExecution pins a new run's environment before admission. Existing runs
 // reconstruct from stored facts instead; input replay must precede this call.
 func ResolveExecution(ctx context.Context, c RunConfig, state string) (RunConfig, error) {
+	state, err := CanonicalState(c.Workspace, state)
+	if err != nil {
+		return c, err
+	}
 	if err := CheckExecutionMode(c); err != nil {
 		return c, err
 	}

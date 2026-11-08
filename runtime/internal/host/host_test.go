@@ -1867,3 +1867,42 @@ func TestStopOwnsProgressThroughDriveHandoff(t *testing.T) {
 		})
 	}
 }
+
+func TestHostCanonicalStateSurvivesAliasRetargeting(t *testing.T) {
+	root := t.TempDir()
+	workspace, state, other := filepath.Join(root, "workspace"), filepath.Join(root, "state"), filepath.Join(root, "other")
+	for _, dir := range []string{workspace, state, other} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "state-alias")
+	if err := os.Symlink(state, alias); err != nil {
+		t.Fatal(err)
+	}
+	h, err := Open(t.Context(), Options{Workspace: workspace, State: alias}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Shutdown(context.Background())
+	if h.opts.State != state {
+		t.Fatalf("host retained alias %q,want %q", h.opts.State, state)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := h.Submit(t.Context(), Submission{Goal: "canonical state", Spec: testSpec(h), Binding: binding("http://127.0.0.1:1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run, err := h.store.LastRun(t.Context()); err != nil || run.ID != ack.Run.ID {
+		t.Fatalf("canonical journal lost run: %s,%v", run.ID, err)
+	}
+	entries, err := os.ReadDir(other)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("host wrote through retargeted alias: %v,%v", entries, err)
+	}
+}

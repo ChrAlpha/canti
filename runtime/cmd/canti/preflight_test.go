@@ -17,6 +17,8 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	"github.com/ChrAlpha/canti/runtime/internal/host"
+	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
@@ -162,7 +164,14 @@ func TestPersistentPreflightChecksActualMountsBeforeCreatingState(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoint := filepath.Join(t.TempDir(), "d.sock")
+	// Only the transport socket needs a short path; state, mounts and helper
+	// fixtures still exercise the caller's original (possibly long) TMPDIR.
+	socketDir, err := os.MkdirTemp("/tmp", "canti-preflight-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	endpoint := filepath.Join(socketDir, "d.sock")
 	listener, err := net.Listen("unix", endpoint)
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +226,44 @@ func TestPersistentPreflightChecksActualMountsBeforeCreatingState(t *testing.T) 
 		t.Fatalf("valid persistent preflight: %+v", response.Error)
 	}
 	assertNoState(t, v.State)
+
+	for _, part := range []string{"public", "spool"} {
+		for _, suffix := range []string{"state", "missing/nested/state"} {
+			alias := filepath.Join(t.TempDir(), "environment-alias")
+			if err := os.Symlink(filepath.Join(c.Environment, part), alias); err != nil {
+				t.Fatal(err)
+			}
+			input := v
+			input.State = filepath.Join(alias, suffix)
+			result := callPreflight(t, preflightRequest(t, input))
+			if result.Error == nil || !strings.Contains(result.Error.Message, "exposes run state") || result.Validated != nil {
+				t.Fatalf("preflight admitted State alias into %s: %+v", part, result)
+			}
+			spec, err := hostserver.SpecFrom(input.Submission.Spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := host.ResolveExecution(t.Context(), spec.Config, input.State); err == nil || !strings.Contains(err.Error(), "exposes run state") {
+				t.Fatalf("direct host admitted State alias: %v", err)
+			}
+			cli := runCLI(t, []string{"OPENAI_API_KEY=fixture"}, "run", "-workspace", c.Workspace, "-state", input.State, "-environment", c.Environment, "-api", "openai-responses", "-model", "fixture", "-model-url", "http://127.0.0.1:1", "-max-attempts", "1", "-goal", "reject exposed state")
+			if cli.code != exitUsage || !strings.Contains(cli.stderr, "exposes run state") {
+				t.Fatalf("CLI admitted State alias: %+v", cli)
+			}
+			assertNoState(t, filepath.Join(c.Environment, part, strings.Split(suffix, "/")[0]))
+		}
+	}
+	outside := filepath.Join(t.TempDir(), "safe-alias")
+	if err := os.Symlink(filepath.Dir(v.State), outside); err != nil {
+		t.Fatal(err)
+	}
+	aliased := v
+	aliased.State = filepath.Join(outside, "missing", "state")
+	normalized := callPreflight(t, preflightRequest(t, aliased))
+	if normalized.Error != nil || normalized.Validated == nil || normalized.Validated.State != filepath.Join(filepath.Dir(v.State), "missing", "state") {
+		t.Fatalf("safe alias was not normalized: %+v", normalized)
+	}
+	assertNoState(t, filepath.Join(filepath.Dir(v.State), "missing"))
 	alias := filepath.Join(t.TempDir(), "state-alias")
 	if err := os.Symlink(filepath.Dir(v.State), alias); err != nil {
 		t.Fatal(err)

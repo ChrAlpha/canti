@@ -488,3 +488,49 @@ func TestPullDeadlineTerminatesItsOwnedProcessGroup(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestResolveStateReturnsCanonicalProspectiveDirectory(t *testing.T) {
+	root := t.TempDir()
+	workspace, parent := filepath.Join(root, "workspace"), filepath.Join(root, "outside")
+	for _, dir := range []string{workspace, parent} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "safe:alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "missing", "missing/nested/state"} {
+		got, err := ResolveState(workspace, filepath.Join(alias, suffix))
+		if err != nil || got != filepath.Join(parent, suffix) {
+			t.Fatalf("resolved State=%q,%v,want %s", got, err, filepath.Join(parent, suffix))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(parent, "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("resolution created missing suffix: %v", err)
+	}
+	unavailable := filepath.Join(parent, "restricted")
+	if got, err := resolveState(workspace, unavailable, func(path string) (os.FileInfo, error) {
+		if path == unavailable {
+			return nil, os.ErrPermission
+		}
+		return os.Lstat(path)
+	}); !errors.Is(err, os.ErrPermission) || got != "" {
+		t.Fatalf("inaccessible ancestor fell back to %q: %v", got, err)
+	}
+
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "absent"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(root, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(dangling, "state"), filepath.Join(loop, "state")} {
+		if got, err := ResolveState(workspace, path); err == nil || got != "" {
+			t.Fatalf("unresolved ancestor fell back to %q: %v", got, err)
+		}
+	}
+}
