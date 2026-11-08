@@ -1,4 +1,4 @@
-# Provider-driven context recovery research
+# Provider-driven, reader-controlled context recovery
 
 Research date: 2026-11-08. This document separates observed implementation facts
 from implications for canti. It records source inspection and offline probes,
@@ -6,18 +6,28 @@ not live provider or recovery validation.
 
 ## Finding
 
-The proposed policy is feasible: use provider-reported usage exclusively,
-send requests without predicting token count or comparing it with a model
-window, and initiate automatic recovery only on a confirmed context-limit
-signal. Canti already meets the no-estimation accounting principle. The
-substantial change is replacing its proactive **byte-capacity** handover
-policy with a durable request-rebuild path.
+The recommended direction is a committed context boundary followed by
+reader-controlled access to historical evidence. An anchor need not contain
+a summary, and opening a new context need not depend on the predecessor
+producing anything. This structurally removes the circular dependency in
+"the context is already too large, so ask that context to summarize itself".
 
-Two limits qualify the result. An already oversized request cannot reliably
-produce its own handover merely by appending an instruction. Also, some
-provider responses do not distinguish output-limit exhaustion from context
-exhaustion; those cannot truthfully be called confirmed overflow. The
-recommended recovery design below is a proposal, not implemented behavior.
+Use provider-reported usage exclusively and initiate automatic context resets
+only on a confirmed context-limit signal. Canti already avoids token
+estimation; its current handover policy is proactive **byte-capacity**
+management. The meaningful refactor separates durable history, the active
+context boundary, and the evidence the next request selects.
+
+The user's follow-up is a hypothesis to evaluate, not a decision that all
+notes or summaries must be prohibited. The supported claim is that summary
+generation should not be mandatory for continuity. Whether fresh readers
+retrieve enough relevant evidence at acceptable cost remains an empirical
+question. Some providers also return ambiguous generation-limit signals;
+the strict overflow-confirmation limitation below remains unchanged.
+
+This report replaces its earlier mandatory-summary recovery proposal with
+an anchor-and-pull design. It is research, not an implemented or approved
+implementation specification.
 
 Baseline: canti `a7e40fa244dae1d4ded178dabb559749f2659aeb`, context version 16,
 core semantics 5, SQLite schema 3, host RPC protocol 5. Local source links
@@ -135,14 +145,20 @@ stream. These are distinct from the single context handoff allowance.
 [retryable failures](https://github.com/bubbuild/republic/blob/fdaddc5a42eafb6cf913dc9d2283d6fc60bf78a3/src/republic/providers/base.py#L276-L305),
 [Bub fallback](https://github.com/bubbuild/bub/blob/7b95690550544e95588d19920864fbcb71826d59/src/bub/builtin/model.py#L137-L180)
 
-**Inference for canti:** Bub demonstrates a small reactive boundary-reset
-mechanism. It does not establish safe replacement of canti's model-written
-handover with automatic summarization after overflow. A canti design still
-needs explicit recovery input, trustworthy error classification, unknown
-usage handling, durable request/projection transitions, and a finite
-no-progress policy. Removing a proactive threshold alone cannot guarantee
-that the working set after retrieval fits, or that a summary request fits
-after the original request was rejected.
+**Inference for canti:** Bub's absence of an automatic summary is the useful
+architectural property: changing the read boundary does not require another
+call using the old context. Its model-facing `tape.search` searches raw tape
+entries, with kind/date/limit filters. Its default projection nevertheless
+replays subsequent tool calls and results, so retrieved evidence can still
+accumulate after an anchor. Bub establishes the boundary-reset mechanism,
+not that every fresh reader recovers the right task state or avoids thrashing.
+[Search tool](https://github.com/bubbuild/bub/blob/7b95690550544e95588d19920864fbcb71826d59/src/bub/builtin/tools.py#L450-L464),
+[default projection](https://github.com/bubbuild/bub/blob/7b95690550544e95588d19920864fbcb71826d59/src/bub/core/context.py#L15-L37).
+
+Bub also documents composing tools through Python in code mode. This supports
+programmatic filtering as an interface option; it is not a guarantee that
+the application selects useful history automatically.
+[Code mode](https://github.com/bubbuild/bub/blob/7b95690550544e95588d19920864fbcb71826d59/website/src/content/docs/docs/sdk/tools.mdx#L228-L257).
 
 ## Canti: current contracts and gaps
 
@@ -153,7 +169,7 @@ after the original request was rejected.
 | Admission | `ContextFit` reserves bytes for a maximum handover, another step, retrieval evidence and repair. | This predicts local rendering capacity, not model tokens; the reserve policy needs redesign. |
 | HTTP failure | Shared `StatusError` makes most 4xx responses unrecoverable, including context-limit 400s. | The run stops instead of handing over. |
 | Successful truncation | Anthropic context-window exhaustion is treated as an ordinary incomplete response. | Core retries the same frozen bytes until attempts run out. |
-| Handover | A model-written proposal is accepted only when requested; `Performed` commits the result, next window and progress atomically. | Reuse this commit contract, while redesigning how an overflow reaches it. |
+| Handover | A model-written proposal is accepted only when requested; `Performed` commits the result, next window and progress atomically. | Reuse transaction/replay guarantees, while separating a boundary change from mandatory summary production. |
 
 Sources: [usage types](../runtime/internal/harness/model.go),
 [Anthropic parsing](../runtime/internal/harness/anthropic/anthropic.go),
@@ -181,6 +197,37 @@ Sources: [model response](../runtime/internal/harness/model.go),
 [`send`](../runtime/internal/harness/loop.go),
 [per-event allowed facts](../runtime/internal/harness/runner.go),
 [SQLite `delta`](../runtime/internal/harness/sqlite/store.go).
+
+### History is available, but reader control is incomplete
+
+- `PublishHistory` exposes the goal, constraints, session navigation, completed
+  commands, purposes, output metadata/previews and retained artifact paths.
+  The archive already supports bounded `read`, `list`, `search`, and `discover`
+  operations with continuations. These are a useful basis for fresh readers.
+- The published retrieval preview removes `Retrieval.Evidence`, retaining its
+  source references. The exact bytes observed earlier live in the journal;
+  carry resolves those bytes by transition/step/source and hash. A fresh
+  reader needs an equivalent bounded *as-observed* access path independent
+  of carry. Rereading a changed or removed import is not historical recall.
+- `discover` searches command and output/preview, skips retrieval/handover
+  echoes, and does not search the published `purpose` file or earlier user
+  goals. It is candidate discovery, not a complete task-history query API.
+  Explicit source lookup and task/session navigation must complement it.
+- Every retrieval's evidence is rendered again in each later request of its
+  active window. A per-read 8 KiB maximum does not prevent aggregate growth.
+  Dropping the mandatory summary without changing this behavior leaves the
+  read/refill/reset cycle possible.
+
+Sources: [history publication](../runtime/internal/harness/history.go),
+[retrieval preview](../runtime/internal/harness/outcome.go),
+[frozen-evidence resolution](../runtime/internal/harness/carry.go),
+[archive operations](../runtime/internal/archive/archive.go),
+[discovery fields](../runtime/internal/archive/discover.go),
+[evidence rendering](../runtime/internal/harness/prompt.go).
+`TestCarriedEvidenceOutlivesItsSource` verifies that committed bytes survive
+removal of the original source; the existing carry mechanism provides this
+property, not a general model-facing historical-snapshot reader.
+[Carry tests](../runtime/internal/harness/carry_test.go).
 
 ## Provider signals: what can be confirmed
 
@@ -234,16 +281,17 @@ configured response to output truncation; it is not evidence of overflow.
    Recommended missing-usage policy: when a finite token budget is configured,
    stop before another call if required usage is unavailable or invalid,
    recording an accounting-unavailable cause rather than falsely claiming
-   budget exhaustion. With no token budget, continuation may use the existing
-   finite time/attempt bounds while keeping usage visibly incomplete. This
-   policy still cannot retroactively bound the cost of an unreported call.
+   budget exhaustion. With no token budget, continuation uses finite per-step
+   attempt limits and any configured run budgets while keeping usage visibly
+   incomplete. Unlimited wall-time/step settings give no global termination
+   bound. This policy cannot retroactively bound the cost of an unreported call.
 3. Remove proactive `WindowSteps`, `WindowBytes`, and `used >= workCapacity`
    handover triggers from this policy. Remove token-count preflight, tokenizer,
    characters-per-token conversions, and model-window tables if introduced
    elsewhere during implementation. Current production Go sources contain
    no estimator/tokenizer matches.
 4. Retain explicit byte limits for memory, request transport, output previews,
-   archive reads and handover text. Rework `PromptLimits.Total`, `ContextFit`,
+   archive reads and optional notes. Rework `PromptLimits.Total`, `ContextFit`,
    session selection and carry admission so the old 128/256 KiB total prompt
    caps and separately computed reserves
    do not silently preserve the old early-handover policy. A local hard-limit
@@ -260,73 +308,128 @@ Sources: [session selection](../runtime/internal/harness/session_context.go),
 [prompt limits](../runtime/internal/harness/prompt.go),
 [host admission](../runtime/internal/host/config.go).
 
-### Durable anchor and handover
+### A boundary change that needs no predecessor inference
 
-Treat an anchor as a committed boundary and recovery provenance, distinct
-from a model-written summary. The recommended flow is:
+Treat an anchor as a committed boundary with provenance. It is effective
+when committed; it is not pending approval by a later generated handover.
+The recommended flow is:
 
 ```mermaid
 flowchart TD
     A[Freeze and commit normal request] --> B[Send exactly those bytes]
     B --> C{Confirmed context overflow?}
     C -->|No| D[Normal response or failure handling]
-    C -->|Yes| E[Commit rejection, reported usage and pending anchor]
-    E --> F[Freeze a bounded recovery request]
-    F --> G[Recover evidence and propose handover]
-    G --> H[Commit handover, new window and progress atomically]
+    C -->|Yes| E[Atomically commit rejection, reported usage and new anchor]
+    E --> F[Freeze fresh task and runtime orientation]
+    F --> G[Reader queries original history for the next task action]
+    G --> H[Read selected evidence or execute justified work]
     H --> A
 ```
 
-**Commit point 1:** atomically record the rejected request's identity
-`(run, step, attempt, revision)`, sanitized provider signal, raw response when
-available, usage availability, old window boundary, archive references and
-pending recovery state. The pending anchor marks where recovery started; it
-does not claim a successful summary or erase old records. Restart after this
-commit reconstructs recovery instead of resending known-rejected bytes.
-If the process dies before this fact commits, the provider result is unknown
-and the existing lost-attempt contract still applies.
+**Atomic reset:** record the rejected request identity `(run, step, attempt,
+revision)`, sanitized provider signal, raw response and reported usage when
+available, the previous context identifier, history's committed high-water
+mark, and the new anchor in one transition. It closes this context projection,
+not the run. No job is invented or marked complete. The failed step remains
+unfinished and its attempt is consumed. Restart derives the next request from
+the committed anchor, never from a process-local flag. Frozen old bytes remain
+immutable. A crash before the rejection commits still has an unknown provider
+outcome under the existing lost-attempt contract.
 
-**Recovery request:** retain the full authoritative goal and constraints,
-the required protocol and environment restrictions, committed progress and
-the latest execution result or its precise reference. Add the previous
-handover when usable and a bounded archive manifest of the interrupted
-window. Clearly label selected and omitted evidence. This is a deliberately
-different projection, with its own frozen bytes and provenance, rather than
-the rejected full prompt plus another instruction.
+**Fresh orientation:** render the exact current goal and effective constraints,
+protocol/environment restrictions, run/session identifiers, anchor and history
+locators, and the actual execution position/result status with source handles.
+This is deterministic runtime state, not a generated account of what matters
+in the old conversation. Progress here means committed step/effect position;
+claims that a feature is finished or that a particular subtask comes next
+remain assertions to verify on demand. A goal such as "continue the previous
+task" requires resolving its referent through session records before task
+execution, rather than inventing an expanded goal at the reset boundary.
+In the normal model-call phase the preceding effect
+has already completed; a pending or unknown effect must instead follow core's
+existing inspect/resolve path. No reset may authorize its re-execution.
 
-Optional historical blocks may be reduced deterministically, by whole
-records and byte-bounded pages, after a further confirmed overflow. This is
-reactive input reduction, not token prediction. Record each selection and
-revision. If the irreducible authoritative input itself overflows, stop with
-that explicit cause; never silently shorten the user's goal or constraints.
-Large-history summarization can use bounded retrieval and multiple requests,
-but every call and every omitted range must remain visible in the journal.
-
-Allow recovery to use bounded read-only retrieval before proposing the
-handover, under a finite recovery budget. The current gate refuses retrieval
-whenever `Window.Requested` is true and counts unsuccessful handovers; it
-must distinguish evidence recovery from a rejected handover proposal. Bind
-the allowed action and recovery contract at acceptance as today. External
-effects cannot run while the recovery projection is incomplete. If the model
-returns a blocker, ordinary return semantics still apply: return is not
-proof of successful handover.
-[Current action gate](../runtime/internal/harness/action.go),
+The first model response can query history or continue work already justified
+by the supplied facts. There is no obligation to reconstruct the previous
+window or to generate a handover before acting. Current `Window.Requested`
+blocks retrieval and is therefore unsuitable as the new anchor mechanism.
+Current `Window.Validate` also requires a nonempty summary and a proposing
+`SourceStep`. An error-driven boundary at the same unfinished step needs
+separate anchor/epoch provenance, not a fabricated completed handover step.
+[Action gate](../runtime/internal/harness/action.go),
 [window validation](../runtime/internal/harness/window.go),
-[context reconstruction](../runtime/internal/harness/loop_context.go).
+[core intents](../runtime/core/state.go).
 
-**Commit point 2:** reuse the local handover action's atomic `Performed`
-contract to persist accepted summary, explicitly selected carry references,
-new window and step progress; clear pending recovery in that same commit.
-Extract shared window-opening validation instead of synthesizing a model
-decision or an artificial completed tool step. Automatic anchor provenance
-must be distinct from `SourceStep`, which currently means the actual step
-that proposed a handover. Frozen old requests remain immutable.
+If even the fresh authoritative input exceeds the provider limit, record
+that cause and stop. Repeatedly opening empty epochs cannot make it fit.
+This design bypasses *old-history* summarization; it does not guarantee that
+every user input, tool schema or selected evidence set fits an unknown model
+window. Repeated reset/transport attempts at the same unfinished step consume
+its finite attempt allowance. Successful retrieval advances the step and
+resets that counter; repeated read/reset cycles therefore need configured
+run-wide bounds for a termination guarantee. Evaluation must set finite
+wall-time and call/step limits as well as observed-usage budgets. Semantic
+no-progress detection remains a separate, unproven policy question.
 
-Bound repeated overflow by durable per-recovery attempts and reductions, and
-bound repeated recovery without useful work. Resume must not reset either
-bound. Successful handover alone is not useful progress. A larger effective
-window may reduce premature handovers, but cannot prove elimination of
-retrieval-driven thrashing or make an oversized necessary working set fit.
+### Reader-directed retrieval and request selection
+
+Separate three things: evidence retained in storage, evidence fetched once,
+and evidence selected for the next model request. Availability must not imply
+automatic replay. A suitable target contract is:
+
+1. Expose original step/decision records, user inputs, retained output and
+   journal-frozen observations through stable, paged references. Include
+   observation time/sequence, source hash and completeness. Keep references
+   to earlier versions even when the live source changes. A task artifact
+   read now and an observation read then are different evidence.
+2. Give readers a cheap orientation index and exact lookup as well as search:
+   recent outcomes, purpose/command candidates, session inputs, neighboring
+   records and source ranges. Search is not proof of absence; retain scan
+   boundaries, incomplete flags and continuations. Keep retrieval echoes out
+   of default original-evidence discovery without making their source handles
+   inaccessible.
+3. Let code filter, sort, count or join records outside the model request,
+   returning selected source handles, exact passages or computed results.
+   Canti can reuse its existing execution environment with the read-only
+   archive plus concrete retrieval operations. This does not require a new
+   generic workflow engine or exposing SQLite to jobs. Arbitrary code still
+   follows its real execution/recovery contract; read-only mounts do not
+   automatically make all shell commands repeatable reads.
+4. Make evidence residency explicit. A fetched passage is included in the next
+   attempted request after its read completes. If that request overflows, the
+   model may never have seen it; fresh orientation must identify the committed
+   latest result handle so the reader can request it again. The reader can
+   retain/release selected handles
+   for later requests. Larger intermediate sets remain external. Commit the
+   selected reference set with the request/action that changes it. The exact
+   interaction needs design and evaluation, but automatic replay of every
+   fetched passage and blind age/LRU eviction are poor defaults: each can
+   discard the distinction between required and incidental evidence.
+5. A reset clears automatic old-transcript inclusion. Readers can reacquire
+   any retained source and optionally consult task notes written during work.
+   Notes are attributable claims, not substitutes for effect receipts or
+   current verification. No note needs to be produced at the boundary, and
+   no mandatory note is injected as the sole representation of history.
+
+For example, a fresh coding context can query the latest failed test, fetch
+its exact error and associated command, inspect the current relevant files,
+then search older decisions only if needed to explain the failure. A program
+can select the newest matching completed command and return its output handle
+without loading all preceding test output into the model. This is an example
+workflow, not an API that canti currently implements in full.
+
+Reader-controlled residency is not truncating the rejected prompt until it
+fits: the new request is constructed from task state and explicit evidence
+selection. It still selects less than the entire archive. Avoid conflating
+lossless storage, retrieval completeness, and unlimited model-visible context.
+
+There are real tradeoffs. An unrecorded rationale cannot be retrieved. A new
+model can decide to repeat a business action under a new effect ID even when
+the runtime correctly prevents replay of the old ID. A task needing many
+jointly relevant passages may still exhaust context. Programmatic aggregation
+helps decomposable tasks; it is not a proof for every joint reasoning task.
+Monitor repeated reference/query sets and time to verified task progress;
+do not equate arbitrary reads or successful resets with useful progress.
 
 ### Core and version implications
 
@@ -341,7 +444,7 @@ retry disposition belong in the implementation specification. It must not
 be a core capability named `Handover` or a fake protocol-decode failure.
 In particular, current `prepare` handles every `RequestRev > 0` by loading
 and decoding the preceding response as protocol-repair evidence. A rebuild
-disposition must select preparation from pending-recovery facts instead;
+disposition must select preparation from the committed anchor/reset facts instead;
 the overflow envelope is not a malformed agent decision.
 [Transition rules](../runtime/core/state.go),
 [events](../runtime/core/event.go),
@@ -351,9 +454,10 @@ the overflow envelope is not a malformed agent decision.
 | Boundary | Expected changes |
 | --- | --- |
 | `core/` | Rebuild-versus-resend semantics and transition/replay tests; next semantics version. |
-| `harness/{model,loop,loop_context,perform,window,context_budget,session_context,runner,store}.go` | Typed overflow, usage availability, recovery facts, request construction, action gate and atomic handover completion. |
+| `harness/{model,loop,loop_context,perform,window,context_budget,session_context,runner,store}.go` | Typed overflow, usage availability, anchor facts, reader-selected requests, removal of the mandatory summary gate, and atomic boundary changes. |
 | `harness/{anthropic,openai,provider}` | Provider-specific classification, raw result/provenance retention and explicit truncation policy. |
-| `harness/sqlite` | Allowed facts, recovery reads, delta accounting, idempotent commits and reopen/crash evidence; schema version if persisted layout changes. |
+| `harness/sqlite` | Allowed reset facts, recovery reads, historical frozen-evidence access, delta accounting, idempotent commits and reopen/crash evidence; schema version if persisted layout changes. |
+| `harness/history`, `archive`, request capture | Source-addressable published evidence, structural discovery/navigation and explicit active references; archive keeps no action-protocol knowledge. |
 | `host`, CLI, SDK and TUI | Revised configuration/admission, visible recovery and usage-unknown projection; RPC version and append-only samples if wire messages change. |
 | Existing documentation | Update architecture, development flags and acceptance evidence that describe the old reserve policy. |
 
@@ -370,13 +474,19 @@ state policy rather than silently interpreting old journals under new rules.
   missing usage, caching normalization, and partial content that resembles a
   valid command but must never execute.
 - Core and SQLite: rejection-to-rebuild transitions, attempt exhaustion,
-  duplicate commit acknowledgement, restart before/after both commit points,
+  duplicate commit acknowledgement, restart before/after reset and request freeze,
   stop/cancel races and no replay of an already accepted external effect.
-- Recovery: one huge result, oversized first goal, oversized summary/carry,
-  missing archive evidence, a second overflow during recovery, and a repeated
-  handover/read/refill cycle with no useful progress.
+- Recovery: one huge result, oversized first goal, an oversized selected
+  evidence set, missing/changed sources, a second overflow immediately after
+  reset, and a repeated read/refill/reset cycle without verified task progress.
+- Historical access: recover exact previously observed bytes after source
+  mutation/removal, retrieve an unanticipated old decision without a summary,
+  follow later corrections, and distinguish missing data from complete scans.
+- Independence: make all attempts using the old context fail, then require
+  the next send to use only fresh orientation. No summarizer call or required
+  predecessor note may occur before retrieval or resumed task work.
 - Long-run comparison: same task/model/provider, reported usage and latency,
-  handovers per useful step, retrieval bytes reread, task completion, and
+  resets per useful step, retrieval bytes reread, task completion, and
   incomplete usage coverage. More successful handovers alone is not success.
 - Concrete provider validation: record sanitized envelopes and run config for
   both APIs and each claimed compatible endpoint. Offline fixtures cannot
@@ -386,13 +496,17 @@ state policy rather than silently interpreting old journals under new rules.
 ## Verification of this research
 
 Only this research document changes. Bub source probes are described above.
-Canti checks run from the isolated research worktree:
+Canti baseline checks were run for the preceding research revision from this
+isolated worktree. Production code is unchanged, so the full checks remain
+applicable; the focused checks below additionally verify contracts examined
+by the reader-controlled follow-up:
 
 | Command | Observed result |
 | --- | --- |
 | `make check lint` | Passed; all three modules checked, lint reported zero issues with and without integration/live build tags. |
 | `go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...` | Passed; runtime CLI 370.642s, harness 197.748s, SQLite 83.369s, remaining tested packages passed. |
 | `git diff --cached --check` | Passed for the staged research document. |
+| `go test -count=1 ./runtime/internal/harness ./runtime/internal/archive -run '^(TestCarriedEvidenceOutlivesItsSource\|TestWindowHandoverRecoversAndDoesNotCarryOldEvidence\|TestDiscoveryOriginalSourcesAndEchoExclusion)$'` | Passed: harness 0.211s, archive 0.008s. These exercise existing frozen-evidence, window and discovery behavior, not the proposed reset implementation. |
 
 These checks establish the inspected baseline, not the proposed behavior.
 No live model request or Docker integration experiment was performed for this
@@ -413,3 +527,90 @@ Only record 1 was read in full, to preserve the earlier distinction between
 handover mechanics and retrieval-driven thrashing. Implementation conclusions
 above were checked against current primary sources. Graph rendering was
 skipped because matching Space enforcement could not be confirmed.
+
+The follow-up used Nowledge MCP query `canti bub handover retrieval context
+thrashing active working set`, mode `normal`, strict scope `default`, limit 3,
+no extra filters. Of the three results, rank 3,
+`58409a0e-a1ad-422d-ad3b-7c06a99ba5cd`, "canti context thrashing baseline and
+policy recommendation", score `0.8528921699164191`, was read in full. It is
+historical offline evidence about rereading joint working sets and the risks
+of blind eviction, not proof that the proposed reader policy succeeds.
+
+## Evidence for reader-driven context
+
+The hypothesis is supported at the architectural level: a fresh model can
+inspect history stored outside its context, choosing evidence for its current
+task. This removes an overflowing predecessor's ability to produce a summary
+from the critical path. It does not establish that unassisted retrieval is
+sufficient for reliable continuation, or that summaries have no value.
+
+Pin the original RLM evidence to **arXiv:2512.24601v1, 31 December 2025**. Its
+prompt becomes a REPL variable; the root model receives metadata, examines
+selected portions programmatically, and delegates semantic work on snippets.
+Its evaluations cover retrieval, aggregation, pairwise reasoning and repository
+question answering; CodeQA is multiple-choice repository understanding, not
+repository modification. The no-subcall ablation also handles inputs beyond
+the model window, separating external access from recursive delegation. The
+paper reports inefficient decisions and high-variance trajectories. This is
+controlled long-input evidence, not evidence for recovery after interrupted
+effects or multi-session coding. [RLM v1, sections 1–3 and 5](https://arxiv.org/html/2512.24601v1).
+
+The authors' implementation, inspected at
+**`c4cfe00266c890bdf83ca293ee2c1f67e1d3bffd`**, makes the distinction concrete:
+the initial request contains task/metadata, while versioned `context_N` and
+`history_N` remain accessible in the environment. However, root message
+history still grows. Each REPL block's displayed result is capped at 20,000
+characters; this neither limits aggregate history nor guarantees a bounded
+request. Optional compaction, disabled by default, sends the current root
+history plus a summarization instruction to the model. Copying that path
+would retain the disputed dependency. Local persistence stores Python objects
+and temporary context files; these paths establish reuse across calls, not a
+crash-recovery guarantee. [Prompt construction](https://github.com/alexzhang13/rlm/blob/c4cfe00266c890bdf83ca293ee2c1f67e1d3bffd/rlm/utils/prompts.py#L233-L246),
+[output cap](https://github.com/alexzhang13/rlm/blob/c4cfe00266c890bdf83ca293ee2c1f67e1d3bffd/rlm/utils/parsing.py#L25-L69),
+[compaction](https://github.com/alexzhang13/rlm/blob/c4cfe00266c890bdf83ca293ee2c1f67e1d3bffd/rlm/core/rlm.py#L602-L644),
+[environment history](https://github.com/alexzhang13/rlm/blob/c4cfe00266c890bdf83ca293ee2c1f67e1d3bffd/rlm/environments/local_repl.py#L399-L490).
+
+Anthropic's just-in-time guidance supports lightweight references, targeted
+queries, and progressive discovery through filesystem tools. It also warns
+that exploration costs latency and can consume context through dead ends or
+missed evidence. Claude Code combines upfront instructions with on-demand
+search, while the same article retains compaction and persistent notes for
+long tasks. This supports reader choice, not a universal archive-only policy.
+[Context engineering, September 2025](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents).
+
+Its long-running coding experiment is more relevant to continuation: fresh
+sessions read a feature list, progress file and Git history, then test the
+current application before choosing work. The preceding session leaves
+structured progress updates. This is qualitative engineering evidence for
+fresh readers plus prepared artifacts and verification, not a controlled
+comparison proving that raw-history retrieval replaces notes. It also reports
+premature completion and undocumented partial work despite compaction.
+[Long-running harnesses, November 2025](https://www.anthropic.com/research/effective-harnesses-for-long-running-agents).
+
+**Design inference:** cold-start requires a bounded orientation: the current
+objective and effective constraints, authoritative progress and unresolved
+effects, archive scope/schema and locators, and available read operations.
+Constraints that must govern the first action cannot depend on a lucky search.
+Workspace reads establish current contents; historical reads establish earlier
+observations and decisions. Neither recovers unrecorded intent, discarded
+observations or the predecessor's internal reasoning. Recompute what can be
+recomputed; optional notes can preserve otherwise unwritten rationale, but
+remain attributable, revisable claims rather than authoritative effect facts.
+
+Retrieval must produce a working set, not reconstruct the whole transcript.
+Use bounded matches, ranges and continuations; keep large intermediate results
+outside the request and return references or computed answers. A cap on each
+result still allows repeated reads to refill the window. The proposal therefore
+needs a separate, explicit policy for selecting the next request from fetched
+evidence, with enough task state to make the next reset useful.
+
+**Evaluation and falsification:** compare summary-plus-archive,
+archive-only, and optional-notes-plus-archive on identical tasks, models and
+budgets. Force cold starts when the old request cannot be sent; include a huge
+result, a changed task needing previously irrelevant evidence, an old binding
+constraint, and an interrupted effect. Measure completion, constraint retention,
+duplicate effects, time to useful work, repeated retrieval bytes, total tokens
+and latency across repeated runs. The hypothesis loses support if readers
+repeatedly reconstruct history, miss constraints, require old-context inference
+to restart, or complete fewer tasks at equal budgets. A successful reset alone
+does not establish useful continuation.
