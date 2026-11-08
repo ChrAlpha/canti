@@ -19,3 +19,7 @@ for module in runtime sdk/go apps/tui; do
 		(cd "$root/$module" && GOWORK=off go build -buildvcs=false ./...)
 	fi
 done
+
+if [ "${1:-}" = --smoke ]; then
+	"$root/scripts/smoke-executables.sh" "$output"
+fi

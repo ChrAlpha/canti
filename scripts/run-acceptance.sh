@@ -12,7 +12,7 @@ export CANTI_ACCEPTANCE_RUNTIME_FIXTURE="$tmp/canti-fixture"
 export CANTI_ACCEPTANCE_TUI="$tmp/canti-tui"
 cd "$root/apps/tui"
 if [ "${ACCEPTANCE_REPORT:-0}" = 1 ]; then
- GOWORK=off "$root/scripts/test-report.sh" go test -json -count=1 -race -tags "${ACCEPTANCE_TAGS:-acceptance}" "$@" ./acceptance
+ GOWORK=off python3 "$root/scripts/ci-shard.py" "$root/scripts/test-report.sh" go test -json -count=1 -race -tags "${ACCEPTANCE_TAGS:-acceptance}" "$@" ./acceptance
 else
  GOWORK=off go test -count=1 -race -tags "${ACCEPTANCE_TAGS:-acceptance}" "$@" ./acceptance
 fi

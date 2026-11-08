@@ -3,8 +3,8 @@
 ## Prerequisites
 
 - Go 1.26 or newer for the workspace and TUI; runtime and SDK declare their independent minimums in `go.mod`.
-- Make, Python 3 for dependency provenance verification, and a POSIX shell for the check targets; Bash and `jq` for the `ci-`
-  targets.
+- Make, Python 3 for dependency provenance, CI policy/sharding and commit checks,
+  and a POSIX shell; Bash and `jq` for the `ci-` targets.
 - A C compiler and a supported platform for Go's race detector.
 - A Unix-like OS: the CLI and executor use `flock` and process groups. Only
   Linux has been verified.
@@ -46,7 +46,7 @@ Cloning requires repository access while the repository is private.
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
 | `make ci-pty` | Serial native terminal and executable acceptance packages selected by `PTY_TESTS`; needs Docker |
 | `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
-| `make lint` | The cognitive complexity limit of `.golangci.yml`, through a pinned golangci-lint fetched by `go run` |
+| `make lint` | The cognitive complexity limit of `.golangci.yml`; defaults to pinned golangci-lint through `go run`, with `GOLANGCI_LINT` selecting an installed binary |
 | `make commits BASE=main` | Build and vet, without and with the tags, every commit after `BASE` in a temporary worktree; `scripts/check-commits.sh BASE` takes a base whose name contains `$` |
 | `go test -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...` | Fresh race-enabled unit test run |
 | `go test -count=1 -race -tags integration -run 'TestGate' -v ./runtime/cmd/canti` | The CLI gate tests with their `evidence` log lines; `make integration` runs every gate test |
@@ -398,31 +398,73 @@ Keep large outputs, credentials, databases, and local task state outside Git.
 
 ## CI and delivery
 
-The CI workflow runs on pushes to `main` and pull requests in parallel jobs.
-`check` runs `make fmt graph vet`, `make native-deps`, `make test-names`, `make lint`, `make ci-unit`,
-and a CLI version smoke test. `make lint` runs golangci-lint's `gocognit` at
-a cognitive complexity of 30 over the production code, without and with the
-`integration,live` tags; `.golangci.yml` lists the only exceptions, core's
-`State.Next` and `State.Validate`. For a pull
-request, `commits` runs `scripts/check-commits.sh` with the base branch,
-which builds and vets every commit after it in a temporary worktree.
-`integration`, `long`, and `pty` each pull
-`alpine:3.23`, run `make ci-integration`, `make ci-long`, or `make ci-pty`,
-and fail if any container labelled `canti.effect` is left; together they run
-each test of `make integration` once. The Makefile lists the tests of the last
-two jobs: `LONG_TESTS` are the slow acceptance tests, and `PTY_TESTS` are the
-tests that open a pseudo-terminal, which wait for terminal output within fixed
-deadlines; `ci-pty` runs `internal/terminal` and the app acceptance package
-sequentially with `-p 1`. App acceptance uses the `acceptance` build tag and
-receives binaries from root orchestration, including the runtime-owned fault
-fixture for SQLite locks and execution receipt checks. Default module tests
-build no sibling source, and the module graph check includes test dependencies.
-The `module-minimum` job builds/tests an isolated runtime+SDK copy on Go 1.25
-with automatic toolchain upgrades disabled. Add a new test of either kind to its list. `make test-names` fails
-when a listed name is not a test, when a test that opens a pseudo-terminal is
-not in `PTY_TESTS`, or when `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, or a
-document under `docs/` cites a test that does not exist; the dated evidence
-records, which cite the tests of their revision, are not checked.
+The CI workflow runs on pushes to `main` and pull requests. A new PR update
+cancels the previous run of that PR; main runs have unique concurrency groups
+so that every commit can finish, including runs still pending. `changes`
+validates the CI policy and selects the workload from both sides of the diff,
+including deleted and renamed paths. Only top-level Markdown and Markdown
+under `docs/` skip heavy jobs; runtime prompts, fixtures, scripts, workflows,
+and unknown paths run the full workload. Documentation changes still run the
+test-name/reference check, and every PR still builds and vets every commit.
+
+`quality` checks test names and documentation references; for code changes it
+also runs `make fmt graph vet` and `make build-smoke`, which checks all modules
+and exercises the freshly built executables without linking them twice.
+Independent `lint` uses the checksum-verified prebuilt golangci-lint at the same pinned version as
+the Makefile. It runs `gocognit` at a cognitive complexity of 30 over production
+code, without and with `integration,live` tags, plus the app’s
+`acceptance,integration` tests; `.golangci.yml` lists the
+exceptions. `commits` builds and vets every commit after the base branch in a
+temporary worktree, using the actual PR head rather than GitHub's synthetic
+merge commit. Commits with identical non-documentation trees reuse an earlier
+successful build/vet in that invocation; each distinct code tree is checked,
+including a broken intermediate commit later reverted. The native
+`actions/setup-go` cache uses all three module sum files, the native dependency
+module sums, and `go.work.sum`.
+The workspace jobs use Go 1.26. `native-deps` verifies patch provenance and
+runs the native dependency upstream race suites once, on its own cached runner.
+`module-minimum` builds/tests an isolated runtime+SDK copy on Go 1.25 with
+automatic toolchain upgrades disabled and no TUI source.
+Each workload has a stable `GOCACHE` path, which is part of the cache archive
+version. Quality and commits have their own scopes so an earlier lint publisher
+cannot exclude their compiler outputs; lint keeps the standard scope and PTY
+is separate from full integration.
+Cache snapshots are immutable until dependencies change; Go still checks current
+source and rebuilds affected packages on every run. Only Go modules and compiler
+outputs are cached, within GitHub's repository cache budget of 10 GB.
+
+`unit` and `long-shards` each run four independent shards of `make ci-unit` or
+`make ci-long`; `integration-shards` runs six shards of `make ci-integration`.
+Six-way integration is a measured trial: compare the actual critical path and
+runner cost, and retain the count only if the results justify it.
+`CI_SHARD_COUNT` and `CI_SHARD_INDEX` partition the names discovered by
+`go test -list .`; unit and integration use a stable hash. Long tests are placed
+longest first on the least loaded shard, using measured duration estimates in
+`scripts/ci-shard.py` and a 40-second estimate for newly discovered tests.
+Estimates affect placement only; every selected top-level test, fuzz seed, and
+example belongs to exactly one shard, and its subtests stay together. The
+partition supports any positive shard count, including empty shards.
+Without shard variables the targets run their complete original suites.
+Discovery uses the same race and build-tag flags and fails on a compilation
+error. Root-orchestrated executable acceptance uses the same shard runner and
+filters as its unit/integration/long lane; it is partitioned once across that lane,
+not repeated in full by each shard. Root builds the separate runtime and TUI
+binaries and the runtime-owned fault fixture; default module tests build no
+sibling source. The module graph check includes test dependencies.
+`pty` runs `internal/terminal` and app acceptance sequentially with `-p 1` on its
+own runner, explicitly disabling shard variables. Docker jobs pull
+`alpine:3.23` and fail on any leftover container labelled `canti.effect`.
+
+The stable `integration` and `long` jobs require all their shards. `check`
+always runs and requires all selected work to succeed, including native
+provenance, module minimums, and `commits` for PRs; failure, cancellation,
+a missing selection, or an unexpected skipped job
+fails the gate. Docs-only runs retain these stable result paths. The Makefile
+lists `LONG_TESTS` and `PTY_TESTS`; add each new slow or pseudo-terminal test to
+its corresponding list. `make test-names` rejects missing or overlapping names,
+unlisted tests that open a pseudo-terminal, and nonexistent test references in
+`README.md`, `AGENTS.md`, `CONTRIBUTING.md`, or `docs/`. Dated evidence records
+cite their own revision and are excluded from the reference check.
 
 Each `ci-` target pipes `go test -json` through `scripts/test-report.sh`,
 which prints each package result as it finishes, then the output of every

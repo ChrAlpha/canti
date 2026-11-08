@@ -1,4 +1,4 @@
-.PHONY: build check ci-integration ci-long ci-pty ci-unit commits fmt graph integration lint race smoke test test-names vet acceptance native-deps isolation
+.PHONY: build build-smoke check ci-integration ci-long ci-pty ci-unit commits fmt graph integration lint race smoke test test-names vet acceptance native-deps isolation ci-policy
 
 empty :=
 space := $(empty) $(empty)
@@ -43,10 +43,13 @@ PTY_TESTS = \
 LONG = $(call anchored,$(LONG_TESTS))
 PTY = $(call anchored,$(PTY_TESTS))
 MODULES = scripts/run-modules.sh
-CI_TEST = $(CURDIR)/scripts/test-report.sh go test -json -count=1 -race
+CI_TEST = python3 $(CURDIR)/scripts/ci-shard.py $(CURDIR)/scripts/test-report.sh go test -json -count=1 -race
 GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
-check: fmt graph vet test-names test acceptance native-deps
+check: fmt graph vet test-names test acceptance native-deps ci-policy
+
+ci-policy:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-ci-policy.py
 
 native-deps:
 	scripts/check-tui-deps.sh
@@ -62,6 +65,9 @@ isolation:
 
 build:
 	scripts/build-modules.sh
+
+build-smoke:
+	scripts/build-modules.sh --smoke
 
 smoke:
 	scripts/smoke-executables.sh
@@ -101,8 +107,11 @@ ci-integration:
 	ACCEPTANCE_REPORT=1 ACCEPTANCE_TAGS=acceptance,integration scripts/run-acceptance.sh -timeout=15m -skip '$(LONG)|$(PTY)'
 
 ci-long:
-	$(MODULES) $(CI_TEST) -timeout=30m -tags integration -run '$(LONG)' ./...
+	CI_SHARD_BALANCE=long $(MODULES) $(CI_TEST) -timeout=30m -tags integration -run '$(LONG)' ./...
+	CI_SHARD_BALANCE=long ACCEPTANCE_REPORT=1 ACCEPTANCE_TAGS=acceptance,integration scripts/run-acceptance.sh -timeout=30m -run '$(LONG)'
 
+ci-pty: export CI_SHARD_COUNT = 1
+ci-pty: export CI_SHARD_INDEX = 0
 ci-pty:
 	cd apps/tui && GOWORK=off $(CI_TEST) -p 1 -timeout=5m -run '$(PTY)' ./internal/terminal
 	ACCEPTANCE_REPORT=1 ACCEPTANCE_TAGS=acceptance,integration scripts/run-acceptance.sh -p 1 -timeout=5m -run '$(PTY)'

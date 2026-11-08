@@ -6,7 +6,8 @@ and harness APIs may change before a stable release.
 
 ## Local setup
 
-Use Go 1.26 or newer, Make, Python 3 (dependency provenance checks), and a POSIX shell. `make check` needs no
+Use Go 1.26 or newer, Make, Python 3 (dependency provenance and CI policy checks),
+and a POSIX shell. `make check` needs no
 credentials, model access, database server, container runtime, or Memoh
 checkout; `make integration` needs a Docker daemon.
 
@@ -17,7 +18,9 @@ make integration
 go run ./runtime/cmd/canti -version
 ```
 
-`make check` validates formatting, runs `go vet`, and runs the unit tests.
+`make check` validates formatting, module boundaries, test names, CI policy and
+native dependency provenance, runs `go vet`, and runs unit and offline executable
+acceptance tests.
 `make integration` adds the Docker-backed and long-history tests. See
 [AGENTS.md](AGENTS.md) for package ownership and agent contribution rules.
 
@@ -56,8 +59,11 @@ assistance in the PR and distinguish automated checks from human review.
 
 Use the bug template for reproducible defects and the feature template for a
 proposed boundary or acceptance property. Include a commit or version and remove
-private data from logs and examples. Public issue and PR prose can be in English
-or Chinese; keep repository guidance and templates in English.
+private data from logs and examples.
+
+Use English for all canti collaboration, including issues, pull requests,
+comments, reviews, documentation, user-facing agent updates, and communication
+between agents.
 
 Keep discussion respectful, focused on the work, and specific about evidence.
 For vulnerabilities, follow [SECURITY.md](SECURITY.md).
