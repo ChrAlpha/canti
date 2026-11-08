@@ -18,16 +18,16 @@ estimation; its current handover policy is proactive **byte-capacity**
 management. The meaningful refactor separates durable history, the active
 context boundary, and the evidence the next request selects.
 
-The user's follow-up is a hypothesis to evaluate, not a decision that all
-notes or summaries must be prohibited. The supported claim is that summary
-generation should not be mandatory for continuity. Whether fresh readers
-retrieve enough relevant evidence at acceptable cost remains an empirical
-question. Some providers also return ambiguous generation-limit signals;
-the strict overflow-confirmation limitation below remains unchanged.
+The supported claim is that summary generation should not be mandatory for
+continuity; this does not prohibit optional task notes. The user has now
+chosen to build the reader-driven design and verify it by using canti itself.
+Comparative evaluation is not a delivery gate. Some providers return ambiguous
+generation-limit signals; the strict overflow-confirmation limitation below
+remains unchanged.
 
 This report replaces its earlier mandatory-summary recovery proposal with
-an anchor-and-pull design. It is research, not an implemented or approved
-implementation specification.
+an anchor-and-pull design. The concrete contracts and build-then-dogfood
+acceptance are in the [implementation plan](provider-context-recovery-plan.md).
 
 Baseline: canti `a7e40fa244dae1d4ded178dabb559749f2659aeb`, context version 16,
 core semantics 5, SQLite schema 3, host RPC protocol 5. Local source links
@@ -278,13 +278,12 @@ configured response to output truncation; it is not evidence of overflow.
    the next request. Recovery calls consume the same usage and wall-time
    budgets. A hard prepaid total cannot be guaranteed from retrospective,
    occasionally missing usage alone.
-   Recommended missing-usage policy: when a finite token budget is configured,
-   stop before another call if required usage is unavailable or invalid,
-   recording an accounting-unavailable cause rather than falsely claiming
-   budget exhaustion. With no token budget, continuation uses finite per-step
-   attempt limits and any configured run budgets while keeping usage visibly
-   incomplete. Unlimited wall-time/step settings give no global termination
-   bound. This policy cannot retroactively bound the cost of an unreported call.
+   Bound reported usage while preserving unknown coverage for missing/lost
+   reports. Missing usage must not by itself block overflow recovery, since
+   a rejection commonly has no usage report. Invalid numeric reports remain
+   provider-contract failures. Apply configured time/step/attempt limits;
+   unlimited run settings give no global termination guarantee. A reported
+   usage budget cannot bound unreported charges.
 3. Remove proactive `WindowSteps`, `WindowBytes`, and `used >= workCapacity`
    handover triggers from this policy. Remove token-count preflight, tokenizer,
    characters-per-token conversions, and model-window tables if introduced
@@ -485,9 +484,9 @@ state policy rather than silently interpreting old journals under new rules.
 - Independence: make all attempts using the old context fail, then require
   the next send to use only fresh orientation. No summarizer call or required
   predecessor note may occur before retrieval or resumed task work.
-- Long-run comparison: same task/model/provider, reported usage and latency,
-  resets per useful step, retrieval bytes reread, task completion, and
-  incomplete usage coverage. More successful handovers alone is not success.
+- Self-validation: run the new executable on its own repository, recording
+  API/model/provider, reported usage, latency, reset count, reread volume,
+  externally verified task completion and incomplete usage coverage.
 - Concrete provider validation: record sanitized envelopes and run config for
   both APIs and each claimed compatible endpoint. Offline fixtures cannot
   establish how an endpoint signals actual overflow. Implementation would
@@ -604,13 +603,13 @@ result still allows repeated reads to refill the window. The proposal therefore
 needs a separate, explicit policy for selecting the next request from fetched
 evidence, with enough task state to make the next reset useful.
 
-**Evaluation and falsification:** compare summary-plus-archive,
-archive-only, and optional-notes-plus-archive on identical tasks, models and
-budgets. Force cold starts when the old request cannot be sent; include a huge
-result, a changed task needing previously irrelevant evidence, an old binding
-constraint, and an interrupted effect. Measure completion, constraint retention,
-duplicate effects, time to useful work, repeated retrieval bytes, total tokens
-and latency across repeated runs. The hypothesis loses support if readers
-repeatedly reconstruct history, miss constraints, require old-context inference
-to restart, or complete fewer tasks at equal budgets. A successful reset alone
-does not establish useful continuation.
+**Implementation and self-validation:** build the selected architecture, then
+use the new canti executable on its own source in an isolated worktree. Force
+a cold start when the old request cannot be sent; include frozen evidence,
+later corrections and process restart. Verify the delivered patch with held-out
+assertions and repository checks; inspect source provenance, duplicate effects,
+repeated reads and reported usage. Repeated reconstruction, missed constraints
+or a dependency on old-context inference are defects to investigate and fix.
+A successful reset alone does not establish useful continuation. The user
+explicitly removed comparative evaluation as a prerequisite; the implementation
+plan defines deterministic gates and the concrete dogfood task.
