@@ -22,6 +22,10 @@ import (
 const Protocol = 1
 const MetadataLimit = 16 << 10
 
+// lingerGrace bounds how long capture waits, once the foreground shell has
+// exited, for descendants that still hold its inherited output pipe.
+const lingerGrace = 100 * time.Millisecond
+
 // Config is supplied in the bound exec's arguments, never read from job files.
 // Workdir is entered by the command's shell, so it need not exist at launch.
 type Config struct {
@@ -114,18 +118,11 @@ func Run(c Config) (Record, error) {
 	}
 	rec.ExitCode = &code
 	rec.FinishedAt = time.Now().UTC()
-	var got capture
-	select {
-	case got = <-captured:
-	case <-time.After(100 * time.Millisecond):
-		reader.Close()
-		got = <-captured
-		rec.Incomplete = true
-	}
+	got := awaitCapture(reader, captured, lingerGrace)
 	rec.Bytes, rec.Stored, rec.Preview = got.total, got.stored, got.preview()
+	rec.Incomplete = !got.eof || got.err != nil
 	if got.err != nil {
 		rec.CaptureError = "capture failed"
-		rec.Incomplete = true
 	}
 	if err := out.Sync(); err != nil {
 		return rec, fmt.Errorf("job runner: sync output: %w", err)
@@ -224,10 +221,33 @@ func publish(root *os.Root, rec *Record) error {
 	return errors.Join(dir.Sync(), dir.Close())
 }
 
+// awaitCapture returns the collector's capture once the foreground shell has
+// exited. While a descendant still holds an inherited write end, it waits at
+// most grace and then stops the collector, which keeps the bytes already in
+// the pipe. Once every write end is closed, EOF is certain and it waits for the
+// collector however late either is scheduled: a helper descheduled past grace
+// must not report a capture that reached EOF as incomplete.
+func awaitCapture(r *os.File, captured <-chan capture, grace time.Duration) capture {
+	if writersRemain(r) {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case got := <-captured:
+			return got
+		case <-timer.C:
+		}
+		if writersRemain(r) && r.SetReadDeadline(time.Now()) != nil {
+			r.Close()
+		}
+	}
+	return <-captured
+}
+
 type capture struct {
 	total, stored int64
 	head, tail    []byte
 	limit         int
+	eof           bool
 	err           error
 }
 
@@ -240,7 +260,12 @@ func collect(r io.Reader, w io.Writer, limit int64, preview int) capture {
 			c.write(w, buf[:n], limit)
 		}
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			switch {
+			case errors.Is(err, io.EOF):
+				c.eof = true
+			case errors.Is(err, os.ErrDeadlineExceeded):
+				c.drain(r, w, limit, buf)
+			default:
 				c.err = errors.Join(c.err, err)
 			}
 			return c
