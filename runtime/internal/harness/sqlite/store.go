@@ -127,6 +127,7 @@ var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL,
+	contextSeqSQL, contextHeadSQL, receiptSQL, sessionRunsSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe

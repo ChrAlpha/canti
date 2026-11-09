@@ -10,6 +10,17 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
+const (
+	// contextSeqSQL reads the sequence of the context head of a run, zero
+	// before its first.
+	contextSeqSQL = `SELECT context_seq FROM runs WHERE id = ?`
+	// contextHeadSQL reads the transition at the context head of a run with
+	// the facts that establish it.
+	contextHeadSQL = `SELECT kind,semantics,from_state,to_state,event,json_extract(facts,'$.ContextState'),
+        json_extract(facts,'$.Outcome'),json_extract(facts,'$.Rejection'),
+        COALESCE(json_type(facts,'$.Response')='object' AND length(json_extract(facts,'$.Failure'))>0,0) FROM transitions WHERE run_id=? AND seq=?`
+)
+
 // Context refuses to combine an old run position with a newer context head.
 func (s *Store) Context(ctx context.Context, expected harness.Snapshot) (harness.ContextState, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -42,7 +53,7 @@ func (s *Store) contextState(ctx context.Context, tx *sql.Tx, expected harness.S
 // the latest snapshot of its run.
 func (s *Store) contextHead(ctx context.Context, tx *sql.Tx, expected harness.Snapshot) (harness.ContextState, error) {
 	var pointer int64
-	if err := tx.QueryRowContext(ctx, `SELECT context_seq FROM runs WHERE id=?`, expected.State.RunID).Scan(&pointer); err != nil {
+	if err := s.stmt(ctx, tx, contextSeqSQL).QueryRowContext(ctx, expected.State.RunID).Scan(&pointer); err != nil {
 		return harness.ContextState{}, err
 	}
 	if pointer == 0 {
@@ -59,9 +70,7 @@ func (s *Store) readContextState(ctx context.Context, tx *sql.Tx, expected harne
 	var outcome, rejection sql.NullString
 	var semantics int
 	var hasRejectionResponse bool
-	err := tx.QueryRowContext(ctx, `SELECT kind,semantics,from_state,to_state,event,json_extract(facts,'$.ContextState'),
-        json_extract(facts,'$.Outcome'),json_extract(facts,'$.Rejection'),
-        COALESCE(json_type(facts,'$.Response')='object' AND length(json_extract(facts,'$.Failure'))>0,0) FROM transitions WHERE run_id=? AND seq=?`, expected.State.RunID, pointer).Scan(&kind, &semantics, &from, &to, &event, &data, &outcome, &rejection, &hasRejectionResponse)
+	err := s.stmt(ctx, tx, contextHeadSQL).QueryRowContext(ctx, expected.State.RunID, pointer).Scan(&kind, &semantics, &from, &to, &event, &data, &outcome, &rejection, &hasRejectionResponse)
 	if err != nil {
 		return harness.ContextState{}, fmt.Errorf("%w: context head: %v", ErrIncompatible, err)
 	}
