@@ -83,6 +83,9 @@ func Item(w io.Writer, it hostrpc.Item) {
 		fmt.Fprintf(w, "└ %s\n", it.Outcome.Status)
 	case it.Kind == "completed":
 		status := string(it.Execution)
+		if (it.Execution == "cancelled" || it.Execution == "timed_out") && it.ExitCode == nil {
+			status += " (exit code unavailable)"
+		}
 		if it.Execution == "exited" && it.ExitCode != nil {
 			status = fmt.Sprintf("exit %d", *it.ExitCode)
 		}

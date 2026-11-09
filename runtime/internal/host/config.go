@@ -24,29 +24,33 @@ import (
 // RunConfig is the host wiring stored with a run; every later command
 // rebuilds the executor and model from it.
 type RunConfig struct {
-	Workspace      string `json:"workspace"`
-	Image          string `json:"image"`
-	Network        string `json:"network"`
-	Memory         string `json:"memory"`
-	CPUs           string `json:"cpus"`
-	Pids           int    `json:"pids"`
-	OutputLimit    int64  `json:"output_limit"`
-	API            string `json:"api"`
-	Model          string `json:"model"`
-	Provider       string `json:"provider,omitempty"`
-	MaxTokens      int    `json:"max_tokens"`
-	Effort         string `json:"effort,omitempty"`
-	Structured     bool   `json:"structured"`
-	DecisionFormat string `json:"decision_format,omitempty"`
-	Fallbacks      bool   `json:"fallbacks"`
-	RequestBytes   int    `json:"request_bytes"`
-	ContextVersion int    `json:"context_version"`
-	HistoryImports string `json:"history_imports,omitempty"`
+	Ephemeral          bool               `json:"ephemeral"`
+	Environment        string             `json:"environment,omitempty"`
+	EnvironmentWorkdir string             `json:"environment_workdir,omitempty"`
+	Attachment         *docker.Attachment `json:"attachment,omitempty"`
+	Workspace          string             `json:"workspace"`
+	Image              string             `json:"image"`
+	Network            string             `json:"network"`
+	Memory             string             `json:"memory"`
+	CPUs               string             `json:"cpus"`
+	Pids               int                `json:"pids"`
+	OutputLimit        int64              `json:"output_limit"`
+	API                string             `json:"api"`
+	Model              string             `json:"model"`
+	Provider           string             `json:"provider,omitempty"`
+	MaxTokens          int                `json:"max_tokens"`
+	Effort             string             `json:"effort,omitempty"`
+	Structured         bool               `json:"structured"`
+	DecisionFormat     string             `json:"decision_format,omitempty"`
+	Fallbacks          bool               `json:"fallbacks"`
+	RequestBytes       int                `json:"request_bytes"`
+	ContextVersion     int                `json:"context_version"`
+	HistoryImports     string             `json:"history_imports,omitempty"`
 }
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 17
+const ContextVersion = 18
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -60,6 +64,9 @@ type Spec struct {
 // with its initial state.
 func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.State, error) {
 	c, b := s.Config, s.Budget
+	if err := CheckExecutionMode(c); err != nil {
+		return harness.Run{}, core.State{}, err
+	}
 	if c.ContextVersion != ContextVersion {
 		return harness.Run{}, core.State{}, fmt.Errorf("context version %d is unsupported; want %d", c.ContextVersion, ContextVersion)
 	}
@@ -70,7 +77,7 @@ func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, errors.New("-max-tokens and -output-limit must be positive")
 	case c.DecisionFormat != "" && c.DecisionFormat != "text" && c.DecisionFormat != "tool":
 		return harness.Run{}, core.State{}, errors.New("-decision-format must be text or tool")
-	case c.Image == "" || c.Network == "":
+	case c.Ephemeral && (c.Image == "" || c.Network == ""):
 		return harness.Run{}, core.State{}, errors.New("-image and -network must not be empty")
 	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
@@ -129,7 +136,7 @@ func ContextConfig(c RunConfig, b harness.Budget) harness.LoopConfig {
 	return harness.LoopConfig{
 		Environment: Environment(c, b), Limits: PromptLimits(c),
 		Reader:       &archive.Reader{Imports: c.HistoryImports},
-		DecisionTool: c.DecisionFormat == "tool",
+		DecisionTool: c.DecisionFormat == "tool", NativeArchive: c.Environment != "",
 	}
 }
 
@@ -194,7 +201,16 @@ func ExecutorConfig(c RunConfig, state string) docker.Config {
 
 // NewExecutor creates the step record root that jobs mount and builds the
 // executor.
-func NewExecutor(c RunConfig, state string) (*docker.Executor, error) {
+func NewExecutor(c RunConfig, state string) (harness.Executor, error) {
+	if err := CheckExecutionMode(c); err != nil {
+		return nil, err
+	}
+	if c.Environment != "" {
+		if c.Attachment == nil {
+			return nil, errors.New("persistent execution requires a stored attachment")
+		}
+		return docker.NewAttached(AttachedConfig(c, state))
+	}
 	if err := os.MkdirAll(HistoryRoot(state), 0o755); err != nil {
 		return nil, err
 	}
@@ -204,6 +220,9 @@ func NewExecutor(c RunConfig, state string) (*docker.Executor, error) {
 // Environment describes to the agent where the commands of a run of c with
 // budget b run.
 func Environment(c RunConfig, b harness.Budget) string {
+	if c.Environment != "" {
+		return persistentEnvironment(c, b)
+	}
 	pids, timeout := "unlimited", "unlimited"
 	if c.Pids > 0 {
 		pids = strconv.Itoa(c.Pids)

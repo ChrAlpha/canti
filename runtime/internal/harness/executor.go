@@ -76,9 +76,35 @@ const (
 	JobUnknown       JobStatus = "unknown"
 )
 
+// EnvironmentBinding identifies a command within a reusable execution environment.
+// Generation is the authority's command slot generation, not an OS process ID.
+type EnvironmentBinding struct {
+	BackendID, EnvironmentID, StartEpoch string
+	AuthorityID                          string
+	Incarnation, Generation              uint64
+}
+
+// Cessation proves that a bound command incarnation cannot execute anymore.
+// ConfirmedAt is an observation time; it is not the command's unknown exit time.
+type Cessation struct {
+	BackendID, EnvironmentID, StartEpoch string
+	AuthorityID                          string
+	EffectID, Spec, OwnerID, StopIntent  string
+	Incarnation, Generation              uint64
+	Kind                                 string
+	RequestedAt, ConfirmedAt             time.Time
+}
+
+const (
+	CessationStopped     = "environment_stopped"
+	CessationEpochEnded  = "start_epoch_ended"
+	CessationQuarantined = "stopped_environment_quarantined"
+)
+
 // Job is a receipt for the accepted effect and specification. ID names a real
 // physical owner. Fenced witnesses durable cancellation; a fenced cancellation
-// may have no owner, but never a virtual ID. Times come from the backend clock.
+// may have no owner, but never a virtual ID. Process times come from backend
+// evidence; dispatch and cessation times are controller observations.
 // Terminal output metadata describes capture-time availability and never mutates
 // after publication; artifact readers independently detect later data loss.
 type Job struct {
@@ -92,6 +118,11 @@ type Job struct {
 	FinishedAt time.Time
 	Preview    string
 	Output     ArtifactRef
+	// Dispatch time starts an attached command's runtime budget, independently
+	// of whether its actual process start/exit timestamps are available.
+	DispatchedAt time.Time           `json:",omitzero"`
+	Binding      *EnvironmentBinding `json:",omitempty"`
+	Cessation    *Cessation          `json:",omitempty"`
 }
 
 // Validate checks identity and evidence shape; the adapter additionally checks
@@ -107,6 +138,9 @@ func (j Job) Validate(e Effect) error {
 	if !j.StartedAt.IsZero() && !j.FinishedAt.IsZero() && j.FinishedAt.Before(j.StartedAt) {
 		return errors.New("harness: receipt finishes before it starts")
 	}
+	if err := j.environmentShape(); err != nil {
+		return err
+	}
 	if !j.statusShape() {
 		return fmt.Errorf("harness: receipt evidence contradicts status %q", j.Status)
 	}
@@ -120,7 +154,7 @@ func (j Job) statusShape() bool {
 	case JobPending:
 		return j.ID != "" && !j.Fenced && j.noExecution() && j.noOutput()
 	case JobRunning:
-		return j.ID != "" && j.ExitCode == nil && !j.StartedAt.IsZero() && j.FinishedAt.IsZero() && j.noOutput()
+		return j.ID != "" && j.ExitCode == nil && !j.budgetOrigin().IsZero() && j.FinishedAt.IsZero() && j.noOutput()
 	case JobSucceeded, JobFailed:
 		return j.ID != "" && j.ExitCode != nil && (*j.ExitCode == 0) == (j.Status == JobSucceeded) && !j.StartedAt.IsZero() && !j.FinishedAt.IsZero()
 	case JobFailedToStart:
@@ -134,7 +168,7 @@ func (j Job) statusShape() bool {
 }
 
 func (j Job) noExecution() bool {
-	return j.ExitCode == nil && j.StartedAt.IsZero() && j.FinishedAt.IsZero()
+	return j.ExitCode == nil && j.StartedAt.IsZero() && j.FinishedAt.IsZero() && j.DispatchedAt.IsZero()
 }
 func (j Job) noOutput() bool { return j.Preview == "" && j.Output == (ArtifactRef{}) }
 func (j Job) diagnosticOnly() bool {
@@ -148,10 +182,47 @@ func (j Job) cancelledShape() bool {
 	if j.ID == "" {
 		return j.noExecution() && j.diagnosticOnly()
 	}
-	if j.StartedAt.IsZero() {
+	if j.Cessation != nil {
 		return j.ExitCode == nil && j.FinishedAt.IsZero()
 	}
+	if j.StartedAt.IsZero() {
+		return j.ExitCode == nil && j.FinishedAt.IsZero() && j.DispatchedAt.IsZero()
+	}
 	return !j.FinishedAt.IsZero() && j.ExitCode != nil
+}
+
+// environmentShape prevents an absent exit code or dispatch timestamp from
+// being mistaken for physical termination evidence.
+func (j Job) environmentShape() error {
+	if j.Binding == nil {
+		if j.Cessation != nil || !j.DispatchedAt.IsZero() {
+			return errors.New("harness: environment evidence needs its command binding")
+		}
+		return nil
+	}
+	b := j.Binding
+	if j.ID == "" || b.AuthorityID == "" || b.BackendID == "" || b.EnvironmentID == "" || b.StartEpoch == "" || b.Incarnation == 0 || b.Generation == 0 {
+		return errors.New("harness: incomplete environment command binding")
+	}
+	if w := j.Cessation; w != nil {
+		if j.Status != JobCancelled || !j.Fenced || j.ExitCode != nil || !j.FinishedAt.IsZero() || w.AuthorityID != b.AuthorityID || w.BackendID != b.BackendID || w.Incarnation != b.Incarnation || w.EffectID != j.EffectID || w.Spec != j.Spec || w.OwnerID != j.ID || !digest(w.StopIntent) || w.EnvironmentID != b.EnvironmentID || w.StartEpoch != b.StartEpoch || w.Generation != b.Generation || w.RequestedAt.IsZero() || w.ConfirmedAt.Before(w.RequestedAt) || w.Kind != CessationStopped && w.Kind != CessationEpochEnded && w.Kind != CessationQuarantined {
+			return errors.New("harness: cessation does not establish this command's termination")
+		}
+	}
+	return nil
+}
+
+func (j Job) budgetOrigin() time.Time {
+	if !j.DispatchedAt.IsZero() {
+		return j.DispatchedAt
+	}
+	return j.StartedAt
+}
+func (j Job) budgetEnd() time.Time {
+	if j.Cessation != nil {
+		return j.Cessation.ConfirmedAt
+	}
+	return j.FinishedAt
 }
 
 // Resolution records who supplied the settlement evidence. An operator owner

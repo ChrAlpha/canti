@@ -59,6 +59,9 @@ func parse(args []string, out io.Writer) (options, int, error) {
 	if err != nil {
 		return o, session.Usage, err
 	}
+	if err := executionFlags(fs, &o.cfg.Spec); err != nil {
+		return o, session.Usage, err
+	}
 	var lv slog.Level
 	if err = lv.UnmarshalText([]byte(o.level)); err != nil {
 		return o, session.Usage, err
@@ -86,6 +89,15 @@ func (o *options) locate() error {
 	}
 	o.cfg.Workspace, o.cfg.State = ws, state
 	o.cfg.Spec.Workspace = ws
+	if o.cfg.Spec.Environment != "" {
+		o.cfg.Spec.Environment, err = filepath.Abs(o.cfg.Spec.Environment)
+		if err != nil {
+			return err
+		}
+		if canonical, e := filepath.EvalSymlinks(o.cfg.Spec.Environment); e == nil {
+			o.cfg.Spec.Environment = canonical
+		}
+	}
 	if o.cfg.Spec.HistoryImports != "" {
 		o.cfg.Spec.HistoryImports, err = filepath.Abs(o.cfg.Spec.HistoryImports)
 	}

@@ -65,6 +65,8 @@ Usage:
   canti status [-run ID]                            print the state of a run as JSON
   canti history [-run ID]                           print the transitions of a run as JSON Lines
   canti context [-run ID] [-step N] [-revision N]   inspect a frozen request and its recorded context
+  canti environment init|attach|inspect|stop|start|detach|retire -environment DIRECTORY
+                                                    manage a prepared development environment
   canti version                                     print the version
 
 Run "canti COMMAND -h" for the flags of a command. A run names its model API
@@ -107,6 +109,9 @@ type app struct {
 }
 
 func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "environment" {
+		return environmentCLI(ctx, args[1:], stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "preflight" {
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "canti preflight takes one JSON request on stdin and no flags")
@@ -214,8 +219,15 @@ func (a *app) locate(workspace, state string) error {
 	} else {
 		state, err = filepath.Abs(state)
 	}
+	if err != nil {
+		return err
+	}
+	state, err = host.CanonicalState(ws, state)
+	if err != nil {
+		return err
+	}
 	a.workspace, a.state = ws, state
-	return err
+	return nil
 }
 
 func runFlag(fs *flag.FlagSet, a *app) {
@@ -238,16 +250,9 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 	registerSpec(fs, &s)
 	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
-		if err := checkTask("-goal", *goal, *constraints); err != nil {
+		if err := a.prepareRunConfig(fs, &s.Config, *goal, *constraints, *input != ""); err != nil {
 			return exitUsage, err
 		}
-		if err := canonicalImports(&s.Config, *input != ""); err != nil {
-			return exitUsage, err
-		}
-		if err := a.checkHostMode(); err != nil {
-			return exitUsage, err
-		}
-		s.Config.Workspace = a.workspace
 		if *session != "" || *input != "" {
 			setConstraints := false
 			fs.Visit(func(f *flag.Flag) {
@@ -258,6 +263,9 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 			return a.submitSession(ctx, *session, *input, *goal, *constraints, setConstraints, s, *url, *once)
 		}
 		if _, _, err := host.NewRun(*goal, *constraints, s, time.Now()); err != nil {
+			return exitUsage, err
+		}
+		if err := host.Validate(ctx, a.state, host.Submission{Goal: *goal, Constraints: *constraints, Spec: s}); err != nil {
 			return exitUsage, err
 		}
 		if err := a.checkCredential(ctx, s.Config, *url); err != nil {
@@ -273,9 +281,6 @@ func runCommand(fs *flag.FlagSet, a *app) action {
 				a.binding(s.Config.API, *url), *once)
 		}
 		if err := os.MkdirAll(a.state, 0o700); err != nil {
-			return exitError, err
-		}
-		if _, err := host.NewExecutor(s.Config, a.state); err != nil {
 			return exitError, err
 		}
 		h, err := a.openHost(ctx, true)

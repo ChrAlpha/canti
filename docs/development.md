@@ -81,6 +81,7 @@ decision, not a loop.
 
 ```sh
 go build -o bin/canti ./runtime/cmd/canti
+go build -o bin/canti-job ./runtime/cmd/canti-job
 go build -o bin/canti-tui ./apps/tui/cmd/canti-tui
 ./bin/canti -version
 ./bin/canti -h
@@ -92,6 +93,145 @@ status 0. `-h` writes usage to standard output and exits with status 0.
 Invoking the binary with no arguments writes usage to standard error and exits
 with status 2. `go run` itself reports a non-zero wrapper status for a failing
 program, so use the binary to inspect its exact exit code.
+
+`canti environment init -environment DIRECTORY` prepares private controller state,
+a read-only helper tree, and a writable spool, without creating a run journal.
+Its JSON result supplies `authority_id`. Provision Docker/Compose/Dev Containers
+with labels `io.canti.control=<canonical directory>` and
+`io.canti.authority=<authority_id>`, and separate mounts of `DIRECTORY/public` at
+`/canti:ro` and `DIRECTORY/spool` at `/var/lib/canti/jobs:rw`. Mount selected
+workspaces separately; keep run state and model credentials outside every mount.
+`environment attach -environment DIRECTORY -container NAME` pins the real ID and
+selected local Unix Docker endpoint. It refuses a container user that cannot write
+the spool, which stays private to the host user: run the container as that UID,
+or as root without user-namespace remapping. `inspect`, `stop`, `start` and `detach` use
+that same directory. Stop affects services as well as the foreground command.
+
+An ambiguous lifecycle request keeps the environment quarantined. `environment
+retire` closes admission and tells the operator to remove the exact old container
+with existing provisioning tools; retry retirement after its absence is confirmed,
+then explicitly attach the replacement. A new container loses manual system-layer
+installations; only designated volumes survive. Neither elapsed time nor a stopped
+sample clears an old unacknowledged request. `canti-job` must be packaged beside
+`canti`, or named explicitly with `environment init -helper PATH`. Initialization
+publishes that helper once and never replaces it, so an environment keeps the
+helper of the canti that initialized it. To adopt a newer helper, initialize a new
+directory and attach a container prepared for its labels and mounts.
+
+### Persistent development environments
+
+New `run` and `canti-tui` invocations require `-environment DIRECTORY` or
+`-ephemeral`. Persistent environments are prepared with ordinary Docker,
+Compose or Dev Containers tooling. No canti provisioning daemon is needed.
+Run state and the attachment authority must remain outside every environment
+mount; attachment and admission reject exposure through additional mounts,
+including read-only mounts. Only local Linux Unix Docker endpoints with coherent
+host bind paths are supported. Attach pins the selected endpoint, daemon ID and
+actual container ID; changing Docker context cannot redirect a resumed run.
+
+The ordinary example uses a developer UID/GID matching the host, private HOME,
+Go 1.26, normal networking and passwordless sudo *inside the environment* for
+package installation. It forwards no host HOME, Git credentials, SSH agent or
+Docker socket. Prepare it from the repository root, with `canti` and `canti-job`
+already built beside each other:
+
+```sh
+export CANTI_WORKSPACE="$HOME/canti-demo/workspace"
+export CANTI_ENVIRONMENT="$HOME/canti-demo/environment"
+mkdir -p "$CANTI_WORKSPACE" "$CANTI_ENVIRONMENT"
+export CANTI_WORKSPACE="$(realpath "$CANTI_WORKSPACE")"
+export CANTI_ENVIRONMENT="$(realpath "$CANTI_ENVIRONMENT")"
+export CANTI_UID="$(id -u)" CANTI_GID="$(id -g)"
+export CANTI_AUTHORITY_ID="$(bin/canti environment init -environment "$CANTI_ENVIRONMENT" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["authority_id"])')"
+docker compose --env-file /dev/null \
+  -f examples/persistent-environment/compose.yaml up -d --build
+container=$(docker compose --env-file /dev/null \
+  -f examples/persistent-environment/compose.yaml ps -q dev)
+bin/canti environment attach -environment "$CANTI_ENVIRONMENT" -container "$container"
+bin/canti run -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
+  -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL \
+  -goal 'Install jq with sudo apt-get, create a private HOME config, then use jq'
+bin/canti-tui -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
+  -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL
+```
+
+The Compose file names its project `canti-dev`, which the Dev Containers CLI
+honors as well; an exported `COMPOSE_PROJECT_NAME` overrides it for both. Either
+tool therefore manages the same container instead of a second claimant of the
+control label, which attachment would refuse. The same Compose service can be
+opened using `examples/persistent-environment/.devcontainer/devcontainer.json`.
+Set the same variables, then run:
+
+```sh
+COMPOSE_BAKE=false devcontainer up --workspace-folder "$CANTI_WORKSPACE" \
+  --config examples/persistent-environment/.devcontainer/devcontainer.json
+```
+
+Attach the returned container ID. Dev Containers adds its own labels, so switching
+an attached container between `docker compose up` and `devcontainer up` can
+replace it: follow the rebuild procedure below. On the verified Dev Containers CLI
+0.90.0 and Compose 5.7.0 combination, disabling Bake for this Compose-backed
+invocation avoids its rejection of the generated Dockerfile outside the build
+context (`fs.read` privilege request). The direct Compose invocation above and the
+Dockerfile-based DinD invocation below use their own build paths; the recorded QA
+runs required this workaround only for the ordinary Dev Container command. Use a
+non-root host UID with these examples.
+
+Commands use the pinned container user, HOME and PATH, `/bin/sh -c`, and a fresh
+shell each time. `environment attach -init /absolute/file` sources an optional
+initialization file on each command. The default cwd maps the exact selected
+host workspace's unique writable bind; `-environment-workdir /workspace/subdir`
+selects a directory within that mapping. Multiple deliberately related workspace
+binds can share the environment. Put background-service output in separate log
+files and redirect stdin, stdout and stderr so command output can finish. Shell
+variables alone do not survive the next command.
+
+A return, session switch, or context reset leaves packages and services intact.
+`environment stop` ends foreground work and services; `environment start` retains
+the same filesystem with a new start epoch. Cancellation and job timeout also stop
+the whole environment, so explicitly start it before another command. Inspect the
+environment gate before start: an unacknowledged mutation stays quarantined and
+requires the retirement/replacement procedure above. Ordinary acknowledged
+cancellation does not require a rebuild. For a deliberate rebuild, including `up
+--build` after a configuration change, stop and detach before replacing the old
+container with Compose or Dev Containers, then explicitly attach the new ID;
+compare `ps -q dev` with the `container_id` that `environment attach` printed.
+Once the attached container is gone, `environment inspect` fails with Docker's
+missing-container error instead of a status. Detach needs the old container, so if
+it was replaced first, run `environment retire`, which confirms the old ID is
+gone, and then attach the new ID. The workspace bind survives; manually installed
+system packages and private HOME in the container layer are replaced. Add private
+volumes deliberately when those files should survive rebuilds.
+
+For canti development that needs a private Docker daemon, the optional
+`examples/persistent-environment-dind/.devcontainer/devcontainer.json` uses the
+[official Docker-in-Docker Feature](https://github.com/devcontainers/features/tree/main/src/docker-in-docker).
+It explicitly enables privileged mode and gives Docker and containerd separate
+private persistent named volumes. The Feature runs an inner daemon, without
+forwarding the outer host socket. Privileged execution grants a broader host
+kernel/device boundary than the ordinary example; use it for trusted development
+on a suitable host. The volumes retain inner images and data across outer
+container replacement; they do not preserve the outer system layer.
+
+Use a separate initialized `CANTI_ENVIRONMENT`, set `CANTI_WORKSPACE` to this
+repository's canonical path, and keep `CANTI_UID`, `CANTI_GID` and the new
+`CANTI_AUTHORITY_ID` exported. Then provision and attach:
+
+```sh
+devcontainer up --workspace-folder "$CANTI_WORKSPACE" \
+  --config examples/persistent-environment-dind/.devcontainer/devcontainer.json
+# Use the containerId from that command's JSON output.
+bin/canti environment attach -environment "$CANTI_ENVIRONMENT" -container CONTAINER_ID
+# Inside the prepared environment, verify the inner daemon and canti integration.
+devcontainer exec --workspace-folder "$CANTI_WORKSPACE" \
+  --config examples/persistent-environment-dind/.devcontainer/devcontainer.json \
+  sh -c 'docker info && make integration'
+```
+
+Both examples use mutable image tags and standard tooling. No image digest is
+required. Provisioning, output retention and journaling do not impose filesystem
+quotas; size your workspace and private Docker volumes for the workload.
 
 | Exit status | Meaning |
 | --- | --- |
@@ -130,7 +270,7 @@ run's API and is sent only when set; `-fallbacks` requires
 prompt, and budget flags of
 `run` are stored with the run and reused by every later command; `-once`,
 `-state`, and `-log-level` apply to one invocation, and
-`-workspace` must name the run's workspace. Defaults: image
+`-workspace` must name the run's workspace. For explicit `-ephemeral`, defaults are image
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, 16,000 output tokens per
 response, no effort, structured output on, fallbacks off, 8 MiB per rendered
@@ -314,11 +454,15 @@ The state directory defaults to
 `$XDG_STATE_HOME/canti/<first 16 hex digits of the SHA-256 of the workspace's
 resolved path>`, with `~/.local/state` when `XDG_STATE_HOME` is unset or
 relative; `-state` overrides it, and it must not overlap the workspace or
-resolve to a path with a colon, which Docker cannot mount. It
-holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
+resolve to a path with a colon, which Docker cannot mount. Existing State or
+parent symlinks are resolved before any state files are created. Safe outside
+aliases use one canonical state and socket identity; dangling, looping or
+unresolvable ancestors are refused. Persistent admission compares that effective
+path against every environment mount before creating state. It holds `canti.db` with its WAL files, the `lock` file, per-effect latches and
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
-read-only step records of every run under `history/<run ID>/`, which jobs see
-at `/canti/runs/<run ID>/`.
+read-only step records of every run under `history/<run ID>/`, which ephemeral jobs see
+at `/canti/runs/<run ID>/`; persistent commands use these logical addresses
+through native `canti:retrieve` and `canti:focus`.
 Each run is bound to the workspace it was created in. Confirmed provider overflow
 opens a fresh anchor at the same unfinished step when retry remains possible.
 The goal, constraints and archive navigation survive; old receipts and selected
@@ -334,8 +478,8 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 17. Schema 4, semantics 6, executor
-record format 2 and host protocol 6 form one current contract. Unsupported
+Each run stores current context version 18. Schema 4, semantics 7, ephemeral executor
+record format 2, attached executor format 1 and host protocol 7 form one current contract. Unsupported
 formats and context versions are rejected; use a fresh state directory. No
 migration or old-run settlement path is supported. Same-version frozen bytes,
 provider bindings, accepted identities and results remain immutable.

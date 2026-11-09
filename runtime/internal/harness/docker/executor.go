@@ -1,7 +1,8 @@
-// Package docker runs harness effects as Docker containers through the
-// Docker Engine API, over connections that the docker CLI opens.
+// Package docker runs harness effects in per-effect containers or as distinct
+// execs in a prepared environment, through the Docker Engine API over
+// connections that the docker CLI opens.
 //
-// A finished job's container, with its Docker log, is removed once its result
+// An ephemeral job's container, with its Docker log, is removed once its result
 // and output are durably recorded, so host disk holds
 // at most Config.OutputLimit bytes of retained output per job, plus the Docker
 // log of each job still running or awaiting capture, bounded only by its
@@ -191,13 +192,25 @@ func CheckLayout(workspace, state string) error {
 	return checkLayout(workspace, state, os.Lstat)
 }
 
+// ResolveState returns the canonical prospective State directory checked by
+// CheckLayout, without creating it. Existing symlink ancestors are resolved;
+// missing components are appended only after a real directory is established.
+func ResolveState(workspace, state string) (string, error) {
+	return resolveState(workspace, state, os.Lstat)
+}
+
 func checkLayout(workspace, state string, lstat func(string) (os.FileInfo, error)) error {
+	_, err := resolveState(workspace, state, lstat)
+	return err
+}
+
+func resolveState(workspace, state string, lstat func(string) (os.FileInfo, error)) (string, error) {
 	ws, err := resolve(workspace)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !filepath.IsAbs(state) || filepath.Clean(state) != state {
-		return fmt.Errorf("docker: state %q is not a clean absolute path", state)
+		return "", fmt.Errorf("docker: state %q is not a clean absolute path", state)
 	}
 	dir, rest := state, ""
 	for {
@@ -206,7 +219,7 @@ func checkLayout(workspace, state string, lstat func(string) (os.FileInfo, error
 			break
 		}
 		if !errors.Is(err, fs.ErrNotExist) || filepath.Dir(dir) == dir {
-			return fmt.Errorf("docker: state %s: %w", state, err)
+			return "", fmt.Errorf("docker: state %s: %w", state, err)
 		}
 		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
 	}
@@ -215,15 +228,15 @@ func checkLayout(workspace, state string, lstat func(string) (os.FileInfo, error
 	// EvalSymlinks ENOENT must not override that successful observation.
 	p, err := resolve(dir)
 	if err != nil {
-		return fmt.Errorf("docker: state %s: %w", state, err)
+		return "", fmt.Errorf("docker: state %s: %w", state, err)
 	}
 	if p = filepath.Join(p, rest); within(ws, p) || within(p, ws) {
-		return fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)
+		return "", fmt.Errorf("docker: workspace %s and state %s overlap", ws, p)
 	}
 	if strings.Contains(p, ":") {
-		return fmt.Errorf("docker: state %s is not a directory that can be mounted", p)
+		return "", fmt.Errorf("docker: state %s is not a directory that can be mounted", p)
 	}
-	return nil
+	return p, nil
 }
 
 func resolve(path string) (string, error) {

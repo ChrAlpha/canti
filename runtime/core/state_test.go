@@ -234,8 +234,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 6 {
-		t.Errorf("SemanticsVersion = %d, want 6", core.SemanticsVersion)
+	if core.SemanticsVersion != 7 {
+		t.Errorf("SemanticsVersion = %d, want 7", core.SemanticsVersion)
 	}
 }
 

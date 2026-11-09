@@ -1,5 +1,5 @@
 #!/bin/sh
-# Exercise the two installed command surfaces without creating state.
+# Exercise installed command surfaces without creating state.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -9,6 +9,7 @@ if [ -z "$output" ]; then
 	trap 'rm -rf "$output"' EXIT
 	mkdir -p "$output/runtime" "$output/apps/tui"
 	(cd "$root/runtime" && GOWORK=off go build -buildvcs=false -o "$output/runtime/canti" ./cmd/canti)
+	(cd "$root/runtime" && GOWORK=off go build -buildvcs=false -o "$output/runtime/canti-job" ./cmd/canti-job)
 	(cd "$root/apps/tui" && GOWORK=off go build -buildvcs=false -o "$output/apps/tui/canti-tui" ./cmd/canti-tui)
 fi
 
@@ -26,3 +27,10 @@ for path in runtime/canti apps/tui/canti-tui; do
 	esac
 	printf '%s version/help: PASS\n' "$exe"
 done
+
+helper_protocol=$("$output/runtime/canti-job" -version)
+if [ "$helper_protocol" != 1 ]; then
+	printf 'canti-job: expected protocol 1, got %s\n' "$helper_protocol" >&2
+	exit 1
+fi
+printf 'canti-job protocol: PASS\n'

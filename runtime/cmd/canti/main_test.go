@@ -42,6 +42,9 @@ import (
 // the loop, and CANTI_TEST_SETUP=checked a session input after its checks,
 // after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "docker" {
+		os.Exit(preflightDockerProxy())
+	}
 	if os.Getenv("CANTI_TEST_MAIN") != "1" && len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		// A process started as a canti command without CANTI_TEST_MAIN,
 		// as a host started from inside a test process would be, would run
@@ -178,19 +181,19 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"-h"}, exitOK, "Usage:", ""},
 		{[]string{"help"}, exitOK, "Usage:", ""},
 		{[]string{"launch"}, exitUsage, "", `unknown command "launch"`},
-		{[]string{"run", "-h"}, exitOK, "-goal", ""},
+		{[]string{"run", "-ephemeral", "-h"}, exitOK, "-goal", ""},
 		{[]string{"status", "-bogus"}, exitUsage, "", "flag provided but not defined"},
 		{[]string{"status", "extra"}, exitUsage, "", `unexpected argument "extra"`},
 		{[]string{"status", "-log-level", "loud"}, exitUsage, "", "loud"},
 		{[]string{"run"}, exitUsage, "", "-goal is required"},
-		{[]string{"run", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
-		{[]string{"run", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
-		{[]string{"run", "-goal", "g"}, exitUsage, "", "-api must be anthropic-messages or openai-responses"},
-		{[]string{"run", "-goal", "g", "-api", "openai-completions", "-model", "m"}, exitUsage, "", "-api openai-completions is not supported"},
-		{[]string{"run", "-goal", "g", "-api", "anthropic-messages"}, exitUsage, "", "-model is required"},
-		{[]string{"run", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-request-bytes", "1"}, exitUsage, "", "canti run: -request-bytes: authoritative orientation needs at least "},
-		{[]string{"run", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
-		{[]string{"run", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-max-steps", "-1"}, exitUsage, "", "-max-steps"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-history", "8"}, exitUsage, "", "flag provided but not defined: -history"},
+		{[]string{"run", "-ephemeral", "-goal", "g"}, exitUsage, "", "-api must be anthropic-messages or openai-responses"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "openai-completions", "-model", "m"}, exitUsage, "", "-api openai-completions is not supported"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "anthropic-messages"}, exitUsage, "", "-model is required"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-request-bytes", "1"}, exitUsage, "", "canti run: -request-bytes: authoritative orientation needs at least "},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
 		{[]string{"resolve"}, exitUsage, "", "exactly one of -job and -execution"},
 		{[]string{"resolve", "-job", "-execution", "cancelled"}, exitUsage, "", "exactly one of -job and -execution"},
@@ -1060,7 +1063,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 }
 
 func TestRunFlagsPersistInTheRun(t *testing.T) {
-	s := parseSpec(t, "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
+	s := parseSpec(t, "-ephemeral", "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-api", "anthropic-messages", "-model", "claude-test", "-max-tokens", "900", "-effort", "medium", "-structured=false", "-fallbacks=false",
 		"-request-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
 		"-output-budget", "1000000", "-job-timeout", "90s")
@@ -1140,5 +1143,62 @@ func TestAResumedRunCallsTheProviderItStores(t *testing.T) {
 	r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key, "ANTHROPIC_BASE_URL=" + f.model.URL}, "resume", "-workspace", f.workspace, "-state", f.state)
 	if r.code != exitOK || r.stdout != "done\n" || len(other.requests()) != 0 || len(f.model.requests()) != 1 {
 		t.Fatalf("resume from a terminal bound to the run's provider: %+v, calls %d and %d", r, len(f.model.requests()), len(other.requests()))
+	}
+}
+
+func TestRunExecutionModeAndProvisioningFlagsFailBeforeStateCreation(t *testing.T) {
+	for _, mode := range [][]string{nil, {"-ephemeral", "-environment", "/missing"}, {"-environment", "/missing", "-image", "alpine"}, {"-environment", "/missing"}, {"-ephemeral", "-environment-workdir", "/workspace"}} {
+		root := t.TempDir()
+		workspace := filepath.Join(root, "workspace")
+		if err := os.Mkdir(workspace, 0700); err != nil {
+			t.Fatal(err)
+		}
+		state := filepath.Join(root, "state")
+		args := append([]string{"run", "-workspace", workspace, "-state", state, "-goal", "goal", "-api", "openai-responses", "-model", "fixture"}, mode...)
+		r := runCLI(t, []string{"OPENAI_API_KEY=fixture"}, args...)
+		if r.code != exitUsage {
+			t.Fatalf("mode %v = %d: %s", mode, r.code, r.stderr)
+		}
+		if _, err := os.Stat(state); !os.IsNotExist(err) {
+			t.Fatalf("mode %v created state: %v", mode, err)
+		}
+	}
+}
+
+func TestCLIUsesCanonicalProspectiveState(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	parent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "safe-state-alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(alias, "missing", "state")
+	got := f.cli(nil, "run", "-state", state, "-goal", "safe outside State")
+	if got.code != exitOK {
+		t.Fatalf("safe State alias: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "missing", "state", "canti.db")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.status("-state", state); got.Run.ID == "" {
+		t.Fatal("alias did not reach the canonical journal")
+	}
+	for _, kind := range []string{"dangling", "loop"} {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "link")
+		target := link
+		if kind == "dangling" {
+			target = filepath.Join(dir, "absent")
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got := f.cli(nil, "run", "-state", filepath.Join(link, "missing", "state"), "-goal", "reject unresolved ancestor")
+		if got.code != exitError {
+			t.Fatalf("unresolved State ancestor accepted: %+v", got)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "absent")); !os.IsNotExist(err) {
+			t.Fatalf("unresolved ancestor was recreated: %v", err)
+		}
 	}
 }

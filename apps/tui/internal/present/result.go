@@ -33,6 +33,9 @@ func Result(out session.Result) (answer, diagnostic string) {
 	case hostrpc.StatusReturned:
 		answer = r.Result + "\n"
 	case hostrpc.StatusStopped:
+		if r.Environment != nil {
+			fmt.Fprintf(&b, "canti: inspect the persistent environment gate with canti environment inspect -environment %q; start explicitly after an acknowledged stop.\n", r.Environment.Directory)
+		}
 		fmt.Fprintf(&b, "canti: run %s stopped: %s\n", r.RunID, r.StopReason)
 	case hostrpc.StatusNeedsResolution:
 		fmt.Fprintf(&b, "canti: run %s needs resolution: the outcome of effect %s is unknown. Inspect it, then record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\"; -execution records the outcome only and leaves a job that may still run untouched.\n", r.RunID, r.EffectID)

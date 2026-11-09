@@ -16,7 +16,7 @@ import "log/slog"
 // versions refuse each other. Versions 1 and 2 are recorded in testdata/v1
 // and testdata/v2; version 5 adds validation and cursor-free initial progress
 // requests. Records live with the runtime server contract tests.
-const Protocol = 6
+const Protocol = 7
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -102,29 +102,32 @@ type Pair struct {
 // Spec is the configuration of a new run, with its budget and limits.
 // Durations are Go duration strings.
 type Spec struct {
-	Workspace      string `json:"workspace"`
-	Image          string `json:"image"`
-	Network        string `json:"network"`
-	Memory         string `json:"memory"`
-	CPUs           string `json:"cpus"`
-	Pids           int    `json:"pids"`
-	OutputLimit    int64  `json:"output_limit"`
-	API            string `json:"api"`
-	Model          string `json:"model"`
-	MaxTokens      int    `json:"max_tokens"`
-	Effort         string `json:"effort"`
-	Structured     bool   `json:"structured"`
-	DecisionFormat string `json:"decision_format"`
-	Fallbacks      bool   `json:"fallbacks"`
-	RequestBytes   int    `json:"request_bytes"`
-	ContextVersion int    `json:"context_version"`
-	HistoryImports string `json:"history_imports"`
-	MaxSteps       int    `json:"max_steps"`
-	MaxAttempts    int    `json:"max_attempts"`
-	WallTime       string `json:"wall_time"`
-	TokenBudget    int64  `json:"token_budget"`
-	OutputBudget   int64  `json:"output_budget"`
-	JobTimeout     string `json:"job_timeout"`
+	Ephemeral          bool   `json:"ephemeral"`
+	Environment        string `json:"environment"`
+	EnvironmentWorkdir string `json:"environment_workdir"`
+	Workspace          string `json:"workspace"`
+	Image              string `json:"image"`
+	Network            string `json:"network"`
+	Memory             string `json:"memory"`
+	CPUs               string `json:"cpus"`
+	Pids               int    `json:"pids"`
+	OutputLimit        int64  `json:"output_limit"`
+	API                string `json:"api"`
+	Model              string `json:"model"`
+	MaxTokens          int    `json:"max_tokens"`
+	Effort             string `json:"effort"`
+	Structured         bool   `json:"structured"`
+	DecisionFormat     string `json:"decision_format"`
+	Fallbacks          bool   `json:"fallbacks"`
+	RequestBytes       int    `json:"request_bytes"`
+	ContextVersion     int    `json:"context_version"`
+	HistoryImports     string `json:"history_imports"`
+	MaxSteps           int    `json:"max_steps"`
+	MaxAttempts        int    `json:"max_attempts"`
+	WallTime           string `json:"wall_time"`
+	TokenBudget        int64  `json:"token_budget"`
+	OutputBudget       int64  `json:"output_budget"`
+	JobTimeout         string `json:"job_timeout"`
 }
 
 // Submission is a request for a new run.
@@ -185,32 +188,34 @@ type Ack struct {
 // Run is the state of a run. Status is active, needs_resolution, returned,
 // or stopped; Phase names its committed phase, for display. Cursor is the
 // position of this state: following the run from it misses and repeats
-// nothing. Driver is driving while the host drives the run and idle
+// nothing. Driver is driving while a drive or stop owns work for the run and idle
 // otherwise; Drivable reports that the host drives it or could continue it
 // without a client's credential, and Why says what is missing otherwise.
 type Run struct {
-	RunID          string `json:"run_id"`
-	SessionID      string `json:"session_id,omitempty"`
-	SessionSeq     int64  `json:"session_seq,omitempty"`
-	InputID        string `json:"input_id,omitempty"`
-	Goal           string `json:"goal"`
-	Constraints    string `json:"constraints"`
-	Status         string `json:"status"`
-	Phase          string `json:"phase"`
-	Step           int    `json:"step"`
-	StopReason     string `json:"stop_reason,omitempty"`
-	Result         string `json:"result,omitempty"`
-	EffectID       string `json:"effect_id,omitempty"`
-	Cursor         string `json:"cursor"`
-	ContextVersion int    `json:"context_version"`
-	API            string `json:"api"`
-	Provider       string `json:"provider,omitempty"`
-	Driver         string `json:"driver"`
-	Drivable       bool   `json:"drivable"`
-	Why            string `json:"why,omitempty"`
-	DriveError     string `json:"drive_error,omitempty"`
-	Totals         Totals `json:"totals"`
-	Budget         Budget `json:"budget"`
+	Environment    *Environment `json:"environment,omitempty"`
+	Ephemeral      bool         `json:"ephemeral"`
+	RunID          string       `json:"run_id"`
+	SessionID      string       `json:"session_id,omitempty"`
+	SessionSeq     int64        `json:"session_seq,omitempty"`
+	InputID        string       `json:"input_id,omitempty"`
+	Goal           string       `json:"goal"`
+	Constraints    string       `json:"constraints"`
+	Status         string       `json:"status"`
+	Phase          string       `json:"phase"`
+	Step           int          `json:"step"`
+	StopReason     string       `json:"stop_reason,omitempty"`
+	Result         string       `json:"result,omitempty"`
+	EffectID       string       `json:"effect_id,omitempty"`
+	Cursor         string       `json:"cursor"`
+	ContextVersion int          `json:"context_version"`
+	API            string       `json:"api"`
+	Provider       string       `json:"provider,omitempty"`
+	Driver         string       `json:"driver"`
+	Drivable       bool         `json:"drivable"`
+	Why            string       `json:"why,omitempty"`
+	DriveError     string       `json:"drive_error,omitempty"`
+	Totals         Totals       `json:"totals"`
+	Budget         Budget       `json:"budget"`
 }
 
 // Totals are a run's measured usage.
@@ -302,3 +307,12 @@ const (
 	DriverDriving = "driving"
 	DriverIdle    = "idle"
 )
+
+// Environment describes pinned execution wiring, without reading the live backend.
+type Environment struct {
+	Directory   string `json:"directory"`
+	ContainerID string `json:"container_id"`
+	DaemonID    string `json:"daemon_id"`
+	Incarnation uint64 `json:"incarnation"`
+	Workdir     string `json:"workdir"`
+}

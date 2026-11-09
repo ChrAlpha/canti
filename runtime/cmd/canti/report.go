@@ -13,12 +13,13 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
+	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 )
 
 func statusCommand(fs *flag.FlagSet, a *app) action {
 	runFlag(fs, a)
 	return func(ctx context.Context) (int, error) {
-		store, run, _, err := a.read(ctx)
+		store, run, c, err := a.read(ctx)
 		if err != nil {
 			return exitError, err
 		}
@@ -36,7 +37,8 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 			"run": map[string]any{"id": run.ID, "goal": run.Goal, "constraints": run.Constraints, "created": run.Created,
 				"session_id": run.SessionID, "session_seq": run.SessionSeq, "input_id": run.InputID,
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
-			"seq": snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
+			"execution": map[string]any{"ephemeral": c.Ephemeral, "environment": hostserver.EnvironmentOf(c)},
+			"seq":       snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
 			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID,
 			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps, "coverage": t.Coverage},
 		}
@@ -134,6 +136,9 @@ func (a *app) report(snap harness.Snapshot, err error, active int, c host.RunCon
 		fmt.Fprintln(a.stdout, s.Decision.Payload)
 		return exitOK, nil
 	case s.Phase == core.PhaseStopped:
+		if c.Environment != "" {
+			fmt.Fprintf(out, "canti: inspect the persistent environment gate with canti environment inspect -environment %q; start explicitly after an acknowledged stop.\n", c.Environment)
+		}
 		fmt.Fprintf(out, "canti: run %s stopped: %s\n", s.RunID, s.Reason)
 		return exitStopped, nil
 	case s.Phase == core.PhaseNeedsResolution:

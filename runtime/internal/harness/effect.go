@@ -95,7 +95,7 @@ func checkReceipt(f Facts) error {
 	case core.ExecutionCancelled:
 		valid = r.Status == JobCancelled
 	case core.ExecutionTimedOut:
-		valid = r.Status == JobCancelled && r.ID != "" && !r.StartedAt.IsZero()
+		valid = r.Status == JobCancelled && r.ID != "" && !r.budgetOrigin().IsZero()
 	case core.ExecutionFailedToStart:
 		valid = r.Status == JobFailedToStart
 	}

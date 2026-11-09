@@ -11,13 +11,24 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
 
+// CanonicalState resolves the effective directory used for admission, host
+// identity and every state write, including when its leaf does not yet exist.
+func CanonicalState(workspace, state string) (string, error) {
+	return docker.ResolveState(workspace, state)
+}
+
 // Validate checks a prospective submission without creating state or durable
 // facts. Submit remains the authoritative admission point under the host lock.
-func Validate(state string, sub Submission) error {
+func Validate(ctx context.Context, state string, sub Submission) error {
+	c, err := ResolveExecution(ctx, sub.Spec.Config, state)
+	if err != nil {
+		return SpecError{Err: err}
+	}
+	sub.Spec.Config = c
 	if _, _, err := NewRun(sub.Goal, sub.Constraints, sub.Spec, time.Now()); err != nil {
 		return SpecError{Err: err}
 	}
-	return docker.CheckConfig(ExecutorConfig(sub.Spec.Config, state))
+	return nil
 }
 
 // ReadInherited inspects existing state without acquiring a writer or creating

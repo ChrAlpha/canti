@@ -383,7 +383,11 @@ func (a *app) remoteReport(r hostrpc.Run, err error) (int, error) {
 	if r.Status == hostrpc.StatusActive && r.Driver != hostrpc.DriverDriving && !r.Drivable && r.Why != "" {
 		fmt.Fprintf(a.stderr, "canti: the host cannot continue run %s by itself: %s\n", r.RunID, r.Why)
 	}
-	return a.report(snap, err, exitActive, host.RunConfig{ContextVersion: r.ContextVersion})
+	config := host.RunConfig{ContextVersion: r.ContextVersion}
+	if r.Environment != nil {
+		config.Environment = r.Environment.Directory
+	}
+	return a.report(snap, err, exitActive, config)
 }
 
 // remoteRun is with for a host process: it selects the run and reports what

@@ -109,11 +109,11 @@ func (h *Host) run(ctx context.Context, d *driver, l *harness.Loop, id string, o
 	h.notify()
 }
 
-// Driving reports whether the host drives run id.
+// Driving reports whether a drive or persistent stop owns work for run id.
 func (h *Host) Driving(id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.drivers[id] != nil
+	return h.workingLocked(id)
 }
 
 // interrupt ends the drive of run id, if any, as a controller shutdown that
@@ -142,22 +142,25 @@ func (h *Host) interrupt(ctx context.Context, id string) error {
 // for the run's lock only until ctx is done or the host shuts down, and a
 // shutdown ends its cleanup too, leaving the run stopped or cancelling, which
 // a later stop or drive finishes.
-func (h *Host) Stop(ctx context.Context, id string) (harness.Snapshot, error) {
+func (h *Host) Stop(ctx context.Context, id string) (snap harness.Snapshot, err error) {
 	ctx, leave, err := h.Enter(ctx)
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
 	defer leave()
+	run, c, err := h.Find(ctx, id)
+	if err != nil {
+		return harness.Snapshot{}, err
+	}
+	id = run.ID
 	unlock, err := h.lockRun(ctx, id)
 	if err != nil {
 		return harness.Snapshot{}, err
 	}
 	defer unlock()
+	finish := h.beginStop(id)
+	defer func() { finish(err) }()
 	if err := h.interrupt(ctx, id); err != nil {
-		return harness.Snapshot{}, err
-	}
-	run, c, err := h.Find(ctx, id)
-	if err != nil {
 		return harness.Snapshot{}, err
 	}
 	l, err := h.loop(run, c, NoModel)
@@ -165,6 +168,30 @@ func (h *Host) Stop(ctx context.Context, id string) (harness.Snapshot, error) {
 		return harness.Snapshot{}, err
 	}
 	return l.Stop(ctx, id, core.StopCancelled)
+}
+
+// beginStop keeps the run's current lock holder observable while it hands off
+// from an interrupted drive to durable stop/cleanup. The prior drive remains
+// separately registered until it actually ends, including after a stop timeout.
+func (h *Host) beginStop(id string) func(error) {
+	h.mu.Lock()
+	lock := h.runs[id]
+	lock.stopping = true
+	h.mu.Unlock()
+	h.notify()
+	return func(err error) {
+		h.mu.Lock()
+		h.ended = ended{id, err}
+		lock.stopping = false
+		h.mu.Unlock()
+		h.notify()
+	}
+}
+
+// workingLocked reads operational ownership under h.mu, not a journal phase.
+func (h *Host) workingLocked(id string) bool {
+	lock := h.runs[id]
+	return h.drivers[id] != nil || lock != nil && lock.stopping
 }
 
 // Resolve records the confirmed outcome obs of the unknown effect of run id.
@@ -282,8 +309,9 @@ func (h *Host) Shutdown(ctx context.Context) error {
 // of one run. Its slot is held by one operation at a time; n counts holders
 // and waiters, so the host forgets it once none remains.
 type runLock struct {
-	slot chan struct{}
-	n    int
+	slot     chan struct{}
+	n        int
+	stopping bool // holder is executing Stop; guarded by Host.mu
 }
 
 // lockRun locks run id until the returned function is called. It waits only
@@ -339,19 +367,19 @@ func (h *Host) acquire(ctx context.Context, slot chan struct{}) error {
 // drive resumes the run from the journal.
 func (h *Host) Interrupt(id string) { _ = h.interrupt(context.Background(), id) }
 
-// ended is the run and the error of the latest drive that ended.
+// ended is the run and error of the latest drive or stop that ended.
 type ended struct {
 	id  string
 	err error
 }
 
-// DriveError returns the error that ended the latest drive of the host if it
-// drove run id and no drive has ended since, or nil: what a client that was
-// not waiting for that drive is told.
+// DriveError returns the latest completed drive or stop error for run id when
+// no operation owns its work. An in-flight stop supersedes its interrupted
+// drive, then publishes its own actual result, including failure or cancellation.
 func (h *Host) DriveError(id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.ended.id == id && h.drivers[id] == nil {
+	if h.ended.id == id && !h.workingLocked(id) {
 		return h.ended.err
 	}
 	return nil

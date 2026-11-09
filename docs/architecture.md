@@ -173,7 +173,8 @@ remaining wall budget and caller deadline. Caller shutdown returns without a Run
 stop; expiry of the harness wall deadline commits StopRequested with its cause.
 After latch publication the executor finishes bounded launch work synchronously,
 so Host ownership cannot be released while that work acts. Job timeout uses
-backend start/finish times and the configured duration; clock assumptions and
+backend start/finish times, or a separately recorded dispatch time when the
+backend cannot supply process timestamps, and the configured duration; clock assumptions and
 restart classification are explicit in the C2 contract.
 
 Inspect and Cancel never create or launch work. Every operation returns the same
@@ -195,7 +196,12 @@ content at the same event ID/sequence succeeds without another write; conflictin
 content fails. The transaction validates effect facts against committed acceptance,
 request context and immutable configuration, without Docker parsing or queries.
 An external receipt must match effect and accepted Spec, have truthful status and
-owner/fence/exit evidence, and agree with its observation. A local cancellation is
+owner/fence/exit evidence, and agree with its observation. A cancelled command
+may omit its exit code only with a typed cessation witness matching its
+environment binding, daemon, attachment incarnation, effect/specification, owner,
+command generation and durable stop-intent identity. A stopped-but-quarantined
+witness does not authorize environment reuse. The witness confirmation time is
+not an actual command exit time; unknown process timestamps remain unset. A local cancellation is
 the only receipt-free Observed. Performed validates a local Outcome and any replacement focus in that same transaction.
 Confirmed rejection commits its response, usage, typed signal and next anchor together.
 The run's context_seq points to its latest successful focus mutation or rejection.
@@ -303,7 +309,11 @@ until the loop is built. The first signal shuts the controller down and then
 calls `Loop.Stop` with `cancelled` under a new 30 s cleanup deadline, so an
 effect that may exist is cancelled and its true result recorded. A second signal abandons that
 cleanup, after which the CLI stops catching signals. `canti stop` performs the
-same persistent stop under `-cleanup` (30 s by default). The cleanup deadline
+same persistent stop under `-cleanup` (30 s by default). The host keeps that
+stop observable as owned work across interruption of the old drive and durable
+cleanup. Waiters stay attached; they receive the stop result or its actual bounded
+failure, while the interrupted drive retains its own cancellation result. This
+ownership is operational state, not a new journal event. The cleanup deadline
 must also cover copying the cancelled job's Docker log into its artifact, so
 a job that wrote a large output needs a longer `-cleanup`. A stop that is
 abandoned or misses its deadline leaves the run for a later `canti stop`. A
@@ -523,9 +533,17 @@ requests retain their exact bytes and provider/API provenance across restart.
 
 ## Execution
 
-The executor owns the physical lifecycle and its durable ordering.
-Docker computes a canonical specification over its effective configuration,
-command, wrapper and retention policy. It uses one named container per effect,
+The executor owns the physical lifecycle and its durable ordering. New runs
+explicitly select persistent attachment or ephemeral execution. The host commits
+the resolved attachment and mapped cwd in Run.Config before accepting commands.
+Input replay returns stored facts before resolving a live environment; resumed
+construction and Specification remain offline and use retained mount metadata.
+The CLI owns Docker-context selection; the host reads no ambient environment.
+Context 18 describes logical retrieval addresses in attached mode, and RPC 7
+projects pinned environments and typed command binding/cessation evidence.
+Earlier frozen context and wire records retain their original bytes.
+The ephemeral Docker executor computes a canonical specification over its effective
+configuration, command, wrapper and retention policy. It uses one named container per effect,
 with effect/state/spec ownership labels. Configuration identity does not freeze
 workspace contents, image tags or daemon defaults. DOCKER_DEFAULT_PLATFORM is
 not an implicit create/pull override.
@@ -554,6 +572,35 @@ is published before release by real owner ID, and remains unchanged across all
 later operations, including Cancel. Failed release is retried on a later sample
 of that effect; no unbounded cross-effect sweep is part of Drive.
 
+The attached executor instead pins an explicitly prepared container, local Unix
+endpoint, daemon, initialization authority ID, and attachment incarnation. The
+prepared container's immutable `io.canti.control` and `io.canti.authority` labels
+must match its host directory and initialization ID. Missing authority is never
+reset while state or evidence remains; a fresh initialization cannot reopen the
+old physical container. One foreground slot survives released process locks and
+controller death across run state directories. Stored mount metadata rejects
+journal exposure without creating directories; dispatch also checks actual mounts.
+
+Every command has its own real Exec ID, start epoch, command generation, local
+reference/binding/latch mirrors and an authoritative record outside the writable
+environment. A versioned read-only `canti-job` helper captures bounded output in
+a separate writable spool. Its evidence is cross-checked with exact exec metadata;
+missing metadata never permits replay. Retained terminal receipts survive later
+container or authority loss. The spool stays private to the host user;
+attachment proves its pinned container user can create evidence in a command
+directory, and helper evidence stays collector-readable when a root command
+writes it.
+
+Raw start/stop requests are single-send and keep durable exact-request references.
+Only their specific successful acknowledgements, or positive exact-exec start
+evidence for a launch, settle those references. A stopped sample cannot reopen
+an ambiguous environment. Ordinary acknowledged cancellation stops the whole
+environment, including services, and explicit start retains its filesystem. A
+quarantined environment needs explicit old-ID removal, retirement, and attachment
+to a genuinely new ID. Retirement preserves old facts; it never invents a command
+exit. This protocol assumes Docker lifecycle changes use the controller; the
+same-user host authority and Docker daemon remain trusted.
+
 Docker calls have their own deadlines; pre-latch calls obey the caller's earlier
 deadline, while post-latch launch completion is synchronous and bounded. Inspect
 is non-starting, not filesystem-read-only: it may capture, publish and release.
@@ -561,10 +608,12 @@ Host Inspect caps one physical sample at 30 seconds and includes its timestamp
 and unavailability; it is separate from journal-only status and progress.
 
 Docker's trust assumptions remain: the daemon and same-user state directory
-writers are trusted. Jobs see the workspace read-write, artifacts and step records
-read-only, with no journal, latch, binding or daemon socket mount. No host credential
-enters a job. Jobs use init, the configured user, dropped capabilities,
-no-new-privileges, configured networking and resource limits. Model credentials
+writers are trusted. Ephemeral jobs see the workspace read-write, artifacts and step records
+read-only, with no journal, latch, binding or daemon socket mount. They use init,
+the configured user, dropped capabilities, no-new-privileges, networking and
+resource limits. Persistent commands use the prepared environment policy and
+read history, artifacts and imports through native retrieval logical addresses;
+those addresses promise no shell mounts. Neither mode inherits host model credentials. Model credentials
 are removed from the CLI environment before children start and are used only for
 the exact provider/API binding. The executor specification checks configuration
 identity; it is not a security proof against a principal with daemon access.
@@ -592,10 +641,11 @@ except decoding a response already paid for, bounds each model request by the
 remaining wall time, and checks the wall time while it waits on a running
 job. The job timeout stops the job, not the run: while inspecting, the loop
 cancels a job once the host clock is `Budget.JobTimeout` past the start time
-the Docker daemon reports, observes it as `timed_out`, and continues with the
+the backend reports (or its separate durable dispatch time), observes it as `timed_out`, and continues with the
 next step. A restarted controller that finds a cancelled job observes it as
-`timed_out` when the daemon's start and finish times span the timeout. Both
-assume the daemon shares the host clock. Tokens
+`timed_out` when its budget origin and completion or cessation confirmation span the timeout.
+Backend timestamps assume the backend shares the host clock; dispatch and
+cessation observations use the controller clock. Tokens
 are the provider-reported usage of saved and incomplete responses, so a run
 can end up to one response over its token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between

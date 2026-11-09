@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -23,11 +24,18 @@ func TestMain(m *testing.M) {
 	if addr := os.Getenv("CANTI_TEST_DIAL"); addr != "" {
 		os.Exit(dialFake(addr))
 	}
+	if worker := os.Getenv("CANTI_ATTACHED_WORKER"); worker != "" {
+		os.Exit(attachedWorker(worker))
+	}
 	os.Exit(m.Run())
 }
 
 func dialFake(addr string) int {
-	if !slices.Equal(os.Args[1:], []string{"system", "dial-stdio"}) {
+	args := os.Args[1:]
+	if len(args) >= 2 && args[0] == "--host" {
+		args = args[2:]
+	}
+	if !slices.Equal(args, []string{"system", "dial-stdio"}) {
 		fmt.Fprintf(os.Stderr, "unexpected arguments %q\n", os.Args[1:])
 		return 2
 	}
@@ -151,16 +159,17 @@ func TestEngineReportsTheDaemonsMessage(t *testing.T) {
 	}
 }
 
-func TestOnlyAStartIsNeverSentTwice(t *testing.T) {
+func TestDisruptiveRequestsAreNeverSentTwice(t *testing.T) {
 	for _, tt := range []struct {
 		op, method, path string
 		replay           bool
 	}{
 		{"inspect", http.MethodGet, "/containers/c/json", true},
 		{"create", http.MethodPost, "/containers/create?name=c", true},
-		{"stop", http.MethodPost, "/containers/c/stop?t=1", true},
+		{"stop", http.MethodPost, "/containers/c/stop?t=1", false},
 		{"rm", http.MethodDelete, "/containers/c?v=1", true},
 		{"start", http.MethodPost, "/containers/c/start", false},
+		{"start", http.MethodPost, "/exec/e/start", false},
 	} {
 		d, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, nth int) {
 			if nth > 1 {
@@ -307,4 +316,53 @@ func TestNegotiationWaitHonorsItsOwnContext(t *testing.T) {
 	}
 	cancel()
 	<-first
+}
+
+func TestPinnedEndpointOverridesAmbientDockerSelection(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "docker")
+	arguments := filepath.Join(dir, "arguments")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexec cat\n", arguments)
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HOST", "unix:///changed-ambient.sock")
+	conn, err := dialDocker(t.Context(), cli, "unix:///pinned.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err = conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 4)
+	if _, err = io.ReadFull(conn, b); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "--host\nunix:///pinned.sock\nsystem\ndial-stdio\n" {
+		t.Fatalf("Docker arguments=%q", data)
+	}
+}
+
+func TestAttachedTransportNeverReplaysARedirectedMutation(t *testing.T) {
+	sends := 0
+	_, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, _ int) {
+		sends++
+		if sends == 1 {
+			w.Header().Set("Location", "/v"+apiMax+"/containers/c/stop")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := dialing(srv)
+	e.single = true
+	err := testEngineExecutor(e).api(t.Context(), "stop", http.MethodPost, "/containers/c/stop", map[string]any{}, nil)
+	if err == nil || sends != 1 {
+		t.Fatalf("redirected mutation: sends=%d err=%v", sends, err)
+	}
 }

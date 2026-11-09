@@ -1,0 +1,32 @@
+# One project name for Compose and the Dev Containers CLI, so both manage the
+# same container; export COMPOSE_PROJECT_NAME for both to choose another.
+name: canti-dev
+services:
+  dev:
+    build:
+      context: .
+      args:
+        USER_UID: ${CANTI_UID:?set CANTI_UID to your uid}
+        USER_GID: ${CANTI_GID:?set CANTI_GID to your gid}
+    init: true
+    restart: "no"
+    labels:
+      io.canti.control: ${CANTI_ENVIRONMENT:?set the canonical attachment directory}
+      io.canti.authority: ${CANTI_AUTHORITY_ID:?use environment init authority_id}
+    volumes:
+      - type: bind
+        source: ${CANTI_ENVIRONMENT}/public
+        target: /canti
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CANTI_ENVIRONMENT}/spool
+        target: /var/lib/canti/jobs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CANTI_WORKSPACE:?set the canonical workspace directory}
+        target: /workspace
+        bind:
+          create_host_path: false

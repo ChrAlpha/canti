@@ -39,10 +39,10 @@ var recordWire = flag.Bool("record-wire", false, "record the encoding of the wir
 // moves no record.
 func wireMessages() map[string]any {
 	code := 3
-	spec := Spec{Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
+	spec := Spec{Environment: "/environment", EnvironmentWorkdir: "/workspace/subdir", Ephemeral: true, Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
 		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, OutputBudget: 8, JobTimeout: "10m0s"}
-	run := Run{RunID: "run_1", SessionID: "s", SessionSeq: 2, InputID: "in_1", Goal: "g", Constraints: "c", Status: StatusStopped, Phase: "stopped",
+	run := Run{Ephemeral: true, Environment: &Environment{Directory: "/environment", ContainerID: "container_1", DaemonID: "daemon_1", Incarnation: 1, Workdir: "/workspace"}, RunID: "run_1", SessionID: "s", SessionSeq: 2, InputID: "in_1", Goal: "g", Constraints: "c", Status: StatusStopped, Phase: "stopped",
 		Step: 4, StopReason: "cancelled", Result: "r", EffectID: "effect_1", Cursor: "run_1:9", ContextVersion: 13, API: "anthropic-messages",
 		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4, Coverage: UsageCoverage{Attempts: 7, InputReports: 3, OutputReports: 4, Lost: 2}}, Budget: Budget{WallTime: "30m0s", Tokens: 5, OutputBytes: 6, JobTimeout: "10m0s"}}
 	return map[string]any{
@@ -58,7 +58,7 @@ func wireMessages() map[string]any {
 				Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
 				Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Focus: true, FocusSources: 2},
 				AnchorSeq: 5, StopReason: "cancelled", Failure: "f", Truncated: true}, {Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"}}},
-			Inspection: &Inspection{RunID: "run_1", Cursor: "run_1:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
+			Inspection: &Inspection{RunID: "run_1", Cursor: "run_1:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{DispatchedAt: "2026-11-07T00:00:00Z", Binding: &EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, Cessation: &Cessation{Binding: EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", StopIntent: "stop_1", Kind: "environment_stopped", RequestedAt: "2026-11-07T00:00:01Z", ConfirmedAt: "2026-11-07T00:00:02Z"}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
 			Wait:       &Wait{Cursor: "run_1:9", Halted: true, Driver: DriverDriving}, Constraints: new(string)},
 	}
 }
@@ -604,5 +604,20 @@ func TestAResolutionTravelsAsTheProtocolsWords(t *testing.T) {
 		if _, err := c.Resolve(context.Background(), "run_none", Resolution{Execution: w}); !errors.As(err, new(sdk.SpecError)) {
 			t.Errorf("resolving with %q = %v, want a spec error", w, err)
 		}
+	}
+}
+
+func TestAttachedInspectionKeepsCessationSeparateFromUnknownProcessTimes(t *testing.T) {
+	now := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	j := harness.Job{EffectID: "effect", Spec: "spec", ID: "exec", Status: harness.JobCancelled, Fenced: true,
+		DispatchedAt: now, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", AuthorityID: "authority", Incarnation: 3, Generation: 7},
+		Cessation: &harness.Cessation{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", AuthorityID: "authority", Incarnation: 3, Generation: 7, EffectID: "effect", Spec: "spec", OwnerID: "exec", StopIntent: "stop", Kind: harness.CessationStopped, RequestedAt: now.Add(time.Second), ConfirmedAt: now.Add(2 * time.Second)}}
+	sample := InspectionOf(host.Inspection{RunID: "run", Seq: 4, SampledAt: now.Add(3 * time.Second), Receipt: &j})
+	r := sample.Receipt
+	if r == nil || r.ExitCode != nil || r.StartedAt != "" || r.FinishedAt != "" || r.DispatchedAt != now.Format(time.RFC3339Nano) {
+		t.Fatalf("invented process evidence: %+v", r)
+	}
+	if r.Binding == nil || r.Binding.Generation != 7 || r.Cessation == nil || r.Cessation.StopIntent != "stop" || r.Cessation.Binding != *r.Binding || r.Cessation.ConfirmedAt != now.Add(2*time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf("lost cessation identity: %+v", r)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 )
@@ -88,6 +89,10 @@ func contextRules(t *testing.T) string {
 	for _, tool := range []bool{false, true} {
 		initial := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: host.Environment(spec.Config, spec.Budget), RunID: run.ID, Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 4, DecisionTool: tool, RetrievalEnabled: true, ImportsEnabled: true, ContextState: &harness.ContextState{FirstStep: 1}}
 		frames := []harness.Frame{initial}
+		persistent := initial
+		persistent.NativeArchive = true
+		persistent.Environment = host.Environment(host.RunConfig{Environment: "/environment", EnvironmentWorkdir: "/workspace"}, spec.Budget)
+		frames = append(frames, persistent)
 		recent := initial
 		recent.Step = 2
 		recent.Receipts = []harness.StepReceipt{{Step: 1, Seq: 5, Purpose: "Inspect original", Status: "done"}}
@@ -126,7 +131,7 @@ func contextRules(t *testing.T) string {
 
 func corpusRules(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v17")
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v18")
 	scenarios, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +221,7 @@ func runtimeMappingRules(t *testing.T) string {
 			c.API, c.DecisionFormat, c.Effort, c.Structured, c.Fallbacks = transport.API, transport.DecisionFormat, transport.Effort, transport.Structured, transport.Fallbacks
 			c.Model, c.MaxTokens = "test-model", 4096
 			loop := host.ContextConfig(c, base.Budget)
-			frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: base.Limits.MaxSteps, Attempt: 1, MaxAttempts: base.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, RetrievalEnabled: enabled[0], ImportsEnabled: enabled[1]}
+			frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: base.Limits.MaxSteps, Attempt: 1, MaxAttempts: base.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, NativeArchive: loop.NativeArchive, RetrievalEnabled: enabled[0], ImportsEnabled: enabled[1]}
 			prompt, err := frame.Prompt(loop.Limits)
 			if err != nil {
 				t.Fatal(err)
@@ -234,19 +239,35 @@ func runtimeMappingRules(t *testing.T) string {
 	}
 	imports := t.TempDir()
 	variants := [][]string{nil, {"-history-imports", imports}, {"-max-steps", "0", "-max-attempts", "1"}, {"-pids", "0", "-job-timeout", "0", "-memory", "", "-cpus", "4", "-network", "bridge"}, {"-image", "custom-image:tag", "-output-limit", "4096", "-job-timeout", "1s"}, {"-image", strings.Repeat("x", 2047)}, {"-image", "debian\xff"}, {"-api", "anthropic-messages", "-model", "test-model", "-effort", "max", "-fallbacks"}, {"-api", "openai-responses", "-model", "test-model", "-max-tokens", "4096", "-effort", "none", "-structured=false", "-decision-format", "tool", "-request-bytes", "131072"}}
+	type configCase struct {
+		label string
+		spec  host.Spec
+	}
+	var configs []configCase
 	for _, flags := range variants {
-		spec := parseSpec(t, flags...)
+		label := strings.ReplaceAll(strings.Join(flags, " "), imports, "DIR")
+		configs = append(configs, configCase{label, parseSpec(t, flags...)})
+	}
+	// Stored synthetic wiring exercises persistent rendering without admission
+	// or Docker. Its fixed identity keeps the request bytes reproducible.
+	attached := base
+	attached.Config.Ephemeral = false
+	attached.Config.Environment, attached.Config.EnvironmentWorkdir = "/fixed/environment", "/workspace/project"
+	attached.Config.Image, attached.Config.Network, attached.Config.Memory, attached.Config.CPUs, attached.Config.Pids = "", "", "", "", 0
+	attached.Config.Attachment = &docker.Attachment{ContainerID: strings.Repeat("c", 64), Incarnation: 7}
+	configs = append(configs, configCase{"attached environment", attached})
+	for _, config := range configs {
+		spec := config.spec
 		loop := host.ContextConfig(spec.Config, spec.Budget)
-		frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: spec.Limits.MaxSteps, Attempt: 1, MaxAttempts: spec.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, RetrievalEnabled: loop.Reader != nil, ImportsEnabled: loop.Reader != nil && loop.Reader.Imports != ""}
+		frame := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, RunID: run.ID, Environment: loop.Environment, Step: 1, MaxSteps: spec.Limits.MaxSteps, Attempt: 1, MaxAttempts: spec.Limits.MaxAttempts, ContextState: &harness.ContextState{FirstStep: 1}, DecisionTool: loop.DecisionTool, NativeArchive: loop.NativeArchive, RetrievalEnabled: loop.Reader != nil, ImportsEnabled: loop.Reader != nil && loop.Reader.Imports != ""}
 		prompt, err := frame.Prompt(loop.Limits)
-		label := strings.Join(flags, " ")
-		label = strings.ReplaceAll(label, imports, "DIR")
 		encoded, _ := json.Marshal(struct {
 			Limits                harness.PromptLimits
 			Core                  core.Limits
 			Tool, Reader, Imports bool
-		}{loop.Limits, spec.Limits, loop.DecisionTool, loop.Reader != nil, loop.Reader != nil && loop.Reader.Imports != ""})
-		fmt.Fprintf(&b, "runtime config %q: %s; environment %s; prompt %s; error %v\n", label, encoded, digest(host.Environment(spec.Config, spec.Budget)), digest(prompt.System+prompt.User()), err)
+			NativeArchive         bool `json:",omitempty"`
+		}{loop.Limits, spec.Limits, loop.DecisionTool, loop.Reader != nil, loop.Reader != nil && loop.Reader.Imports != "", loop.NativeArchive})
+		fmt.Fprintf(&b, "runtime config %q: %s; environment %s; prompt %s; error %v\n", config.label, encoded, digest(host.Environment(spec.Config, spec.Budget)), digest(prompt.System+prompt.User()), err)
 	}
 	return b.String()
 }

@@ -18,6 +18,9 @@ import (
 func registerSpec(fs *flag.FlagSet, s *host.Spec) {
 	c, b, l := &s.Config, &s.Budget, &s.Limits
 	c.ContextVersion = host.ContextVersion
+	fs.BoolVar(&c.Ephemeral, "ephemeral", false, "run each command in a separate restricted container; select this or -environment")
+	fs.StringVar(&c.Environment, "environment", "", "persistent attachment `directory`; select this or -ephemeral")
+	fs.StringVar(&c.EnvironmentWorkdir, "environment-workdir", "", "absolute command `directory` inside the mapped workspace")
 	fs.StringVar(&c.Image, "image", "debian:bookworm-slim", "container `image` of every job")
 	fs.StringVar(&c.Network, "network", "none", "container `network` of every job")
 	fs.StringVar(&c.Memory, "memory", "2g", "memory `limit` of every job; unlimited if empty")
@@ -81,4 +84,46 @@ func canonicalImports(c *host.RunConfig, mayRetry bool) error {
 		return fmt.Errorf("-history-imports: %w", err)
 	}
 	return nil
+}
+
+// executionFlags rejects resource policy that belongs to provisioning, and
+// canonicalizes the public handle without opening its live descriptor on retry.
+func executionFlags(fs *flag.FlagSet, c *host.RunConfig) error {
+	if c.Environment == "" {
+		return nil
+	}
+	var conflict string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "image", "network", "memory", "cpus", "pids":
+			conflict = f.Name
+		}
+	})
+	if conflict != "" {
+		return fmt.Errorf("-%s requires -ephemeral; provision persistent environment limits and network externally", conflict)
+	}
+	dir, err := filepath.Abs(c.Environment)
+	if err != nil {
+		return err
+	}
+	if canonical, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = canonical
+	}
+	c.Environment = dir
+	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
+	return nil
+}
+
+func (a *app) prepareRunConfig(fs *flag.FlagSet, c *host.RunConfig, goal, constraints string, mayRetry bool) error {
+	if err := checkTask("-goal", goal, constraints); err != nil {
+		return err
+	}
+	if err := executionFlags(fs, c); err != nil {
+		return err
+	}
+	if err := canonicalImports(c, mayRetry); err != nil {
+		return err
+	}
+	c.Workspace = a.workspace
+	return a.checkHostMode()
 }

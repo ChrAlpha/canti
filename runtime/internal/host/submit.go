@@ -108,6 +108,11 @@ func (h *Host) Submit(ctx context.Context, s Submission) (Ack, error) {
 		return Ack{}, err
 	}
 	spec := s.Spec
+	resolved, err := ResolveExecution(ctx, spec.Config, h.opts.State)
+	if err != nil {
+		return Ack{}, SpecError{err}
+	}
+	spec.Config = resolved
 	p, err := newProvider(spec.Config.API, s.Binding)
 	if err != nil {
 		return Ack{}, err
@@ -159,6 +164,10 @@ func (h *Host) replay(ctx context.Context, s Submission, previous harness.Run) (
 	spec := s.Spec
 	if p, err := newProvider(spec.Config.API, s.Binding); err == nil {
 		spec.Config.Provider = p
+	}
+	spec.Config.Attachment = c.Attachment
+	if spec.Config.Environment == c.Environment && spec.Config.EnvironmentWorkdir == "" {
+		spec.Config.EnvironmentWorkdir = c.EnvironmentWorkdir
 	}
 	differs := fieldsDiffering("", c, spec.Config)
 	differs = append(differs, fieldsDiffering("budget.", previous.Budget, spec.Budget)...)

@@ -233,8 +233,12 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	}
 	limits := harness.DefaultPromptLimits()
 	limits.Total = cmp.Or(sc.contextBytes, 256<<10)
+	environment := corpusEnvironment
+	if sc.nativeArchive {
+		environment = "Commands run in fresh shells in a persistent Linux environment with working directory /workspace. Files, installed tools, HOME and background services persist across commands, runs, sessions and context resets. Archive paths are logical native retrieval addresses, not shell mounts."
+	}
 	loop, err := harness.NewLoop(store, x, m, harness.LoopConfig{
-		Environment: corpusEnvironment, History: history,
+		Environment: environment, NativeArchive: sc.nativeArchive, History: history,
 		Limits: limits, Poll: time.Millisecond, Backoff: -1, Now: func() time.Time { return corpusCreated },
 		Reader: reader, DecisionTool: sc.tool,
 	})

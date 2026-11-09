@@ -138,3 +138,27 @@ func TestRetrievalPromptKeepsQueryWhenCommandIsClipped(t *testing.T) {
 		}
 	}
 }
+
+func TestPersistentRetrievalUsesLogicalAddressesWithoutShellFallback(t *testing.T) {
+	f := testFrame()
+	f.RetrievalEnabled, f.ImportsEnabled, f.NativeArchive = true, true, true
+	prompt := mustPrompt(t, f, DefaultPromptLimits())
+	without := f
+	without.RetrievalEnabled = false
+	section := strings.TrimPrefix(prompt.System, mustPrompt(t, without, DefaultPromptLimits()).System)
+	if len(section) > 2048 {
+		t.Fatalf("native retrieval section is %d bytes, over 2048", len(section))
+	}
+	for _, want := range []string{"logical addresses", "canti:retrieve", "canti:focus", "report an incomplete scan", "evidence/", "/canti/imports"} {
+		if !strings.Contains(prompt.System, want) {
+			t.Errorf("persistent instructions lack %q", want)
+		}
+	}
+	if strings.Contains(prompt.System, "bounded shell command") {
+		t.Fatal("persistent archive promises a shell fallback without mounts")
+	}
+	f.NativeArchive = false
+	if !strings.Contains(mustPrompt(t, f, DefaultPromptLimits()).System, "bounded shell command") {
+		t.Fatal("ephemeral shell archive fallback lost")
+	}
+}

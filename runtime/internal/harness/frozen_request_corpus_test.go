@@ -29,17 +29,18 @@ const (
 )
 
 type frozenScenario struct {
-	name         string
-	tool         bool
-	limits       core.Limits
-	contextBytes int // PromptLimits.Total instead of 256 KiB
-	outputs      map[string]string
-	finals       map[string]harness.Job                  // final job of a command instead of success
-	imports      map[string]string                       // files of a read-only imported history archive
-	changes      map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
-	runs         []frozenRun
-	marks        map[string][]string
-	edge         func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
+	name          string
+	nativeArchive bool
+	tool          bool
+	limits        core.Limits
+	contextBytes  int // PromptLimits.Total instead of 256 KiB
+	outputs       map[string]string
+	finals        map[string]harness.Job                  // final job of a command instead of success
+	imports       map[string]string                       // files of a read-only imported history archive
+	changes       map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
+	runs          []frozenRun
+	marks         map[string][]string
+	edge          func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
 }
 
 type frozenRun struct {
@@ -70,7 +71,7 @@ func frozenScenarios() []frozenScenario {
 	focus := func(seq int64) string {
 		return corpusDecision(core.Exec, fmt.Sprintf(`canti:focus {"sources":[{"seq":%d,"source":0}]}`, seq))
 	}
-	return slices.Concat([]frozenScenario{
+	return slices.Concat(persistentScenarios(limits), []frozenScenario{
 		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}}},
 		{name: "reset-focus-repair", limits: limits, imports: map[string]string{"notes": "FROZEN_ORIGINAL_NOTES"}, runs: []frozenRun{{id: corpusRun, goal: "Recover original notes across provider rejection.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read notes."), overflow, focus(5), corpusDecision(core.Exec, "canti:focus {\"sources\":[]}"), "invalid decision", corpusDecision(core.Return, "Recovered notes.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources", "3 done focus 0 sources"}}}, marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "Its result predates this anchor"}, "run1-step03-rev1.json": {"Selected focus evidence", "FROZEN_ORIGINAL_NOTES"}, "run1-step04-rev2.json": {"Protocol repair"}}},
 		{name: "session-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"previous_run_id", "/canti/runs/" + corpusRun + "/"}}},
@@ -144,7 +145,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 					}
 				}
 			}
-			dir := filepath.Join("testdata", "frozen-requests-v17", sc.name)
+			dir := filepath.Join("testdata", "frozen-requests-v18", sc.name)
 			if *updateRequests {
 				if t.Failed() {
 					t.Fatal("-update-requests keeps the goldens of a failing scenario")
@@ -262,7 +263,7 @@ func elideBody(t *testing.T, facts, name string) string {
 // scenario passed.
 func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) (orphans []string) {
 	t.Helper()
-	root := filepath.Join("testdata", "frozen-requests-v17")
+	root := filepath.Join("testdata", "frozen-requests-v18")
 	names := map[string]bool{}
 	for _, sc := range scenarios {
 		if names[sc.name] {
@@ -358,4 +359,11 @@ func TestCurrentVersionRequestsAreSentAsFrozen(t *testing.T) {
 	if prompts, sent := f.model.calls(); prompts != 0 || sent != 1 || !bytes.Equal(f.model.sent[0], frozen) {
 		t.Fatalf("rendered %d prompts, sent %q", prompts, f.model.sent)
 	}
+}
+
+func persistentScenarios(limits core.Limits) []frozenScenario {
+	overflow := `raw:{"model":"claude-opus-5","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"return\",\"payload\":\"partial\"}"}]}`
+	return []frozenScenario{{name: "persistent-native-retrieval-reset-focus", nativeArchive: true, limits: limits, imports: map[string]string{"notes": "PERSISTENT_ORIGINAL_EVIDENCE"},
+		runs:  []frozenRun{{id: corpusRun, goal: "Read original environment evidence across context reset.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read original evidence."), overflow, corpusDecision(core.Exec, `canti:focus {"sources":[{"seq":5,"source":0}]}`), corpusDecision(core.Return, "Evidence retained.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources"}}},
+		marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "logical addresses"}, "run1-step03-rev1.json": {"PERSISTENT_ORIGINAL_EVIDENCE", "Selected focus evidence"}}}}
 }

@@ -12,6 +12,7 @@ import (
 // one independent, bounded Prompt. The core never receives a Frame or any
 // other history representation.
 type Frame struct {
+	NativeArchive                                  bool
 	Goal, Constraints, Environment                 string
 	Step, MaxSteps, Attempt, MaxAttempts           int
 	RunID                                          string

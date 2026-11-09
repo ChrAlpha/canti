@@ -14,8 +14,10 @@ import (
 )
 
 // preflight is a bounded, versioned, side-effect-free executable interface.
-// It does not open a writable host or create its state directory.
+// It does not open a writable host or create its state directory, and no
+// Docker client it runs inherits a model credential.
 func preflight(ctx context.Context, in io.Reader, out io.Writer) int {
+	discardCredentials()
 	req, err := decodePreflight(in)
 	resp := hostrpc.Response{Protocol: hostrpc.Protocol}
 	if err == nil && req.Protocol != hostrpc.Protocol {

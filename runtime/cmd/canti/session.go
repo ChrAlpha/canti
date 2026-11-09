@@ -18,7 +18,7 @@ import (
 )
 
 func (a *app) submitSession(ctx context.Context, session, input, goal, constraints string, explicitConstraints bool, s host.Spec, url string, once bool) (int, error) {
-	if code, err := a.checkSession(session, input, goal, constraints, s, url); err != nil {
+	if code, err := a.checkSession(ctx, session, input, goal, constraints, s, url); err != nil {
 		return code, err
 	}
 	if a.remoteMode() {
@@ -66,7 +66,7 @@ var inputChecked = func() {}
 // submitSession touches the state, and one that a state without a journal
 // refuses before it creates the state. A journal that exists once a check
 // fails may hold the input, whose retry the lookup under the lock reports.
-func (a *app) checkSession(session, input, goal, constraints string, s host.Spec, url string) (int, error) {
+func (a *app) checkSession(ctx context.Context, session, input, goal, constraints string, s host.Spec, url string) (int, error) {
 	if input == "" {
 		return exitUsage, errors.New("-session requires -input")
 	}
@@ -76,7 +76,11 @@ func (a *app) checkSession(session, input, goal, constraints string, s host.Spec
 	if err := docker.CheckLayout(a.workspace, a.state); err != nil {
 		return exitError, err
 	}
-	code, err := a.checkNewInput(goal, constraints, s, url)
+	if _, err := os.Stat(filepath.Join(a.state, "canti.db")); err == nil {
+		inputChecked()
+		return exitOK, nil
+	}
+	code, err := a.checkNewInput(ctx, goal, constraints, s, url)
 	inputChecked()
 	if _, statErr := os.Stat(filepath.Join(a.state, "canti.db")); err != nil && errors.Is(statErr, fs.ErrNotExist) {
 		return code, err
@@ -84,11 +88,11 @@ func (a *app) checkSession(session, input, goal, constraints string, s host.Spec
 	return exitOK, nil
 }
 
-func (a *app) checkNewInput(goal, constraints string, s host.Spec, url string) (int, error) {
-	if _, _, err := host.NewRun(goal, constraints, s, time.Now()); err != nil {
+func (a *app) checkNewInput(ctx context.Context, goal, constraints string, s host.Spec, url string) (int, error) {
+	if err := host.Validate(ctx, a.state, host.Submission{Goal: goal, Constraints: constraints, Spec: s}); err != nil {
 		return exitUsage, err
 	}
-	if err := a.checkCredential(context.Background(), s.Config, url); err != nil {
+	if err := a.checkCredential(ctx, s.Config, url); err != nil {
 		return exitError, err
 	}
 	return exitOK, nil

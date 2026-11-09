@@ -105,7 +105,7 @@ func TestStartupSignalsCancelPreflightAndEscalateOwnedChildren(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, exe, "-runtime", exe, "-workspace", workspace, "-state", state, "-host", "owned", "-host-wait", "20s")
+			cmd := exec.CommandContext(ctx, exe, "-ephemeral", "-runtime", exe, "-workspace", workspace, "-state", state, "-host", "owned", "-host-wait", "20s")
 			cmd.Env = append(runtimeEnvironment(), "CANTI_STARTUP_TEST_MODE="+mode, "CANTI_STARTUP_TEST_CLI=1", "CANTI_STARTUP_MARKER="+marker, "GORACE=atexit_sleep_ms=0")
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -167,5 +167,17 @@ func TestStartupSignalsCancelPreflightAndEscalateOwnedChildren(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestChatRequiresExplicitExecutionModeAndRejectsProvisioningFlags(t *testing.T) {
+	for _, args := range [][]string{nil, {"-environment", "/environment", "-ephemeral"}, {"-environment", "/environment", "-memory", "1g"}, {"-ephemeral", "-environment-workdir", "/workspace"}} {
+		if _, code, err := parse(args, &bytes.Buffer{}); err == nil || code != session.Usage {
+			t.Fatalf("accepted %v: %d, %v", args, code, err)
+		}
+	}
+	o, _, err := parse([]string{"-environment", "/environment", "-environment-workdir", "/workspace/project"}, &bytes.Buffer{})
+	if err != nil || o.cfg.Spec.Environment != "/environment" || o.cfg.Spec.Image != "" || o.cfg.Spec.Pids != 0 {
+		t.Fatalf("persistent flags = %+v, %v", o.cfg.Spec, err)
 	}
 }

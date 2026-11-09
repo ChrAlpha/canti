@@ -74,7 +74,7 @@ type Host struct {
 	admission chan struct{}
 
 	mu       sync.Mutex
-	changed  chan struct{} // closed and replaced whenever the host commits or a drive ends
+	changed  chan struct{} // closed and replaced whenever progress or operational ownership changes
 	drivers  map[string]*driver
 	runs     map[string]*runLock
 	ended    ended
@@ -88,6 +88,11 @@ type Host struct {
 // state directory must exist. Unless create is set, a missing journal is an
 // error.
 func Open(ctx context.Context, opts Options, create bool) (*Host, error) {
+	state, err := CanonicalState(opts.Workspace, opts.State)
+	if err != nil {
+		return nil, err
+	}
+	opts.State = state
 	path := filepath.Join(opts.State, "canti.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && !create {
 		return nil, fmt.Errorf("no runs in workspace %s", opts.Workspace)

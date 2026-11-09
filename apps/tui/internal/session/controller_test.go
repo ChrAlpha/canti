@@ -317,7 +317,9 @@ func TestFirstOwnedInputLossRequestsStopAndAwaitsCleanup(t *testing.T) {
 
 func protocolHost(t *testing.T, handle func(hostrpc.Request) (hostrpc.Response, bool)) string {
 	t.Helper()
-	state, err := os.MkdirTemp("", "canti-protocol-")
+	// Only this protocol fixture needs a bounded Unix socket path. Leave the
+	// caller's TMPDIR unchanged for build output and all other fixture data.
+	state, err := os.MkdirTemp("/tmp", "canti-protocol-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,5 +560,43 @@ func TestStopDuringReplayDriveIsHonoredAfterDriveError(t *testing.T) {
 	close(release)
 	if out := turn.Outcome(); out.Code != Stopped || stops.Load() != 1 {
 		t.Fatalf("stop lost after Drive error: %+v stops=%d", out, stops.Load())
+	}
+}
+
+func TestSetupAdoptsCanonicalStateBeforeConnecting(t *testing.T) {
+	aliasRoot, err := os.MkdirTemp("/tmp", "canti-chat-state-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(aliasRoot) })
+	alias := filepath.Join(aliasRoot, "state")
+	canonical := make(chan string, 1)
+	state := protocolHost(t, func(req hostrpc.Request) (hostrpc.Response, bool) {
+		switch req.Op {
+		case hostrpc.OpValidate:
+			// Once validation answers, the original spelling disappears. Startup
+			// must connect using the returned identity rather than recreate it.
+			if err := os.Remove(alias); err != nil {
+				return hostrpc.Response{Error: &hostrpc.Error{Code: hostrpc.CodeFailed, Message: err.Error()}}, false
+			}
+			return hostrpc.Response{Validated: &hostrpc.Validated{State: <-canonical, Spec: req.Validate.Submission.Spec, GoalLimit: 100}}, false
+		case hostrpc.OpHello:
+			return hostrpc.Response{Hello: &hostrpc.Hello{Protocol: hostrpc.Protocol}}, false
+		}
+		return hostrpc.Response{}, false
+	})
+	canonical <- state
+	if err := os.Symlink(state, alias); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{State: alias, HostMode: Auto, HostWait: 100 * time.Millisecond, RuntimePath: filepath.Join(aliasRoot, "must-not-start-runtime")})
+	if err := c.Setup(t.Context(), t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c.cfg.State != state || c.runtime.state != state {
+		t.Fatalf("startup retained alias: config=%q runtime=%q,want %q", c.cfg.State, c.runtime.state, state)
+	}
+	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup recreated an unvalidated State path: %v", err)
 	}
 }

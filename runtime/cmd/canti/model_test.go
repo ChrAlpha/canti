@@ -26,7 +26,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 		{"Responses fallbacks", []string{"-api", "openai-responses", "-model", "m", "-fallbacks"}, "-fallbacks needs -api anthropic-messages"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := parseSpec(t, tc.args...)
+			s := parseSpec(t, append([]string{"-ephemeral"}, tc.args...)...)
 			s.Config.Workspace = "/work"
 			s.Config.Provider = "http://127.0.0.1:1"
 			if _, _, err := host.NewRun("goal", "", s, time.Time{}); err == nil || !strings.Contains(err.Error(), tc.err) {
@@ -39,7 +39,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 		{"-api", "openai-responses", "-model", "m", "-effort", "none", "-decision-format", "tool"},
 		{"-api", "openai-responses", "-model", "m"},
 	} {
-		s := parseSpec(t, args...)
+		s := parseSpec(t, append([]string{"-ephemeral"}, args...)...)
 		s.Config.Workspace = "/work"
 		s.Config.Provider = "http://127.0.0.1:1"
 		run, _, err := host.NewRun("goal", "", s, time.Time{})
