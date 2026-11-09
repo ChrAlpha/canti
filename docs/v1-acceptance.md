@@ -200,13 +200,13 @@ starts, not raw HTTP sends. Loss of all authority/helper/spool contents, even
 with mount-root inodes retained, produced a fresh authority identity and refused
 reattachment of the old container. These results are in `controller-f152bb3.md`.
 
-The final focused command, with the original long task TMPDIR unchanged, was:
+The focused command at 391dd95, with the original long task TMPDIR unchanged, was:
 
 ```sh
 go test -json -count=1 -race -timeout=3m -run '^(TestSetupAdoptsCanonicalStateBeforeConnecting|TestCLIUsesCanonicalProspectiveState|TestResolveStateReturnsCanonicalProspectiveDirectory|TestHostCanonicalStateSurvivesAliasRetargeting|TestPersistentPreflightChecksActualMountsBeforeCreatingState|TestPersistentReplayUsesStoredAttachmentWithoutEnvironmentAccess|TestPersistentReconstructionRejectsEveryMountExposingState|TestNewPersistentAdmissionRequiresLiveValidationBeforeRunCommit|TestPersistentAcceptancePinsTheStoredPhysicalExecutionContract|TestStopOwnsProgressThroughDriveHandoff|TestExternalStopKeepsOwnerAttached|TestRunExecutionModeAndProvisioningFlagsFailBeforeStateCreation|TestChatRequiresExplicitExecutionModeAndRejectsProvisioningFlags)$' ./runtime/internal/host ./runtime/cmd/canti ./runtime/internal/harness/docker ./apps/tui/internal/session ./apps/tui/cmd/canti-tui
 ```
 
-The actual public scenario command at the final source was
+The actual public scenario command at 391dd95 was
 `python3 <qa>/public-scenarios.py --repo <qa-worktree> --commit
 391dd9555581966c299134583a9d9aa0633ff7b4 --canti
 <qa>/public-391dd95/bin/canti --run-id p8 --docker-host
@@ -224,19 +224,100 @@ isolated CLI state, not IDE-managed credential sharing. Neither has the ephemera
 
 ### Final source gates
 
+A review of `e0ce624` found defects that the earlier gates did not exercise.
+QA reproduced each one before the fix, using offline fakes, compiled executables
+and real Docker:
+
+- A missing or removed command workdir made the helper fail before the shell
+  started: exit 125, with no completion record. The command became unknown and
+  kept the environment slot busy. Now the command shell enters the workdir, so
+  the shell's error is captured output with a nonzero completion, and a later
+  command reuses the environment.
+- Drive, Inspect, Cancel and `environment stop` resolved the run's workspace on
+  the host first. Deleting or moving that subtree, during a command or after
+  admission, failed them with `lstat`, and Docker stop was never called. Now
+  host path resolution belongs only to admission of a new configuration.
+  Bound work checks attachment identity and its stored canonical mapping
+  against one container observation per operation; it previously took two.
+- Docker clients started by `canti preflight` inherited the three model
+  credential variables. QA checked this with sentinel names; values were never
+  recorded. Preflight now removes them before any Docker I/O.
+- A container user whose UID differed from the host spool owner (host UID 1000,
+  container UID 1001) passed attachment and then could not write evidence.
+  Attachment now runs a write challenge as that user and refuses it. Root and
+  same-UID users still produce collector-readable evidence.
+- `docker compose -p canti-dev` and the Dev Containers CLI derived different
+  project names for the example service. The Compose file now names the
+  project for both tools.
+
+The fixes are in `ee29280`. Its tree, `256be0fed973be238675a4be2f56e31d24a111a2`,
+is the clean QA snapshot `48a7180bdbf7c2dacf0fcb960082bc1a8f86ad3f`: the same
+production and documentation commits plus the tests-only commit `deb9a65`, which
+extends four existing test files. QA ran every gate below at that snapshot on
+Linux/amd64 with Go1.26.10, rootful host Engine29.9.1-1, Compose2.40.3 and Dev
+Containers CLI 0.90.0. Each listed command exited zero.
+`.git/agent-supervision/environment-review/qa/final-summary.json`,
+`verification.json` and `report.md` retain the commands, timings, counts and
+baseline reproductions. These results describe that tree. Later
+documentation-only revisions of this file were not rerun.
+
+| Exact command from the repository root | Observed result |
+| --- | --- |
+| `make check lint` | Passed, 157.212 s; module checks, offline and executable acceptance, zero lint issues |
+| `go test -v -count=1 -race ./runtime/... ./sdk/go/... ./apps/tui/...` | Passed, 103.875 s; 762 parents and 1,195 subtests; 2 optional external-corpus skips |
+| `GOFLAGS=-v DOCKER_CONFIG=<task-local empty config> make integration` (host Docker) | Passed, 399.062 s; 869 parents and 1,286 subtests, no failures; root executable acceptance 50.249 s; 3 parent skips |
+| `git diff --check` | Passed, 0.005 s |
+| `make commits BASE=e0ce624` | Passed, 22.313 s; module builds and normal and tagged vet for each commit |
+
+The focused real Docker `TestAttachedDocker` cases passed with no skips. They
+cover:
+
+- ordinary cwd failure and reuse of the environment afterwards;
+- a workspace missing after admission;
+- an actual container stop after subtree deletion, with slot and fence release;
+- rejection of a mismatched UID;
+- readable helper evidence from root and same-UID users.
+
+The skips are the same as before:
+
+- `TestRetrievalCasefoldQuality` and `TestRetrievalTermsCorpusExperiment` need
+  an external frozen corpus.
+- `TestAcceptanceReleasedResources` is a runtime-owned fixture that root
+  acceptance invokes separately.
+
+The first `make integration` attempt is retained in
+`integration-first-summary.json`. It ran unisolated and exited 2 after
+342.502 s, because the host Docker configuration's credential helper exited 255
+in `TestBindPullsAnImageTheDaemonLacks`. The retry used a synthetic, empty,
+task-local `DOCKER_CONFIG`. `docker-config-identity.json` confirms that the
+retry reached the same daemon ID. No source or test was changed for the retry.
+
+Dev Containers evidence at this tree is configuration only:
+
+- Compose config resolves the default `canti-dev`, the same explicit name, and
+  a shared `COMPOSE_PROJECT_NAME` override.
+- Dev Containers CLI 0.90.0 `read-configuration` parses the same Compose file
+  and service.
+
+No Dev Containers startup or rebuild, no DinD run and no live provider was
+exercised. Model adapters were offline fixtures. The actual Dev Container and
+DinD rows above describe their recorded earlier sources; the ordinary Dev
+Container row predates the shared project name.
+
+#### Earlier gates at 391dd95
+
 QA completed the following commands on Linux/amd64, Go1.26.10 and host
 Engine29.9.1-1 at exact source
 `391dd9555581966c299134583a9d9aa0633ff7b4` (tree
-`441f757c5439d4f865549137c002ce11221bfbc7`). Each listed command exited zero;
+`441f757c5439d4f865549137c002ce11221bfbc7`). The final gates above supersede
+them. Each listed command exited zero;
 `gate-runs/g391/manifest.json`, its JSON events and the separate
 `check-lint-corrected/manifest.json` retain the results. The consolidated
 `acceptance-391dd95.md` and `.json` record completion and the final resource
 audit: all 18 task containers stopped, all 9 preexisting container states and
 the shared daemon identity unchanged; task images, seven new volumes and the
 ordinary network are retained and inventoried rather than claimed removed.
-This acceptance update
-changes documentation only; these timings describe the tested source, not a
-rerun on its documentation successor.
+These timings describe that source only.
 
 | Exact command from the repository root | Observed result |
 | --- | --- |

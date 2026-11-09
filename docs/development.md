@@ -113,7 +113,10 @@ with existing provisioning tools; retry retirement after its absence is confirme
 then explicitly attach the replacement. A new container loses manual system-layer
 installations; only designated volumes survive. Neither elapsed time nor a stopped
 sample clears an old unacknowledged request. `canti-job` must be packaged beside
-`canti`, or named explicitly with `environment init -helper PATH`.
+`canti`, or named explicitly with `environment init -helper PATH`. Initialization
+publishes that helper once and never replaces it, so an environment keeps the
+helper of the canti that initialized it. To adopt a newer helper, initialize a new
+directory and attach a container prepared for its labels and mounts.
 
 ### Persistent development environments
 
@@ -193,12 +196,13 @@ requires the retirement/replacement procedure above. Ordinary acknowledged
 cancellation does not require a rebuild. For a deliberate rebuild, including `up
 --build` after a configuration change, stop and detach before replacing the old
 container with Compose or Dev Containers, then explicitly attach the new ID;
-compare `ps -q dev` with `ContainerID` from `environment inspect`. Detach needs
-the old container, so if it was replaced first, run `environment retire`, which
-confirms the old ID is gone, and then attach the new ID. The workspace bind
-survives; manually installed system packages and private HOME in the container
-layer are replaced. Add private volumes deliberately when those files should
-survive rebuilds.
+compare `ps -q dev` with the `container_id` that `environment attach` printed.
+Once the attached container is gone, `environment inspect` fails with Docker's
+missing-container error instead of a status. Detach needs the old container, so if
+it was replaced first, run `environment retire`, which confirms the old ID is
+gone, and then attach the new ID. The workspace bind survives; manually installed
+system packages and private HOME in the container layer are replaced. Add private
+volumes deliberately when those files should survive rebuilds.
 
 For canti development that needs a private Docker daemon, the optional
 `examples/persistent-environment-dind/.devcontainer/devcontainer.json` uses the
