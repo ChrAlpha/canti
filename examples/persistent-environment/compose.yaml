@@ -1,3 +1,6 @@
+# One project name for Compose and the Dev Containers CLI, so both manage the
+# same container; export COMPOSE_PROJECT_NAME for both to choose another.
+name: canti-dev
 services:
   dev:
     build:

@@ -42,10 +42,27 @@ type attachedFake struct {
 	startOnce                           sync.Once
 	labelIdentity, extraMount           string
 	extraTarget, extraType              string
+	user, probeFailure                  string
+	probes                              int
+	daemonChecks                        int
+	daemonID                            string
+	changeEpochOnCreate                 bool
 }
 
 func newAttachedFake(t *testing.T) *attachedFake {
+	t.Helper()
+	f := newUnattachedFake(t)
+	if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func newUnattachedFake(t *testing.T) *attachedFake {
+	t.Helper()
 	f := &attachedFake{t: t, dir: t.TempDir(), workspace: t.TempDir(), running: true, exists: true, epoch: time.Now().UTC(), container: strings.Repeat("c", 64), execs: map[string]execMetadata{}, requests: map[string]execRequest{}}
+	f.user = fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	f.daemonID = "daemon"
 	f.endpoint = "unix://" + filepath.Join(f.dir, "engine.sock")
 	helper := filepath.Join(t.TempDir(), "helper")
 	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
@@ -63,9 +80,6 @@ func newAttachedFake(t *testing.T) *attachedFake {
 	key := "docker\x00" + f.endpoint
 	engines.Store(key, f.engine)
 	t.Cleanup(func() { engines.Delete(key); f.engine.client.CloseIdleConnections() })
-	if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err != nil {
-		t.Fatal(err)
-	}
 	return f
 }
 func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +89,11 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v"+apiMax)
 	if path == "/info" {
-		json.NewEncoder(w).Encode(map[string]string{"ID": "daemon", "OSType": "linux", "Architecture": runtime.GOARCH})
+		f.mu.Lock()
+		f.daemonChecks++
+		id := f.daemonID
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"ID": id, "OSType": "linux", "Architecture": runtime.GOARCH})
 		return
 	}
 	if strings.HasSuffix(path, "/stop") {
@@ -133,7 +151,7 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		var c preparedContainer
 		c.ID = f.container
-		c.Config.User = "1000:1000"
+		c.Config.User = f.user
 		c.Config.Env = []string{"HOME=/home/dev", "PATH=/usr/local/bin:/usr/bin:/bin"}
 		c.Config.Labels = map[string]string{controlLabel: f.dir, authorityLabel: f.labelIdentity}
 		c.State.Running, c.State.Paused, c.State.Restarting = f.running, f.paused, f.restarting
@@ -188,6 +206,9 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 		id := fmt.Sprintf("%064x", f.next)
 		f.execs[id] = execMetadata{ID: id, ContainerID: f.container}
 		f.requests[id] = req
+		if f.changeEpochOnCreate {
+			f.epoch = f.epoch.Add(time.Second)
+		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{"Id": id})
 		return
@@ -201,6 +222,32 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.HasSuffix(path, "/start") {
+			req := f.requests[id]
+			if len(req.Cmd) == 5 && req.Cmd[3] == "canti-attach" {
+				f.probes++
+				if req.WorkingDir != "/" || req.User != f.user || !strings.HasPrefix(req.Cmd[4], spoolRoot+"/.attach-") {
+					f.t.Errorf("invalid spool write challenge: %+v", req)
+				}
+				code := 0
+				probe := filepath.Join(f.dir, "spool", strings.TrimPrefix(req.Cmd[4], spoolRoot+"/"))
+				switch f.probeFailure {
+				case "exit":
+					code = 1
+				case "missing":
+				case "symlink":
+					if err := os.Symlink(filepath.Join(f.dir, "public", "manifest.json"), probe); err != nil {
+						f.t.Error(err)
+					}
+				default:
+					if err := os.WriteFile(probe, nil, 0600); err != nil {
+						f.t.Error(err)
+					}
+				}
+				m.Pid, m.ExitCode = 42, &code
+				f.execs[id] = m
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			f.starts++
 			if f.startEntered != nil {
 				f.startOnce.Do(func() { close(f.startEntered) })
@@ -322,6 +369,221 @@ func TestAttachedCancellationConfirmsCessationWithoutPID1Exit(t *testing.T) {
 	}
 	if f.stops != stops {
 		t.Fatal("old cancellation stopped the newer command")
+	}
+}
+
+func TestAttachedActiveCommandSurvivesWorkspaceRemoval(t *testing.T) {
+	for _, mutation := range []string{"delete", "move"} {
+		for _, operation := range []string{"drive", "inspect", "cancel", "stop"} {
+			t.Run(mutation+"/"+operation, func(t *testing.T) {
+				f := newAttachedFake(t)
+				// Bind the parent so the mutable project subtree can disappear
+				// while the prepared container's mount remains unchanged.
+				project := filepath.Join(f.workspace, "project")
+				if err := os.Mkdir(project, 0700); err != nil {
+					t.Fatal(err)
+				}
+				c := f.executor(t).cfg
+				c.Workspace, c.Workdir = project, "/workspace/project"
+				x, err := NewAttached(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e := effectFor(x, "workspace_removed", "sleep 60")
+				if _, err = x.Drive(t.Context(), e); err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "move" {
+					err = os.Rename(project, project+"-moved")
+				} else {
+					err = os.RemoveAll(project)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var j harness.Job
+				switch operation {
+				case "drive":
+					j, err = x.Drive(t.Context(), e)
+				case "inspect":
+					j, err = x.Inspect(t.Context(), e)
+				case "cancel":
+					j, err = x.Cancel(t.Context(), e)
+				case "stop":
+					_, err = ControlEnvironment(t.Context(), f.dir, "stop")
+				}
+				if err != nil {
+					t.Fatalf("%s after workspace %s: %v (Docker stops=%d)", operation, mutation, err, f.stops)
+				}
+				if operation == "drive" || operation == "inspect" {
+					if j.Status != harness.JobRunning {
+						t.Fatalf("lost active command: %+v", j)
+					}
+					f.complete(t, x, e, 0, "finished after removal")
+					j, err = x.Inspect(t.Context(), e)
+					if err != nil || j.Status != harness.JobSucceeded {
+						t.Fatalf("completion after removal: %+v: %v", j, err)
+					}
+				} else {
+					if f.stops != 1 {
+						t.Fatalf("Docker stop requests=%d, want 1", f.stops)
+					}
+					j, err = x.Inspect(t.Context(), e)
+					if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil {
+						t.Fatalf("cessation after removal: %+v: %v", j, err)
+					}
+				}
+				_, s, err := readEnvironment(f.dir)
+				if err != nil || s.Active != "" || len(s.Requests) != 0 || s.Pending != "" {
+					t.Fatalf("terminal command retained slot/fence: %+v: %v", s, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAttachedObservesAttachmentOncePerBoundOperation(t *testing.T) {
+	for _, operation := range []string{"drive", "inspect", "cancel", "stop"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			e := effectFor(x, "single_observation", "sleep 60")
+			if _, err := x.Drive(t.Context(), e); err != nil {
+				t.Fatal(err)
+			}
+			before := f.daemonChecks
+			var err error
+			switch operation {
+			case "drive":
+				_, err = x.Drive(t.Context(), e)
+			case "inspect":
+				_, err = x.Inspect(t.Context(), e)
+			case "cancel":
+				_, err = x.Cancel(t.Context(), e)
+			case "stop":
+				_, err = ControlEnvironment(t.Context(), f.dir, "stop")
+			}
+			if err != nil || f.daemonChecks-before != 1 {
+				t.Fatalf("%s repeated attachment observation: daemon checks=%d: %v", operation, f.daemonChecks-before, err)
+			}
+		})
+	}
+}
+
+func TestAttachedLaunchRechecksEpochAfterExecCreation(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	f.changeEpochOnCreate = true
+	e := effectFor(x, "changed_epoch", "touch must-not-run")
+	if _, err := x.Drive(t.Context(), e); err == nil {
+		t.Fatal("launched after environment changed during exec creation")
+	}
+	if f.starts != 0 {
+		t.Fatalf("sent %d starts into a changed epoch", f.starts)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found || r.ExecID == "" || r.Launch != "" || !r.DispatchedAt.IsZero() {
+		t.Fatalf("epoch recheck consumed launch latch: %+v: %v", r, err)
+	}
+}
+
+func TestAttachedHelperLaunchUsesStableDirectoryAndRetainsRequestedCwd(t *testing.T) {
+	f := newAttachedFake(t)
+	c := f.executor(t).cfg
+	c.Workdir = "/workspace/missing"
+	x, err := NewAttached(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := effectFor(x, "helper_cwd", "printf useful")
+	j, err := x.Drive(t.Context(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	req := f.requests[j.ID]
+	f.mu.Unlock()
+	if req.WorkingDir != "/" || req.User != c.Attachment.User {
+		t.Fatalf("helper launch requires stable cwd and prepared user: %+v", req)
+	}
+	var cwd string
+	for i := 0; i+1 < len(req.Cmd); i++ {
+		if req.Cmd[i] == "-workdir" {
+			cwd = req.Cmd[i+1]
+		}
+	}
+	if cwd != c.Workdir {
+		t.Fatalf("helper lost command cwd: %q", cwd)
+	}
+	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		found := false
+		for _, value := range req.Env {
+			if value == name+"=" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("helper did not clear %s", name)
+		}
+	}
+}
+
+func TestAttachedWorkspaceRemovalDoesNotBypassIdentityChecks(t *testing.T) {
+	for _, identity := range []string{"daemon", "label", "attachment"} {
+		for _, operation := range []string{"drive", "inspect", "cancel", "stop"} {
+			t.Run(identity+"/"+operation, func(t *testing.T) {
+				f := newAttachedFake(t)
+				project := filepath.Join(f.workspace, "project")
+				if err := os.Mkdir(project, 0700); err != nil {
+					t.Fatal(err)
+				}
+				c := f.executor(t).cfg
+				c.Workspace, c.Workdir = project, "/workspace/project"
+				x, err := NewAttached(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e := effectFor(x, "identity_after_removal", "sleep 60")
+				if _, err := x.Drive(t.Context(), e); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(project); err != nil {
+					t.Fatal(err)
+				}
+				switch identity {
+				case "daemon":
+					f.daemonID = "replacement-daemon"
+				case "label":
+					f.labelIdentity = strings.Repeat("d", 64)
+				case "attachment":
+					a, err := ReadAttachment(f.dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					a.ContainerID = strings.Repeat("d", 64)
+					if err := saveJSON(filepath.Join(f.dir, "authority", "environment.json"), a, false); err != nil {
+						t.Fatal(err)
+					}
+				}
+				switch operation {
+				case "drive":
+					_, err = x.Drive(t.Context(), e)
+				case "inspect":
+					_, err = x.Inspect(t.Context(), e)
+				case "cancel":
+					_, err = x.Cancel(t.Context(), e)
+				case "stop":
+					_, err = ControlEnvironment(t.Context(), f.dir, "stop")
+				}
+				if err == nil || f.stops != 0 || f.starts != 1 {
+					t.Fatalf("identity change allowed mutation: starts=%d stops=%d: %v", f.starts, f.stops, err)
+				}
+				_, s, err := readEnvironment(f.dir)
+				if err != nil || s.Active != e.ID {
+					t.Fatalf("identity mismatch released slot: %+v: %v", s, err)
+				}
+			})
+		}
 	}
 }
 func TestAttachedCompetingStatesCannotDispatchBesideSurvivingCommand(t *testing.T) {
@@ -1167,5 +1429,50 @@ func TestEnvironmentAdmissionDoesNotRecoverPendingOrUnsettledRequests(t *testing
 				t.Fatal("admission mutated Docker")
 			}
 		})
+	}
+}
+
+func TestEnvironmentAttachmentRequiresSuccessfulRegularSpoolWriteEvidence(t *testing.T) {
+	for _, failure := range []string{"exit", "missing", "symlink"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newUnattachedFake(t)
+			f.probeFailure = failure
+			if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err == nil {
+				t.Fatal("published attachment without successful regular spool write evidence")
+			}
+			if f.probes != 1 || f.starts != 0 || f.stops != 0 {
+				t.Fatalf("probe=%d command starts=%d stops=%d", f.probes, f.starts, f.stops)
+			}
+			if _, err := os.Stat(filepath.Join(f.dir, "authority", "environment.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("published rejected attachment: %v", err)
+			}
+			_, s, err := readEnvironment(f.dir)
+			if err != nil || s.Gate != "unattached" || s.Active != "" {
+				t.Fatalf("failed admission changed authority: %+v: %v", s, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(f.dir, "spool"))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("challenge was not cleaned up: %v: %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentSameIdentityReattachDoesNotRepeatSpoolWriteChallenge(t *testing.T) {
+	f := newAttachedFake(t)
+	if f.probes != 1 {
+		t.Fatalf("initial spool challenges=%d, want 1", f.probes)
+	}
+	before, err := os.ReadFile(filepath.Join(f.dir, "authority", "environment.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.probeFailure = "exit"
+	if _, err := AttachEnvironment(t.Context(), f.dir, f.endpoint, "dev", ""); err != nil {
+		t.Fatalf("same-identity reattach repeated mutation: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(f.dir, "authority", "environment.json"))
+	if err != nil || string(before) != string(after) || f.probes != 1 {
+		t.Fatalf("same-identity reattach changed authority/challenged again: probes=%d: %v", f.probes, err)
 	}
 }

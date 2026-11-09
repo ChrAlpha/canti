@@ -19,7 +19,7 @@ func run(args []string) int {
 	fs.Uint64Var(&c.Generation, "generation", 0, "command generation")
 	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "retained output bytes")
 	fs.IntVar(&c.PreviewLimit, "preview-limit", 4096, "preview bytes")
-	fs.StringVar(&c.Workdir, "workdir", "", "command cwd")
+	fs.StringVar(&c.Workdir, "workdir", "", "directory the command shell enters")
 	fs.StringVar(&c.Init, "init", "", "optional shell initialization file")
 	if err := fs.Parse(args); err != nil {
 		return 125

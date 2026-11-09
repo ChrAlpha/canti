@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -125,6 +126,69 @@ func TestPreflightRejectsTrailingDocumentBeforeValidation(t *testing.T) {
 		t.Fatalf("trailing request accepted: %+v", response)
 	}
 	assertNoState(t, validation.State)
+}
+
+func TestCompiledPreflightRemovesProviderCredentialsBeforeDockerFailure(t *testing.T) {
+	v := testPreflightValidation(t)
+	c := &v.Submission.Spec
+	c.Ephemeral, c.Environment = false, filepath.Join(t.TempDir(), "environment")
+	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
+	helperBytes := []byte("#!/bin/sh\necho 1\n")
+	helper := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(helper, helperBytes, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.InitEnvironment(c.Environment, helper); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := docker.EnvironmentIdentity(c.Environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := harness.ConfigDigest(helperBytes)
+	a := docker.Attachment{Format: 1, Directory: c.Environment, Endpoint: "unix:///synthetic-preflight.sock", DaemonID: "daemon", ContainerID: strings.Repeat("a", 64), AuthorityID: authority, Incarnation: 1,
+		Helper: "/canti/bin/" + digest + "/canti-job", HelperDigest: digest, User: "0:0", Home: "/root", Path: "/usr/bin:/bin", AdmissionEpoch: "epoch"}
+	a.Mounts = []docker.EnvironmentMount{{Type: "bind", Source: c.Workspace, Target: "/workspace", Writable: true}, {Type: "bind", Source: filepath.Join(a.Directory, "public"), Target: "/canti"}, {Type: "bind", Source: filepath.Join(a.Directory, "spool"), Target: "/var/lib/canti/jobs", Writable: true}}
+	data, err := json.Marshal(a)
+	if err == nil {
+		err = os.WriteFile(filepath.Join(c.Environment, "authority", "environment.json"), data, 0600)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "canti")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build public canti: %v %s", err, out)
+	}
+	commands := t.TempDir()
+	observed := filepath.Join(commands, "observed")
+	// Record presence only, never values. The first Docker subprocess fails
+	// before transport I/O, exercising the public command's early failure path.
+	script := "#!/bin/sh\nprintf 'called\\n' >\"$QA_OBSERVED\"\n" +
+		"[ \"${OPENAI_API_KEY+x}\" != x ] || printf 'OPENAI_API_KEY\\n' >>\"$QA_OBSERVED\"\n" +
+		"[ \"${ANTHROPIC_API_KEY+x}\" != x ] || printf 'ANTHROPIC_API_KEY\\n' >>\"$QA_OBSERVED\"\n" +
+		"[ \"${ANTHROPIC_AUTH_TOKEN+x}\" != x ] || printf 'ANTHROPIC_AUTH_TOKEN\\n' >>\"$QA_OBSERVED\"\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(commands, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), binary, "preflight")
+	cmd.Env = []string{"PATH=" + commands + ":/usr/bin:/bin", "QA_OBSERVED=" + observed,
+		"OPENAI_API_KEY=synthetic-openai-sentinel", "ANTHROPIC_API_KEY=synthetic-anthropic-sentinel", "ANTHROPIC_AUTH_TOKEN=synthetic-token-sentinel"}
+	cmd.Stdin = bytes.NewReader(preflightRequest(t, v))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("preflight transport response: %v %s", err, out)
+	}
+	var response hostrpc.Response
+	if err := json.Unmarshal(out, &response); err != nil || response.Error == nil || response.Validated != nil {
+		t.Fatalf("Docker failure response=%s: %v", out, err)
+	}
+	seen, err := os.ReadFile(observed)
+	if err != nil || string(seen) != "called\n" {
+		t.Fatalf("first Docker subprocess inherited credential names: %q: %v", seen, err)
+	}
+	assertNoState(t, v.State)
 }
 
 // The test binary acts as Docker's stdio transport, so this boundary test needs

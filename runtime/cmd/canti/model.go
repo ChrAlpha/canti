@@ -13,6 +13,14 @@ import (
 // starts any process, whichever API its run uses.
 var credentialVariables = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"}
 
+// discardCredentials removes every model credential from the environment of
+// a command that uses none, before it performs any I/O or starts a process.
+func discardCredentials() {
+	for _, name := range credentialVariables {
+		os.Unsetenv(name)
+	}
+}
+
 // credentials reads the model credentials and removes them from the
 // environment, so that no child process inherits one. It fails only when
 // none is set; host.NewModel reports a missing credential of the run's API.

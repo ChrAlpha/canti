@@ -37,7 +37,15 @@ func (x *Attached) execRequest(r attachedRecord) execRequest {
 		command = append(command, "-init", a.Init)
 	}
 	command = append(command, "--", r.Effect.Command)
-	return execRequest{User: a.User, WorkingDir: x.cfg.Workdir, Cmd: command, Env: []string{"HOME=" + a.Home, "PATH=" + a.Path, "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=", "OPENAI_API_KEY="}}
+	// The helper launches from the root directory and its shell enters the
+	// workdir: a removed workdir fails the command, not the exec's creation.
+	return execRequest{User: a.User, WorkingDir: "/", Cmd: command, Env: commandEnv(a)}
+}
+
+// commandEnv is the environment of every process the controller starts in the
+// prepared container: its pinned HOME and PATH, with model credentials blanked.
+func commandEnv(a Attachment) []string {
+	return []string{"HOME=" + a.Home, "PATH=" + a.Path, "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=", "OPENAI_API_KEY="}
 }
 func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attachedRecord) (harness.Job, error) {
 	if s.Gate != "open" || len(s.Requests) > 0 {

@@ -89,6 +89,34 @@ func TestInitializationAndWorkingDirectoryAreExplicit(t *testing.T) {
 		t.Fatalf("retained output=%q: %v", output, err)
 	}
 }
+
+func TestMissingWorkingDirectoryPublishesCommandFailure(t *testing.T) {
+	for _, initialized := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "initialized"}[initialized], func(t *testing.T) {
+			c := config(t, "printf should-not-run")
+			c.Workdir = filepath.Join(c.Workdir, "missing")
+			if initialized {
+				c.Init = filepath.Join(t.TempDir(), "init.sh")
+				if err := os.WriteFile(c.Init, []byte("export INITIALIZED=yes\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec, err := Run(c)
+			if err != nil || rec.ExitCode == nil || *rec.ExitCode == 0 || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt) || rec.Incomplete {
+				t.Fatalf("cwd failure must have ordinary completion: %+v: %v", rec, err)
+			}
+			output, err := os.ReadFile(filepath.Join(c.Directory, "output"))
+			if err != nil || !strings.Contains(string(output), "cd") || !strings.Contains(string(output), c.Workdir) || strings.Contains(string(output), "should-not-run") {
+				t.Fatalf("cwd stderr=%q: %v", output, err)
+			}
+			data, err := os.ReadFile(filepath.Join(c.Directory, "completion.json"))
+			var saved Record
+			if err != nil || json.Unmarshal(data, &saved) != nil || saved.ExitCode == nil || *saved.ExitCode != *rec.ExitCode || saved.Digest != rec.Digest || saved.EffectID != c.EffectID {
+				t.Fatalf("durable cwd completion=%+v: %v", saved, err)
+			}
+		})
+	}
+}
 func TestEvidenceDoesNotFollowAnOutputSymlink(t *testing.T) {
 	c := config(t, "touch should-not-run")
 	target := filepath.Join(t.TempDir(), "target")

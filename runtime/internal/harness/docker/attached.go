@@ -299,7 +299,12 @@ func (x *Attached) reserve(ctx context.Context, e harness.Effect, s *environment
 	s.ActiveSpec, s.ActiveState = e.Spec, x.cfg.State
 	return r, saveEnvironmentState(x.cfg.Attachment.Directory, *s)
 }
-func (x *Attached) activeOwner(ctx context.Context, s environmentState) (*Attached, attachedRecord, error) {
+
+// activeOwner rebuilds the executor of the command bound to the shared slot,
+// possibly another State's, and checks it against the attachment and container
+// c this operation already observed. Its workspace is not consulted on the
+// host: stopping or reconciling bound work must not depend on its existence.
+func (x *Attached) activeOwner(s environmentState, c preparedContainer) (*Attached, attachedRecord, error) {
 	var r attachedRecord
 	found, err := readJSON(filepath.Join(x.jobDir(s.Active), "command.json"), &r)
 	if err != nil || !found {
@@ -316,13 +321,16 @@ func (x *Attached) activeOwner(ctx context.Context, s environmentState) (*Attach
 	if err != nil || !found {
 		return nil, r, errors.Join(err, errors.New("docker: invalid active command authority"))
 	}
-	if _, _, err = observedEnvironmentWorkdir(ctx, r.Config.Attachment, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
+	if !r.Config.Attachment.sameIdentity(x.cfg.Attachment) {
+		return nil, r, fmt.Errorf("%w: active command belongs to another environment attachment", harness.ErrJobLost)
+	}
+	if _, err = observedMapping(c, r.Config.Workspace, r.Config.State, r.Config.Workdir); err != nil {
 		return nil, r, err
 	}
 	return owner, r, nil
 }
-func (x *Attached) reconcileActive(ctx context.Context, s *environmentState) error {
-	previous, r, err := x.activeOwner(ctx, *s)
+func (x *Attached) reconcileActive(ctx context.Context, s *environmentState, c preparedContainer) error {
+	previous, r, err := x.activeOwner(*s, c)
 	if err != nil {
 		return err
 	}
@@ -389,12 +397,16 @@ func validateAttachedTerminal(r attachedRecord) error {
 	return j.Validate(r.Effect)
 }
 
+// prepareSlot observes the attachment once for the operation and recovers the
+// shared slot. The configuration was admitted with resolved host paths; its
+// effects check identity and the stored canonical mapping only, so a workspace
+// removed after admission fails its command's cd instead of its operation.
 func (x *Attached) prepareSlot(ctx context.Context, e harness.Effect, s *environmentState) error {
-	var err error
-	if _, _, err = observedEnvironmentWorkdir(ctx, x.cfg.Attachment, x.cfg.Workspace, x.cfg.State, x.cfg.Workdir); err != nil {
+	c, err := x.backend.checkAttachment(ctx, x.cfg.Attachment)
+	if err != nil {
 		return err
 	}
-	if err = x.backend.checkAttachment(ctx, x.cfg.Attachment); err != nil {
+	if _, err = observedMapping(c, x.cfg.Workspace, x.cfg.State, x.cfg.Workdir); err != nil {
 		return err
 	}
 	if err = x.recoverControl(ctx, s); err != nil {
@@ -404,7 +416,7 @@ func (x *Attached) prepareSlot(ctx context.Context, e harness.Effect, s *environ
 		return fmt.Errorf("%w: environment attachment is %s", harness.ErrJobLost, s.Gate)
 	}
 	if s.Active != "" && s.Active != e.ID {
-		if err = x.reconcileActive(ctx, s); err != nil {
+		if err = x.reconcileActive(ctx, s, c); err != nil {
 			return err
 		}
 		if s.Active != "" {

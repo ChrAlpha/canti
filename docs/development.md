@@ -102,7 +102,9 @@ with labels `io.canti.control=<canonical directory>` and
 `/canti:ro` and `DIRECTORY/spool` at `/var/lib/canti/jobs:rw`. Mount selected
 workspaces separately; keep run state and model credentials outside every mount.
 `environment attach -environment DIRECTORY -container NAME` pins the real ID and
-selected local Unix Docker endpoint. `inspect`, `stop`, `start` and `detach` use
+selected local Unix Docker endpoint. It refuses a container user that cannot write
+the spool, which stays private to the host user: run the container as that UID,
+or as root without user-namespace remapping. `inspect`, `stop`, `start` and `detach` use
 that same directory. Stop affects services as well as the foreground command.
 
 An ambiguous lifecycle request keeps the environment quarantined. `environment
@@ -139,9 +141,9 @@ export CANTI_ENVIRONMENT="$(realpath "$CANTI_ENVIRONMENT")"
 export CANTI_UID="$(id -u)" CANTI_GID="$(id -g)"
 export CANTI_AUTHORITY_ID="$(bin/canti environment init -environment "$CANTI_ENVIRONMENT" |
   python3 -c 'import json,sys; print(json.load(sys.stdin)["authority_id"])')"
-docker compose --env-file /dev/null -p canti-dev \
+docker compose --env-file /dev/null \
   -f examples/persistent-environment/compose.yaml up -d --build
-container=$(docker compose --env-file /dev/null -p canti-dev \
+container=$(docker compose --env-file /dev/null \
   -f examples/persistent-environment/compose.yaml ps -q dev)
 bin/canti environment attach -environment "$CANTI_ENVIRONMENT" -container "$container"
 bin/canti run -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
@@ -151,22 +153,27 @@ bin/canti-tui -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
   -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL
 ```
 
-The same Compose service can be opened using
-`examples/persistent-environment/.devcontainer/devcontainer.json`. Set the same
-variables, then run:
+The Compose file names its project `canti-dev`, which the Dev Containers CLI
+honors as well; an exported `COMPOSE_PROJECT_NAME` overrides it for both. Either
+tool therefore manages the same container instead of a second claimant of the
+control label, which attachment would refuse. The same Compose service can be
+opened using `examples/persistent-environment/.devcontainer/devcontainer.json`.
+Set the same variables, then run:
 
 ```sh
 COMPOSE_BAKE=false devcontainer up --workspace-folder "$CANTI_WORKSPACE" \
   --config examples/persistent-environment/.devcontainer/devcontainer.json
 ```
 
-Attach the returned container ID. On the verified Dev Containers CLI 0.90.0 and
-Compose 5.7.0 combination, disabling Bake for this Compose-backed invocation
-avoids its rejection of the generated Dockerfile outside the build context
-(`fs.read` privilege request). The direct Compose invocation above and the
-Dockerfile-based DinD invocation below use their own build paths; the recorded
-QA runs required this workaround only for the ordinary Dev Container command.
-Use a non-root host UID with these examples.
+Attach the returned container ID. Dev Containers adds its own labels, so switching
+an attached container between `docker compose up` and `devcontainer up` can
+replace it: follow the rebuild procedure below. On the verified Dev Containers CLI
+0.90.0 and Compose 5.7.0 combination, disabling Bake for this Compose-backed
+invocation avoids its rejection of the generated Dockerfile outside the build
+context (`fs.read` privilege request). The direct Compose invocation above and the
+Dockerfile-based DinD invocation below use their own build paths; the recorded QA
+runs required this workaround only for the ordinary Dev Container command. Use a
+non-root host UID with these examples.
 
 Commands use the pinned container user, HOME and PATH, `/bin/sh -c`, and a fresh
 shell each time. `environment attach -init /absolute/file` sources an optional
@@ -178,16 +185,20 @@ files and redirect stdin, stdout and stderr so command output can finish. Shell
 variables alone do not survive the next command.
 
 A return, session switch, or context reset leaves packages and services intact.
-`environment stop` ends foreground work and services; `environment start`
-retains the same filesystem with a new start epoch. Cancellation and job timeout
-also stop the whole environment, so explicitly start it before another command.
-Inspect the environment gate before start: an unacknowledged mutation stays
-quarantined and requires the retirement/replacement procedure above. Ordinary
-acknowledged cancellation does not require a rebuild. For a deliberate rebuild,
-stop and detach before replacing the old container with Compose or Dev Containers,
-then explicitly attach the new ID. The workspace bind survives; manually installed
-system packages and private HOME in the container layer are replaced. Add private
-volumes deliberately when those files should survive rebuilds.
+`environment stop` ends foreground work and services; `environment start` retains
+the same filesystem with a new start epoch. Cancellation and job timeout also stop
+the whole environment, so explicitly start it before another command. Inspect the
+environment gate before start: an unacknowledged mutation stays quarantined and
+requires the retirement/replacement procedure above. Ordinary acknowledged
+cancellation does not require a rebuild. For a deliberate rebuild, including `up
+--build` after a configuration change, stop and detach before replacing the old
+container with Compose or Dev Containers, then explicitly attach the new ID;
+compare `ps -q dev` with `ContainerID` from `environment inspect`. Detach needs
+the old container, so if it was replaced first, run `environment retire`, which
+confirms the old ID is gone, and then attach the new ID. The workspace bind
+survives; manually installed system packages and private HOME in the container
+layer are replaced. Add private volumes deliberately when those files should
+survive rebuilds.
 
 For canti development that needs a private Docker daemon, the optional
 `examples/persistent-environment-dind/.devcontainer/devcontainer.json` uses the

@@ -20,9 +20,7 @@ import (
 )
 
 func environmentCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	for _, name := range credentialVariables {
-		os.Unsetenv(name)
-	}
+	discardCredentials()
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "Usage: canti environment init|attach|inspect|stop|start|detach|retire -environment DIRECTORY [flags]")
 		return exitUsage

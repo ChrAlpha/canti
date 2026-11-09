@@ -23,6 +23,7 @@ const Protocol = 1
 const MetadataLimit = 16 << 10
 
 // Config is supplied in the bound exec's arguments, never read from job files.
+// Workdir is entered by the command's shell, so it need not exist at launch.
 type Config struct {
 	Directory, EffectID, Spec, Command, Workdir, Init string
 	Generation                                        uint64
@@ -85,12 +86,16 @@ func Run(c Config) (Record, error) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	script := c.Command
+	// The shell, not the helper's launch, enters the workdir, before and after
+	// the optional init: a missing or inaccessible directory is the command's
+	// own failure, captured with its output and a completion, never a launch
+	// that leaves no evidence. The helper itself runs from the root directory.
+	script := "cd -- \"$2\" || exit $?\n"
 	if c.Init != "" {
-		script = ". \"$1\" || exit $?\ncd -- \"$2\" || exit $?\n" + script
+		script += ". \"$1\" || exit $?\ncd -- \"$2\" || exit $?\n"
 	}
-	cmd := exec.Command("/bin/sh", "-c", script, "canti-job", c.Init, c.Workdir)
-	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Workdir, nil, writer, writer
+	cmd := exec.Command("/bin/sh", "-c", script+c.Command, "canti-job", c.Init, c.Workdir)
+	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = "/", nil, writer, writer
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	rec := Record{Protocol: Protocol, EffectID: c.EffectID, Spec: c.Spec, Generation: c.Generation}
 	if err := cmd.Start(); err != nil {

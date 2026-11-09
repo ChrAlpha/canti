@@ -331,6 +331,9 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	if err = x.mountChallenge(ctx, a); err != nil {
 		return Attachment{}, err
 	}
+	if err = x.spoolChallenge(ctx, a); err != nil {
+		return Attachment{}, err
+	}
 	if err = saveJSON(filepath.Join(dir, "authority", "environment.json"), a, false); err != nil {
 		return Attachment{}, err
 	}
@@ -459,10 +462,59 @@ func (x *Executor) mountChallenge(ctx context.Context, a Attachment) error {
 	return nil
 }
 
+// spoolChallenge proves, before an attachment is committed, that its pinned
+// user can create evidence in a command directory prepared as dispatch prepares
+// one: private to the host user that owns the spool. A container user whose
+// UID differs, or is remapped by a user namespace, is refused here instead of
+// failing every command before its completion can be written.
+func (x *Executor) spoolChallenge(ctx context.Context, a Attachment) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	name := ".attach-" + hex.EncodeToString(nonce[:])
+	dir := filepath.Join(a.Directory, "spool", name)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	request := execRequest{User: a.User, WorkingDir: "/", Cmd: []string{"/bin/sh", "-c", `: > "$1"`, "canti-attach", spoolRoot + "/" + name + "/probe"}, Env: commandEnv(a)}
+	var created struct{ ID string }
+	if err := x.api(ctx, "exec-create", http.MethodPost, "/containers/"+a.ContainerID+"/exec", request, decodeResponse(&created)); err != nil {
+		return err
+	}
+	if len(created.ID) != 64 {
+		return errors.New("docker: exec creation returned an invalid physical ID")
+	}
+	if err := x.api(ctx, "start", http.MethodPost, "/exec/"+created.ID+"/start", struct{ Detach, Tty bool }{Detach: true}, nil); err != nil {
+		return err
+	}
+	call, cancel := context.WithTimeout(ctx, x.timeouts.call)
+	defer cancel()
+	for {
+		var m execMetadata
+		if err := x.api(call, "exec-inspect", http.MethodGet, "/exec/"+created.ID+"/json", nil, decodeResponse(&m)); err != nil {
+			return err
+		}
+		if !m.Running && m.ExitCode != nil {
+			probe, err := os.Lstat(filepath.Join(dir, "probe"))
+			if *m.ExitCode != 0 || err != nil || !probe.Mode().IsRegular() {
+				return fmt.Errorf("docker: environment user %q cannot write the host-owned command spool; run the prepared container as host UID %d, or as root without user-namespace remapping", a.User, os.Getuid())
+			}
+			return nil
+		}
+		select {
+		case <-call.Done():
+			return fmt.Errorf("docker: spool write challenge did not finish within %v", x.timeouts.call)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 // EnvironmentWorkdir validates a read-only admission snapshot and returns the
 // unique writable workspace bind mapping. It never recovers control state,
-// acquires the foreground slot, or creates the run state directory. Dispatch
-// must recheck because admission reserves nothing.
+// acquires the foreground slot, or creates the run state directory. Reserving
+// the slot rechecks gate, readiness and mapping because admission reserves nothing.
 func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, requested string) (string, error) {
 	cwd, c, err := observedEnvironmentWorkdir(ctx, a, workspace, state, requested)
 	if err != nil {
@@ -493,27 +545,29 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 	return cwd, nil
 }
 
-// Recovery checks the same physical mapping even when admission is closed: it
-// must remain possible to reconcile old work in a stopped/quarantined environment.
+// observedEnvironmentWorkdir is the admission check of a new configuration. It
+// resolves the workspace and prospective State on the host before observing
+// the attachment, so a missing workspace or a State alias into a mount is
+// refused before the canonical paths are committed with the run.
 func observedEnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, requested string) (string, preparedContainer, error) {
 	state, err := ResolveState(workspace, state)
 	if err != nil {
 		return "", preparedContainer{}, err
 	}
-	x := environmentEngine(a.Endpoint)
-	if err := x.checkAttachment(ctx, a); err != nil {
-		return "", preparedContainer{}, err
-	}
-	c, err := x.inspectPrepared(ctx, a.ContainerID)
+	c, err := environmentEngine(a.Endpoint).checkAttachment(ctx, a)
 	if err != nil {
 		return "", c, err
 	}
-	mounts := mountProjection(c)
-	if err := checkEnvironmentMounts(a.Directory, mounts); err != nil {
-		return "", c, err
-	}
-	cwd, err := pinnedEnvironmentWorkdir(Attachment{Mounts: mounts}, workspace, state, requested)
+	cwd, err := observedMapping(c, workspace, state, requested)
 	return cwd, c, err
+}
+
+// observedMapping checks the run's mapping against the mounts of a container
+// already observed in this operation. It is lexical over canonical paths, so
+// observing and cancelling bound work keep working, even in a stopped or
+// quarantined environment, after its command removes its own workspace.
+func observedMapping(c preparedContainer, workspace, state, requested string) (string, error) {
+	return pinnedEnvironmentWorkdir(Attachment{Mounts: mountProjection(c)}, workspace, state, requested)
 }
 func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) (string, error) {
 	var candidates []string
@@ -544,32 +598,36 @@ func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) 
 	}
 	return cwd, nil
 }
-func (x *Executor) checkAttachment(ctx context.Context, a Attachment) error {
+
+// checkAttachment observes, once per operation, that a still names the current
+// attachment, daemon and labelled container with verified bind sources, and
+// returns that container observation for the operation's later checks.
+func (x *Executor) checkAttachment(ctx context.Context, a Attachment) (preparedContainer, error) {
 	if err := a.validate(); err != nil {
-		return err
+		return preparedContainer{}, err
 	}
 	current, err := ReadAttachment(a.Directory)
 	if err != nil {
-		return err
+		return preparedContainer{}, err
 	}
 	if current.AuthorityID != a.AuthorityID || current.ContainerID != a.ContainerID || current.DaemonID != a.DaemonID || current.Incarnation != a.Incarnation || current.Endpoint != a.Endpoint {
-		return fmt.Errorf("%w: environment attachment changed", harness.ErrJobLost)
+		return preparedContainer{}, fmt.Errorf("%w: environment attachment changed", harness.ErrJobLost)
 	}
 	id, err := x.daemon(ctx)
 	if err != nil {
-		return err
+		return preparedContainer{}, err
 	}
 	if id != a.DaemonID {
-		return fmt.Errorf("%w: Docker daemon identity changed", harness.ErrJobLost)
+		return preparedContainer{}, fmt.Errorf("%w: Docker daemon identity changed", harness.ErrJobLost)
 	}
 	c, err := x.inspectPrepared(ctx, a.ContainerID)
 	if err != nil {
-		return err
+		return c, err
 	}
 	if c.Config.Labels[authorityLabel] != a.AuthorityID || c.ID != a.ContainerID || c.Config.Labels[controlLabel] != a.Directory {
-		return fmt.Errorf("%w: environment identity changed", harness.ErrJobLost)
+		return c, fmt.Errorf("%w: environment identity changed", harness.ErrJobLost)
 	}
-	return checkEnvironmentMounts(a.Directory, mountProjection(c))
+	return c, checkEnvironmentMounts(a.Directory, mountProjection(c))
 }
 
 func attachmentIncarnation(dir string, a Attachment, state environmentState) (Attachment, bool, error) {

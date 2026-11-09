@@ -586,8 +586,10 @@ reference/binding/latch mirrors and an authoritative record outside the writable
 environment. A versioned read-only `canti-job` helper captures bounded output in
 a separate writable spool. Its evidence is cross-checked with exact exec metadata;
 missing metadata never permits replay. Retained terminal receipts survive later
-container or authority loss. Helper evidence is collector-readable inside its
-private spool directory, including when command and collector UIDs differ.
+container or authority loss. The spool stays private to the host user;
+attachment proves its pinned container user can create evidence in a command
+directory, and helper evidence stays collector-readable when a root command
+writes it.
 
 Raw start/stop requests are single-send and keep durable exact-request references.
 Only their specific successful acknowledgements, or positive exact-exec start

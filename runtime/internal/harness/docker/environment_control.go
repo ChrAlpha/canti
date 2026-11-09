@@ -165,7 +165,8 @@ func ControlEnvironment(ctx context.Context, directory, operation string) (Envir
 	if operation == "retire" {
 		return x.retire(ctx, &s)
 	}
-	if err = x.backend.checkAttachment(ctx, a); err != nil {
+	c, err := x.backend.checkAttachment(ctx, a)
+	if err != nil {
 		return EnvironmentStatus{}, err
 	}
 	if err = x.recoverControl(ctx, &s); err != nil {
@@ -179,13 +180,13 @@ func ControlEnvironment(ctx context.Context, directory, operation string) (Envir
 	}
 	switch operation {
 	case "stop", "detach":
-		if err = x.stopEnvironment(ctx, &s, operation); err != nil {
+		if err = x.stopEnvironment(ctx, &s, operation, c); err != nil {
 			return EnvironmentStatus{}, err
 		}
 
 	case "start":
 		if s.Active != "" {
-			if err = x.reconcileActive(ctx, &s); err != nil {
+			if err = x.reconcileActive(ctx, &s, c); err != nil {
 				return EnvironmentStatus{}, err
 			}
 		}
@@ -259,9 +260,9 @@ func (x *Attached) retire(ctx context.Context, s *environmentState) (Environment
 	return EnvironmentStatus{AuthorityID: a.AuthorityID, Directory: a.Directory, Endpoint: a.Endpoint, DaemonID: a.DaemonID, ContainerID: a.ContainerID, Incarnation: a.Incarnation, Gate: "retired"}, nil
 }
 
-func (x *Attached) stopEnvironment(ctx context.Context, s *environmentState, operation string) error {
+func (x *Attached) stopEnvironment(ctx context.Context, s *environmentState, operation string, observed preparedContainer) error {
 	if s.Active != "" {
-		owner, r, err := x.activeOwner(ctx, *s)
+		owner, r, err := x.activeOwner(*s, observed)
 		if err != nil {
 			return err
 		}
