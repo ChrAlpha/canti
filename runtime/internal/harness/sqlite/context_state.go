@@ -35,6 +35,12 @@ func (s *Store) contextState(ctx context.Context, tx *sql.Tx, expected harness.S
 	if latest != expected {
 		return harness.ContextState{}, harness.ErrStaleSnapshot
 	}
+	return s.contextHead(ctx, tx, expected)
+}
+
+// contextHead is contextState for expected, which tx has already read as
+// the latest snapshot of its run.
+func (s *Store) contextHead(ctx context.Context, tx *sql.Tx, expected harness.Snapshot) (harness.ContextState, error) {
 	var pointer int64
 	if err := tx.QueryRowContext(ctx, `SELECT context_seq FROM runs WHERE id=?`, expected.State.RunID).Scan(&pointer); err != nil {
 		return harness.ContextState{}, err
@@ -144,8 +150,11 @@ func (s *Store) checkFocusHead(ctx context.Context, tx *sql.Tx, expected harness
 	return nil
 }
 
+// checkContext checks t against the context head of its run inside the
+// write transaction tx that commits it, which has read t.From at t.Seq-1 as
+// the latest snapshot of the run.
 func (s *Store) checkContext(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
-	current, err := s.contextState(ctx, tx, harness.Snapshot{Seq: t.Seq - 1, State: t.From})
+	current, err := s.contextHead(ctx, tx, harness.Snapshot{Seq: t.Seq - 1, State: t.From})
 	if err != nil {
 		return err
 	}
