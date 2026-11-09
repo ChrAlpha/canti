@@ -31,7 +31,7 @@ func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit 
 	if before <= 0 {
 		before = math.MaxInt64
 	}
-	rows, err := s.db.QueryContext(ctx, receiptSQL, runID, before, limit)
+	rows, err := s.stmts[receiptSQL].QueryContext(ctx, runID, before, limit)
 	if err != nil {
 		return nil, err
 	}

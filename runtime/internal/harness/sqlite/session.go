@@ -139,6 +139,9 @@ func (s *Store) SessionInput(ctx context.Context, sessionID, inputID string) (ha
 	return s.run(s.db.QueryRowContext(ctx, `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.input_id = ?`, sessionID, inputID))
 }
 
+// sessionRunsSQL pages the runs of a session newest first.
+const sessionRunsSQL = `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.seq < ? ORDER BY sr.seq DESC LIMIT ?`
+
 // SessionRuns returns newest-first runs, excluding before when positive.
 func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
 	if !ValidKey(sessionID) || before < 0 || limit <= 0 {
@@ -150,7 +153,7 @@ func (s *Store) SessionRuns(ctx context.Context, sessionID string, before int64,
 	if before == 0 {
 		before = int64(^uint64(0) >> 1)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.semantics, r.run FROM session_runs sr JOIN runs r ON r.id = sr.run_id WHERE sr.session_id = ? AND sr.seq < ? ORDER BY sr.seq DESC LIMIT ?`, sessionID, before, limit)
+	rows, err := s.stmts[sessionRunsSQL].QueryContext(ctx, sessionID, before, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -266,9 +266,9 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 		name, update string
 		reads        []string
 	}{
-		{"unknown kind", `UPDATE transitions SET kind = 'teleported' WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Commit"}},
-		{"other semantics", `UPDATE transitions SET semantics = semantics + 1 WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Recent", "Commit"}},
-		{"unknown field", `UPDATE transitions SET to_state = json_insert(to_state, '$.Extra', 1) WHERE run_id = ? AND seq = ?`, []string{"Latest", "Transitions", "Commit"}},
+		{"unknown kind", `UPDATE transitions SET kind = 'teleported' WHERE run_id = ? AND seq = ?`, []string{"Latest", "Head", "Transitions", "Commit"}},
+		{"other semantics", `UPDATE transitions SET semantics = semantics + 1 WHERE run_id = ? AND seq = ?`, []string{"Latest", "Head", "Transitions", "Recent", "Commit"}},
+		{"unknown field", `UPDATE transitions SET to_state = json_insert(to_state, '$.Extra', 1) WHERE run_id = ? AND seq = ?`, []string{"Latest", "Head", "Transitions", "Commit"}},
 		{"unknown facts field", `UPDATE transitions SET facts = json_insert(facts, '$.Extra', 1) WHERE run_id = ? AND seq = ?`, []string{"Transitions", "Recent"}},
 	}
 	for _, c := range corruptions {
@@ -281,6 +281,7 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 			}
 			reads := map[string]func() error{
 				"Latest":      func() error { _, err := s.Latest(ctx, "run-1"); return err },
+				"Head":        func() error { _, err := s.Head(ctx, "run-1"); return err },
 				"Transitions": func() error { _, err := s.Transitions(ctx, "run-1", 0, 100); return err },
 				"Recent":      func() error { _, err := s.Recent(ctx, "run-1", 0, 5); return err },
 				"Commit":      func() error { return d.try(core.RequestFrozen{}, harness.Facts{Request: requestFor(d.snap.State)}) },
@@ -317,7 +318,51 @@ func TestReadsRefuseIncompatibleRecords(t *testing.T) {
 		if _, err := s.Latest(ctx, "run-1"); !errors.Is(err, ErrIncompatible) {
 			t.Errorf("Latest error = %v, want ErrIncompatible", err)
 		}
+		if _, err := s.Head(ctx, "run-1"); !errors.Is(err, ErrIncompatible) {
+			t.Errorf("Head error = %v, want ErrIncompatible", err)
+		}
 	})
+}
+
+// TestHeadFollowsLatestAtEveryPosition requires that Head report the sequence
+// and intent of Latest at every position of a run, before its first
+// transition, while a snapshot holds a decision whose payload needs JSON
+// escaping, and once the run has returned.
+func TestHeadFollowsLatestAtEveryPosition(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	check := func(at string) {
+		t.Helper()
+		latest, err := s.Latest(ctx, "run-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, err := s.Head(ctx, "run-1")
+		if err != nil {
+			t.Fatalf("Head(%s) error = %v", at, err)
+		}
+		if head.Seq != latest.Seq || head.Intent() != latest.State.Intent() {
+			t.Fatalf("Head(%s) = seq %d, %s; Latest = seq %d, %s", at, head.Seq, head.Intent(), latest.Seq, latest.State.Intent())
+		}
+	}
+	check("fresh run")
+	d.freeze()
+	check("frozen request")
+	d.send()
+	check("sent request")
+	body := execBody("printf '%s\\n' \"quoted\" \u2028 </dev/null" + strings.Repeat("x", 1<<16))
+	d.save(body, harness.Usage{})
+	check("saved response")
+	d.load(body)
+	check("accepted decision")
+	d.observe(core.ExecutionExited, 1)
+	check("completed step")
+	d.decide([]byte(`{"kind":"return","payload":"done"}`), harness.Usage{})
+	check("returned run")
+	if _, err := s.Head(ctx, "ghost"); !errors.Is(err, harness.ErrNotFound) {
+		t.Fatalf("Head(unknown run) error = %v, want ErrNotFound", err)
+	}
 }
 
 func TestCommitRefusesTransitionsItCannotReproduce(t *testing.T) {

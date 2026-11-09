@@ -118,12 +118,16 @@ const (
 	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action'), json_extract(facts, '$.Execution')
 		FROM transitions WHERE run_id = ? AND seq = ?`
+	// headSQL is latestSQL without the decision payload, which SQLite drops
+	// before the state crosses the SQL boundary.
+	headSQL = `SELECT seq, kind, semantics, json_remove(to_state, '$.Decision.payload') FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
-	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
+	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL,
+	contextSeqSQL, contextHeadSQL, receiptSQL, sessionRunsSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
@@ -304,7 +308,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if err != nil {
 		return err
 	}
-	last, err := s.latest(ctx, tx, r.run)
+	last, err := s.latestAs(ctx, tx, r.run, r.from, &t.From)
 	if err != nil {
 		return err
 	}
