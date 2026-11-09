@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unicode/utf8"
 )
@@ -66,8 +67,167 @@ func TestInheritedBackgroundPipeCannotHoldCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 800*time.Millisecond || !rec.Incomplete || *rec.ExitCode != 0 || rec.Preview != "foreground" {
+	if time.Since(start) > 800*time.Millisecond || !rec.Incomplete || rec.CaptureError != "" || *rec.ExitCode != 0 || rec.Preview != "foreground" {
 		t.Fatalf("elapsed=%v record=%+v", time.Since(start), rec)
+	}
+}
+
+func TestClosedPipeWaitsForCollectorPastTheLingerGrace(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err = w.Write([]byte("0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err = w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	captured, result := make(chan capture, 1), make(chan capture, 1)
+	release := make(chan struct{})
+	go func() { <-release; captured <- collect(r, &out, 1024, 128) }()
+	grace := 5 * time.Millisecond
+	go func() { result <- awaitCapture(r, captured, grace) }()
+	select {
+	case got := <-result:
+		close(release)
+		t.Fatalf("returned before collector: %+v", got)
+	case <-time.After(4 * grace):
+	}
+	close(release)
+	select {
+	case got := <-result:
+		if !got.eof || got.err != nil || got.total != 2 || got.stored != 2 || out.String() != "0\n" {
+			t.Fatalf("closed pipe lost complete capture: %+v output=%q", got, out.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closed pipe did not finish after collector was released")
+	}
+}
+
+func TestPipeWriterObservationKeepsBufferedEOFAndUnknownStatesDistinct(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if !writersRemain(r) {
+		t.Fatal("empty pipe lost its live writer")
+	}
+	if _, err = w.Write([]byte("pending")); err != nil {
+		t.Fatal(err)
+	}
+	if !writersRemain(r) {
+		t.Fatal("buffered bytes concealed a live writer")
+	}
+	if err = w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if writersRemain(r) {
+		t.Fatal("buffered bytes concealed confirmed EOF")
+	}
+	if err = r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !writersRemain(r) {
+		t.Fatal("unavailable pipe manufactured confirmed EOF")
+	}
+}
+
+func TestCaptureDeadlineRetainsPendingBytesWithinItsOutputLimit(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	text := strings.Repeat("pending-", 128)
+	if _, err = w.Write([]byte(text)); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	result := make(chan capture, 1)
+	go func() { result <- collect(r, &out, 16, 128) }()
+	var got capture
+	select {
+	case got = <-result:
+	case <-time.After(time.Second):
+		r.Close()
+		w.Close()
+		t.Fatal("deadline drain waited for the live writer")
+	}
+	if got.eof || got.err != nil || got.total != int64(len(text)) || got.stored != 16 || out.String() != text[:16] || len(got.preview()) > 128 {
+		t.Fatalf("deadline lost pending bytes or limits: %+v output=%q", got, out.String())
+	}
+}
+
+func TestContinuousInheritedWriterCannotExtendCapturePastItsGrace(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	writerReady, writerDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		chunk := bytes.Repeat([]byte("x"), 4096)
+		if _, err := w.Write(chunk); err != nil {
+			return
+		}
+		close(writerReady)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-writerReady:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not publish initial bytes")
+	}
+	var out bytes.Buffer
+	captured, result := make(chan capture, 1), make(chan capture, 1)
+	go func() { captured <- collect(r, &out, 64, 128) }()
+	start := time.Now()
+	go func() { result <- awaitCapture(r, captured, 10*time.Millisecond) }()
+	var got capture
+	select {
+	case got = <-result:
+	case <-time.After(time.Second):
+		r.Close()
+		w.Close()
+		t.Fatal("continuous writer extended capture past its bound")
+	}
+	if time.Since(start) > time.Second || got.eof || got.err != nil || got.total < got.stored || got.stored != 64 || out.Len() != 64 {
+		t.Errorf("live writer escaped bounded incomplete capture: %+v elapsed=%v", got, time.Since(start))
+	}
+	select {
+	case <-writerDone:
+		t.Error("writer ceased before capture stopped waiting")
+	default:
+	}
+	r.Close()
+	w.Close()
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not exit after pipe cleanup")
+	}
+}
+
+func TestCollectorReadFailureDoesNotManufactureEOF(t *testing.T) {
+	failure := errors.New("read failed")
+	got := collect(iotest.ErrReader(failure), io.Discard, 1024, 128)
+	if got.eof || !errors.Is(got.err, failure) || got.total != 0 || got.stored != 0 {
+		t.Fatalf("read failure became EOF: %+v", got)
 	}
 }
 func TestInitializationAndWorkingDirectoryAreExplicit(t *testing.T) {
