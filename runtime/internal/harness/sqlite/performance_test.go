@@ -118,6 +118,25 @@ func BenchmarkLatestDecision(b *testing.B) {
 	}
 }
 
+// BenchmarkHeadDecision reads the position of the run that
+// BenchmarkLatestDecision reads, as the readers that follow a run do.
+func BenchmarkHeadDecision(b *testing.B) {
+	for _, size := range decisionSizes {
+		b.Run(fmt.Sprintf("decision_%dB", size), func(b *testing.B) {
+			ctx := context.Background()
+			s := open(b, tempPath(b))
+			d := newDriver(b, s, createRun(b, s, "run-1", limits))
+			d.decide(execBody("echo "+strings.Repeat("x", size)), harness.Usage{})
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := s.Head(ctx, "run-1"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkCommitDecision commits the observation that completes a step
 // whose accepted decision has each size: the commit that carries the
 // decision in its from state and checks it against the latest snapshot.

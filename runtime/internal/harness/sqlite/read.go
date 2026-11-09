@@ -75,6 +75,42 @@ func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.S
 	return snap, nil
 }
 
+// Head is the position of the latest snapshot of a run: its sequence and
+// what the harness does next. It is read without the payload of the
+// decision the snapshot holds, the one field of a state without a bound, so
+// that a reader that follows a run's position pays nothing for it.
+type Head struct {
+	Seq   int64
+	state core.State
+}
+
+// Intent is the intent of the snapshot at h.
+func (h Head) Intent() core.Intent { return h.state.Intent() }
+
+// Head returns the position of the latest snapshot of run runID, which Latest
+// returns in full. It refuses the records Latest refuses but for the content
+// of the decision payload, which it does not read.
+func (s *Store) Head(ctx context.Context, runID string) (Head, error) {
+	var h Head
+	var kind string
+	var semantics int
+	var state string
+	err := s.stmts[headSQL].QueryRowContext(ctx, runID).Scan(&h.Seq, &kind, &semantics, &state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		err = missing(s.stmts[initialSQL].QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
+	case err == nil:
+		err = known(kind, semantics)
+	}
+	if err == nil {
+		err = decodeState(semantics, state, &h.state)
+	}
+	if err != nil {
+		return Head{}, err
+	}
+	return h, nil
+}
+
 // Totals returns the run-wide sums maintained by Commit.
 func (s *Store) Totals(ctx context.Context, runID string) (harness.Totals, error) {
 	return s.totals(ctx, nil, runID)

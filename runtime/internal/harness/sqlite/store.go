@@ -118,11 +118,14 @@ const (
 	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action'), json_extract(facts, '$.Execution')
 		FROM transitions WHERE run_id = ? AND seq = ?`
+	// headSQL is latestSQL without the decision payload, which SQLite drops
+	// before the state crosses the SQL boundary.
+	headSQL = `SELECT seq, kind, semantics, json_remove(to_state, '$.Decision.payload') FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
-	latestSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
+	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL,
 }
 

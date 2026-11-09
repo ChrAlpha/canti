@@ -47,7 +47,7 @@ func (h *Host) View(ctx context.Context, id string) (View, error) {
 		if v.Totals, err = h.store.Totals(ctx, run.ID); err != nil {
 			return v, err
 		}
-		again, err := h.store.Latest(ctx, run.ID)
+		again, err := h.store.Head(ctx, run.ID)
 		if err != nil || again.Seq == v.Snapshot.Seq {
 			v.Drivable, v.Why = h.drivability(v)
 			return v, err
@@ -184,12 +184,12 @@ type Cursor struct {
 var ErrCursor = errors.New("host: the cursor names no position of a run")
 
 // cursor checks that c names a run of the state directory and a position of
-// it, and returns the run's latest snapshot.
-func (h *Host) cursor(ctx context.Context, c Cursor) (harness.Snapshot, error) {
+// it, and returns the position of the run's latest snapshot.
+func (h *Host) cursor(ctx context.Context, c Cursor) (sqlite.Head, error) {
 	if c.RunID == "" || c.Seq < 0 {
-		return harness.Snapshot{}, fmt.Errorf("%w: %+v", ErrCursor, c)
+		return sqlite.Head{}, fmt.Errorf("%w: %+v", ErrCursor, c)
 	}
-	latest, err := h.store.Latest(ctx, c.RunID)
+	latest, err := h.store.Head(ctx, c.RunID)
 	switch {
 	case errors.Is(err, harness.ErrNotFound):
 		return latest, fmt.Errorf("%w: no run %q", ErrCursor, c.RunID)
@@ -235,7 +235,7 @@ func (h *Host) Progress(ctx context.Context, after Cursor, limit int) (Page, err
 	if err != nil {
 		return Page{}, err
 	}
-	p := Page{Next: after, More: len(rows) == limit, Halted: latest.State.Intent() == core.IntentHalt}
+	p := Page{Next: after, More: len(rows) == limit, Halted: latest.Intent() == core.IntentHalt}
 	bytes := 0
 	for _, r := range rows {
 		item, ok := project(r)
@@ -342,11 +342,11 @@ func (h *Host) Wait(ctx context.Context, after Cursor) (WaitResult, error) {
 		changed, driving, closing := h.changed, h.workingLocked(after.RunID), h.closing
 		h.mu.Unlock()
 		h.checkpoint(PointWaiting)
-		snap, err := h.store.Latest(ctx, after.RunID)
+		head, err := h.store.Head(ctx, after.RunID)
 		if err != nil {
 			return WaitResult{}, err
 		}
-		r := WaitResult{Cursor: Cursor{after.RunID, snap.Seq}, Halted: snap.State.Intent() == core.IntentHalt, Driving: driving}
+		r := WaitResult{Cursor: Cursor{after.RunID, head.Seq}, Halted: head.Intent() == core.IntentHalt, Driving: driving}
 		if r.Cursor.Seq > after.Seq || r.Halted || !driving || closing {
 			return r, nil
 		}
