@@ -25,16 +25,21 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
-      - name: Check formatting and vet
-        run: make fmt vet
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+            apps/tui/go.sum
+            go.work.sum
+      - name: Check formatting, module boundaries and vet
+        run: make fmt graph vet
       - name: Check test names
         run: make test-names
       - name: Check function complexity
         run: make lint
       - name: Run race-enabled unit tests
         run: make ci-unit
-      - name: Smoke-test CLI
-        run: test "$(go run ./cmd/canti -version)" = dev
+      - name: Build modules and smoke-test both executables
+        run: make build smoke
 
   commits:
     if: github.event_name == 'pull_request'
@@ -50,6 +55,11 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+            apps/tui/go.sum
+            go.work.sum
       - name: Build and vet every commit
         env:
           BASE: origin/${{ github.base_ref }}
@@ -67,6 +77,11 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+            apps/tui/go.sum
+            go.work.sum
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run Docker-backed integration tests
@@ -87,6 +102,11 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+            apps/tui/go.sum
+            go.work.sum
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run long acceptance tests
@@ -107,6 +127,11 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
+          cache-dependency-path: |
+            runtime/go.sum
+            sdk/go/go.sum
+            apps/tui/go.sum
+            go.work.sum
       - name: Pull test image
         run: docker pull alpine:3.23
       - name: Run pseudo-terminal tests serially

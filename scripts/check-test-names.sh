@@ -2,6 +2,7 @@
 # Usage: make test-names, or LONG='^(TestA|...)$' PTY='^(TestB|...)$' scripts/check-test-names.sh
 set -eu
 
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 status=0
@@ -11,9 +12,11 @@ problem() {
 }
 
 listed() {
-	go test -list . -tags "$1" ./... >"$tmp/list"
-	awk '/^ok[ \t]/ { for (i = 0; i < n; i++) print $2, names[i]; n = 0; next }
-		/^(Test|Fuzz|Benchmark|Example)/ { names[n++] = $0 }' "$tmp/list"
+	for module in runtime sdk/go apps/tui; do
+		(cd "$root/$module" && GOWORK=off go test -list . -tags "$1" ./...) >"$tmp/list"
+		awk '/^ok[ \t]/ { for (i = 0; i < n; i++) print $2, names[i]; n = 0; next }
+			/^(Test|Fuzz|Benchmark|Example)/ { names[n++] = $0 }' "$tmp/list"
+	done
 }
 
 suite() {
@@ -33,15 +36,18 @@ while read -r name; do
 		problem "LONG: $name is not a test with -tags integration"
 done <"$tmp/long"
 while read -r name; do
-	awk -v n="$name" '$2 == n { if ($1 ~ /\/cmd\/canti$/) found = 1; else other = 1 } END { exit !found || other }' "$tmp/integration" ||
-		problem "PTY: $name is not a test of ./cmd/canti alone with -tags integration"
+	awk -v n="$name" '$2 == n { if ($1 ~ /\/(runtime\/cmd\/canti|apps\/tui\/cmd\/canti-tui)$/) found++; else other = 1 } END { exit found != 1 || other }' "$tmp/integration" ||
+		problem "PTY: $name must exist once in runtime/cmd/canti or apps/tui/cmd/canti-tui with -tags integration"
 done <"$tmp/pty"
 sort "$tmp/long" "$tmp/pty" | uniq -d >"$tmp/both"
 while read -r name; do
 	problem "$name is in both LONG and PTY"
 done <"$tmp/both"
 
-go list -tags integration,live -f '{{.Dir}}{{range .TestGoFiles}} {{.}}{{end}}{{range .XTestGoFiles}} {{.}}{{end}}' ./... |
+for module in runtime sdk/go apps/tui; do
+	(cd "$root/$module" && GOWORK=off go list -tags integration,live -f '{{.Dir}}{{range .TestGoFiles}} {{.}}{{end}}{{range .XTestGoFiles}} {{.}}{{end}}' ./...) >>"$tmp/testfiles"
+done
+cat "$tmp/testfiles" |
 	while read -r dir files; do
 		[ -n "$files" ] || continue
 		(cd "$dir" && awk '
@@ -98,7 +104,7 @@ awk '
 			if (before ~ /[A-Za-z0-9_]/) continue
 			print FILENAME ":" FNR, (run || substr(line, 1, 1) == "*") ? "prefix" : "exact", name
 		}
-	}' README.md AGENTS.md CONTRIBUTING.md docs/*.md >"$tmp/cited"
+	}' "$root/README.md" "$root/AGENTS.md" "$root/CONTRIBUTING.md" "$root"/docs/*.md >"$tmp/cited"
 while read -r at kind name; do
 	case $kind in
 	prefix) grep -q "^$name" "$tmp/names" || problem "$at: no test name starts with $name" ;;
