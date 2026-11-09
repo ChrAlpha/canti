@@ -308,7 +308,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if err != nil {
 		return err
 	}
-	last, err := s.latest(ctx, tx, r.run)
+	last, err := s.latestAs(ctx, tx, r.run, r.from, &t.From)
 	if err != nil {
 		return err
 	}

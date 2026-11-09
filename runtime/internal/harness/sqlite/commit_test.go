@@ -221,6 +221,28 @@ func TestCommitNeverOverwritesConflictingContent(t *testing.T) {
 	}
 }
 
+// TestCommitComparesTheLatestStateByValue requires that a commit accept a
+// from state that the latest state stored in another encoding holds, as a
+// state stored with its fields in another order, and still refuse a from
+// state that differs from it in value.
+func TestCommitComparesTheLatestStateByValue(t *testing.T) {
+	s := open(t, tempPath(t))
+	d := newDriver(t, s, createRun(t, s, "run-1", limits))
+	d.decide(execBody("ls"), harness.Usage{})
+	if _, err := s.db.Exec(`UPDATE transitions SET to_state = json_set(json_remove(to_state, '$.RunID'), '$.RunID', json_extract(to_state, '$.RunID'))
+		WHERE run_id = 'run-1' AND seq = ?`, d.snap.Seq); err != nil {
+		t.Fatal(err)
+	}
+	stale := d.snap
+	stale.State.Decision.Purpose = "another purpose"
+	obs := observation(core.ExecutionExited, 1)
+	j := receipt(stale.State, *obs)
+	if err := newDriver(t, s, stale).try(core.Observed{EffectID: stale.State.EffectID, Execution: core.ExecutionExited}, harness.Facts{Observation: obs, Receipt: &j}); !errors.Is(err, harness.ErrBrokenChain) {
+		t.Fatalf("error = %v, want ErrBrokenChain", err)
+	}
+	d.observe(core.ExecutionExited, 1)
+}
+
 func TestCommitRejectsFromOutsideTheChain(t *testing.T) {
 	s := open(t, tempPath(t))
 	d := newDriver(t, s, createRun(t, s, "run-1", limits))

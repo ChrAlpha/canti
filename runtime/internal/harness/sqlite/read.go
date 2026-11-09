@@ -55,19 +55,32 @@ func (s *Store) Latest(ctx context.Context, runID string) (harness.Snapshot, err
 }
 
 func (s *Store) latest(ctx context.Context, tx *sql.Tx, runID string) (harness.Snapshot, error) {
+	return s.latestAs(ctx, tx, runID, "", nil)
+}
+
+// latestAs is latest for a caller that holds state and its encoding, which
+// reads back as state exactly: a latest state stored as exactly those bytes
+// is state, checked without decoding the bytes again. A commit gives the
+// from state of its transition, which it requires to be the latest.
+func (s *Store) latestAs(ctx context.Context, tx *sql.Tx, runID, encoded string, state *core.State) (harness.Snapshot, error) {
 	var snap harness.Snapshot
 	var kind string
 	var semantics int
-	var state string
-	err := s.stmt(ctx, tx, latestSQL).QueryRowContext(ctx, runID).Scan(&snap.Seq, &kind, &semantics, &state)
+	var stored string
+	err := s.stmt(ctx, tx, latestSQL).QueryRowContext(ctx, runID).Scan(&snap.Seq, &kind, &semantics, &stored)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		err = missing(s.stmt(ctx, tx, initialSQL).QueryRowContext(ctx, runID).Scan(&semantics, &state), "run")
+		err = missing(s.stmt(ctx, tx, initialSQL).QueryRowContext(ctx, runID).Scan(&semantics, &stored), "run")
 	case err == nil:
 		err = known(kind, semantics)
 	}
-	if err == nil {
-		err = decodeState(semantics, state, &snap.State)
+	switch {
+	case err != nil:
+	case state != nil && stored == encoded:
+		snap.State = *state
+		err = checkState(semantics, snap.State)
+	default:
+		err = decodeState(semantics, stored, &snap.State)
 	}
 	if err != nil {
 		return harness.Snapshot{}, err
@@ -427,6 +440,15 @@ func decodeState(semantics int, data string, state *core.State) error {
 	}
 	if err := strict(data, state); err != nil {
 		return err
+	}
+	return checkState(semantics, *state)
+}
+
+// checkState checks a state stored under semantics as decodeState does,
+// apart from decoding it.
+func checkState(semantics int, state core.State) error {
+	if err := core.KnownSemantics(semantics); err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	if err := state.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrIncompatible, err)
