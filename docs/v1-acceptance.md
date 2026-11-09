@@ -269,14 +269,18 @@ documentation-only revisions of this file were not rerun.
 | `git diff --check` | Passed, 0.005 s |
 | `make commits BASE=e0ce624` | Passed, 22.313 s; module builds and normal and tagged vet for each commit |
 
-The focused real Docker `TestAttachedDocker` cases passed with no skips. They
-cover:
+These focused real Docker tests passed with no skips:
 
-- ordinary cwd failure and reuse of the environment afterwards;
-- a workspace missing after admission;
-- an actual container stop after subtree deletion, with slot and fence release;
-- rejection of a mismatched UID;
-- readable helper evidence from root and same-UID users.
+- `TestAttachedDockerMissingWorkdirCompletesAndReleasesEnvironment`: a missing
+  requested cwd, and a workspace removed after admission, each give an ordinary
+  cwd failure, and the environment is reused afterwards.
+- `TestAttachedDockerStopsAfterCommandRemovesWorkspace`: cancellation and
+  `environment stop` actually stop the container after the command deletes its
+  workspace, and release the slot and fence.
+- `TestAttachedDockerRejectsUserUnableToWritePrivateSpool`: a mismatched UID is
+  rejected.
+- `TestAttachedDockerSupportedUserWritesCommandEvidence`: root and same-UID
+  users write readable helper evidence.
 
 The skips are the same as before:
 
