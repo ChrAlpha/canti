@@ -222,7 +222,7 @@ adds privilege. Both example results describe the recorded CLI invocations with
 isolated CLI state, not IDE-managed credential sharing. Neither has the ephemeral `network=none` or
 `CapDrop=ALL` guarantee.
 
-### Final source gates
+### Review-fix source gates at 256be0f
 
 A review of `e0ce624` found defects that the earlier gates did not exercise.
 QA reproduced each one before the fix, using offline fakes, compiled executables
@@ -258,8 +258,9 @@ Linux/amd64 with Go1.26.10, rootful host Engine29.9.1-1, Compose2.40.3 and Dev
 Containers CLI 0.90.0. Each listed command exited zero.
 `.git/agent-supervision/environment-review/qa/final-summary.json`,
 `verification.json` and `report.md` retain the commands, timings, counts and
-baseline reproductions. These results describe that tree. Later
-documentation-only revisions of this file were not rerun.
+baseline reproductions. These results describe that tree only. They do not
+cover later commits: the context fixture test `61dab14`, revisions of this
+file, and the capture correction below.
 
 | Exact command from the repository root | Observed result |
 | --- | --- |
@@ -308,12 +309,58 @@ exercised. Model adapters were offline fixtures. The actual Dev Container and
 DinD rows above describe their recorded earlier sources; the ordinary Dev
 Container row predates the shared project name.
 
+#### Capture correction after these gates
+
+PR CI at `1c57723` (run 42569613888, job 129003772545) failed
+`TestAttachedDockerSupportedUserWritesCommandEvidence/0:0`. A successful
+`id -u` kept its 2 output bytes but was reported incomplete with
+`capture failed`.
+
+After the foreground shell exited, the helper waited 100 ms for the pipe's EOF
+and then closed its read end. A helper descheduled past that window woke for
+the expired timer before it read an EOF that was already in the pipe.
+
+`7bff5af` keeps the 100 ms grace only while a write end may remain, which it
+checks by polling for POLLHUP; otherwise it waits for the EOF. If a writer is
+still present at the deadline, a read deadline stops capture and keeps the
+bytes already in the pipe. That output is reported incomplete without a
+capture error.
+
+`413ec51` adds jobrunner regressions, including
+`TestClosedPipeWaitsForCollectorPastTheLingerGrace` and
+`TestContinuousInheritedWriterCannotExtendCapturePastItsGrace`. It also
+requires an empty capture error in
+`TestInheritedBackgroundPipeCannotHoldCompletion`.
+
+The targeted evidence is retained under
+`.git/agent-supervision/environment-review/capture-qa/`:
+
+- **Controlled schedule.** The helper is stopped after the foreground shell is
+  reaped. The last writer closes 8 to 14 ms after the foreground exits, and the
+  helper resumes 150 ms later.
+
+  | Helper | Baseline false incomplete with `capture failed` | Fixed |
+  | --- | --- | --- |
+  | Host, GOMAXPROCS 1 | 8/8 | 0/16 across both settings |
+  | Host, GOMAXPROCS 2 | 6/8 | |
+  | Rootful Docker | 8/8 | 0/8 |
+
+- **Uncontrolled load.** CPU-limited Docker load did not reproduce the baseline
+  failure in 50 attempts. This is negative evidence only.
+- **Repeated tests.** The jobrunner package passed with `-count=20 -race`.
+  `TestAttachedDockerSupportedUserWritesCommandEvidence` passed with
+  `-count=10 -race`, under a 0.5 CPU container limit and two busy workers: all
+  20 root and same-UID subtests passed.
+
+This section claims no full-gate result for the corrected tree. Those gates
+were still running when it was written.
+
 #### Earlier gates at 391dd95
 
 QA completed the following commands on Linux/amd64, Go1.26.10 and host
 Engine29.9.1-1 at exact source
 `391dd9555581966c299134583a9d9aa0633ff7b4` (tree
-`441f757c5439d4f865549137c002ce11221bfbc7`). The final gates above supersede
+`441f757c5439d4f865549137c002ce11221bfbc7`). The review-fix gates above supersede
 them. Each listed command exited zero;
 `gate-runs/g391/manifest.json`, its JSON events and the separate
 `check-lint-corrected/manifest.json` retain the results. The consolidated
