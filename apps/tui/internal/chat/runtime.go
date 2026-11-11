@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -26,6 +27,10 @@ const (
 )
 
 var ErrLocked = errors.New("workspace locked")
+
+// errHostStarting reports that another operation of this client is starting
+// the runtime process; the caller waits for that process to serve.
+var errHostStarting = errors.New("runtime: another host start is in progress")
 var credentialVariables = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"}
 
 type runtimeClient struct {
@@ -33,9 +38,13 @@ type runtimeClient struct {
 	hostWait                                time.Duration
 	env                                     []string
 	logLevel                                string
-	child                                   *exec.Cmd
-	childDone                               chan error
-	starting                                <-chan struct{}
+	// lifecycle serializes process start, check and close. Established RPCs
+	// never take it; concurrent active-chat operations may use their clients
+	// independently.
+	lifecycle sync.Mutex
+	child     *exec.Cmd
+	childDone chan error
+	starting  <-chan struct{}
 }
 
 func (a *runtimeClient) checkHostMode() error {
@@ -51,7 +60,7 @@ func (a *runtimeClient) checkHostMode() error {
 func leaving(err error) bool { return errors.Is(err, hostrpc.ErrClosing) || hostrpc.Lost(err) }
 
 func (a *runtimeClient) connect(ctx context.Context) (*hostrpc.Client, error) {
-	if a.hostMode == Owned && a.child == nil && locked(a.state) {
+	if a.hostMode == Owned && a.noChild() && locked(a.state) {
 		return nil, fmt.Errorf("%w: owned mode requires exclusive runtime ownership; use -host auto to attach", ErrLocked)
 	}
 	path, err := hostrpc.SocketPath(a.state)
@@ -76,10 +85,11 @@ func (a *runtimeClient) connect(ctx context.Context) (*hostrpc.Client, error) {
 			// started, has exited without serving: one that was shutting down
 			// as this client arrived, or one that lost the lock to it. Start
 			// the next one.
-			if err := a.startHost(); err != nil {
+			if err := a.startHost(); err == nil {
+				starts++
+			} else if !errors.Is(err, errHostStarting) {
 				return nil, err
 			}
-			starts++
 		case time.Now().After(deadline):
 			if locked(a.state) {
 				return nil, fmt.Errorf("workspace %s is %w and no host serves it", a.workspace, ErrLocked)
@@ -108,6 +118,11 @@ func locked(state string) bool {
 }
 
 func (a *runtimeClient) startHost() error {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+	if !a.canStartLocked() {
+		return errHostStarting
+	}
 	exe, err := a.runtimeExecutable()
 	if err != nil {
 		return err
@@ -150,6 +165,14 @@ func (a *runtimeClient) startHost() error {
 	return nil
 }
 
+// noChild reports whether this client owns no runtime child, under the
+// lifecycle lock.
+func (a *runtimeClient) noChild() bool {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+	return a.child == nil
+}
+
 func isCredential(name string) bool {
 	for _, v := range credentialVariables {
 		if name == v {
@@ -177,6 +200,14 @@ func (a *runtimeClient) retry(ctx context.Context, op func(*hostrpc.Client) erro
 }
 
 func (a *runtimeClient) canStartHost() bool {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+	return a.canStartLocked()
+}
+
+// canStartLocked reports whether the lifecycle state admits a new host start;
+// the caller holds lifecycle.
+func (a *runtimeClient) canStartLocked() bool {
 	if a.starting != nil {
 		select {
 		case <-a.starting:
@@ -200,10 +231,20 @@ func (a *runtimeClient) canStartHost() bool {
 
 func (a *runtimeClient) hello(ctx context.Context, c *hostrpc.Client) error {
 	h, err := c.Hello(ctx)
-	if err == nil && a.hostMode == Owned && (a.child == nil || h.PID != a.child.Process.Pid) {
+	if err != nil {
+		return err
+	}
+	a.lifecycle.Lock()
+	owned := a.hostMode == Owned
+	pid := 0
+	if a.child != nil {
+		pid = a.child.Process.Pid
+	}
+	a.lifecycle.Unlock()
+	if owned && (pid == 0 || h.PID != pid) {
 		return fmt.Errorf("%w: owned mode requires its own runtime; use -host auto to attach to the serving host", ErrLocked)
 	}
-	return err
+	return nil
 }
 
 func (a *runtimeClient) runtimeExecutable() (string, error) {
@@ -249,6 +290,8 @@ func (a *runtimeClient) validate(ctx context.Context, sub hostrpc.Submission, b 
 }
 
 func (a *runtimeClient) closeHost(ctx context.Context) {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
 	if a.child == nil {
 		return
 	}

@@ -683,6 +683,24 @@ func TestStopTargetsTheRunTheLogShows(t *testing.T) {
 	}
 }
 
+func TestRuntimeLifecycleAccessIsSerialized(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	a := runtimeClient{starting: done}
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-gate
+			a.canStartHost()
+		}()
+	}
+	close(gate)
+	wg.Wait()
+}
+
 func TestSubmitDistinguishesRejectionFromUnknownAcceptance(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
