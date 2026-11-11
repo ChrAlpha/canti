@@ -27,6 +27,7 @@ func TestPersistedNamesMatchCommittedLiterals(t *testing.T) {
 		{string(ExecutionFailedToStart), "failed_to_start"},
 		{string(ExecutionUnknown), "unknown"},
 		{RequestFrozen{}.Kind(), "request_frozen"},
+		{InputsBound{}.Kind(), "inputs_bound"},
 		{AttemptStarted{}.Kind(), "attempt_started"},
 		{ResponseSaved{}.Kind(), "response_saved"},
 		{ResponseIncomplete{}.Kind(), "response_incomplete"},

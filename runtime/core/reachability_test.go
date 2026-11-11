@@ -28,8 +28,23 @@ var recordSemantics = flag.Bool("record-semantics", false, "record the transitio
 // candidates returns every event a harness could report from s: the
 // identities s holds, a next attempt, each decision body, execution, and
 // reportable stop reason.
+// maxExploredInputs bounds the absolute Inputs value the reachability walk
+// explores. Above it the rules are isomorphic; the legal increment remains
+// exercised at every count below the bound, and the non-increasing refusal at
+// every state.
+const maxExploredInputs = 2
+
 func candidates(s core.State) []core.Event {
-	out := []core.Event{core.RequestFrozen{}}
+	out := []core.Event{core.RequestFrozen{}, core.InputsBound{Count: s.Inputs}}
+	if s.Inputs < maxExploredInputs {
+		out = append(out, core.InputsBound{Count: s.Inputs + 1})
+	}
+	if s.Inputs > 0 {
+		out = append(out, core.InputsBound{Count: s.Inputs - 1})
+	}
+	if s.Inputs+2 <= maxExploredInputs {
+		out = append(out, core.InputsBound{Count: s.Inputs + 2})
+	}
 	for _, at := range [][2]int{{s.Step, s.Attempt}, {s.Step, s.Attempt + 1}, {s.Step + 1, s.Attempt}} {
 		out = append(out, core.AttemptStarted{Step: at[0], Attempt: at[1]}, core.ResponseSaved{Step: at[0], Attempt: at[1]},
 			core.ResponseIncomplete{Step: at[0], Attempt: at[1]}, core.RequestRejected{Step: at[0], Attempt: at[1]}, core.ResponseLoaded{Step: at[0], Attempt: at[1], Body: execBody})
@@ -77,6 +92,14 @@ func label(e core.Event) string {
 	return e.Kind()
 }
 
+// lineDigest keeps the full transition digest without retaining every large
+// state/event JSON line in memory. The digest is over the sorted per-line
+// hashes; the pin is the set, not a diagnostic dump.
+func lineDigest(line string) string {
+	sum := sha256.Sum256([]byte(line))
+	return fmt.Sprintf("%x", sum)
+}
+
 // reachable explores every state Next reaches from a new run under limits,
 // following at most depth events, and returns the transitions it took,
 // labelled, and the digest of every event it tried in full: its state and
@@ -110,7 +133,7 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 				if next != s {
 					t.Fatalf("Next(%+v, %+v) failed and changed the state to %+v", s, e, next)
 				}
-				full = append(full, fmt.Sprintf("%s %s %s %s refused: illegal %v", from, s.Intent(), e.Kind(), event, errors.Is(err, core.ErrIllegalTransition)))
+				full = append(full, lineDigest(fmt.Sprintf("%s %s %s %s refused: illegal %v", from, s.Intent(), e.Kind(), event, errors.Is(err, core.ErrIllegalTransition))))
 				continue
 			}
 			line := fmt.Sprintf("%s %s -> %s", s.Phase, label(e), next.Phase)
@@ -119,7 +142,7 @@ func reachable(t *testing.T, limits core.Limits, depth int) (map[string]bool, st
 			}
 			table[line] = true
 			to, _ := json.Marshal(next)
-			full = append(full, fmt.Sprintf("%s %s %s %s -> %s %s", from, s.Intent(), e.Kind(), event, to, next.Intent()))
+			full = append(full, lineDigest(fmt.Sprintf("%s %s %s %s -> %s %s", from, s.Intent(), e.Kind(), event, to, next.Intent())))
 			if _, ok := seen[next]; !ok {
 				seen[next] = seen[s] + 1
 				queue = append(queue, next)
@@ -186,4 +209,52 @@ func sorted(set map[string]bool) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// TestInputBoundCandidatesBoundTheExploredInputCount keeps the state-space
+// walk finite: the absolute Inputs value is isomorphic beyond a small bound,
+// while a legal increment and a non-increasing refusal remain exercised.
+func TestInputBoundCandidatesBoundTheExploredInputCount(t *testing.T) {
+	high := core.State{Inputs: 100, Seen: 100}
+	for _, e := range candidates(high) {
+		if b, ok := e.(core.InputsBound); ok && b.Count == high.Inputs+1 {
+			t.Fatalf("candidate %d grows past the explored input bound %d", b.Count, maxExploredInputs)
+		}
+	}
+	start := core.State{}
+	var legal, illegal bool
+	for _, e := range candidates(start) {
+		if b, ok := e.(core.InputsBound); ok {
+			legal = legal || b.Count == 1
+			illegal = illegal || b.Count == 0
+		}
+	}
+	if !legal || !illegal {
+		t.Fatalf("InputsBound legal=%v illegal=%v coverage from a fresh state", legal, illegal)
+	}
+}
+
+// TestInputBoundCandidatesCoverBatchAndDecrease pins the remaining legal and
+// illegal count classes inside the explored bound: a two-input batch and a
+// positive decrease. Both are offered independently of phase, so the
+// transition table can pin them in both legal phases.
+func TestInputBoundCandidatesCoverBatchAndDecrease(t *testing.T) {
+	for _, phase := range []core.Phase{core.PhaseIdle, core.PhaseResponseSaved} {
+		zero := core.State{Phase: phase}
+		one := core.State{Phase: phase, Inputs: 1, Seen: 1}
+		var batch, decrease bool
+		for _, e := range candidates(zero) {
+			if b, ok := e.(core.InputsBound); ok {
+				batch = batch || b.Count == 2
+			}
+		}
+		for _, e := range candidates(one) {
+			if b, ok := e.(core.InputsBound); ok {
+				decrease = decrease || b.Count == 0
+			}
+		}
+		if !batch || !decrease {
+			t.Fatalf("phase %s candidates batch=%v decrease=%v", phase, batch, decrease)
+		}
+	}
 }

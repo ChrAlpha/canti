@@ -54,13 +54,17 @@ type State struct {
 	Decision   Decision
 	EffectID   string
 	Reason     StopReason
+	// Inputs counts the principal instructions bound to this run; Seen
+	// counts the bound instructions included in the current frozen request.
+	Inputs int
+	Seen   int
 }
 
 // SemanticsVersion identifies the transition rules of this package. It must
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 7
+const SemanticsVersion = 8
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -136,6 +140,9 @@ func (s State) Validate() error {
 	}
 	if s.RequestRev < 0 {
 		return fail("request revision %d is negative", s.RequestRev)
+	}
+	if s.Inputs < 0 || s.Seen < 0 || s.Seen > s.Inputs {
+		return fail("input position %d/%d is outside the bound instructions", s.Seen, s.Inputs)
 	}
 	switch s.Reason {
 	case "", StopCancelled, StopTimedOut, StopBudgetExhausted, StopUnrecoverable, StopStepsExhausted, StopAttemptsExhausted, StopProtocolFailure, StopUnresolved:
@@ -214,6 +221,15 @@ func (s State) Next(event Event) (State, error) {
 		if s.Phase == PhaseIdle {
 			s.Phase = PhaseRequestFrozen
 			s.RequestRev++
+			s.Seen = s.Inputs
+			return s, nil
+		}
+	case InputsBound:
+		if s.Phase == PhaseIdle || s.Phase == PhaseResponseSaved {
+			if e.Count <= s.Inputs {
+				return s, fmt.Errorf("%w: %d bound instructions do not follow %d", ErrInvalidEvent, e.Count, s.Inputs)
+			}
+			s.Inputs = e.Count
 			return s, nil
 		}
 	case AttemptStarted:
@@ -345,6 +361,10 @@ func (s State) Next(event Event) (State, error) {
 func validateEvent(event Event) error {
 	switch e := event.(type) {
 	case RequestFrozen:
+	case InputsBound:
+		if e.Count < 1 {
+			return fmt.Errorf("%w: bound instruction count is required", ErrInvalidEvent)
+		}
 	case AttemptStarted:
 		if e.Attempt < 1 {
 			return fmt.Errorf("%w: attempt number is required", ErrInvalidEvent)
@@ -439,7 +459,27 @@ func (s State) retry(exhausted StopReason, resume Phase) State {
 	return s
 }
 
+// Superseded reports the decoded decision of the current request when the
+// request did not include every instruction bound to the run: that decision
+// is set aside, and the step completes without an effect or a return. A body
+// that does not decode is not superseded; it follows the repair rule instead.
+// Next applies the same rule in decide.
+func (s State) Superseded(body []byte) (Decision, bool) {
+	if s.Inputs <= s.Seen {
+		return Decision{}, false
+	}
+	decision, err := Decode(body)
+	if err != nil {
+		return Decision{}, false
+	}
+	return decision, true
+}
+
 func (s State) decide(body []byte) State {
+	if _, superseded := s.Superseded(body); superseded {
+		s.Decision = Decision{}
+		return s.advance()
+	}
 	decision, err := Decode(body)
 	if err != nil {
 		return s.retry(StopProtocolFailure, PhaseIdle)

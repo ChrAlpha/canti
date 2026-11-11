@@ -15,7 +15,7 @@ var (
 	invalidBody = []byte(`{"kind":"wait","payload":"x"}`)
 )
 
-const legalPairs = 21
+const legalPairs = 23
 
 func at(phase core.Phase, edits ...func(*core.State)) core.State {
 	s := core.State{
@@ -50,6 +50,10 @@ func withAttempt(attempt int) func(*core.State) {
 
 func withRev(rev int) func(*core.State) {
 	return func(s *core.State) { s.RequestRev = rev }
+}
+
+func withInputs(inputs, seen int) func(*core.State) {
+	return func(s *core.State) { s.Inputs, s.Seen = inputs, seen }
 }
 
 func TestNewState(t *testing.T) {
@@ -95,6 +99,7 @@ func eventSamples() []struct {
 		kind  string
 	}{
 		{core.RequestFrozen{}, "request_frozen"},
+		{core.InputsBound{Count: 1}, "inputs_bound"},
 		{core.AttemptStarted{Step: 1, Attempt: 1}, "attempt_started"},
 		{core.ResponseSaved{Step: 1, Attempt: 1}, "response_saved"},
 		{core.ResponseIncomplete{Step: 1, Attempt: 1}, "response_incomplete"},
@@ -112,6 +117,8 @@ func eventSamples() []struct {
 func legalTransitions() []transition {
 	return []transition{
 		{"idle freezes request", at(core.PhaseIdle), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(1))},
+		{"idle binds instructions", at(core.PhaseIdle), core.InputsBound{Count: 1}, at(core.PhaseIdle, withInputs(1, 0))},
+		{"idle binds later instructions", at(core.PhaseIdle, withInputs(1, 1)), core.InputsBound{Count: 2}, at(core.PhaseIdle, withInputs(2, 1))},
 		{"repair freezes a new request", at(core.PhaseIdle, withRev(1), withAttempt(2)), core.RequestFrozen{}, at(core.PhaseRequestFrozen, withRev(2), withAttempt(2))},
 		{"idle stops", at(core.PhaseIdle), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withReason(core.StopCancelled))},
 		{"idle stops as unrecoverable", at(core.PhaseIdle), core.StopRequested{Reason: core.StopUnrecoverable}, at(core.PhaseStopped, withReason(core.StopUnrecoverable))},
@@ -130,6 +137,9 @@ func legalTransitions() []transition {
 			s.Decision = core.Decision{Kind: core.Return, Payload: "done"}
 		})},
 		{"saved response repairs invalid decision with a new request", at(core.PhaseResponseSaved, withRev(1)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: invalidBody}, at(core.PhaseIdle, withRev(1), withAttempt(2))},
+		{"saved response binds instructions", at(core.PhaseResponseSaved, withRev(1)), core.InputsBound{Count: 1}, at(core.PhaseResponseSaved, withRev(1), withInputs(1, 0))},
+		{"saved response supersedes an exec decision", at(core.PhaseResponseSaved, withRev(1), withInputs(1, 0)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}, at(core.PhaseIdle, withInputs(1, 0), withStep(2))},
+		{"saved response supersedes a return decision", at(core.PhaseResponseSaved, withRev(1), withInputs(1, 0)), core.ResponseLoaded{Step: 1, Attempt: 1, Body: returnBody}, at(core.PhaseIdle, withInputs(1, 0), withStep(2))},
 		{"saved response stops", at(core.PhaseResponseSaved, withRev(1)), core.StopRequested{Reason: core.StopCancelled}, at(core.PhaseStopped, withRev(1), withReason(core.StopCancelled))},
 
 		{"saved effect observes failed start", at(core.PhaseEffectSaved, withRev(1), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseIdle, withStep(2))},
@@ -193,6 +203,9 @@ func TestValidateRejectsIncoherentStates(t *testing.T) {
 		{"step beyond budget", at(core.PhaseIdle, withStep(4))},
 		{"attempt beyond budget", at(core.PhaseIdle, withAttempt(3))},
 		{"negative request revision", at(core.PhaseIdle, withRev(-1))},
+		{"negative instructions", at(core.PhaseIdle, withInputs(-1, 0))},
+		{"seen without instructions", at(core.PhaseIdle, withInputs(0, 1))},
+		{"seen beyond instructions", at(core.PhaseIdle, withInputs(1, 2))},
 		{"idle with decision", at(core.PhaseIdle, func(s *core.State) { s.Decision = core.Decision{Kind: core.Exec} })},
 		{"idle with effect", at(core.PhaseIdle, func(s *core.State) { s.EffectID = "effect-1" })},
 		{"idle with reason", at(core.PhaseIdle, withReason(core.StopCancelled))},
@@ -234,8 +247,8 @@ func TestEventKindsAreStableAndUnique(t *testing.T) {
 		}
 		seen[tt.kind] = true
 	}
-	if core.SemanticsVersion != 7 {
-		t.Errorf("SemanticsVersion = %d, want 7", core.SemanticsVersion)
+	if core.SemanticsVersion != 8 {
+		t.Errorf("SemanticsVersion = %d, want 8", core.SemanticsVersion)
 	}
 }
 
@@ -384,6 +397,8 @@ func TestNextRejectsInvalidEvents(t *testing.T) {
 		{"zero attempt started", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{}},
 		{"stale attempt started", at(core.PhaseRequestFrozen, withRev(1), withAttempt(2)), core.AttemptStarted{Step: 1, Attempt: 1}},
 		{"attempt started ahead", at(core.PhaseRequestFrozen, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 2}},
+		{"zero bound instructions", at(core.PhaseIdle), core.InputsBound{}},
+		{"rebound instructions", at(core.PhaseIdle, withInputs(2, 0)), core.InputsBound{Count: 2}},
 		{"redelivered attempt start after send", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 1}},
 		{"skipped attempt start", at(core.PhaseRequestSent, withRev(1)), core.AttemptStarted{Step: 1, Attempt: 3}},
 		{"stale response saved", at(core.PhaseRequestSent, withRev(1), withAttempt(2)), core.ResponseSaved{Step: 1, Attempt: 1}},
@@ -555,6 +570,7 @@ func TestNextEnforcesBudgets(t *testing.T) {
 		{"steps exhausted after failed start", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Observed{EffectID: "effect-1", Execution: core.ExecutionFailedToStart}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after a performed effect", at(core.PhaseEffectSaved, withRev(1), withStep(3), withExec), core.Performed{EffectID: "effect-1"}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
 		{"steps exhausted after resolution", at(core.PhaseNeedsResolution, withRev(1), withStep(3), withExec), core.Resolved{EffectID: "effect-1", Execution: core.ExecutionExited}, at(core.PhaseStopped, withRev(1), withStep(3), withExec, withReason(core.StopStepsExhausted))},
+		{"steps exhausted after a superseded decision", at(core.PhaseResponseSaved, withRev(1), withStep(3), withInputs(1, 0)), core.ResponseLoaded{Step: 3, Attempt: 1, Body: execBody}, at(core.PhaseStopped, withRev(1), withStep(3), withInputs(1, 0), withReason(core.StopStepsExhausted))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
