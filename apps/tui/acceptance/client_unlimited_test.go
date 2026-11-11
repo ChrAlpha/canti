@@ -13,8 +13,8 @@ func TestChatUnlimitedSteps(t *testing.T) {
 	if r := wait(); r.code != exitOK || r.stdout != "done\ndone\n" {
 		t.Fatalf("chat: %+v", r)
 	}
-	if s := f.status(); s.Run.SessionSeq != 2 || s.Phase != "returned" {
-		t.Fatalf("session did not continue: %+v", s)
+	if s := f.status(); s.Run.Ordinal != 2 || s.Phase != "returned" {
+		t.Fatalf("line did not continue: %+v", s)
 	}
 	for _, e := range f.history() {
 		if e.State.Limits.MaxSteps != 0 {

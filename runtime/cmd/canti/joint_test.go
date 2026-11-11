@@ -19,7 +19,6 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
-	"github.com/ChrAlpha/canti/runtime/internal/host"
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
@@ -128,14 +127,13 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	}
 	ctx := context.Background()
 	c := &hostrpc.Client{Path: f.socket()}
-	v, err := c.View(ctx, "")
-	if err != nil {
+	if _, err := c.View(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	read := func(from string) ([]hostrpc.Item, string) {
 		var items []hostrpc.Item
 		for {
-			p, err := c.Progress(ctx, v.RunID, from, 2)
+			p, err := c.Progress(ctx, from, 2)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +159,7 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 			carries++
 		}
 	}
-	resp, err := c.Call(ctx, hostrpc.Request{Op: hostrpc.OpProgress, Cursor: hostserver.CursorOf(host.Cursor{RunID: v.RunID})})
+	resp, err := c.Call(ctx, hostrpc.Request{Op: hostrpc.OpProgress, Cursor: hostserver.CursorOf(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,11 +313,10 @@ func TestJointAFollowerThatStopsReadingDelaysNoOtherClient(t *testing.T) {
 	}
 	ctx := context.Background()
 	c := &hostrpc.Client{Path: f.socket()}
-	v, err := c.View(ctx, "")
-	if err != nil {
+	if _, err := c.View(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	from := hostserver.CursorOf(host.Cursor{RunID: v.RunID})
+	from := hostserver.CursorOf(0)
 	request, err := json.Marshal(hostrpc.Request{Protocol: hostrpc.Protocol, Op: hostrpc.OpProgress, Cursor: from})
 	if err != nil {
 		t.Fatal(err)

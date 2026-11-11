@@ -131,7 +131,7 @@ func contextRules(t *testing.T) string {
 
 func corpusRules(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v18")
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v19")
 	scenarios, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)

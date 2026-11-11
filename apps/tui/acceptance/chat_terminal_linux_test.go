@@ -45,14 +45,14 @@ func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 			p := startPTYChatWithMode(t, f, nil, nil, tc.canonical, "-model-url", server.URL)
 			pos := p.awaitStatus(t, "ready", 0)
 			p.awaitRaw(t)
-			p.send(t, "first\rread ahead\r")
+			p.send(t, "first\rread ahead")
 			pos = p.awaitStatus(t, "running", pos)
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
 				t.Fatal("first request did not reach provider")
 			}
-			p.send(t, "busy complete\rbusy partial")
+			p.send(t, "busy completebusy partial")
 			p.await(t, "busy partial", pos)
 			if tc.interrupted {
 				p.send(t, "\x03")
@@ -71,7 +71,7 @@ func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 			if tc.interrupted {
 				wantRequests = 0
 			}
-			if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != wantRequests {
+			if s := f.status(); s.Run.Ordinal != 1 || s.Run.Goal != "first" || len(f.model.requests()) != wantRequests {
 				t.Fatalf("busy or read-ahead input created another run: %+v", s)
 			}
 			p.send(t, "\r")
@@ -80,7 +80,7 @@ func TestChatTerminalKeepsReadAheadDraft(t *testing.T) {
 				answer = "first answer"
 			}
 			p.await(t, answer, pos)
-			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "read aheadbusy completebusy partial" || s.Phase != "returned" {
+			if s := f.status(); s.Run.Ordinal != 2 || s.Run.Goal != "read aheadbusy completebusy partial" || s.Phase != "returned" {
 				t.Fatalf("fresh input did not advance cleanly: %+v", s)
 			}
 			prompts := f.model.prompts(1)
@@ -248,10 +248,10 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("busy input survived output recovery: %+v, requests=%d, output tail=%q", s, len(f.model.requests()), p.text()[max(0, len(p.text())-500):])
 	}
-	// A committed return precedes the final session event. Observe the second running/ready
+	// A committed return precedes the final return event. Observe the second running/ready
 	// cycle before sending the idle quit key, rather than racing that delivery.
 	pos := p.mark()
 	p.send(t, "\r")
@@ -259,7 +259,7 @@ func testChatTerminalReopensPromptAfterStderrBackpressure(t *testing.T) {
 	unblockLater()
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		if s := f.status(); s.Run.SessionSeq == 2 && s.Phase == "returned" {
+		if s := f.status(); s.Run.Ordinal == 2 && s.Phase == "returned" {
 			if s.Run.Goal != "draft during blocked display" || len(f.model.requests()) != 2 {
 				t.Fatalf("fresh input did not advance cleanly: %+v, requests=%d", s, len(f.model.requests()))
 			}
@@ -372,7 +372,7 @@ func testChatPromptReturnedSignal(t *testing.T, signal syscall.Signal) {
 		t.Fatal(err)
 	}
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("signal changed completed run: %+v, requests=%d", s, len(f.model.requests()))
 	}
 }
@@ -412,7 +412,7 @@ func testChatPromptDisplayDeadline(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("full terminal output took %s to terminate", elapsed)
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first" || s.Phase != "stopped" || s.Reason != "cancelled" || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Run.Ordinal != 1 || s.Run.Goal != "first" || s.Phase != "stopped" || s.Reason != "cancelled" || len(f.model.requests()) != 1 {
 		t.Fatalf("output failure replayed busy input or lost cancellation: %+v, requests=%d", s, len(f.model.requests()))
 	}
 }

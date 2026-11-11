@@ -311,9 +311,38 @@ func (s *Server) do(ctx context.Context, req Request) Response {
 		resp.Run, err = s.resolve(ctx, req)
 	case OpInherited:
 		var c string
-		if c, err = s.Host.InheritedConstraints(ctx, req.SessionID); err == nil {
+		if c, err = s.Host.InheritedConstraints(ctx); err == nil {
 			resp.Constraints = &c
 		}
+	case OpObserve:
+		if req.Observe == nil {
+			err = errors.New("hostrpc: observe without an observation")
+			break
+		}
+		var ack host.Ack
+		ack, err = s.Host.Observe(ctx, host.Observation{InputID: req.Observe.InputID, Source: req.Observe.Source,
+			Subject: req.Observe.Subject, Text: req.Observe.Text, Now: time.Now()})
+		if err == nil {
+			w := AckOf(ack, nil, nil)
+			resp.Ack = &w
+		}
+	case OpWithdraw:
+		if req.Withdraw == nil {
+			req.Withdraw = &Withdrawal{}
+		}
+		var withdrawn []harness.Input
+		withdrawn, err = s.Host.Withdraw(ctx, req.Withdraw.InputID)
+		if err == nil {
+			resp.Withdrawn = make([]Input, 0, len(withdrawn))
+			for _, in := range withdrawn {
+				resp.Withdrawn = append(resp.Withdrawn, InputOf(in))
+			}
+			if resp.Withdrawn == nil {
+				resp.Withdrawn = []Input{}
+			}
+		}
+	case OpCancel:
+		resp.Run, err = s.cancel(ctx, req)
 	case OpShutdown:
 		if s.Shutdown != nil {
 			go s.Shutdown()
@@ -342,20 +371,38 @@ func (s *Server) submit(ctx context.Context, req Request) (*Ack, error) {
 		return nil, host.SpecError{Err: fmt.Errorf("the run's workspace %s is not the host's %s", spec.Config.Workspace, s.Host.Workspace())}
 	}
 	sub := req.Submit
-	ack, err := s.Host.Submit(ctx, host.Submission{SessionID: sub.SessionID, InputID: sub.InputID, Goal: sub.Goal, Constraints: sub.Constraints,
-		ExplicitConstraints: sub.ExplicitConstraints, Spec: spec, Binding: BindingFrom(req.Binding), Now: time.Now()})
+	ack, err := s.Host.Submit(ctx, host.Submission{InputID: sub.InputID, Goal: sub.Goal, Constraints: sub.Constraints,
+		ExplicitConstraints: sub.ExplicitConstraints, Delivery: harness.InputDelivery(sub.Delivery), Fresh: sub.Fresh,
+		Spec: spec, Binding: BindingFrom(req.Binding), Now: time.Now()})
 	if err != nil {
 		return nil, err
 	}
 	var driveErr error
-	if !ack.Replayed {
+	var v *host.View
+	if ack.Opened() && !ack.Replayed {
 		_, driveErr = s.Host.Drive(ctx, ack.Run.ID, BindingFrom(req.Binding), host.DriveOptions{Once: req.Once})
 	}
-	v, err := s.Host.View(ctx, ack.Run.ID)
+	if ack.Opened() {
+		view, err := s.Host.View(ctx, ack.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		v = &view
+		driveErr = cmpErr(driveErr, s.Host.DriveError(ack.Run.ID))
+	}
+	w := AckOf(ack, v, driveErr)
+	return &w, nil
+}
+
+// cancel cancels the accepted effect of the named run, or the latest run.
+func (s *Server) cancel(ctx context.Context, req Request) (*Run, error) {
+	ctx, cancel := context.WithTimeout(ctx, maxCleanup)
+	defer cancel()
+	snap, err := s.Host.CancelEffect(ctx, req.RunID)
 	if err != nil {
 		return nil, err
 	}
-	return &Ack{Replayed: ack.Replayed, Differs: append([]string{}, ack.Differs...), Run: RunOf(v, cmpErr(driveErr, s.Host.DriveError(ack.Run.ID)))}, nil
+	return s.view(ctx, cmpID(req.RunID, snap.State.RunID))
 }
 
 func cmpErr(errs ...error) error {
@@ -394,7 +441,7 @@ func (s *Server) wait(ctx context.Context, req Request) (*Wait, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Wait{Cursor: CursorOf(r.Cursor), Halted: r.Halted, Driver: driver(r.Driving)}, nil
+	return &Wait{Cursor: CursorOf(r.Cursor), Quiescent: r.Quiescent, Driver: driver(r.Driving)}, nil
 }
 
 // stop carries out a stop within the host's lifetime, not the connection's:
@@ -457,18 +504,20 @@ func errorOf(err error) *Error {
 		code = CodeDriving
 	case errors.Is(err, host.ErrCursor):
 		code = CodeCursor
+	case errors.Is(err, host.ErrHeld):
+		code = CodeHeld
+	case errors.Is(err, harness.ErrInputConflict), errors.Is(err, host.ErrConflict):
+		code = CodeConflict
+	case errors.Is(err, harness.ErrInputSpec):
+		code = CodeSpec
 	}
 	return &Error{Code: code, Message: err.Error()}
 }
 
 // requestCursor resolves only on the server; clients return cursors unchanged.
 func requestCursor(req Request) (host.Cursor, error) {
-	if req.Cursor == "" && req.RunID != "" {
-		return host.Cursor{RunID: req.RunID}, nil
+	if req.Cursor == "" {
+		return 0, nil
 	}
-	c, err := ParseCursor(req.Cursor)
-	if err == nil && req.RunID != "" && req.RunID != c.RunID {
-		return host.Cursor{}, host.ErrCursor
-	}
-	return c, err
+	return ParseCursor(req.Cursor)
 }

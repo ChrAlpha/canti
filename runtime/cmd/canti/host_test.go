@@ -195,7 +195,7 @@ func TestConcurrentClientsStartOneHost(t *testing.T) {
 		switch {
 		case r.code == exitOK && r.stdout == "done\n":
 			admitted++
-		case r.code == exitError && strings.Contains(r.stderr, "it first"):
+		case r.code == exitUsage && strings.Contains(r.stderr, "-delivery"), r.code == exitError && strings.Contains(r.stderr, "it first"):
 		default:
 			t.Errorf("client: %+v", r)
 		}
@@ -387,7 +387,7 @@ func TestAForegroundHostBindsItsCredentialAndContinuesTheOpenRun(t *testing.T) {
 	}
 	other := newScriptedModel(t, f.key, map[int]core.Decision{1: {Kind: core.Return, Payload: "elsewhere"}})
 	if r := runCLI(t, nil, append(append([]string{"run"}, keyless...), append(fixtureModel, "-model-url", other.URL, "-goal", "third")...)...); r.code != exitError ||
-		!strings.Contains(r.stderr, "ANTHROPIC_API_KEY") || len(other.requests()) != 0 {
+		!strings.Contains(r.stderr, "no credential is given or bound") || len(other.requests()) != 0 {
 		t.Fatalf("a keyless client of another pair: %+v", r)
 	}
 	r := stop()
@@ -587,11 +587,11 @@ func TestACommandOnNoRunStartsNoHost(t *testing.T) {
 // replayed, from the start, and a run an earlier invocation admitted from
 // its reported state.
 func TestASubmissionFollowsFromWhatItHasNotShown(t *testing.T) {
-	ack := hostrpc.Ack{Run: hostrpc.Run{RunID: "run_1", Cursor: "run_1:7"}}
+	ack := hostrpc.Ack{Pos: 5, Run: &hostrpc.Run{RunID: "run_1", Cursor: "pos:7"}}
 	for _, tc := range []struct {
 		replayed, lost bool
 		want           string
-	}{{false, false, ""}, {true, true, ""}, {true, false, "run_1:7"}} {
+	}{{false, false, "pos:4"}, {true, true, "pos:4"}, {true, false, "pos:7"}} {
 		ack.Replayed = tc.replayed
 		if got := followFrom(ack, tc.lost); got != tc.want {
 			t.Errorf("followFrom(replayed %v, lost %v) = %+v; want %+v", tc.replayed, tc.lost, got, tc.want)
@@ -687,38 +687,33 @@ func TestARetryNamesItsRunAfterItsImportsAreGone(t *testing.T) {
 // an input that names another history imports directory than its admitted
 // run says, on stderr, that the run keeps its own settings and which ones
 // the retry named otherwise, embedded and through the host process, alone
-// and in a session, with the run's result on stdout, and that an identical
+// and replayed, with the run's result on stdout, and that an identical
 // retry names none.
 func TestAReplayNamesTheSettingsItIgnoresInEveryMode(t *testing.T) {
 	for _, mode := range []string{"embedded", "auto"} {
-		for _, session := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s session %v", mode, session), func(t *testing.T) {
-				f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-				f.autoHost()
-				first, other := t.TempDir(), t.TempDir()
-				submit := func(dir string) result {
-					args := []string{"-host", mode, "-input", "k", "-goal", "g", "-history-imports", dir}
-					if session {
-						args = append(args, "-session", "s")
-					}
-					return f.cli(nil, "run", args...)
-				}
-				if r := submit(first); r.code != exitOK || r.stdout != "done\n" || strings.Contains(r.stderr, "differs") {
-					t.Fatalf("first submission: %+v", r)
-				}
-				run := f.status().Run.ID
-				if r := submit(other); r.code != exitOK || r.stdout != "done\n" ||
-					!strings.Contains(r.stderr, "canti: input k names run "+run+", which keeps its own settings; this submission differs in history_imports\n") {
-					t.Fatalf("a retry naming another directory: %+v", r)
-				}
-				if r := submit(first); r.code != exitOK || r.stdout != "done\n" || strings.Contains(r.stderr, "differs") {
-					t.Fatalf("an identical retry: %+v", r)
-				}
-				if f.status().Run.ID != run || len(f.model.requests()) != 1 {
-					t.Fatalf("the retries made run %s and %d requests", f.status().Run.ID, len(f.model.requests()))
-				}
-			})
-		}
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+			f.autoHost()
+			first, other := t.TempDir(), t.TempDir()
+			submit := func(dir string) result {
+				args := []string{"-host", mode, "-input", "k", "-goal", "g", "-history-imports", dir}
+				return f.cli(nil, "run", args...)
+			}
+			if r := submit(first); r.code != exitOK || r.stdout != "done\n" || strings.Contains(r.stderr, "differs") {
+				t.Fatalf("first submission: %+v", r)
+			}
+			run := f.status().Run.ID
+			if r := submit(other); r.code != exitOK || r.stdout != "done\n" ||
+				!strings.Contains(r.stderr, "canti: input k names run "+run+", which keeps its own settings; this submission differs in history_imports\n") {
+				t.Fatalf("a retry naming another directory: %+v", r)
+			}
+			if r := submit(first); r.code != exitOK || r.stdout != "done\n" || strings.Contains(r.stderr, "differs") {
+				t.Fatalf("an identical retry: %+v", r)
+			}
+			if f.status().Run.ID != run || len(f.model.requests()) != 1 {
+				t.Fatalf("the retries made run %s and %d requests", f.status().Run.ID, len(f.model.requests()))
+			}
+		})
 	}
 }
 

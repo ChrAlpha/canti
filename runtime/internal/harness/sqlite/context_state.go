@@ -10,6 +10,8 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
+const anchorKindSQL = `SELECT kind FROM transitions WHERE run_id=? AND seq=?`
+
 const (
 	// contextSeqSQL reads the sequence of the context head of a run, zero
 	// before its first.
@@ -145,7 +147,7 @@ func (s *Store) checkFocusHead(ctx context.Context, tx *sql.Tx, expected harness
 			return fmt.Errorf("%w: focus anchor is not prior", ErrIncompatible)
 		}
 		var anchorKind string
-		if err := tx.QueryRowContext(ctx, `SELECT kind FROM transitions WHERE run_id=? AND seq=?`, expected.State.RunID, state.AnchorSeq).Scan(&anchorKind); err != nil || anchorKind != "request_rejected" {
+		if err := tx.QueryRowContext(ctx, anchorKindSQL, expected.State.RunID, state.AnchorSeq).Scan(&anchorKind); err != nil || anchorKind != "request_rejected" {
 			return fmt.Errorf("%w: focus anchor is not a rejection", ErrIncompatible)
 		}
 		anchor, err := s.readContextState(ctx, tx, expected, state.AnchorSeq)

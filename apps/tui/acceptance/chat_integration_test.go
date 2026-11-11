@@ -58,7 +58,7 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
 	f.model.answer(1, 2, reply{text: `{"kind":"exec","payload":"echo started > started; sleep 60"}`})
 	in, w := io.Pipe()
-	cmd, wait := f.startWith(in, nil, tuiCommand, "-session", "s", "-image", image)
+	cmd, wait := f.startWith(in, nil, tuiCommand, "-image", image)
 	io.WriteString(w, "first request\n")
 	waitFor(t, func() bool { return strings.Contains(f.cli(nil, "status").stdout, `"phase":"returned"`) })
 	io.WriteString(w, "interrupted request\n")
@@ -75,11 +75,11 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 		!strings.Contains(r.stderr, "stopped: cancelled") {
 		t.Fatalf("chat: %+v", r)
 	}
-	_, wait = f.startWith(strings.NewReader("third request\n"), nil, tuiCommand, "-session", "s", "-image", image)
+	_, wait = f.startWith(strings.NewReader("third request\n"), nil, tuiCommand, "-image", image)
 	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
-	if s.Reason != "cancelled" || s.Totals.Steps != 1 || f.status().Run.SessionSeq != 3 {
+	if s.Reason != "cancelled" || s.Totals.Steps != 1 || f.status().Run.Ordinal != 3 {
 		t.Fatalf("interrupted run: %+v", s)
 	}
 	p := f.model.prompts(1)
@@ -88,17 +88,13 @@ func TestChatKeepsTheDialogueAfterInterruptingACommand(t *testing.T) {
 	}
 	c := p[2]
 	current := f.status().Run
-	checkSessionLink(t, f, c, current.ID, s.Run.ID, "third request", 3)
+	checkLineLink(t, f, c, current.ID, s.Run.ID, "third request")
 	if strings.Contains(c, "sleep 60") {
 		t.Fatal("prior command replayed inline")
 	}
-	interrupted := archiveSession(t, f, s.Run.ID)
-	if interrupted.PreviousRunID == "" || interrupted.Sequence != 2 {
-		t.Fatalf("missing earlier dialogue: %+v", interrupted)
-	}
-	first := interrupted.PreviousRunID
-	if link := archiveSession(t, f, first); link.Sequence != 1 || link.PreviousRunID != "" || link.InputID == interrupted.InputID {
-		t.Fatalf("first session link: %+v", link)
+	first := archivePrevious(t, f, s.Run.ID)
+	if first == "" || archivePrevious(t, f, first) != "" {
+		t.Fatalf("previous run chain: %q", first)
 	}
 	for path, want := range map[string]string{
 		first + "/goal": "first request", first + "/result": "phase: returned\n\nfirst answer",

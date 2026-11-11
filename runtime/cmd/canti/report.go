@@ -34,16 +34,25 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 			decision = &st.Decision
 		}
 		out := map[string]any{
-			"run": map[string]any{"id": run.ID, "goal": run.Goal, "constraints": run.Constraints, "created": run.Created,
-				"session_id": run.SessionID, "session_seq": run.SessionSeq, "input_id": run.InputID,
+			"run": map[string]any{"id": run.ID, "ordinal": ordinal(ctx, store, run.ID), "goal": run.Goal, "constraints": run.Constraints, "created": run.Created,
+				"input_id": run.InputID, "input_pos": run.InputPos, "fresh": run.Fresh,
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
 			"execution": map[string]any{"ephemeral": c.Ephemeral, "environment": hostserver.EnvironmentOf(c)},
 			"seq":       snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
 			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID,
+			"inputs": st.Inputs, "seen": st.Seen,
 			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps, "coverage": t.Coverage},
 		}
 		return exitOK, a.encoder().Encode(out)
 	}
+}
+
+func ordinal(ctx context.Context, store *sqlite.Store, id string) int {
+	n, err := store.RunOrdinal(ctx, id)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func consistent(ctx context.Context, j harness.Journal, id string) (harness.Snapshot, harness.Totals, error) {

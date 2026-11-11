@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
@@ -66,9 +66,9 @@ func TestPipeHangupDetachesButExplicitSignalStopsAutoRun(t *testing.T) {
 						case hostrpc.OpHello:
 							resp.Hello = &hostrpc.Hello{Protocol: hostrpc.Protocol}
 						case hostrpc.OpSubmit:
-							resp.Ack = &hostrpc.Ack{Run: hostrpc.Run{RunID: "r", Status: hostrpc.StatusActive, Driver: hostrpc.DriverDriving}}
+							resp.Ack = &hostrpc.Ack{Run: &hostrpc.Run{RunID: "r", Status: hostrpc.StatusActive, Driver: hostrpc.DriverDriving}}
 						case hostrpc.OpProgress:
-							resp.Page = &hostrpc.Page{Next: "cursor", Halted: stops.Load() > 0}
+							resp.Page = &hostrpc.Page{Next: "cursor", Quiescent: stops.Load() > 0}
 						case hostrpc.OpWait:
 							once.Do(func() { close(waiting) })
 							var b [1]byte
@@ -90,7 +90,7 @@ func TestPipeHangupDetachesButExplicitSignalStopsAutoRun(t *testing.T) {
 				}
 			}()
 			defer func() { listener.Close(); <-serverDone; workers.Wait() }()
-			c := session.New(session.Config{State: state, HostMode: session.Auto, HostWait: time.Second})
+			c := chat.New(chat.Config{State: state, HostMode: chat.Auto, HostWait: time.Second})
 			c.GoalLimit = 100
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -126,11 +126,11 @@ func TestPipeHangupDetachesButExplicitSignalStopsAutoRun(t *testing.T) {
 				}
 				close(releaseStop)
 			}
-			want := session.Stopped
+			want := chat.Stopped
 			if sig == syscall.SIGHUP {
-				want = session.Active
+				want = chat.Active
 				if tc.blocked {
-					want = session.Error
+					want = chat.Error
 				}
 			}
 			select {
@@ -198,7 +198,7 @@ func TestUncertainPipeExitPreservesRecoveryIdentityAtQuietLogLevel(t *testing.T)
 						}()
 					}
 				}()
-				c := session.New(session.Config{State: state, HostMode: session.Auto, HostWait: time.Second, SessionID: "conversation", LogLevel: slog.LevelError})
+				c := chat.New(chat.Config{State: state, HostMode: chat.Auto, HostWait: time.Second, LogLevel: slog.LevelError})
 				c.GoalLimit = 128
 				var output strings.Builder
 				var diagnostic io.Writer = &output
@@ -209,7 +209,7 @@ func TestUncertainPipeExitPreservesRecoveryIdentityAtQuietLogLevel(t *testing.T)
 				code, runErr, stop := runInput(t.Context(), c, "original goal", io.Discard, diagnostic, nil, nil)
 				listener.Close()
 				<-done
-				if code != session.Error || !stop || identity == "" {
+				if code != chat.Error || !stop || identity == "" {
 					t.Fatalf("uncertain result: code=%d err=%v stop=%v identity=%q", code, runErr, stop, identity)
 				}
 				if brokenOutput {
@@ -218,7 +218,7 @@ func TestUncertainPipeExitPreservesRecoveryIdentityAtQuietLogLevel(t *testing.T)
 					}
 					return
 				}
-				if runErr != nil || !strings.Contains(output.String(), "canti run -session conversation -input "+identity) || !strings.Contains(output.String(), "original goal and launch flags") || !strings.Contains(output.String(), "before starting new input") {
+				if runErr != nil || !strings.Contains(output.String(), "canti run -input "+identity) || !strings.Contains(output.String(), "original goal and launch flags") || !strings.Contains(output.String(), "before starting new input") {
 					t.Fatalf("unsafe uncertain output: %q; err=%v", output.String(), runErr)
 				}
 				if strings.Contains(output.String(), "Host connection interrupted") {
@@ -250,21 +250,21 @@ func (w failedDiagnostic) Write(p []byte) (int, error) {
 }
 
 func TestPipeCancellationExitPreservesOutputFailureBoundaries(t *testing.T) {
-	cancelled := session.Result{Code: session.Stopped, Run: hostrpc.Run{RunID: "run", Status: hostrpc.StatusStopped, StopReason: "cancelled"}}
+	cancelled := chat.Result{Code: chat.Stopped, Run: hostrpc.Run{RunID: "run", Status: hostrpc.StatusStopped, StopReason: "cancelled"}}
 	for _, tc := range []struct {
 		name         string
-		result       session.Result
+		result       chat.Result
 		explicitStop bool
 		answerFails  bool
 		want         int
 	}{
-		{"explicit cancellation", cancelled, true, false, session.Stopped},
-		{"display loss alone", cancelled, false, false, session.Error},
-		{"answer failure", session.Result{Code: session.OK, Run: hostrpc.Run{Status: hostrpc.StatusReturned, Result: "answer"}}, true, true, session.Error},
-		{"non-cancellation stop", session.Result{Code: session.Stopped, Run: hostrpc.Run{Status: hostrpc.StatusStopped, StopReason: "budget"}}, true, false, session.Error},
-		{"abandoned cleanup", session.Result{Code: session.Error, Interrupted: true, Err: context.Canceled}, true, false, session.Error},
-		{"uncertain admission", session.Result{Code: session.Error, Uncertain: true}, true, false, session.Error},
-		{"unresolved effect", session.Result{Code: session.Resolution, Run: hostrpc.Run{Status: hostrpc.StatusNeedsResolution}}, true, false, session.Error},
+		{"explicit cancellation", cancelled, true, false, chat.Stopped},
+		{"display loss alone", cancelled, false, false, chat.Error},
+		{"answer failure", chat.Result{Code: chat.OK, Run: hostrpc.Run{Status: hostrpc.StatusReturned, Result: "answer"}}, true, true, chat.Error},
+		{"non-cancellation stop", chat.Result{Code: chat.Stopped, Run: hostrpc.Run{Status: hostrpc.StatusStopped, StopReason: "budget"}}, true, false, chat.Error},
+		{"abandoned cleanup", chat.Result{Code: chat.Error, Interrupted: true, Err: context.Canceled}, true, false, chat.Error},
+		{"uncertain admission", chat.Result{Code: chat.Error, Uncertain: true}, true, false, chat.Error},
+		{"unresolved effect", chat.Result{Code: chat.Resolution, Run: hostrpc.Run{Status: hostrpc.StatusNeedsResolution}}, true, false, chat.Error},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, progressFailed := range []bool{false, true} {
@@ -279,7 +279,7 @@ func TestPipeCancellationExitPreservesOutputFailureBoundaries(t *testing.T) {
 				if tc.answerFails {
 					out = failedDiagnostic{answerErr}
 				}
-				code, err, stop := finishInput(tc.result, "input", "session", out, diagnostic, displayErr, tc.explicitStop)
+				code, err, stop := finishInput(tc.result, "input", out, diagnostic, displayErr, tc.explicitStop)
 				wantErr := error(os.ErrDeadlineExceeded)
 				if tc.answerFails {
 					wantErr = answerErr

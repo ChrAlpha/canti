@@ -13,26 +13,29 @@ import "log/slog"
 // Protocol is the version of the messages of this package. A change to any
 // of them needs the next version and a new testdata/v<N> record, which is
 // recorded once and never rewritten; a host and a client of different
-// versions refuse each other. Versions 1 and 2 are recorded in testdata/v1
-// and testdata/v2; version 5 adds validation and cursor-free initial progress
-// requests. Records live with the runtime server contract tests.
-const Protocol = 7
+// versions refuse each other. Version 5 adds validation and cursor-free
+// initial progress requests; version 8 makes input typed, adds steer,
+// follow-up, observation, withdrawal and cancellation, and makes cursors
+// opaque agent-log positions. Records live with the runtime server contract
+// tests.
+const Protocol = 8
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
-	Validate  *Validation `json:"validate,omitempty"`
-	Protocol  int         `json:"protocol"`
-	Op        string      `json:"op"`
-	RunID     string      `json:"run_id,omitempty"`
-	SessionID string      `json:"session_id,omitempty"`
-	Cursor    string      `json:"cursor,omitempty"`
-	Submit    *Submission `json:"submit,omitempty"`
-	Binding   *Binding    `json:"binding,omitempty"`
-	Once      bool        `json:"once,omitempty"`
-	Limit     int         `json:"limit,omitempty"`
-	TimeoutMS int64       `json:"timeout_ms,omitempty"`
-	CleanupMS int64       `json:"cleanup_ms,omitempty"`
-	Resolve   *Resolution `json:"resolve,omitempty"`
+	Validate  *Validation  `json:"validate,omitempty"`
+	Protocol  int          `json:"protocol"`
+	Op        string       `json:"op"`
+	RunID     string       `json:"run_id,omitempty"`
+	Cursor    string       `json:"cursor,omitempty"`
+	Submit    *Submission  `json:"submit,omitempty"`
+	Binding   *Binding     `json:"binding,omitempty"`
+	Observe   *Observation `json:"observe,omitempty"`
+	Withdraw  *Withdrawal  `json:"withdraw,omitempty"`
+	Once      bool         `json:"once,omitempty"`
+	Limit     int          `json:"limit,omitempty"`
+	TimeoutMS int64        `json:"timeout_ms,omitempty"`
+	CleanupMS int64        `json:"cleanup_ms,omitempty"`
+	Resolve   *Resolution  `json:"resolve,omitempty"`
 }
 
 // The operations.
@@ -47,7 +50,10 @@ const (
 	OpWait      = "wait"      // wait for a run to pass Cursor, at most TimeoutMS
 	OpStop      = "stop"      // stop a run, the host bounding cleanup by CleanupMS
 	OpResolve   = "resolve"   // record the outcome or the job of an unknown effect
-	OpInherited = "inherited" // the constraints a new input of SessionID inherits
+	OpInherited = "inherited" // the constraints a new non-fresh input inherits
+	OpObserve   = "observe"   // admit evidence from a source about a subject
+	OpWithdraw  = "withdraw"  // take back held inputs
+	OpCancel    = "cancel"    // cancel the accepted effect of a run
 	OpShutdown  = "shutdown"  // shut the host down
 )
 
@@ -63,6 +69,7 @@ type Response struct {
 	Page        *Page       `json:"page,omitempty"`
 	Wait        *Wait       `json:"wait,omitempty"`
 	Constraints *string     `json:"constraints,omitempty"`
+	Withdrawn   []Input     `json:"withdrawn,omitempty"`
 }
 
 // Error is a refused or failed operation. Code classifies it for the client.
@@ -78,7 +85,8 @@ const (
 	CodeConflict = "conflict" // the input names a run of other content
 	CodeClosing  = "closing"  // the host is shutting down
 	CodeDriving  = "driving"  // the host already drives the run
-	CodeCursor   = "cursor"   // the cursor names no position of a run
+	CodeCursor   = "cursor"   // the cursor names no position of the agent log
+	CodeHeld     = "held"     // held inputs must be withdrawn first
 	CodeFailed   = "failed"   // anything else; Message says what
 )
 
@@ -130,14 +138,31 @@ type Spec struct {
 	JobTimeout         string `json:"job_timeout"`
 }
 
-// Submission is a request for a new run.
+// Submission is one input for the agent. Delivery steers the open run or
+// queues a follow-up; it is ignored when the agent is quiescent. Fresh starts
+// a new line.
 type Submission struct {
-	SessionID           string `json:"session_id,omitempty"`
 	InputID             string `json:"input_id,omitempty"`
 	Goal                string `json:"goal"`
 	Constraints         string `json:"constraints"`
 	ExplicitConstraints bool   `json:"explicit_constraints"`
+	Delivery            string `json:"delivery,omitempty"`
+	Fresh               bool   `json:"fresh,omitempty"`
 	Spec                Spec   `json:"spec"`
+}
+
+// Observation is evidence one source reports about one subject.
+type Observation struct {
+	InputID string `json:"input_id,omitempty"`
+	Source  string `json:"source"`
+	Subject string `json:"subject"`
+	Text    string `json:"text"`
+}
+
+// Withdrawal takes back the named held input, or every held input when InputID
+// is empty.
+type Withdrawal struct {
+	InputID string `json:"input_id,omitempty"`
 }
 
 // Binding is the provider and the key a drive calls the model with. The key
@@ -175,29 +200,34 @@ type Resolution struct {
 // executor finds, and otherwise the confirmed outcome obs, whose execution
 // state travels as the protocol's word for it.
 
-// Ack acknowledges a durably admitted submission, or names the run an
-// earlier attempt of the same input admitted, with Replayed, and Differs
-// naming the settings in which the retry differs from that run, which keeps
-// its own.
+// Ack acknowledges a durably admitted input with its disposition and
+// agent-log position, or names the input an earlier attempt admitted, with
+// Replayed, and Differs naming the settings in which the retry differs from
+// what was first admitted, which keeps its own. Run is set when the input
+// opened a run.
 type Ack struct {
-	Replayed bool     `json:"replayed"`
-	Differs  []string `json:"differs"`
-	Run      Run      `json:"run"`
+	Replayed    bool     `json:"replayed"`
+	Differs     []string `json:"differs"`
+	InputID     string   `json:"input_id,omitempty"`
+	Disposition string   `json:"disposition,omitempty"`
+	Pos         int64    `json:"pos"`
+	Run         *Run     `json:"run,omitempty"`
 }
 
 // Run is the state of a run. Status is active, needs_resolution, returned,
 // or stopped; Phase names its committed phase, for display. Cursor is the
-// position of this state: following the run from it misses and repeats
-// nothing. Driver is driving while a drive or stop owns work for the run and idle
+// agent-log position of this state: following the log from it misses and
+// repeats nothing. Driver is driving while a drive or stop owns work and idle
 // otherwise; Drivable reports that the host drives it or could continue it
 // without a client's credential, and Why says what is missing otherwise.
 type Run struct {
 	Environment    *Environment `json:"environment,omitempty"`
 	Ephemeral      bool         `json:"ephemeral"`
 	RunID          string       `json:"run_id"`
-	SessionID      string       `json:"session_id,omitempty"`
-	SessionSeq     int64        `json:"session_seq,omitempty"`
+	Ordinal        int          `json:"ordinal,omitempty"`
 	InputID        string       `json:"input_id,omitempty"`
+	InputPos       int64        `json:"input_pos,omitempty"`
+	Fresh          bool         `json:"fresh,omitempty"`
 	Goal           string       `json:"goal"`
 	Constraints    string       `json:"constraints"`
 	Status         string       `json:"status"`
@@ -214,6 +244,9 @@ type Run struct {
 	Drivable       bool         `json:"drivable"`
 	Why            string       `json:"why,omitempty"`
 	DriveError     string       `json:"drive_error,omitempty"`
+	PendingSteers  int          `json:"pending_steers,omitempty"`
+	Queued         int          `json:"queued,omitempty"`
+	Held           int          `json:"held,omitempty"`
 	Totals         Totals       `json:"totals"`
 	Budget         Budget       `json:"budget"`
 }
@@ -248,33 +281,52 @@ type Budget struct {
 // Page is one page of a run's progress: Next is the cursor of the page that
 // follows, More reports that rows remain, and Halted that the run had halted.
 type Page struct {
-	Items  []Item `json:"items"`
-	Next   string `json:"next"`
-	More   bool   `json:"more"`
-	Halted bool   `json:"halted"`
+	Items     []Item `json:"items"`
+	Next      string `json:"next"`
+	More      bool   `json:"more"`
+	Quiescent bool   `json:"quiescent"`
 }
 
 // Item is one entry of a run's progress. Truncated reports that one of its
 // texts is cut at its cap.
 type Item struct {
-	Seq        int64    `json:"seq"`
-	Step       int      `json:"step"`
-	Kind       string   `json:"kind"`
-	Command    string   `json:"command,omitempty"`
-	Purpose    string   `json:"purpose,omitempty"`
-	Action     string   `json:"action,omitempty"`
-	Result     string   `json:"result,omitempty"`
-	Local      bool     `json:"local,omitempty"`
-	Resolved   bool     `json:"resolved,omitempty"`
-	Execution  string   `json:"execution,omitempty"`
-	ExitCode   *int     `json:"exit_code,omitempty"`
-	Preview    string   `json:"preview,omitempty"`
-	Detail     string   `json:"detail,omitempty"`
-	Outcome    *Outcome `json:"outcome,omitempty"`
-	AnchorSeq  int64    `json:"anchor_seq,omitempty"`
-	StopReason string   `json:"stop_reason,omitempty"`
-	Failure    string   `json:"failure,omitempty"`
-	Truncated  bool     `json:"truncated,omitempty"`
+	Pos          int64    `json:"pos"`
+	RunID        string   `json:"run_id,omitempty"`
+	Seq          int64    `json:"seq,omitempty"`
+	Step         int      `json:"step"`
+	Kind         string   `json:"kind"`
+	Command      string   `json:"command,omitempty"`
+	Purpose      string   `json:"purpose,omitempty"`
+	Action       string   `json:"action,omitempty"`
+	Result       string   `json:"result,omitempty"`
+	Local        bool     `json:"local,omitempty"`
+	Resolved     bool     `json:"resolved,omitempty"`
+	Execution    string   `json:"execution,omitempty"`
+	ExitCode     *int     `json:"exit_code,omitempty"`
+	Preview      string   `json:"preview,omitempty"`
+	Detail       string   `json:"detail,omitempty"`
+	Outcome      *Outcome `json:"outcome,omitempty"`
+	AnchorSeq    int64    `json:"anchor_seq,omitempty"`
+	StopReason   string   `json:"stop_reason,omitempty"`
+	Failure      string   `json:"failure,omitempty"`
+	SupersededBy int      `json:"superseded_by,omitempty"`
+	Inputs       int      `json:"inputs,omitempty"`
+	Input        *Input   `json:"input,omitempty"`
+	Withdrawn    []string `json:"withdrawn,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
+}
+
+// Input is one admitted input as progress reports it, with bounded text.
+type Input struct {
+	Pos         int64  `json:"pos,omitempty"`
+	InputID     string `json:"input_id,omitempty"`
+	Authority   string `json:"authority"`
+	Delivery    string `json:"delivery,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	Text        string `json:"text"`
+	Truncated   bool   `json:"truncated,omitempty"`
 }
 
 // Outcome is the result of a local action.
@@ -289,12 +341,12 @@ type Outcome struct {
 	FocusSources   int    `json:"focus_sources,omitempty"`
 }
 
-// Wait is what a wait observed: the cursor of the run's latest transition,
-// whether it has halted, and its driver.
+// Wait is what a wait observed: the latest agent-log position, whether the
+// agent was quiescent, and whether a drive or operation owned work.
 type Wait struct {
-	Cursor string `json:"cursor"`
-	Halted bool   `json:"halted"`
-	Driver string `json:"driver"`
+	Cursor    string `json:"cursor"`
+	Quiescent bool   `json:"quiescent"`
+	Driver    string `json:"driver"`
 }
 
 // The statuses of a run, and its drivers.

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,17 +32,33 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 4
+const schemaVersion = 5
+
+const (
+	journalModeSQL      = `PRAGMA journal_mode`
+	userVersionCheckSQL = `PRAGMA user_version`
+	schemaObjectsSQL    = `SELECT count(*) FROM sqlite_schema`
+	contextSeqUpdateSQL = `UPDATE runs SET context_seq=? WHERE id=?`
+)
+
+var userVersionSQL = fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion)
 
 const options = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=fullfsync(1)&_txlock=immediate"
 
 const schema = `
+CREATE TABLE agent_log (
+	n INTEGER PRIMARY KEY CHECK (n = 1),
+	pos INTEGER NOT NULL
+);
+INSERT INTO agent_log (n, pos) VALUES (1, 0);
 CREATE TABLE runs (
 	n INTEGER PRIMARY KEY,
 	id TEXT NOT NULL UNIQUE,
 	semantics INTEGER NOT NULL,
 	run TEXT NOT NULL,
 	initial TEXT NOT NULL,
+	input_pos INTEGER,
+	fresh INTEGER NOT NULL DEFAULT 0,
 	input_tokens INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	output_bytes INTEGER NOT NULL DEFAULT 0,
@@ -52,9 +69,42 @@ CREATE TABLE runs (
 	output_reports INTEGER NOT NULL DEFAULT 0,
 	lost_attempts INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE inputs (
+	pos INTEGER PRIMARY KEY,
+	input_id TEXT,
+	authority TEXT NOT NULL,
+	delivery TEXT NOT NULL DEFAULT '',
+	disposition TEXT NOT NULL DEFAULT '',
+	withdrawn_pos INTEGER,
+	delivered_pos INTEGER,
+	run_id TEXT REFERENCES runs (id),
+	admitted_run_id TEXT,
+	text TEXT NOT NULL,
+	constraints TEXT NOT NULL DEFAULT '',
+	explicit_constraints INTEGER NOT NULL DEFAULT 0,
+	fresh INTEGER NOT NULL DEFAULT 0,
+	spec TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
+	subject TEXT NOT NULL DEFAULT '',
+	admitted_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX inputs_client ON inputs (input_id);
+CREATE INDEX inputs_run ON inputs (run_id, pos);
+CREATE INDEX inputs_disposition ON inputs (disposition, pos);
+CREATE INDEX inputs_observation ON inputs (source, subject, pos);
+CREATE INDEX inputs_withdrawn ON inputs (withdrawn_pos, pos) WHERE withdrawn_pos IS NOT NULL;
+CREATE INDEX inputs_delivered ON inputs (delivered_pos, pos) WHERE delivered_pos IS NOT NULL;
+CREATE TABLE observation_keys (
+	source TEXT NOT NULL,
+	subject TEXT NOT NULL,
+	latest_pos INTEGER NOT NULL,
+	PRIMARY KEY (source, subject)
+);
+CREATE INDEX observation_keys_latest ON observation_keys (latest_pos DESC);
 CREATE TABLE transitions (
 	run_id TEXT NOT NULL REFERENCES runs (id),
 	seq INTEGER NOT NULL CHECK (seq > 0),
+	pos INTEGER NOT NULL,
 	event_id TEXT NOT NULL,
 	kind TEXT NOT NULL,
 	semantics INTEGER NOT NULL,
@@ -67,29 +117,24 @@ CREATE TABLE transitions (
 	rev INTEGER NOT NULL,
 	PRIMARY KEY (run_id, seq)
 );
+CREATE UNIQUE INDEX transitions_pos ON transitions (pos);
 CREATE UNIQUE INDEX transitions_request ON transitions (run_id, step, rev) WHERE kind = 'request_frozen';
 CREATE UNIQUE INDEX transitions_response ON transitions (run_id, step, attempt) WHERE kind = 'response_saved';
-CREATE UNIQUE INDEX transitions_completion_step ON transitions (run_id, json_extract(from_state, '$.Step')) WHERE kind IN ('observed','resolved','performed');
+CREATE UNIQUE INDEX transitions_completion_step ON transitions (run_id, json_extract(from_state, '$.Step'))
+	WHERE kind IN ('observed','resolved','performed') OR (kind = 'response_loaded' AND (CASE WHEN json_valid(facts) THEN json_type(facts, '$.Supersede') END) = 'object');
 CREATE INDEX transitions_steps ON transitions (run_id, seq) WHERE kind IN ('observed', 'resolved');
-` + performedIndex + `
-CREATE TABLE session_runs (
-	session_id TEXT NOT NULL,
-	seq INTEGER NOT NULL CHECK (seq > 0),
-	input_id TEXT NOT NULL,
-	run_id TEXT NOT NULL UNIQUE REFERENCES runs (id),
-	PRIMARY KEY (session_id, seq),
-	UNIQUE (session_id, input_id)
-);
-`
+CREATE INDEX transitions_superseded ON transitions (run_id, seq)
+	WHERE kind = 'response_loaded' AND (CASE WHEN json_valid(facts) THEN json_type(facts, '$.Supersede') END) = 'object';
+` + performedIndex
 
 // performedIndex serves bounded reads of local completions.
 const performedIndex = `CREATE INDEX transitions_performed ON transitions (run_id, seq) WHERE kind = 'performed';`
 
 const (
-	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? FROM runs WHERE id = ?`
-	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`
-	runSQL       = `SELECT semantics, run FROM runs WHERE id = ?`
-	lastRunSQL   = `SELECT semantics, run FROM runs ORDER BY n DESC LIMIT 1`
+	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? AND input_pos IS ? AND fresh = ? FROM runs WHERE id = ?`
+	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial, input_pos, fresh) VALUES (?, ?, ?, ?, ?, ?)`
+	runSQL       = `SELECT semantics, run, input_pos, fresh FROM runs WHERE id = ?`
+	lastRunSQL   = `SELECT semantics, run, input_pos, fresh FROM runs WHERE n = (SELECT max(n) FROM runs)`
 	initialSQL   = `SELECT semantics, initial FROM runs WHERE id = ?`
 	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps, usage_attempts, input_reports, output_reports, lost_attempts FROM runs WHERE id = ?`
 	addSQL       = `UPDATE runs SET input_tokens = ?, output_tokens = ?, output_bytes = ?, steps = ?,
@@ -98,8 +143,12 @@ const (
 	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
 		FROM transitions WHERE run_id = ? AND seq = ?`
 	insertSQL = `INSERT INTO transitions
-		(run_id, seq, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(run_id, seq, pos, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	agentPosSQL    = `SELECT pos FROM agent_log WHERE n = 1`
+	bumpPosSQL     = `UPDATE agent_log SET pos = ? WHERE n = 1`
+	lastPosSQL     = `SELECT pos FROM agent_log WHERE n = 1`
+	steerCountSQL  = `SELECT count(*) FROM inputs WHERE run_id = ? AND authority = 'principal' AND disposition = 'steer'`
 	transitionsSQL = `SELECT seq, event_id, kind, semantics, event, from_state, to_state, facts
 		FROM transitions WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`
 	requestSQL  = `SELECT semantics, from_state, to_state, facts FROM transitions WHERE run_id = ? AND kind = 'request_frozen' AND step = ? AND rev = ?`
@@ -112,6 +161,8 @@ const (
 		WHERE run_id = ?1 AND kind IN ('observed', 'resolved') AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
 		UNION ALL SELECT * FROM (SELECT seq, kind, semantics, from_state, facts FROM transitions
 		WHERE run_id = ?1 AND kind = 'performed' AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
+		UNION ALL SELECT * FROM (SELECT seq, kind, semantics, from_state, facts FROM transitions
+		WHERE run_id = ?1 AND kind = 'response_loaded' AND (CASE WHEN json_valid(facts) THEN json_type(facts, '$.Supersede') END) = 'object' AND seq < ?2 ORDER BY seq DESC LIMIT ?3)
 		ORDER BY seq DESC LIMIT ?3`
 	// completionSQL reads one transition by primary key for Completion.
 	completionSQL = `SELECT seq, kind, semantics, from_state, facts FROM transitions WHERE run_id = ? AND seq = ?`
@@ -126,8 +177,11 @@ const (
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
-	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL,
-	contextSeqSQL, contextHeadSQL, receiptSQL, sessionRunsSQL,
+	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL, logWithdrawalsSQL,
+	contextSeqSQL, contextHeadSQL, receiptSQL, agentPosSQL, bumpPosSQL,
+	lastPosSQL, steerCountSQL, steersSQL, boundsSQL, observationsSQL,
+	previousIDsSQL, previousCountSQL, queuedSQL, queuedCountSQL,
+	inputByClientSQL, inputByPositionSQL, inputAtSQL, inputsAtSQL, deliveredSQL, observationKeySQL, steerBytesSQL, insertInputSQL, latestRunsSQL,
 }
 
 // Store is a harness.Journal backed by one SQLite database file. It is safe
@@ -136,6 +190,7 @@ type Store struct {
 	db       *sql.DB
 	stmts    map[string]*sql.Stmt
 	readOnly bool
+	onCommit atomic.Pointer[func()]
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -178,25 +233,28 @@ func busy(err error) bool {
 
 func (s *Store) initialize(ctx context.Context, tx *sql.Tx) error {
 	var mode string
-	if err := tx.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+	if err := tx.QueryRowContext(ctx, journalModeSQL).Scan(&mode); err != nil {
 		return err
 	}
 	if mode != "wal" {
 		return fmt.Errorf("journal mode is %q, want wal", mode)
 	}
 	var version int
-	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	if err := tx.QueryRowContext(ctx, userVersionCheckSQL).Scan(&version); err != nil {
 		return err
 	}
 	var objects int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema").Scan(&objects); err != nil {
+	if err := tx.QueryRowContext(ctx, schemaObjectsSQL).Scan(&objects); err != nil {
 		return err
 	}
 	switch {
 	case version == schemaVersion:
 		return nil
 	case version == 0 && objects == 0:
-		_, err := tx.ExecContext(ctx, schema+fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion))
+		if _, err := tx.ExecContext(ctx, schema); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, userVersionSQL)
 		return err
 
 	}
@@ -205,6 +263,25 @@ func (s *Store) initialize(ctx context.Context, tx *sql.Tx) error {
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// SetOnCommit installs the function every successful write calls after its
+// transaction commits. It is the single notification point for readers of the
+// agent log: a write that advances a position or changes an input fact has
+// committed by the time the hook runs, so a woken reader cannot observe a
+// stale journal. A failed or rolled-back write calls nothing.
+func (s *Store) SetOnCommit(fn func()) {
+	if fn == nil {
+		s.onCommit.Store(nil)
+		return
+	}
+	s.onCommit.Store(&fn)
+}
+
+func (s *Store) committed() {
+	if fn := s.onCommit.Load(); fn != nil {
+		(*fn)()
+	}
+}
 
 func (s *Store) write(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
 	if err := ctx.Err(); err != nil {
@@ -221,7 +298,11 @@ func (s *Store) write(ctx context.Context, fn func(context.Context, *sql.Tx) err
 	if err := fn(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.committed()
+	return nil
 }
 
 func (s *Store) stmt(ctx context.Context, tx *sql.Tx, query string) *sql.Stmt {
@@ -233,10 +314,12 @@ func (s *Store) stmt(ctx context.Context, tx *sql.Tx, query string) *sql.Stmt {
 
 // CreateRun records run with its initial state at sequence zero. The state
 // must be the fresh state of the same run. Repeating an identical create
-// succeeds without change; different content under an existing ID fails.
+// succeeds without change; different content under an existing ID fails. A
+// run created by an admitted input, which the host alone does, is created
+// with its input in the same transaction instead.
 func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.State) error {
-	if run.SessionID != "" || run.InputID != "" || run.SessionSeq != 0 {
-		return errors.New("sqlite: session runs require Submit")
+	if run.InputPos != 0 || run.InputID != "" {
+		return errors.New("sqlite: a run with an input is created by admission")
 	}
 	data, state, err := encodeRun(run, initial)
 	if err != nil {
@@ -246,7 +329,7 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		var same bool
 		var semantics int
 		var stored string
-		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, data, state, run.ID).Scan(&semantics, &stored, &same)
+		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, data, state, nil, run.Fresh, run.ID).Scan(&semantics, &stored, &same)
 		if err == nil {
 			var initial core.State
 			if err := decodeState(semantics, stored, &initial); err != nil {
@@ -264,7 +347,7 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		if err := s.checkAdmission(ctx, tx); err != nil {
 			return err
 		}
-		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state)
+		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state, nil, run.Fresh)
 		return err
 	})
 }
@@ -276,7 +359,10 @@ func encodeRun(run harness.Run, initial core.State) (string, string, error) {
 	if want, _ := core.NewState(run.ID, initial.Limits); initial != want {
 		return "", "", fmt.Errorf("sqlite: run %q must start from its fresh state", run.ID)
 	}
-	for _, text := range []string{run.ID, run.Goal, run.Constraints} {
+	if run.InputPos < 0 {
+		return "", "", fmt.Errorf("sqlite: run %q has a negative input position", run.ID)
+	}
+	for _, text := range []string{run.ID, run.Goal, run.Constraints, run.InputID} {
 		if !utf8.ValidString(text) {
 			return "", "", fmt.Errorf("sqlite: run %q holds invalid UTF-8", run.ID)
 		}
@@ -349,12 +435,22 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	if err := s.checkEffect(ctx, tx, t); err != nil {
 		return err
 	}
-	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, t.EventID, r.kind, r.semantics,
+	if err := s.checkInputs(ctx, tx, t); err != nil {
+		return err
+	}
+	var pos int64
+	if pos, err = nextPos(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := s.stmt(ctx, tx, insertSQL).ExecContext(ctx, r.run, t.Seq, pos, t.EventID, r.kind, r.semantics,
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
 	}
+	if err := s.markDelivered(ctx, tx, pos, t.Facts.Delivered); err != nil {
+		return err
+	}
 	if t.Facts.ContextState != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE runs SET context_seq=? WHERE id=?`, t.Seq, r.run); err != nil {
+		if _, err := tx.ExecContext(ctx, contextSeqUpdateSQL, t.Seq, r.run); err != nil {
 			return err
 		}
 	}
@@ -398,6 +494,9 @@ func encode(t harness.Transition) (record, error) {
 func delta(t harness.Transition) harness.Totals {
 	var d harness.Totals
 	settled := false
+	if _, ok := t.Event.(core.ResponseLoaded); ok && t.Facts.Supersede != nil {
+		d.Steps = 1
+	}
 	switch t.Event.(type) {
 	case core.ResponseSaved, core.ResponseIncomplete, core.RequestRejected:
 		settled = true
@@ -465,6 +564,57 @@ func (s *Store) addTotals(ctx context.Context, tx *sql.Tx, runID string, d harne
 	_, err = s.stmt(ctx, tx, addSQL).ExecContext(ctx, total.Usage.InputTokens, total.Usage.OutputTokens, total.OutputBytes, steps,
 		total.Coverage.Attempts, total.Coverage.InputReports, total.Coverage.OutputReports, total.Coverage.Lost, runID)
 	return err
+}
+
+// checkInputs enforces the input side of a commit inside the transaction
+// that writes it: the principal steers a ResponseLoaded answers must all be
+// bound, and an InputsBound must not claim more steers than its run admitted.
+// A bind may commit the prefix it read before a concurrent steer arrived; the
+// remaining steers bind at the next binding point.
+func (s *Store) checkInputs(ctx context.Context, tx *sql.Tx, t harness.Transition) error {
+	switch e := t.Event.(type) {
+	case core.InputsBound:
+		var count int
+		if err := s.stmt(ctx, tx, steerCountSQL).QueryRowContext(ctx, t.From.RunID).Scan(&count); err != nil {
+			return err
+		}
+		if e.Count > count {
+			return fmt.Errorf("%w: %d bound instructions exceed the %d steers of run %q", harness.ErrFacts, e.Count, count, t.From.RunID)
+		}
+	case core.ResponseLoaded:
+		var count int
+		if err := s.stmt(ctx, tx, steerCountSQL).QueryRowContext(ctx, t.From.RunID).Scan(&count); err != nil {
+			return err
+		}
+		if count > t.From.Inputs {
+			return fmt.Errorf("%w: run %q holds %d steers and %d are bound", harness.ErrInputsPending, t.From.RunID, count, t.From.Inputs)
+		}
+	}
+	return nil
+}
+
+// markDelivered records the first request position that showed each input.
+func (s *Store) markDelivered(ctx context.Context, tx *sql.Tx, pos int64, d *harness.Delivered) error {
+	if d == nil {
+		return nil
+	}
+	for _, inputPos := range d.Positions {
+		if _, err := s.stmt(ctx, tx, deliveredSQL).ExecContext(ctx, pos, inputPos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// nextPos takes the next agent-log position in tx.
+func nextPos(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var pos int64
+	if err := tx.QueryRowContext(ctx, agentPosSQL).Scan(&pos); err != nil {
+		return 0, err
+	}
+	pos++
+	_, err := tx.ExecContext(ctx, bumpPosSQL, pos)
+	return pos, err
 }
 
 // checkEffect applies harness.CheckEffect to t inside the transaction tx

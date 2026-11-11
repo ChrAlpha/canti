@@ -21,10 +21,26 @@ type Frame struct {
 	Receipts                                       []StepReceipt
 	Latest                                         *StepRecord
 	DecisionTool, RetrievalEnabled, ImportsEnabled bool
-	SessionContext                                 string
+	Instructions                                   []Instruction
+	Observations                                   []ObservationInput
+	Delivered                                      []Input
+	Previous                                       []PreviousRun
+	PreviousMore                                   int
 	Focused                                        []FocusedEvidence
 	capture                                        *ContextCapture
-	sessionNavigation                              string
+	previousRun                                    string
+	preparation                                    string
+}
+
+// Instruction is one principal instruction bound to the run, with the
+// transition that bound it and the step in progress at that moment.
+type Instruction struct {
+	Index   int
+	Text    string
+	Pos     int64
+	Seq     int64
+	Step    int
+	InputID string
 }
 
 // Rejection is a response of the current step that failed to decode, with
@@ -63,6 +79,36 @@ func (f Frame) Validate() error {
 	}
 	if f.Latest != nil && f.Latest.Step != f.Step-1 {
 		return errors.New("harness: latest result is not the previous completed step")
+	}
+	if err := f.validateInputs(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateInputs checks the bound instructions, the observation keys, and the
+// previous runs a request may include.
+func (f Frame) validateInputs() error {
+	last := int64(0)
+	for i, in := range f.Instructions {
+		if in.Index != i+1 || in.Seq <= 0 || in.Seq < last || in.Step < 1 || in.Step > f.Step || in.Pos < 1 || !utf8.ValidString(in.Text) || in.Text == "" {
+			return errors.New("harness: invalid bound instruction")
+		}
+		last = in.Seq
+	}
+	if len(f.Observations) > MaxObservationKeys {
+		return errors.New("harness: too many observation keys")
+	}
+	keys := map[string]bool{}
+	for _, o := range f.Observations {
+		key := o.Source + "\x00" + o.Subject
+		if o.Pos < 1 || !utf8.ValidString(o.Text) || keys[key] {
+			return errors.New("harness: invalid observation")
+		}
+		keys[key] = true
+	}
+	if len(f.Previous) > MaxPreviousRuns || f.PreviousMore < 0 {
+		return errors.New("harness: invalid previous runs")
 	}
 	return nil
 }

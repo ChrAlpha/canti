@@ -72,6 +72,8 @@ func hidden(r rune) bool { return r != '\t' && (!unicode.IsGraphic(r) || r == ut
 // result of a completed step.
 func Item(w io.Writer, it hostrpc.Item) {
 	switch {
+	case it.Kind == "withdrawn":
+		fmt.Fprintf(w, "↩ withdrew %d input(s): %s\n", len(it.Withdrawn), strings.Join(it.Withdrawn, ", "))
 	case it.Kind == "context_reset":
 		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":

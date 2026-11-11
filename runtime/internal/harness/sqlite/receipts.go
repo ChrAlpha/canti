@@ -16,13 +16,21 @@ import (
 const receiptSQL = `WITH selected AS (
     SELECT seq FROM (SELECT seq FROM transitions WHERE run_id=?1 AND kind IN ('observed','resolved') AND seq<?2 ORDER BY seq DESC LIMIT ?3)
     UNION ALL SELECT seq FROM (SELECT seq FROM transitions WHERE run_id=?1 AND kind='performed' AND seq<?2 ORDER BY seq DESC LIMIT ?3)
+    UNION ALL SELECT seq FROM (SELECT seq FROM transitions WHERE run_id=?1 AND kind='response_loaded'
+        AND (CASE WHEN json_valid(facts) THEN json_type(facts,'$.Supersede') END)='object' AND seq<?2 ORDER BY seq DESC LIMIT ?3)
     ORDER BY seq DESC LIMIT ?3
 ) SELECT t.seq,t.semantics,json_extract(t.from_state,'$.Step'),
-    substr(json_extract(t.from_state,'$.Decision.purpose'),1,4096),
-    COALESCE(json_extract(t.facts,'$.Outcome.Status'),json_extract(t.facts,'$.Observation.Execution')),
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Supersede') END)='object'
+        THEN substr(json_extract(t.facts,'$.Supersede.Purpose'),1,4096)
+        ELSE substr(json_extract(t.from_state,'$.Decision.purpose'),1,4096) END,
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Supersede') END)='object' THEN 'superseded'
+        ELSE COALESCE(json_extract(t.facts,'$.Outcome.Status'),json_extract(t.facts,'$.Observation.Execution')) END,
     json_extract(t.facts,'$.Observation.ExitCode'),
-    COALESCE(json_extract(t.facts,'$.Resolution.Source')='operator',0)
-    FROM selected JOIN transitions t ON t.run_id=?1 AND t.seq=selected.seq ORDER BY t.seq DESC`
+    COALESCE(json_extract(t.facts,'$.Resolution.Source')='operator',0),
+    COALESCE(json_extract(t.facts,'$.Supersede.Instruction'),0),
+    COALESCE(json_extract(t.facts,'$.Supersede.Kind'),'')
+    FROM selected CROSS JOIN transitions t INDEXED BY sqlite_autoindex_transitions_1
+    WHERE t.run_id=?1 AND t.seq=selected.seq ORDER BY t.seq DESC`
 
 func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit int) ([]harness.StepReceipt, error) {
 	if limit < 1 || limit > 1000 {
@@ -40,9 +48,9 @@ func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit 
 	for rows.Next() {
 		var r harness.StepReceipt
 		var semantics int
-		var purpose sql.NullString
+		var purpose, kind sql.NullString
 		var code sql.NullInt64
-		if err := rows.Scan(&r.Seq, &semantics, &r.Step, &purpose, &r.Status, &code, &r.Resolved); err != nil {
+		if err := rows.Scan(&r.Seq, &semantics, &r.Step, &purpose, &r.Status, &code, &r.Resolved, &r.SupersededBy, &kind); err != nil {
 			return nil, err
 		}
 		if err := core.KnownSemantics(semantics); err != nil {
@@ -52,9 +60,13 @@ func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit 
 			return nil, fmt.Errorf("%w: invalid receipt identity", ErrIncompatible)
 		}
 		r.Purpose = purpose.String
+		r.DecisionKind = core.Kind(kind.String)
 		if code.Valid {
 			n := int(code.Int64)
 			r.ExitCode = &n
+		}
+		if r.SupersededBy > 0 && (r.DecisionKind != core.Exec && r.DecisionKind != core.Return || r.Status != "superseded") {
+			return nil, fmt.Errorf("%w: invalid superseded receipt at sequence %d", ErrIncompatible, r.Seq)
 		}
 		out = append(out, r)
 	}

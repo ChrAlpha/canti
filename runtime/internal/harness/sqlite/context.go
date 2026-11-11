@@ -25,8 +25,23 @@ const ContextEventPageBytes = 16 << 20
 
 const contextColumns = `seq, event_id, kind, semantics, event, from_state, to_state, facts`
 
-const contextFrozenSQL = `SELECT ` + contextColumns + `, step, rev
+const (
+	contextFrozenSQL = `SELECT ` + contextColumns + `, step, rev
 	FROM transitions INDEXED BY transitions_request WHERE run_id = ? AND kind = 'request_frozen'`
+	contextFrozenLatestSQL   = contextFrozenSQL + ` ORDER BY step DESC, rev DESC LIMIT 1`
+	contextFrozenStepSQL     = contextFrozenSQL + ` AND step = ? ORDER BY rev DESC LIMIT 1`
+	contextFrozenRevisionSQL = contextFrozenSQL + ` AND step = ? AND rev = ?`
+	contextFrozenPreviousSQL = contextFrozenSQL + ` AND (step, rev) < (?, ?) ORDER BY step DESC, rev DESC LIMIT 1`
+	contextFrozenNextSQL     = contextFrozenSQL + ` AND (step, rev) > (?, ?) ORDER BY step, rev LIMIT 1`
+	contextRunSQL            = `SELECT semantics, run, initial,
+		COALESCE((SELECT max(seq) FROM transitions WHERE run_id = runs.id), 0)
+		FROM runs WHERE id = ?`
+	contextEventPageSQL = `SELECT seq,
+		octet_length(event) + octet_length(from_state) + octet_length(to_state) + octet_length(facts)
+		FROM transitions WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`
+	contextEventsSQL = `SELECT ` + contextColumns + `
+		FROM transitions WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`
+)
 
 // ContextRequest reads only the selected frozen request in one snapshot.
 // Zero step or revision selects the latest; a revision needs a step.
@@ -75,9 +90,7 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 	var page ContextPage
 	var semantics int
 	var data, initial string
-	err := tx.QueryRowContext(ctx, `SELECT semantics, run, initial,
-		COALESCE((SELECT max(seq) FROM transitions WHERE run_id = runs.id), 0)
-		FROM runs WHERE id = ?`, runID).Scan(&semantics, &data, &initial, &page.AsOfSeq)
+	err := tx.QueryRowContext(ctx, contextRunSQL, runID).Scan(&semantics, &data, &initial, &page.AsOfSeq)
 	if err != nil {
 		return page, missing(err, "run")
 	}
@@ -97,16 +110,19 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 	}
 	page.Request = *request
 	state = request.To
-	args := []any{runID, state.Step, state.RequestRev}
-	page.Previous, err = contextFrozen(ctx, tx, runID,
-		" AND (step, rev) < (?, ?) ORDER BY step DESC, rev DESC LIMIT 1", args)
+	page.Previous, err = scanContextFrozen(tx.QueryRowContext(ctx, contextFrozenPreviousSQL, runID, state.Step, state.RequestRev), runID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return page, err
 	}
-	page.Next, err = contextFrozen(ctx, tx, runID,
-		" AND (step, rev) > (?, ?) ORDER BY step, rev LIMIT 1", args)
+	if errors.Is(err, sql.ErrNoRows) {
+		page.Previous = nil
+	}
+	page.Next, err = scanContextFrozen(tx.QueryRowContext(ctx, contextFrozenNextSQL, runID, state.Step, state.RequestRev), runID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return page, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		page.Next = nil
 	}
 	if request.Seq > page.AsOfSeq ||
 		page.Previous != nil && page.Previous.Seq >= request.Seq ||
@@ -127,9 +143,7 @@ func readContextPage(ctx context.Context, tx *sql.Tx, runID string, step, revisi
 }
 
 func contextEventPage(ctx context.Context, tx *sql.Tx, runID string, after, before int64, limit int) (int64, int64, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT seq,
-		octet_length(event) + octet_length(from_state) + octet_length(to_state) + octet_length(facts)
-		FROM transitions WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`, runID, after, before, limit+1)
+	rows, err := tx.QueryContext(ctx, contextEventPageSQL, runID, after, before, limit+1)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -150,24 +164,25 @@ func contextEventPage(ctx context.Context, tx *sql.Tx, runID string, after, befo
 }
 
 func selectContextRequest(ctx context.Context, tx *sql.Tx, runID string, step, revision int) (*harness.Transition, error) {
-	selection, args := " ORDER BY step DESC, rev DESC LIMIT 1", []any{runID}
-	if step > 0 {
-		selection, args = " AND step = ? ORDER BY rev DESC LIMIT 1", append(args, step)
-		if revision > 0 {
-			selection, args = " AND step = ? AND rev = ?", append(args, revision)
-		}
+	var row *sql.Row
+	switch {
+	case step == 0:
+		row = tx.QueryRowContext(ctx, contextFrozenLatestSQL, runID)
+	case revision == 0:
+		row = tx.QueryRowContext(ctx, contextFrozenStepSQL, runID, step)
+	default:
+		row = tx.QueryRowContext(ctx, contextFrozenRevisionSQL, runID, step, revision)
 	}
-	request, err := contextFrozen(ctx, tx, runID, selection, args)
+	request, err := scanContextFrozen(row, runID)
 	return request, missing(err, "frozen request")
 }
 
-func contextFrozen(ctx context.Context, tx *sql.Tx, runID, selection string, args []any) (*harness.Transition, error) {
+func scanContextFrozen(row *sql.Row, runID string) (*harness.Transition, error) {
 	var r record
 	var seq int64
 	var eventID string
 	var step, revision int
-	err := tx.QueryRowContext(ctx, contextFrozenSQL+selection, args...).Scan(
-		&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts, &step, &revision)
+	err := row.Scan(&seq, &eventID, &r.kind, &r.semantics, &r.event, &r.from, &r.to, &r.facts, &step, &revision)
 	if err != nil {
 		return nil, err
 	}
@@ -188,8 +203,7 @@ func contextFrozen(ctx context.Context, tx *sql.Tx, runID, selection string, arg
 }
 
 func contextEvents(ctx context.Context, tx *sql.Tx, runID string, after, before int64, limit int) ([]harness.Transition, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT `+contextColumns+`
-		FROM transitions WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`, runID, after, before, limit)
+	rows, err := tx.QueryContext(ctx, contextEventsSQL, runID, after, before, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -13,8 +13,9 @@ import (
 
 type contextReport struct {
 	RunID          string                  `json:"run_id"`
-	SessionID      string                  `json:"session_id,omitempty"`
-	SessionSeq     int64                   `json:"session_seq,omitempty"`
+	InputID        string                  `json:"input_id,omitempty"`
+	InputPos       int64                   `json:"input_pos,omitempty"`
+	Fresh          bool                    `json:"fresh,omitempty"`
 	AsOfSeq        int64                   `json:"as_of_seq"`
 	Request        harness.ContextRequest  `json:"request"`
 	Previous       *harness.ContextRequest `json:"previous,omitempty"`
@@ -97,7 +98,7 @@ func (a *app) writeRequest(ctx context.Context, store *sqlite.Store, id string, 
 }
 
 func describeContext(p sqlite.ContextPage, bodies bool) (contextReport, error) {
-	r := contextReport{RunID: p.Run.ID, SessionID: p.Run.SessionID, SessionSeq: p.Run.SessionSeq, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}, EventBytes: p.EventBytes, EventByteLimit: sqlite.ContextEventPageBytes}
+	r := contextReport{RunID: p.Run.ID, InputID: p.Run.InputID, InputPos: p.Run.InputPos, Fresh: p.Run.Fresh, AsOfSeq: p.AsOfSeq, More: p.More, Events: []harness.ContextEvent{}, EventBytes: p.EventBytes, EventByteLimit: sqlite.ContextEventPageBytes}
 	var err error
 	if r.Request, err = harness.DescribeContextRequest(p.Request); err != nil {
 		return r, err
@@ -180,10 +181,12 @@ func (r contextReport) writeText(w io.Writer) error {
 func (t *textLines) capture(c *harness.ContextCapture) {
 	t.line("Rendered prompt bytes: %d / %d", c.Bytes.Total, c.Bytes.Limit)
 	b := c.Bytes
-	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; anchor %d; focus %d; latest %d", b.System, b.Goal, b.Constraints, b.Environment, b.Anchor, b.Focus, b.Latest)
-	t.line("Preparation: %s; latest step %d sequence %d; selected sources %d", c.Preparation, c.LatestStep, c.LatestSeq, len(c.Focus))
-	if c.SessionNavigation != "" {
-		t.line("Previous session run: %s", c.SessionNavigation)
+	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; anchor %d; previous %d; instructions %d; observations %d; focus %d; latest %d",
+		b.System, b.Goal, b.Constraints, b.Environment, b.Anchor, b.Previous, b.Instructions, b.Observations, b.Focus, b.Latest)
+	t.line("Preparation: %s; latest step %d sequence %d; selected sources %d; bound instructions %d; observation keys %d; latest observation position %d",
+		c.Preparation, c.LatestStep, c.LatestSeq, len(c.Focus), c.InstructionCount, c.ObservationKeys, c.ObservationPos)
+	if c.PreviousRun != "" {
+		t.line("Previous run: %s", c.PreviousRun)
 	}
 	for _, retrieval := range c.Retrievals {
 		t.line("Retrieval at step %d: %s; original query in observation; more %t; incomplete %t", retrieval.Step, retrieval.OperationName(), retrieval.More, retrieval.Incomplete)

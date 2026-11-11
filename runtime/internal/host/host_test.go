@@ -120,7 +120,7 @@ func TestSubmitAcknowledgesAdmissionAndNamesTheRunOfARetriedInput(t *testing.T) 
 	h := testHost(t, Options{Checkpoint: func(p string) { points = append(points, p) }})
 	url := "http://127.0.0.1:1"
 	first := submit(t, h, Submission{InputID: "in-1", Goal: "g", Binding: binding(url)})
-	if first.Replayed || first.Run.InputID != "in-1" || first.Run.SessionID != "" || first.Run.SessionSeq != 0 || first.Config.Provider != url {
+	if first.Replayed || first.Run.InputID != "in-1" || first.Run.InputPos != 1 || first.Run.Fresh || first.Config.Provider != url {
 		t.Fatalf("first ack = %+v", first)
 	}
 	if strings.Join(points, " ") != PointAdmitting+" "+PointSubmitted {
@@ -133,33 +133,28 @@ func TestSubmitAcknowledgesAdmissionAndNamesTheRunOfARetriedInput(t *testing.T) 
 	if _, err := h.Submit(context.Background(), Submission{InputID: "in-1", Goal: "other", Spec: testSpec(h), Binding: binding(url)}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a retry of other content = %v, want ErrConflict", err)
 	}
-	if _, err := h.Submit(context.Background(), Submission{InputID: "in-2", Goal: "g", Spec: testSpec(h), Binding: binding(url)}); err == nil || !strings.Contains(err.Error(), "resume or stop it first") {
+	if _, err := h.Submit(context.Background(), Submission{InputID: "in-2", Goal: "g", Spec: testSpec(h), Binding: binding(url)}); !errors.Is(err, harness.ErrDeliveryRequired) && !strings.Contains(err.Error(), "-delivery") && !strings.Contains(err.Error(), "delivery") {
 		t.Fatalf("a new input beside an open run = %v", err)
-	}
-	if _, err := h.Submit(context.Background(), Submission{SessionID: "s", InputID: "in-1", Goal: "g", Spec: testSpec(h), Binding: binding(url)}); err == nil {
-		t.Fatal("a session input of the same ID replayed the standalone run instead of being refused beside it")
 	}
 }
 
-func TestSessionAndStandaloneInputsAreDistinctKeys(t *testing.T) {
+func TestAnInputIDNamesOneAdmittedInput(t *testing.T) {
 	h := testHost(t, Options{})
 	url := answering(t, core.Decision{Kind: core.Return, Payload: "done"})
-	for _, s := range []Submission{{InputID: "x"}, {SessionID: "s", InputID: "x"}} {
-		s.Binding = binding(url)
-		ack := submit(t, h, s)
-		if ack.Replayed {
-			t.Fatalf("%+v replayed %s", s, ack.Run.ID)
-		}
-		d, err := h.Drive(context.Background(), ack.Run.ID, binding(url), DriveOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
-			t.Fatalf("drive = %+v, %v", snap.State, err)
-		}
-		if again := submit(t, h, s); !again.Replayed || again.Run.ID != ack.Run.ID || again.Snapshot.State.Phase != core.PhaseReturned {
-			t.Fatalf("retry of %+v = %+v", s, again)
-		}
+	s := Submission{InputID: "x", Binding: binding(url)}
+	ack := submit(t, h, s)
+	if ack.Replayed {
+		t.Fatalf("first admission replayed %s", ack.Run.ID)
+	}
+	d, err := h.Drive(context.Background(), ack.Run.ID, binding(url), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("drive = %+v, %v", snap.State, err)
+	}
+	if again := submit(t, h, s); !again.Replayed || again.Run.ID != ack.Run.ID || again.Snapshot.State.Phase != core.PhaseReturned {
+		t.Fatalf("retry = %+v", again)
 	}
 }
 
@@ -526,8 +521,12 @@ func TestWaitSeesACommitThatLandsWhileItRegisters(t *testing.T) {
 	h.drivers[id] = &driver{done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r, err := h.Wait(ctx, Cursor{id, 0})
-	if err != nil || r.Cursor.Seq != 1 || !r.Halted {
+	last, err := h.logEnd(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.Wait(ctx, Cursor(last))
+	if err != nil || r.Cursor <= Cursor(last) || !r.Quiescent {
 		t.Fatalf("Wait = %+v, %v, want the stop committed while it registered", r, err)
 	}
 	delete(h.drivers, id)
@@ -540,8 +539,12 @@ func TestWaitWakesForACommitAfterItsRecheck(t *testing.T) {
 	h.drivers[id] = &driver{done: make(chan struct{})}
 	h.mu.Unlock()
 	got := make(chan WaitResult, 1)
+	last, err := h.logEnd(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	go func() {
-		r, err := h.Wait(context.Background(), Cursor{id, 0})
+		r, err := h.Wait(context.Background(), Cursor(last))
 		if err != nil {
 			t.Error(err)
 		}
@@ -559,7 +562,7 @@ func TestWaitWakesForACommitAfterItsRecheck(t *testing.T) {
 	}
 	select {
 	case r := <-got:
-		if r.Cursor.Seq != 1 {
+		if r.Cursor <= Cursor(last) {
 			t.Fatalf("Wait = %+v", r)
 		}
 	case <-time.After(10 * time.Second):
@@ -590,16 +593,16 @@ func TestProgressPagesAreBoundedAndAdvancePastRowsThatShowNothing(t *testing.T) 
 	ctx := context.Background()
 	var all []Item
 	pages := 0
-	for after := (Cursor{id, 0}); ; pages++ {
+	for after := Cursor(0); ; pages++ {
 		p, err := h.Progress(ctx, after, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Next.Seq <= after.Seq && p.More {
-			t.Fatalf("page after %d did not advance: %+v", after.Seq, p)
+		if p.Next <= after && p.More {
+			t.Fatalf("page after %d did not advance: %+v", after, p)
 		}
 		if again, _ := h.Progress(ctx, after, 1); len(again.Items) != len(p.Items) || again.Next != p.Next {
-			t.Fatalf("the page after %d read again differs", after.Seq)
+			t.Fatalf("the page after %d read again differs", after)
 		}
 		all = append(all, p.Items...)
 		after = p.Next
@@ -624,7 +627,7 @@ func TestProgressPagesAreBoundedAndAdvancePastRowsThatShowNothing(t *testing.T) 
 	if decided != 3 || completed != 3 || returned != 1 || pages <= len(all) {
 		t.Fatalf("%d pages of one row show %d decided, %d completed, %d returned items", pages, decided, completed, returned)
 	}
-	full, err := h.Progress(ctx, Cursor{id, 0}, 0)
+	full, err := h.Progress(ctx, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,11 +642,15 @@ func TestProgressPagesAreBoundedAndAdvancePastRowsThatShowNothing(t *testing.T) 
 		t.Fatalf("a full page holds %d items of %d bytes, %d cut, more %v; want all %d, each of the two 100 KiB commands cut where it is shown twice",
 			len(full.Items), size, cut, full.More, len(all))
 	}
-	if _, err := h.Progress(ctx, Cursor{id, snap.Seq + 1}, 0); !errors.Is(err, ErrCursor) {
-		t.Fatal("a cursor past the run's last transition was accepted")
+	last, err := h.logEnd(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := h.Progress(ctx, Cursor{"run_other", 0}, 0); !errors.Is(err, ErrCursor) {
-		t.Fatal("a cursor of an unknown run was accepted")
+	if _, err := h.Progress(ctx, Cursor(last+1), 0); !errors.Is(err, ErrCursor) {
+		t.Fatal("a cursor past the end of the agent log was accepted")
+	}
+	if _, err := h.Progress(ctx, Cursor(-1), 0); !errors.Is(err, ErrCursor) {
+		t.Fatal("a negative cursor was accepted")
 	}
 }
 
@@ -962,7 +969,7 @@ func TestSubmitWaitsForClosedRunPublicationWithoutCancellingItsDrive(t *testing.
 	if ack, err := h.Submit(ctx, next); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("new input overtook the closed run's publisher: run=%s err=%v", ack.Run.ID, err)
 	}
-	if _, err := h.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+	if _, err := h.store.Input(t.Context(), "next"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("cancelled admission created a run: %v", err)
 	}
 	result := filepath.Join(HistoryRoot(h.opts.State), first.Run.ID, "result")
@@ -990,7 +997,7 @@ func TestSubmitWaitsForClosedRunPublicationWithoutCancellingItsDrive(t *testing.
 	if _, err := h.Submit(t.Context(), next); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("admission ignored a failed publication: %v", err)
 	}
-	if _, err := h.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+	if _, err := h.store.Input(t.Context(), "next"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("failed publication admitted a run: %v", err)
 	}
 	if err := os.Remove(result); err != nil {
@@ -1059,7 +1066,7 @@ func TestShutdownRetainsOwnershipUntilClosedRunPublicationEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if _, err := reopened.store.SessionInput(t.Context(), "", "next"); !errors.Is(err, harness.ErrNotFound) {
+	if _, err := reopened.store.Input(t.Context(), "next"); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("shutdown admitted the next input: %v", err)
 	}
 	if ack, err := reopened.Submit(t.Context(), next); err != nil || ack.Replayed {
@@ -1092,7 +1099,7 @@ func TestPagesStayWithinTheirBoundsAtTheFactLimits(t *testing.T) {
 		t.Fatalf("an item of %d bytes may not fit a page of %d", sqlite.ProgressRowBytes, PageBytes)
 	}
 	var truncated []ItemKind
-	for after := (Cursor{id, 0}); ; {
+	for after := Cursor(0); ; {
 		p, err := h.Progress(context.Background(), after, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -1137,11 +1144,10 @@ func truncatedNames(kinds []ItemKind) []string {
 	return out
 }
 
-// TestACursorIsBoundToItsRun requires that Progress and Wait refuse a
-// cursor of no run, or past the end of its run, as ErrCursor, and that a
-// cursor of one run never reads another: the position of a run with more
-// transitions is past the end of one with fewer.
-func TestACursorIsBoundToItsRun(t *testing.T) {
+// TestACursorNamesAPositionOfTheAgentLog requires that Progress and Wait
+// refuse a negative cursor or one past the end of the agent log, and that a
+// cursor at the latest position reports quiescence with nothing left to read.
+func TestACursorNamesAPositionOfTheAgentLog(t *testing.T) {
 	url := answering(t, core.Decision{Kind: core.Return, Payload: "done"})
 	h := testHost(t, Options{})
 	first := submit(t, h, Submission{Binding: binding(url)}).Run.ID
@@ -1149,23 +1155,32 @@ func TestACursorIsBoundToItsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, _ := d.Result()
-	second := submit(t, h, Submission{Binding: binding(url), Goal: "second"}).Run.ID
-	for _, c := range []Cursor{{second, snap.Seq}, {"run_none", 0}, {"", 0}, {first, -1}, {first, snap.Seq + 1}} {
+	if _, err := d.Result(); err != nil {
+		t.Fatal(err)
+	}
+	last, err := h.logEnd(context.Background())
+	if err != nil || last < 1 {
+		t.Fatalf("log end = %d, %v", last, err)
+	}
+	for _, c := range []Cursor{-1, Cursor(last + 1)} {
 		if _, err := h.Progress(context.Background(), c, 0); !errors.Is(err, ErrCursor) {
-			t.Errorf("Progress(%+v) = %v", c, err)
+			t.Errorf("Progress(%d) = %v", c, err)
 		}
 		if _, err := h.Wait(context.Background(), c); !errors.Is(err, ErrCursor) {
-			t.Errorf("Wait(%+v) = %v", c, err)
+			t.Errorf("Wait(%d) = %v", c, err)
 		}
 	}
 	v, err := h.View(context.Background(), first)
-	if err != nil || v.Cursor() != (Cursor{first, snap.Seq}) {
-		t.Fatalf("view cursor = %+v, %v", v.Cursor(), err)
+	if err != nil || v.Cursor() != Cursor(last) {
+		t.Fatalf("view cursor = %+v, %v; want %d", v.Cursor(), err, last)
 	}
 	p, err := h.Progress(context.Background(), v.Cursor(), 0)
-	if err != nil || len(p.Items) != 0 || p.More || !p.Halted || p.Next != v.Cursor() {
-		t.Fatalf("the page after a halted run's last transition = %+v, %v", p, err)
+	if err != nil || len(p.Items) != 0 || p.More || !p.Quiescent || p.Next != v.Cursor() {
+		t.Fatalf("the page after the log's last transition = %+v, %v", p, err)
+	}
+	later, err := h.Wait(context.Background(), v.Cursor())
+	if err != nil || later.Cursor != v.Cursor() || !later.Quiescent || later.Driving {
+		t.Fatalf("Wait at the quiescent end = %+v, %v", later, err)
 	}
 }
 
@@ -1298,7 +1313,7 @@ func TestAnItemIsTruncatedOnlyForATextItShows(t *testing.T) {
 	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
 		t.Fatalf("drive = %+v, %v", snap.State, err)
 	}
-	p, err := h.Progress(context.Background(), Cursor{id, 0}, 0)
+	p, err := h.Progress(context.Background(), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1625,7 +1640,7 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 		t.Fatalf("drive=%+v %v", snap, err)
 	}
 	focus, reset := 0, 0
-	for after := (Cursor{RunID: id}); ; {
+	for after := Cursor(0); ; {
 		page, err := h.Progress(context.Background(), after, 1)
 		if err != nil {
 			t.Fatal(err)
@@ -1679,7 +1694,12 @@ func TestPersistentReplayUsesStoredAttachmentWithoutEnvironmentAccess(t *testing
 		t.Fatal(err)
 	}
 	run.InputID = "persistent-input"
-	if _, err := h.store.Submit(t.Context(), run, initial); err != nil {
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Admit(t.Context(), harness.InputSubmission{InputID: run.InputID, Authority: harness.AuthorityPrincipal,
+		Text: run.Goal, Constraints: run.Constraints, ExplicitConstraints: true, Spec: data, Run: run, Initial: initial, Now: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	request := spec
@@ -1843,7 +1863,7 @@ func TestStopOwnsProgressThroughDriveHandoff(t *testing.T) {
 			waitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 			waited, err := h.Wait(waitCtx, view.Cursor())
 			cancel()
-			if !errors.Is(err, context.DeadlineExceeded) || !waited.Driving || waited.Halted {
+			if !errors.Is(err, context.DeadlineExceeded) || !waited.Driving || waited.Quiescent {
 				t.Fatalf("wait abandoned owned stop: %+v, %v", waited, err)
 			}
 			if outcome.name == "cancelled" {

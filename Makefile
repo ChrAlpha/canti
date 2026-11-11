@@ -11,10 +11,9 @@ LONG_TESTS = \
 	TestLoopBoundsRequestsAsHistoryGrows \
 	TestNativeDiscoveryOwnRunAcrossRestartsAndWindows \
 	TestRetrievalDiscoveryAcrossFreshPages \
-	TestSessionDialogueSurvivesHandoverRetryAndRestart \
-	TestSessionGrowthRemainsBoundedAndIsolated \
-	TestSessionMultiRunWindowStress \
-	TestSessionUnknownResolutionPreservesTheRunningEffect \
+	TestLineDialogueSurvivesHandoverRetryAndRestart \
+	TestLineMultiRunWindowStress \
+	TestLineUnknownResolutionPreservesTheRunningEffect \
 	TestUnlimitedStepsAcrossCrashHandoverAndRestart
 
 PTY_TESTS = \
@@ -22,7 +21,10 @@ PTY_TESTS = \
 	TestNativeInitFailureRestoresPTY \
 	TestChatKeepsInheritedDescriptorsBlocking \
 	TestChatPromptWriteBackpressure \
-	TestChatPTYBusyInputDoesNotBecomeNextRun \
+	TestChatPTYEnterSteersWhileRunning \
+	TestChatPTYFollowUpCtrlFQueuesAndContinues \
+	TestChatPTYHeldInputCtrlRRestores \
+	TestChatPTYCtrlXCancelsTheEffect \
 	TestChatPTYPasteSpansCompletionAndRequiresManualSend \
 	TestChatPTYBusyScrollDoesNotQueueInput \
 	TestChatPTYDisplayFailureWaitsForCancellation \
@@ -31,7 +33,7 @@ PTY_TESTS = \
 	TestChatPTYHangupCancelsTheDockerJob \
 	TestChatPTYHangupDetachesFromAHostProcess \
 	TestChatPTYHangupStopsTheActiveRun \
-	TestChatPTYInterruptsDockerJobAndKeepsSession \
+	TestChatPTYInterruptsDockerJobAndKeepsLine \
 	TestChatPTYResolutionGuidanceSurvivesAltScreen \
 	TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr \
 	TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal \

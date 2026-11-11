@@ -25,6 +25,9 @@ var events = func() map[string]reflect.Type {
 	return m
 }()
 
+const completionStepSQL = `SELECT seq,kind,semantics,from_state,facts FROM transitions INDEXED BY transitions_completion_step
+        WHERE run_id=? AND json_extract(from_state,'$.Step')=? AND (kind IN ('observed','resolved','performed') OR (kind='response_loaded' AND (CASE WHEN json_valid(facts) THEN json_type(facts,'$.Supersede') END)='object'))`
+
 // Run returns the stored run record.
 func (s *Store) Run(ctx context.Context, runID string) (harness.Run, error) {
 	return s.run(s.stmts[runSQL].QueryRowContext(ctx, runID))
@@ -39,13 +42,33 @@ func (s *Store) run(row interface{ Scan(...any) error }) (harness.Run, error) {
 	var run harness.Run
 	var data string
 	var semantics int
-	if err := row.Scan(&semantics, &data); err != nil {
+	var inputPos sql.NullInt64
+	var fresh bool
+	if err := row.Scan(&semantics, &data, &inputPos, &fresh); err != nil {
 		return run, missing(err, "run")
 	}
 	if err := core.KnownSemantics(semantics); err != nil {
 		return run, fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
-	return run, strict(data, &run)
+	if err := strict(data, &run); err != nil {
+		return run, err
+	}
+	if run.InputPos != inputPos.Int64 || run.Fresh != fresh {
+		return run, fmt.Errorf("%w: run %q input position or freshness differs from its record", ErrIncompatible, run.ID)
+	}
+	return run, nil
+}
+
+// runAt reads the run record of id and checks its identity.
+func (s *Store) runAt(ctx context.Context, tx *sql.Tx, id string) (harness.Run, error) {
+	run, err := s.run(s.stmt(ctx, tx, runSQL).QueryRowContext(ctx, id))
+	if err != nil {
+		return run, err
+	}
+	if run.ID != id {
+		return run, fmt.Errorf("%w: run identity differs from its key", ErrIncompatible)
+	}
+	return run, nil
 }
 
 // Latest returns the last committed transition's sequence and state, or
@@ -347,8 +370,7 @@ func (s *Store) completion(ctx context.Context, tx *sql.Tx, runID string, seq in
 
 // CompletionAtStep resolves one archived step through its bounded unique index.
 func (s *Store) CompletionAtStep(ctx context.Context, runID string, step int) (harness.StepRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT seq,kind,semantics,from_state,facts FROM transitions INDEXED BY transitions_completion_step
-        WHERE run_id=? AND json_extract(from_state,'$.Step')=? AND kind IN ('observed','resolved','performed')`, runID, step)
+	rows, err := s.db.QueryContext(ctx, completionStepSQL, runID, step)
 	if err != nil {
 		return harness.StepRecord{}, err
 	}
@@ -377,6 +399,16 @@ func scanStep(rows *sql.Rows) (harness.StepRecord, error) {
 	}
 	if err := cmp.Or(known(kind, semantics), decodeState(semantics, from, &state), strict(data, &facts)); err != nil {
 		return harness.StepRecord{}, err
+	}
+	if kind == "response_loaded" {
+		if facts.Supersede == nil {
+			return harness.StepRecord{}, fmt.Errorf("%w: a %s transition at seq %d completes no step", ErrIncompatible, kind, seq)
+		}
+		r := harness.StepRecord{Seq: seq, Step: state.Step, Purpose: facts.Supersede.Purpose, Superseded: facts.Supersede}
+		if err := r.Validate(semantics, false); err != nil {
+			return r, fmt.Errorf("%w: superseded step %d of seq %d: %v", ErrIncompatible, r.Step, seq, err)
+		}
+		return r, nil
 	}
 	if kind != "observed" && kind != "performed" && kind != "resolved" {
 		return harness.StepRecord{}, fmt.Errorf("%w: a %s transition at seq %d completes no step", ErrIncompatible, kind, seq)

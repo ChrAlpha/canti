@@ -73,28 +73,27 @@ func TestClientMapsWireErrorsWithoutRuntimeTypes(t *testing.T) {
 }
 
 func TestClientKeepsProgressAndWaitCursorsOpaque(t *testing.T) {
-	const runID = "run-qa"
 	const cursor = "opaque:/?next=not-a-sequence"
 	client, requests := answerOnce(t, Response{Protocol: Protocol, Page: &Page{Next: cursor, More: true}})
-	page, err := client.Progress(testContext(t), runID, "", 7)
+	page, err := client.Progress(testContext(t), "", 7)
 	if err != nil || page.Next != cursor {
 		t.Fatalf("Progress = %+v, %v", page, err)
 	}
-	if request := <-requests; request.Op != OpProgress || request.RunID != runID || request.Cursor != "" || request.Limit != 7 {
+	if request := <-requests; request.Op != OpProgress || request.RunID != "" || request.Cursor != "" || request.Limit != 7 {
 		t.Fatalf("progress request = %+v", request)
 	}
 	client, requests = answerOnce(t, Response{Protocol: Protocol, Wait: &Wait{Cursor: "after:opaque", Driver: DriverIdle}})
-	wait, err := client.Wait(testContext(t), runID, cursor)
+	wait, err := client.Wait(testContext(t), cursor)
 	if err != nil || wait.Cursor != "after:opaque" {
 		t.Fatalf("Wait = %+v, %v", wait, err)
 	}
-	if request := <-requests; request.Op != OpWait || request.RunID != runID || request.Cursor != cursor {
+	if request := <-requests; request.Op != OpWait || request.RunID != "" || request.Cursor != cursor {
 		t.Fatalf("wait request = %+v", request)
 	}
 }
 
 func TestClientValidatesThroughPublicProtocol(t *testing.T) {
-	validation := Validation{State: "/state", Submission: Submission{SessionID: "session-qa", Goal: "input"}}
+	validation := Validation{State: "/state", Submission: Submission{Goal: "input"}}
 	client, requests := answerOnce(t, Response{Protocol: Protocol, Validated: &Validated{State: "/state", GoalLimit: 4096}})
 	got, err := client.Validate(testContext(t), validation)
 	if err != nil || got.State != validation.State || got.GoalLimit != 4096 {

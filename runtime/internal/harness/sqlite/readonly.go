@@ -24,7 +24,7 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	}
 	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), readOnly: true}
 	var version int
-	err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
+	err = db.QueryRowContext(ctx, userVersionCheckSQL).Scan(&version)
 	if err == nil && version != schemaVersion {
 		err = fmt.Errorf("%w: schema version %d, want %d; use fresh state", ErrIncompatible, version, schemaVersion)
 	}

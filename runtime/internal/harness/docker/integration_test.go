@@ -251,6 +251,10 @@ func TestRepeatedReceiptRetriesItsFailedContainerRelease(t *testing.T) {
 }
 
 func TestBindPullsAnImageTheDaemonLacks(t *testing.T) {
+	// The pull is answered by the proxy; a fresh Docker config keeps a
+	// broken credential helper in the developer environment out of the CLI's
+	// registry lookup.
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
 	cfg, name := setup(t, docker.Config{})
 	var creates, pulls atomic.Int32
 	cfg.Docker = filepath.Join(dockertest.Proxy(t, func(w http.ResponseWriter, r *http.Request) bool {

@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -21,17 +22,24 @@ type SpecError struct{ Err error }
 func (e SpecError) Error() string { return e.Err.Error() }
 func (e SpecError) Unwrap() error { return e.Err }
 
-// ErrConflict reports an input ID that already names a run of other content.
+// ErrConflict reports an input ID that already names an input of other content.
 var ErrConflict = errors.New("input ID already exists with different content")
 
-// Submission is a request for a new run. An InputID makes it retryable: the
-// same input, in SessionID or in no session when that is empty, always names
-// the run first admitted for it. A session input inherits the constraints of
-// the session's latest run unless ExplicitConstraints is set.
+// ErrHeld reports a principal input refused while a stopped run holds inputs.
+var ErrHeld = errors.New("held inputs must be withdrawn first")
+
+// Submission is one input for the agent: a principal instruction or an
+// observation. An InputID makes it retryable: the same input always names the
+// input first admitted for it. Delivery steers the open run or queues a
+// follow-up; it is ignored when the agent is quiescent. Fresh starts a new
+// line. A non-fresh principal input inherits the latest run's constraints
+// unless ExplicitConstraints is set.
 type Submission struct {
-	SessionID, InputID  string
+	InputID             string
 	Goal, Constraints   string
 	ExplicitConstraints bool
+	Delivery            harness.InputDelivery
+	Fresh               bool
 	Spec                Spec
 	// Binding names the provider the run stores, and its keys, when it has
 	// keys for the run's API, are those that admission checks the run can be
@@ -41,28 +49,35 @@ type Submission struct {
 	Now     time.Time
 }
 
-// Ack acknowledges a submission once its run is durably admitted, or names
-// the run an earlier attempt of the same input admitted, with Replayed set
-// and the snapshot it has reached. Admission drives nothing.
+// Observation is evidence one source reports about one subject. It never
+// starts or wakes a run, and it has no disposition.
+type Observation struct {
+	InputID         string
+	Source, Subject string
+	Text            string
+	Now             time.Time
+}
+
+// Ack acknowledges an admitted input. Run is set when the input opened a run,
+// now or earlier; Replayed reports the answer of the input's first admission,
+// and Differs names, for a replay, the settings in which the retried
+// submission differs from what was first admitted, which keeps its own.
 type Ack struct {
 	Run      harness.Run
 	Config   RunConfig
-	Replayed bool
-	// Differs names, for a replay, the settings in which the retried
-	// submission differs from the run first admitted for its input, which
-	// keeps its own: the stored config's fields by their JSON names, and
-	// "budget.<field>" and "limits.<field>".
-	Differs  []string
+	Input    harness.Input
 	Snapshot harness.Snapshot
+	Replayed bool
+	Differs  []string
 }
 
-// Submit admits s: under the host's admission lock it answers a retry of an
-// input, checks that the latest run of the state directory is closed and its
-// step records published, creates the run with the provider s names, and
-// commits it in the transaction that admits it. Submit is an operation of
-// the host: Shutdown awaits it, so its run is either admitted or not before
-// the host releases the state directory, and a submission still waiting
-// for admission when the shutdown begins is refused with ErrClosing.
+// Opened reports whether the acknowledged input is the goal of a run.
+func (a Ack) Opened() bool { return a.Run.ID != "" }
+
+// Submit admits one input. Under the host's admission lock it answers a retry,
+// prepares the input the branch the latest run selects, and commits the input
+// and, when it opens a run, the run in one transaction. Admission drives
+// nothing: a steer or queued follow-up only acknowledges.
 func (h *Host) Submit(ctx context.Context, s Submission) (Ack, error) {
 	ctx, leave, err := h.Enter(ctx)
 	if err != nil {
@@ -72,12 +87,8 @@ func (h *Host) Submit(ctx context.Context, s Submission) (Ack, error) {
 	if err := h.acquire(ctx, h.admission); err != nil {
 		return Ack{}, err
 	}
-	defer func() { <-h.admission }()
+	defer h.releaseAdmission()
 	if dir := s.Spec.Config.HistoryImports; dir != "" {
-		// A relative directory is refused: only its client can resolve it.
-		// An absolute one is compared and stored canonical; a retry is
-		// answered whether or not its directory still exists, and only a
-		// new run needs it to exist, which NewRun checks.
 		if !filepath.IsAbs(dir) {
 			return Ack{}, SpecError{fmt.Errorf("history imports %q must be an absolute directory", dir)}
 		}
@@ -86,93 +97,310 @@ func (h *Host) Submit(ctx context.Context, s Submission) (Ack, error) {
 		}
 	}
 	if s.InputID != "" {
-		previous, err := h.store.SessionInput(ctx, s.SessionID, s.InputID)
-		if err == nil {
+		if previous, err := h.store.Input(ctx, s.InputID); err == nil {
+			if !sameInputContent(previous, s) {
+				return Ack{}, fmt.Errorf("%w: %s", ErrConflict, s.InputID)
+			}
 			return h.replay(ctx, s, previous)
-		}
-		if !errors.Is(err, harness.ErrNotFound) {
+		} else if !errors.Is(err, harness.ErrNotFound) {
 			return Ack{}, err
 		}
 	}
-	constraints := s.Constraints
-	if s.SessionID != "" && !s.ExplicitConstraints {
-		prior, err := h.store.SessionRuns(ctx, s.SessionID, 0, 1)
+	for range 3 {
+		ack, err := h.admit(ctx, s)
+		if errors.Is(err, harness.ErrAdmissionRace) {
+			continue
+		}
+		return ack, err
+	}
+	return Ack{}, fmt.Errorf("the latest run changed during every attempt to prepare input; retry")
+}
+
+// admit prepares the input for the branch the latest run selects and commits
+// it. A branch that changed after the read returns harness.ErrAdmissionRace.
+func (h *Host) admit(ctx context.Context, s Submission) (Ack, error) {
+	latest, snap, _, err := h.latest(ctx)
+	if err != nil {
+		return Ack{}, err
+	}
+	if latest != nil {
+		if _, err := DecodeConfig(*latest, h.opts.Workspace); err != nil {
+			return Ack{}, err
+		}
+	}
+	open := latest == nil || snap.State.Closed()
+	if open && latest != nil && !s.ExplicitConstraints && !s.Fresh {
+		s.Constraints = latest.Constraints
+	}
+	var sub harness.InputSubmission
+	if open {
+		if latest != nil {
+			if err := h.Closed(ctx); err != nil {
+				return Ack{}, err
+			}
+		}
+		sub, err = h.openingSubmission(ctx, s)
+	} else {
+		sub, err = h.workingSubmission(ctx, s)
+	}
+	if err != nil {
+		return Ack{}, err
+	}
+	h.checkpoint(PointAdmitting)
+	// A queued follow-up's binding and its row become visible together: the
+	// start that opens the row takes this lock before it reads the queued
+	// input or its binding.
+	h.binding.Lock()
+	admission, err := h.store.Admit(ctx, sub)
+	if err == nil && admission.Disposition == harness.DispositionQueued {
+		h.rememberBinding(admission.Input.Pos, s.Binding)
+	}
+	h.binding.Unlock()
+	switch {
+	case errors.Is(err, harness.ErrInputConflict):
+		return Ack{}, fmt.Errorf("%w: %s", ErrConflict, s.InputID)
+	case errors.Is(err, harness.ErrHeld):
+		return Ack{}, fmt.Errorf("%w; withdraw the held inputs first", ErrHeld)
+	case errors.Is(err, harness.ErrDeliveryRequired):
+		return Ack{}, SpecError{fmt.Errorf("the agent is working: run with -delivery steer to steer it or -delivery follow_up to queue the input; run without -delivery is accepted only when the agent is quiescent")}
+	case errors.Is(err, harness.ErrInputSpec):
+		return Ack{}, SpecError{err}
+	case err != nil:
+		return Ack{}, err
+	}
+	h.checkpoint(PointSubmitted)
+	ack := Ack{Input: admission.Input, Replayed: admission.Replayed, Snapshot: snap}
+	if admission.Run != nil {
+		run := *admission.Run
+		stored, err := DecodeConfig(run, h.opts.Workspace)
 		if err != nil {
 			return Ack{}, err
 		}
-		if len(prior) > 0 {
-			constraints = prior[0].Constraints
-		}
+		ack.Run, ack.Config = run, stored
+		ack.Snapshot = harness.Snapshot{State: sub.Initial}
+		h.forgetBinding(admission.Input.Pos)
+		h.opts.Logger.Info("opened run", "run_id", run.ID, "input_id", run.InputID, "input_pos", run.InputPos, "fresh", run.Fresh)
+		return ack, nil
 	}
-	if err := h.Closed(ctx); err != nil {
-		return Ack{}, err
+	switch admission.Disposition {
+	case harness.DispositionSteer:
+		h.opts.Logger.Info("steered run", "run_id", admission.Input.RunID, "input_id", admission.Input.InputID, "input_pos", admission.Input.Pos)
+	case harness.DispositionQueued:
+		h.opts.Logger.Info("queued follow-up", "input_id", admission.Input.InputID, "input_pos", admission.Input.Pos)
 	}
+	return ack, nil
+}
+
+// openingSubmission prepares the run an input opens when the agent is
+// quiescent: its resolved execution, provider, budget, and limits, and the
+// check that a credential can drive it.
+func (h *Host) openingSubmission(ctx context.Context, s Submission) (harness.InputSubmission, error) {
 	spec := s.Spec
 	resolved, err := ResolveExecution(ctx, spec.Config, h.opts.State)
 	if err != nil {
-		return Ack{}, SpecError{err}
+		return harness.InputSubmission{}, SpecError{err}
 	}
 	spec.Config = resolved
 	p, err := newProvider(spec.Config.API, s.Binding)
 	if err != nil {
-		return Ack{}, err
+		return harness.InputSubmission{}, err
 	}
 	spec.Config.Provider = p
-	run, initial, err := NewRun(s.Goal, constraints, spec, s.Now)
+	run, initial, err := NewRun(s.Goal, s.Constraints, spec, s.Now)
 	if err != nil {
-		return Ack{}, SpecError{err}
+		return harness.InputSubmission{}, SpecError{err}
 	}
+	run.Fresh = s.Fresh
 	if err := h.drivable(spec.Config, p, s.Binding); err != nil {
-		return Ack{}, err
+		return harness.InputSubmission{}, err
 	}
-	h.checkpoint(PointAdmitting)
-	if s.InputID == "" {
-		if err := h.store.CreateRun(ctx, run, initial); err != nil {
-			return Ack{}, err
-		}
-	} else {
-		run.SessionID, run.InputID = s.SessionID, s.InputID
-		if run, err = h.store.Submit(ctx, run, initial); err != nil {
-			return Ack{}, err
-		}
-		h.opts.Logger.Info("accepted input", "session_id", run.SessionID, "session_seq", run.SessionSeq, "input_id", run.InputID, "run_id", run.ID)
-	}
-	h.checkpoint(PointSubmitted)
-	stored, err := DecodeConfig(run, h.opts.Workspace)
+	data, err := json.Marshal(spec)
 	if err != nil {
-		return Ack{}, err
+		return harness.InputSubmission{}, err
 	}
-	return Ack{Run: run, Config: stored, Snapshot: harness.Snapshot{State: initial}}, nil
+	return harness.InputSubmission{InputID: s.InputID, Authority: harness.AuthorityPrincipal, Delivery: s.Delivery,
+		Text: s.Goal, Constraints: s.Constraints, ExplicitConstraints: s.ExplicitConstraints, Fresh: s.Fresh,
+		Spec: data, Run: run, Initial: initial, Now: s.Now}, nil
 }
 
-// replay acknowledges s, a retry of the input that admitted previous.
-func (h *Host) replay(ctx context.Context, s Submission, previous harness.Run) (Ack, error) {
-	if previous.Goal != s.Goal || (s.ExplicitConstraints || s.SessionID == "") && previous.Constraints != s.Constraints {
-		if s.SessionID != "" {
-			return Ack{}, fmt.Errorf("session %w", ErrConflict)
-		}
-		return Ack{}, ErrConflict
-	}
-	c, err := DecodeConfig(previous, h.opts.Workspace)
-	if err != nil {
-		return Ack{}, err
-	}
-	snap, err := h.store.Latest(ctx, previous.ID)
-	if err != nil {
-		return Ack{}, err
+// workingSubmission prepares a steer or follow-up while the agent works. It
+// resolves no execution and checks no credential: a follow-up stores the run
+// spec it will open with, which the follow-up start resolves and checks when
+// it opens the run.
+func (h *Host) workingSubmission(ctx context.Context, s Submission) (harness.InputSubmission, error) {
+	if s.Delivery == "" {
+		return harness.InputSubmission{}, SpecError{fmt.Errorf("the agent is working: name a delivery")}
 	}
 	spec := s.Spec
-	if p, err := newProvider(spec.Config.API, s.Binding); err == nil {
+	if s.Delivery == harness.DeliveryFollowUp {
+		p, err := newProvider(spec.Config.API, s.Binding)
+		if err != nil {
+			return harness.InputSubmission{}, err
+		}
 		spec.Config.Provider = p
+		if spec.Config.ContextVersion == 0 {
+			spec.Config.ContextVersion = ContextVersion
+		}
+		if err := CheckExecutionMode(spec.Config); err != nil {
+			return harness.InputSubmission{}, SpecError{err}
+		}
+		if _, _, err := NewRun(s.Goal, s.Constraints, spec, s.Now); err != nil {
+			return harness.InputSubmission{}, SpecError{err}
+		}
 	}
-	spec.Config.Attachment = c.Attachment
-	if spec.Config.Environment == c.Environment && spec.Config.EnvironmentWorkdir == "" {
-		spec.Config.EnvironmentWorkdir = c.EnvironmentWorkdir
+	data, err := json.Marshal(spec)
+	if err != nil {
+		return harness.InputSubmission{}, err
 	}
-	differs := fieldsDiffering("", c, spec.Config)
-	differs = append(differs, fieldsDiffering("budget.", previous.Budget, spec.Budget)...)
-	differs = append(differs, fieldsDiffering("limits.", snap.State.Limits, spec.Limits)...)
-	return Ack{Run: previous, Config: c, Replayed: true, Differs: differs, Snapshot: snap}, nil
+	return harness.InputSubmission{InputID: s.InputID, Authority: harness.AuthorityPrincipal, Delivery: s.Delivery,
+		Text: s.Goal, Constraints: s.Constraints, ExplicitConstraints: s.ExplicitConstraints, Fresh: s.Fresh,
+		Spec: data, Now: s.Now}, nil
+}
+
+// replay acknowledges a retry of the input that admitted previous.
+func (h *Host) replay(ctx context.Context, s Submission, previous harness.Input) (Ack, error) {
+	ack := Ack{Input: previous, Replayed: true}
+	var storedSpec Spec
+	haveSpec := len(previous.Spec) > 0
+	if haveSpec {
+		if err := strictSpec(previous.Spec, &storedSpec); err != nil {
+			return Ack{}, err
+		}
+	}
+	if previous.RunID != "" && previous.Disposition == harness.DispositionOpened {
+		run, err := h.store.Run(ctx, previous.RunID)
+		if err != nil {
+			return Ack{}, err
+		}
+		c, err := DecodeConfig(run, h.opts.Workspace)
+		if err != nil {
+			return Ack{}, err
+		}
+		snap, err := h.store.Latest(ctx, run.ID)
+		if err != nil {
+			return Ack{}, err
+		}
+		submitted := s.Spec
+		if p, err := newProvider(submitted.Config.API, s.Binding); err == nil {
+			submitted.Config.Provider = p
+		}
+		submitted.Config.Attachment = c.Attachment
+		if submitted.Config.Environment == c.Environment && submitted.Config.EnvironmentWorkdir == "" {
+			submitted.Config.EnvironmentWorkdir = c.EnvironmentWorkdir
+		}
+		ack.Differs = fieldsDiffering("", c, submitted.Config)
+		ack.Differs = append(ack.Differs, fieldsDiffering("budget.", run.Budget, s.Spec.Budget)...)
+		ack.Differs = append(ack.Differs, fieldsDiffering("limits.", snap.State.Limits, s.Spec.Limits)...)
+		ack.Run, ack.Config, ack.Snapshot = run, c, snap
+		return ack, nil
+	}
+	if haveSpec {
+		ack.Differs = fieldsDiffering("", storedSpec.Config, s.Spec.Config)
+		ack.Differs = append(ack.Differs, fieldsDiffering("budget.", storedSpec.Budget, s.Spec.Budget)...)
+		ack.Differs = append(ack.Differs, fieldsDiffering("limits.", storedSpec.Limits, s.Spec.Limits)...)
+	}
+	if previous.Disposition == harness.DispositionQueued {
+		h.binding.Lock()
+		h.rememberBinding(previous.Pos, s.Binding)
+		h.binding.Unlock()
+	}
+	return ack, nil
+}
+
+func strictSpec(data []byte, s *Spec) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(s)
+}
+
+func sameInputContent(previous harness.Input, s Submission) bool {
+	return previous.Authority == harness.AuthorityPrincipal && previous.Text == s.Goal &&
+		previous.Delivery == s.Delivery && previous.Fresh == s.Fresh &&
+		(!s.ExplicitConstraints && !s.Fresh || previous.Constraints == s.Constraints)
+}
+
+// Observe admits an observation. It never touches a run: it appends the
+// evidence with its own agent-log position and returns it.
+func (h *Host) Observe(ctx context.Context, o Observation) (Ack, error) {
+	ctx, leave, err := h.Enter(ctx)
+	if err != nil {
+		return Ack{}, err
+	}
+	defer leave()
+	if err := h.acquire(ctx, h.admission); err != nil {
+		return Ack{}, err
+	}
+	defer h.releaseAdmission()
+	admission, err := h.store.Admit(ctx, harness.InputSubmission{InputID: o.InputID, Authority: harness.AuthorityObservation,
+		Text: o.Text, Source: o.Source, Subject: o.Subject, Now: o.Now})
+	if errors.Is(err, harness.ErrInputConflict) {
+		return Ack{}, fmt.Errorf("%w: %s", ErrConflict, o.InputID)
+	}
+	if errors.Is(err, harness.ErrInputSpec) {
+		return Ack{}, SpecError{err}
+	}
+	if err != nil {
+		return Ack{}, err
+	}
+	return Ack{Input: admission.Input, Replayed: admission.Replayed}, nil
+}
+
+// Withdraw takes back the named queued follow-up or unseen steer of the
+// stopped latest run, or with an empty input ID every such input, and returns
+// them in position order.
+func (h *Host) Withdraw(ctx context.Context, inputID string) ([]harness.Input, error) {
+	ctx, leave, err := h.Enter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	if err := h.acquire(ctx, h.admission); err != nil {
+		return nil, err
+	}
+	defer h.releaseAdmission()
+	h.checkpoint(PointWithdrawing)
+	withdrawn, err := h.store.Withdraw(ctx, inputID)
+	switch {
+	case errors.Is(err, harness.ErrInputSpec), errors.Is(err, harness.ErrNotWithdrawable):
+		return nil, SpecError{err}
+	case err != nil:
+		return nil, err
+	}
+	for _, in := range withdrawn {
+		h.forgetBinding(in.Pos)
+	}
+	return withdrawn, nil
+}
+
+// latest reads the latest run of the state directory, if any, with its
+// snapshot and latest event.
+func (h *Host) latest(ctx context.Context) (*harness.Run, harness.Snapshot, core.Event, error) {
+	run, err := h.store.LastRun(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return nil, harness.Snapshot{}, nil, nil
+	}
+	if err != nil {
+		return nil, harness.Snapshot{}, nil, err
+	}
+	snap, err := h.store.Latest(ctx, run.ID)
+	if err != nil {
+		return nil, harness.Snapshot{}, nil, err
+	}
+	last, err := h.store.LastEvent(ctx, run.ID)
+	return &run, snap, last, err
+}
+
+// InheritedConstraints returns the constraints a new non-fresh principal
+// input inherits: those of the latest run.
+func (h *Host) InheritedConstraints(ctx context.Context) (string, error) {
+	last, err := h.store.LastRun(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return last.Constraints, nil
 }
 
 // fieldsDiffering names the fields of the structs a and b, of one type, that

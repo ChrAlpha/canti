@@ -194,7 +194,7 @@ tags = args[args.index('-tags') + 1] if '-tags' in args else ''
 if acceptance:
     names = ['TestAcceptanceOne', 'TestAcceptanceTwo', 'TestChatKeepsInheritedDescriptorsBlocking']
     if 'integration' in tags:
-        names += ['TestChatStopsDockerWithBlockedStderr', 'TestSessionDialogueSurvivesHandoverRetryAndRestart']
+        names += ['TestChatStopsDockerWithBlockedStderr', 'TestLineDialogueSurvivesHandoverRetryAndRestart']
 elif module == 'runtime':
     names = ['TestRuntimeUnit']
     if 'integration' in tags:
@@ -238,7 +238,7 @@ else:
                                        'TestAppUnit', 'TestAcceptanceOne', 'TestAcceptanceTwo',
                                        'TestChatStopsDockerWithBlockedStderr']),
                 "ci-long": (4, ['TestContextCaptureBoundsRejectedRetrievalAcrossReopen',
-                                'TestSessionDialogueSurvivesHandoverRetryAndRestart']),
+                                'TestLineDialogueSurvivesHandoverRetryAndRestart']),
                 "ci-pty": (1, ['TestPTYNativeRawRestore', 'TestChatKeepsInheritedDescriptorsBlocking']),
             }
             for target, (count, expected) in cases.items():

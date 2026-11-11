@@ -16,12 +16,14 @@ import (
 	"unicode/utf8"
 )
 
-// RunsRoot, ArtifactsRoot, and ImportsRoot are where jobs and retrieval see
-// the step records of runs, the artifacts of jobs, and an imported history.
+// RunsRoot, ArtifactsRoot, ImportsRoot, and InputsRoot are where jobs and
+// retrieval see the step records of runs, the artifacts of jobs, an imported
+// history, and the admitted agent-log inputs.
 const (
 	RunsRoot      = "/canti/runs"
 	ArtifactsRoot = "/canti/artifacts"
 	ImportsRoot   = "/canti/imports"
+	InputsRoot    = "/canti/inputs"
 )
 
 // DefaultBytes and MaxBytes are the default and largest byte limit of a
@@ -86,7 +88,11 @@ type Reader struct {
 	History   string
 	Artifacts string
 	Imports   string
+	Inputs    string
 	Excluded  []string
+	// RepairInput repairs one missing input record from the journal when the
+	// input was delivered; an undelivered input returns ErrInputAbsent.
+	RepairInput func(context.Context, int64) error
 }
 
 func (r Reader) Retrieve(ctx context.Context, q RetrievalQuery) (Retrieval, error) {
@@ -140,6 +146,11 @@ func (q RetrievalQuery) check() (int, string) {
 // perform runs the operation of result's query on its path.
 func (r Reader) perform(ctx context.Context, limit int, result *Retrieval) error {
 	q := result.Query
+	if pos, ok := inputPosition(q.Path); ok && r.RepairInput != nil {
+		if err := r.RepairInput(ctx, pos); err != nil {
+			return fmt.Errorf("input archive unavailable: %w", err)
+		}
+	}
 	f, err := r.open(q.Path)
 	if err != nil {
 		return err
@@ -164,6 +175,49 @@ func (r Reader) perform(ctx context.Context, limit int, result *Retrieval) error
 	return errors.New("list requires a directory; read requires a regular file; search requires either")
 }
 
+// InputFile reads one input archive file through the same safe opening rules
+// as retrieval: canonical input path, no symlink, regular file only,
+// nonblocking open, bounded read and cancellation. expected is the maximum
+// number of bytes the caller will accept; a longer file is refused.
+func (r Reader) InputFile(ctx context.Context, pos int64, name string, expected int) ([]byte, error) {
+	if pos < 1 || (name != MetaFile && name != "text") || expected < 0 {
+		return nil, errors.New("invalid input archive file")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	virtual := InputsRoot + "/" + InputDir(pos) + "/" + name
+	f, err := r.open(virtual)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("input archive entry is not a regular file")
+	}
+	if info.Size() > int64(expected) {
+		return nil, fmt.Errorf("input archive entry is %d bytes, over the %d-byte expected record", info.Size(), expected)
+	}
+	body, err := io.ReadAll(io.LimitReader(f, int64(expected)+1))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(body) > expected {
+		return nil, fmt.Errorf("input archive entry exceeds the %d-byte expected record", expected)
+	}
+	return body, nil
+}
+
 func (r Reader) open(name string) (*os.File, error) {
 	if !utf8.ValidString(name) || len(name) > 4096 || path.Clean(name) != name {
 		return nil, errors.New("path must be a clean absolute UTF-8 archive path")
@@ -174,7 +228,7 @@ func (r Reader) open(name string) (*os.File, error) {
 		}
 	}
 	for _, root := range []struct{ virtual, host string }{
-		{RunsRoot, r.History}, {ArtifactsRoot, r.Artifacts}, {ImportsRoot, r.Imports},
+		{RunsRoot, r.History}, {ArtifactsRoot, r.Artifacts}, {ImportsRoot, r.Imports}, {InputsRoot, r.Inputs},
 	} {
 		if name != root.virtual && !strings.HasPrefix(name, root.virtual+"/") {
 			continue

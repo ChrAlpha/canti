@@ -308,7 +308,7 @@ func TestExternalStopKeepsOwnerAttached(t *testing.T) {
 		t.Fatal(err)
 	}
 	response, err := (&hostrpc.Client{Path: path}).Call(ctx, hostrpc.Request{Op: hostrpc.OpWait, RunID: view.Run.ID, Cursor: hostserver.CursorOf(view.Cursor()), TimeoutMS: 30})
-	if err != nil || response.Wait == nil || response.Wait.Driver != hostrpc.DriverDriving || response.Wait.Halted {
+	if err != nil || response.Wait == nil || response.Wait.Driver != hostrpc.DriverDriving || response.Wait.Quiescent {
 		t.Fatalf("public wait abandoned stop: %+v,%v", response.Wait, err)
 	}
 	finish()

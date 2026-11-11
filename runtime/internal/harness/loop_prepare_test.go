@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	earlierRun = "session-earlier"
-	sessionRun = "session-current"
+	earlierRun = "line-earlier"
+	lineRun    = "line-current"
 )
 
 var errTransient = errors.New("journal read: input/output error")
@@ -46,9 +46,14 @@ func (j *tampered) LatestRequest(ctx context.Context, runID string) (harness.Req
 	return tamper(j, "LatestRequest", runID, v, err)
 }
 
-func (j *tampered) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
-	v, err := j.Store.SessionRuns(ctx, sessionID, before, limit)
-	return tamper(j, "SessionRuns", "", v, err)
+func (j *tampered) PreviousRuns(ctx context.Context, runID string) ([]harness.PreviousRun, int, error) {
+	v, more, err := j.Store.PreviousRuns(ctx, runID)
+	if j.done || err != nil || j.method != "PreviousRuns" || j.run != "" && runID != j.run {
+		return v, more, err
+	}
+	j.done = true
+	got, err := j.alter(v)
+	return got.([]harness.PreviousRun), more, err
 }
 
 func (j *tampered) Latest(ctx context.Context, runID string) (harness.Snapshot, error) {
@@ -66,10 +71,20 @@ func (j *tampered) Totals(ctx context.Context, runID string) (harness.Totals, er
 	return tamper(j, "Totals", runID, v, err)
 }
 
-// sessionAfterAStep returns a fixture whose session run, which follows an
-// earlier run of its session stopped after it froze its first request, has
+func (j *tampered) Context(ctx context.Context, snap harness.Snapshot) (harness.ContextState, error) {
+	v, err := j.Store.Context(ctx, snap)
+	return tamper(j, "Context", snap.State.RunID, v, err)
+}
+
+func (j *tampered) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
+	v, err := j.Store.Receipts(ctx, id, before, limit)
+	return tamper(j, "Receipts", id, v, err)
+}
+
+// lineAfterAStep returns a fixture whose current run, which follows an
+// earlier run of its line stopped after it froze its first request, has
 // observed its first step and waits to prepare its second.
-func sessionAfterAStep(t *testing.T) *fixture {
+func lineAfterAStep(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t, limits, harness.Budget{}, execReply("true"), returnReply("done"))
 	ctx := f.bounded()
@@ -87,26 +102,26 @@ func sessionAfterAStep(t *testing.T) *fixture {
 			t.Fatal(err)
 		}
 	}
-	submit := func(id, goal string) {
+	create := func(id, goal string, fresh bool) {
 		t.Helper()
 		state, err := core.NewState(id, limits)
 		if err == nil {
-			_, err = f.store.Submit(ctx, harness.Run{ID: id, SessionID: "session-1", InputID: id, Goal: goal, Created: created}, state)
+			err = f.store.CreateRun(ctx, harness.Run{ID: id, Goal: goal, Created: created, Fresh: fresh}, state)
 		}
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 	stop(runID)
-	submit(earlierRun, "Report the Go version.")
+	create(earlierRun, "Report the Go version.", true)
 	l := f.loop()
 	if s, err := l.Step(ctx, earlierRun); err != nil || s.State.Phase != core.PhaseRequestFrozen {
 		t.Fatalf("earlier run: %+v, %v", s.State, err)
 	}
 	stop(earlierRun)
-	submit(sessionRun, "Count the Go files.")
+	create(lineRun, "Count the Go files.", false)
 	for range 10 {
-		s, err := l.Step(ctx, sessionRun)
+		s, err := l.Step(ctx, lineRun)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,69 +130,61 @@ func sessionAfterAStep(t *testing.T) *fixture {
 			return f
 		}
 	}
-	t.Fatal("the session run did not complete its first step")
+	t.Fatal("the current run did not complete its first step")
 	return nil
 }
 
-func sessionTransitions(t *testing.T, f *fixture) []harness.Transition {
+func lineTransitions(t *testing.T, f *fixture) []harness.Transition {
 	t.Helper()
-	ts, err := f.store.Transitions(context.Background(), sessionRun, 0, 1000)
+	ts, err := f.store.Transitions(context.Background(), lineRun, 0, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ts
 }
 
-func (j *tampered) Context(ctx context.Context, snap harness.Snapshot) (harness.ContextState, error) {
-	v, err := j.Store.Context(ctx, snap)
-	return tamper(j, "Context", snap.State.RunID, v, err)
-}
-func (j *tampered) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
-	v, err := j.Store.Receipts(ctx, id, before, limit)
-	return tamper(j, "Receipts", id, v, err)
-}
-
 func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
-	for _, method := range []string{"Context", "Receipts", "Recent", "SessionRuns"} {
+	for _, method := range []string{"Context", "Receipts", "Recent", "PreviousRuns"} {
 		t.Run(method, func(t *testing.T) {
-			f := sessionAfterAStep(t)
-			before := sessionTransitions(t, f)
+			f := lineAfterAStep(t)
+			before := lineTransitions(t, f)
 			prompts, sent := f.model.calls()
 			j := &tampered{Store: f.open(), method: method, alter: func(v any) (any, error) { return v, errTransient }}
 			l := f.loopOn(j)
-			snap, err := l.Step(f.bounded(), sessionRun)
-			if !errors.Is(err, errTransient) || snap.Seq != before[len(before)-1].Seq || len(sessionTransitions(t, f)) != len(before) {
+			snap, err := l.Step(f.bounded(), lineRun)
+			if !errors.Is(err, errTransient) || snap.Seq != before[len(before)-1].Seq || len(lineTransitions(t, f)) != len(before) {
 				t.Fatalf("failed read committed: %+v %v", snap, err)
 			}
 			if p, s := f.model.calls(); !j.done || p != prompts || s != sent {
 				t.Fatal("failed read reached model")
 			}
-			snap, err = l.Step(f.bounded(), sessionRun)
+			snap, err = l.Step(f.bounded(), lineRun)
 			if err != nil || snap.State.Phase != core.PhaseRequestFrozen {
 				t.Fatalf("recovery=%+v %v", snap, err)
 			}
-			request, err := f.store.LatestRequest(f.bounded(), sessionRun)
-			if err != nil || request.Context.SessionNavigation != earlierRun {
-				t.Fatalf("session navigation=%+v %v", request.Context, err)
+			request, err := f.store.LatestRequest(f.bounded(), lineRun)
+			if err != nil || request.Context.PreviousRun != earlierRun {
+				t.Fatalf("previous run navigation=%+v %v", request.Context, err)
 			}
 		})
 	}
 }
+
 func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
-	for _, method := range []string{"Run", "SessionRuns"} {
+	for _, method := range []string{"Run", "PreviousRuns"} {
 		t.Run(method, func(t *testing.T) {
-			f := sessionAfterAStep(t)
+			f := lineAfterAStep(t)
 			j := &tampered{Store: f.open(), method: method, alter: func(v any) (any, error) {
 				if method == "Run" {
 					r := v.(harness.Run)
-					r.SessionSeq = 0
+					r.Goal = ""
 					return r, nil
 				}
-				runs := v.([]harness.Run)
-				runs[0].SessionID = "wrong"
+				runs := v.([]harness.PreviousRun)
+				runs[0].Run.ID = lineRun
 				return runs, nil
 			}}
-			snap, err := f.loopOn(j).Step(f.bounded(), sessionRun)
+			snap, err := f.loopOn(j).Step(f.bounded(), lineRun)
 			if err != nil || snap.State.Reason != core.StopUnrecoverable || !j.done {
 				t.Fatalf("corrupt context=%+v %v", snap, err)
 			}

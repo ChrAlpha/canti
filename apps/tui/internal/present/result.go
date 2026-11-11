@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
 // Result keeps the answer separate from diagnostic and recovery text.
-func Result(out session.Result) (answer, diagnostic string) {
+func Result(out chat.Result) (answer, diagnostic string) {
 	r := out.Run
 	var b strings.Builder
 	if out.Detached {
@@ -55,6 +55,6 @@ func Result(out session.Result) (answer, diagnostic string) {
 }
 
 // Reconciliation is mandatory outcome guidance, independent of log level.
-func Reconciliation(inputID, sessionID string) string {
-	return fmt.Sprintf("canti: acceptance of input %s is unknown; reconcile with \"canti run -session %s -input %[1]s\" and the original goal and launch flags before starting new input.\n", inputID, sessionID)
+func Reconciliation(inputID string) string {
+	return fmt.Sprintf("canti: acceptance of input %s is unknown; reconcile with \"canti run -input %[1]s\" and the original goal and launch flags before starting new input.\n", inputID)
 }

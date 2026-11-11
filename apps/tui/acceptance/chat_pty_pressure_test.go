@@ -26,7 +26,7 @@ func TestChatPTYThirtyTwoReturnedRoundsKeepProgressAndDescriptorsBounded(t *test
 	for i := 1; i <= 32; i++ {
 		p.send(t, fmt.Sprintf("round %02d\r", i))
 		pos = p.await(t, fmt.Sprintf("answer-%02d", i), pos)
-		if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != int64(i) || s.Run.Goal != fmt.Sprintf("round %02d", i) {
+		if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != i || s.Run.Goal != fmt.Sprintf("round %02d", i) {
 			t.Fatalf("round %d did not return: %+v", i, s)
 		}
 	}

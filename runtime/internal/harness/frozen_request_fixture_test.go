@@ -235,7 +235,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	limits.Total = cmp.Or(sc.contextBytes, 256<<10)
 	environment := corpusEnvironment
 	if sc.nativeArchive {
-		environment = "Commands run in fresh shells in a persistent Linux environment with working directory /workspace. Files, installed tools, HOME and background services persist across commands, runs, sessions and context resets. Archive paths are logical native retrieval addresses, not shell mounts."
+		environment = "Commands run in fresh shells in a persistent Linux environment with working directory /workspace. Files, installed tools, HOME and background services persist across commands, runs and context resets. Archive paths are logical native retrieval addresses, not shell mounts."
 	}
 	loop, err := harness.NewLoop(store, x, m, harness.LoopConfig{
 		Environment: environment, NativeArchive: sc.nativeArchive, History: history,
@@ -257,15 +257,16 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: cmp.Or(run.constraints, "Do not modify files outside /workspace."), Budget: run.budget, Created: corpusCreated}
-		if len(sc.runs) > 1 {
-			record.SessionID, record.InputID = "session-1", fmt.Sprintf("input-%d", i+1)
-			_, err = r.store.Submit(ctx, record, state)
-		} else {
-			err = r.store.CreateRun(ctx, record, state)
-		}
-		if err != nil {
+		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: cmp.Or(run.constraints, "Do not modify files outside /workspace."), Budget: run.budget, Created: corpusCreated, Fresh: i == 0}
+		if err := r.store.CreateRun(ctx, record, state); err != nil {
 			t.Fatal(err)
+		}
+		if i == 0 {
+			for _, observation := range sc.observations {
+				if _, err := r.store.Admit(ctx, observation); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 		r.model.mu.Lock()
 		r.model.replies = append(r.model.replies, run.replies...)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
@@ -18,11 +19,12 @@ var ErrNotQuiescent = errors.New("host: drives did not end before the shutdown d
 // DriveOptions select how far a drive takes a run: to its halt, or one step.
 type DriveOptions struct{ Once bool }
 
-// driver is one drive of a run: the controller's cancel, and its result once
-// done is closed.
+// driver is one drive of a run: the controller's cancel, the loop that owns
+// its effect watch, and its result once done is closed.
 type driver struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	loop   *harness.Loop
 	snap   harness.Snapshot
 	err    error
 }
@@ -88,7 +90,7 @@ func (h *Host) Drive(ctx context.Context, id string, b Binding, o DriveOptions) 
 		return Drive{}, fmt.Errorf("run %s: %w", id, ErrDriving)
 	}
 	dctx, cancel := context.WithCancel(h.life)
-	d := &driver{cancel: cancel, done: make(chan struct{})}
+	d := &driver{cancel: cancel, done: make(chan struct{}), loop: l}
 	h.drivers[id] = d
 	go h.run(dctx, d, l, id, o)
 	return Drive{d}, nil
@@ -100,6 +102,14 @@ func (h *Host) run(ctx context.Context, d *driver, l *harness.Loop, id string, o
 		step = l.Step
 	}
 	d.snap, d.err = step(ctx, id)
+	if d.err == nil && d.snap.State.Phase == core.PhaseReturned {
+		// The follow-up start belongs to this drive: the driver stays owned
+		// until its final publication and the next run's admission have
+		// happened, so a waiter never observes quiescence between them.
+		if err := h.startFollowUp(ctx, d.snap); err != nil {
+			h.opts.Logger.WarnContext(ctx, "follow-up did not start", "run_id", id, "error", err)
+		}
+	}
 	d.cancel()
 	h.mu.Lock()
 	delete(h.drivers, id)
@@ -108,6 +118,79 @@ func (h *Host) run(ctx context.Context, d *driver, l *harness.Loop, id string, o
 	close(d.done)
 	h.notify()
 }
+
+// startFollowUp opens the oldest queued follow-up after the returned run of
+// snap, then drives it with the binding its submission left in memory or the
+// host's own credential for the run's pair. It admits the run even when no
+// credential can drive it, as any run without a credential is admitted.
+func (h *Host) startFollowUp(ctx context.Context, snap harness.Snapshot) error {
+	if snap.State.Phase != core.PhaseReturned {
+		return nil
+	}
+	// Opening a follow-up and publishing its credential binding are one
+	// critical section with Submit: a follow-up must never become visible to
+	// this start before the binding its submission gave is in memory. The
+	// lock ends with the opening; the follow-up's own drive may open another.
+	var run *harness.Run
+	var binding Binding
+	err := func() error {
+		h.binding.Lock()
+		defer h.binding.Unlock()
+		in, err := h.store.Queued(ctx)
+		if errors.Is(err, harness.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var spec Spec
+		if len(in.Spec) == 0 {
+			return fmt.Errorf("queued input %d stores no run spec", in.Pos)
+		}
+		if err := strictSpec(in.Spec, &spec); err != nil {
+			return fmt.Errorf("queued input %d: %w", in.Pos, err)
+		}
+		resolved, err := ResolveExecution(ctx, spec.Config, h.opts.State)
+		if err != nil {
+			return fmt.Errorf("queued input %d: %w", in.Pos, SpecError{err})
+		}
+		spec.Config = resolved
+		constraints := in.Constraints
+		if !in.ExplicitConstraints && !in.Fresh {
+			predecessor, err := h.store.LastRun(ctx)
+			if err != nil {
+				return err
+			}
+			constraints = predecessor.Constraints
+		}
+		next, initial, err := NewRun(in.Text, constraints, spec, h.now())
+		if err != nil {
+			return fmt.Errorf("queued input %d: %w", in.Pos, SpecError{err})
+		}
+		binding, _ = h.bindingFor(in.Pos)
+		admission, err := h.store.OpenFollowUp(ctx, in, next, initial)
+		if err != nil {
+			return err
+		}
+		h.forgetBinding(in.Pos)
+		run = admission.Run
+		return nil
+	}()
+	if err != nil || run == nil {
+		return err
+	}
+	h.opts.Logger.Info("opened follow-up", "run_id", run.ID, "input_id", run.InputID, "input_pos", run.InputPos)
+	if _, err := h.Drive(ctx, run.ID, binding, DriveOptions{}); err != nil {
+		if errors.Is(err, ErrNoCredential) || errors.Is(err, ErrNoKeys) {
+			h.opts.Logger.Info("follow-up is admitted and not drivable", "run_id", run.ID, "error", err)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *Host) now() time.Time { return time.Now() }
 
 // Driving reports whether a drive or persistent stop owns work for run id.
 func (h *Host) Driving(id string) bool {
@@ -341,6 +424,7 @@ func (h *Host) lockRun(ctx context.Context, id string) (func(), error) {
 	return func() {
 		<-l.slot
 		forget()
+		h.notify()
 	}, nil
 }
 

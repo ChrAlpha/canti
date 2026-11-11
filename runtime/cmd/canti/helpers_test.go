@@ -245,7 +245,7 @@ func runCLI(t *testing.T, env []string, args ...string) result {
 }
 
 // hostCommands are the commands that take -host.
-var hostCommands = map[string]bool{"run": true, "resume": true, "stop": true, "resolve": true}
+var hostCommands = map[string]bool{"run": true, "resume": true, "stop": true, "resolve": true, "observe": true, "withdraw": true, "cancel": true}
 
 // pinHost uses -host embedded after
 // a command that takes -host and names none, so that every test runs the
@@ -415,9 +415,10 @@ type status struct {
 		Environment *hostrpc.Environment `json:"environment"`
 	} `json:"execution"`
 	Run struct {
-		SessionID   string    `json:"session_id"`
-		SessionSeq  int64     `json:"session_seq"`
+		Ordinal     int       `json:"ordinal"`
 		InputID     string    `json:"input_id"`
+		InputPos    int64     `json:"input_pos"`
+		Fresh       bool      `json:"fresh"`
 		ID          string    `json:"id"`
 		Goal        string    `json:"goal"`
 		Constraints string    `json:"constraints"`
@@ -438,6 +439,8 @@ type status struct {
 	Reason     core.StopReason `json:"reason"`
 	Decision   *core.Decision  `json:"decision"`
 	EffectID   string          `json:"effect_id"`
+	Inputs     int             `json:"inputs"`
+	Seen       int             `json:"seen"`
 	Totals     struct {
 		Coverage     harness.UsageCoverage `json:"coverage"`
 		InputTokens  int64                 `json:"input_tokens"`

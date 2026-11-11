@@ -408,9 +408,10 @@ type status struct {
 		Environment *hostrpc.Environment `json:"environment"`
 	} `json:"execution"`
 	Run struct {
-		SessionID   string    `json:"session_id"`
-		SessionSeq  int64     `json:"session_seq"`
+		Ordinal     int       `json:"ordinal"`
 		InputID     string    `json:"input_id"`
+		InputPos    int64     `json:"input_pos"`
+		Fresh       bool      `json:"fresh"`
 		ID          string    `json:"id"`
 		Goal        string    `json:"goal"`
 		Constraints string    `json:"constraints"`
@@ -431,6 +432,8 @@ type status struct {
 	Reason     string          `json:"reason"`
 	Decision   *decision       `json:"decision"`
 	EffectID   string          `json:"effect_id"`
+	Inputs     int             `json:"inputs"`
+	Seen       int             `json:"seen"`
 	Totals     struct {
 		Coverage     hostrpc.UsageCoverage `json:"coverage"`
 		InputTokens  int64                 `json:"input_tokens"`
@@ -597,31 +600,23 @@ func archiveText(t *testing.T, f *fixture, name string) string {
 	return ""
 }
 
-type archivedSession struct {
-	SessionID     string `json:"session_id"`
-	Sequence      int64  `json:"sequence"`
-	InputID       string `json:"input_id"`
-	PreviousRunID string `json:"previous_run_id"`
+func archivePrevious(t *testing.T, f *fixture, run string) string {
+	t.Helper()
+	return strings.TrimSpace(archiveText(t, f, "/canti/runs/"+run+"/previous"))
 }
 
-func archiveSession(t *testing.T, f *fixture, run string) archivedSession {
+func checkLineLink(t *testing.T, f *fixture, prompt, current, previous, goal string) {
 	t.Helper()
-	var s archivedSession
-	if err := json.Unmarshal([]byte(archiveText(t, f, "/canti/runs/"+run+"/session")), &s); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/") ||
+		!strings.Contains(prompt, "## Previous runs") || !strings.Contains(prompt, "- "+previous+":") ||
+		!strings.Contains(prompt, "/canti/runs/"+previous+"/") {
+		t.Fatalf("missing task or previous-run navigation: %s", prompt)
 	}
-	return s
-}
-func checkSessionLink(t *testing.T, f *fixture, prompt, current, previous, goal string, seq int64) {
-	t.Helper()
-	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/session") || !strings.Contains(prompt, "Previous run: /canti/runs/"+previous+"/.") {
-		t.Fatalf("missing task/session navigation: %s", prompt)
-	}
-	link, prior := archiveSession(t, f, current), archiveSession(t, f, previous)
-	if link.PreviousRunID != previous || link.Sequence != seq || prior.Sequence != seq-1 || link.SessionID == "" || prior.SessionID != link.SessionID || link.InputID == "" || prior.InputID == "" || link.InputID == prior.InputID {
-		t.Fatalf("session chain identity: current=%+v prior=%+v", link, prior)
+	if got := archivePrevious(t, f, current); got != previous {
+		t.Fatalf("previous run record = %q, want %q", got, previous)
 	}
 }
+
 func checkFile(t *testing.T, name, want string) {
 	t.Helper()
 	body, err := os.ReadFile(name)

@@ -12,13 +12,19 @@ import (
 
 // View is the state of a run as the host reports it: the run, its stored
 // config, the committed snapshot with its totals, whether a drive or stop owns
-// its work, and whether the host could drive it by itself, with why not.
+// its work, whether the host could drive it by itself, and the input counts
+// of the agent log.
 type View struct {
-	Run      harness.Run
-	Config   RunConfig
-	Snapshot harness.Snapshot
-	Totals   harness.Totals
-	Driving  bool
+	Run           harness.Run
+	Config        RunConfig
+	Snapshot      harness.Snapshot
+	Pos           int64
+	Ordinal       int
+	Totals        harness.Totals
+	Driving       bool
+	PendingSteers int
+	Queued        int
+	Held          int
 	// Drivable reports that the host drives the run or could continue it
 	// without a client's credential: it finishes a pending stop, which needs
 	// none, or holds a credential bound to the run's API and provider. Why
@@ -27,9 +33,9 @@ type View struct {
 	Why      string
 }
 
-// Cursor is the position of the view's snapshot: a reader that follows the
-// run from it misses no transition and repeats none.
-func (v View) Cursor() Cursor { return Cursor{v.Run.ID, v.Snapshot.Seq} }
+// Cursor is the agent-log position of the view's run: following the agent
+// from it misses no later fact and repeats none.
+func (v View) Cursor() Cursor { return Cursor(v.Pos) }
 
 // View returns the view of run id, or of the latest run when id is empty.
 // The snapshot and totals are read until two reads of the snapshot agree, so
@@ -49,6 +55,17 @@ func (h *Host) View(ctx context.Context, id string) (View, error) {
 		}
 		again, err := h.store.Head(ctx, run.ID)
 		if err != nil || again.Seq == v.Snapshot.Seq {
+			counts, err := h.store.InputCounts(ctx, run.ID)
+			if err != nil {
+				return v, err
+			}
+			v.PendingSteers, v.Queued, v.Held = counts.Pending, counts.Queued, counts.Held
+			if v.Pos, err = h.store.RunPos(ctx, run.ID); err != nil {
+				return v, err
+			}
+			if v.Ordinal, err = h.store.RunOrdinal(ctx, run.ID); err != nil {
+				return v, err
+			}
 			v.Drivable, v.Why = h.drivability(v)
 			return v, err
 		}
@@ -80,12 +97,13 @@ func (h *Host) drivability(v View) (bool, string) {
 }
 
 // ResumeOpen continues the open run of the state directory, if any, that the
-// host can continue by itself, as its View's Drivable reports: it finishes a
-// pending stop, within ctx, and starts driving a run of its context version
-// whose API and provider one of its credentials is bound to. It commits
-// nothing to any other run, which waits for a client: a run of another
-// context version, one that needs resolution, or one that needs a credential
-// the host does not hold.
+// host can continue by itself, or opens the oldest queued follow-up after a
+// returned latest run. It finishes a pending stop, within ctx, and starts
+// driving a run of its context version whose API and provider one of its
+// credentials is bound to. It commits nothing to any other run, which waits
+// for a client: a run of another context version, one that needs resolution,
+// or one that needs a credential the host does not hold. Nothing starts after
+// a stop.
 func (h *Host) ResumeOpen(ctx context.Context) error {
 	ctx, leave, err := h.Enter(ctx)
 	if err != nil {
@@ -103,11 +121,18 @@ func (h *Host) ResumeOpen(ctx context.Context) error {
 	switch {
 	case err != nil:
 		return err
-	case !v.Drivable || v.Driving:
+	case v.Driving:
+		return nil
+	case v.Snapshot.State.Phase == core.PhaseReturned:
+		return h.startFollowUp(ctx, v.Snapshot)
+	case v.Snapshot.State.Closed():
 		return nil
 	case v.Snapshot.State.Phase == core.PhaseCancelling:
 		_, err = h.Stop(ctx, last.ID)
 	default:
+		if !v.Drivable {
+			return nil
+		}
 		_, err = h.Drive(ctx, last.ID, Binding{}, DriveOptions{})
 	}
 	return err
@@ -125,30 +150,53 @@ const (
 	ItemRecovered       ItemKind = "effect_recovered"
 	ItemNeedsResolution ItemKind = "needs_resolution" // an effect's outcome is unknown
 	ItemContextReset    ItemKind = "context_reset"
-	ItemStopped         ItemKind = "stopped" // the run stopped
+	ItemStopped         ItemKind = "stopped"      // the run stopped
+	ItemInput           ItemKind = "input"        // an admitted principal instruction or observation
+	ItemWithdrawn       ItemKind = "withdrawn"    // a withdrawal of held principal inputs
+	ItemInputsBound     ItemKind = "inputs_bound" // principal instructions were bound to a run
+	ItemRunStarted      ItemKind = "run_started"  // a run's first committed transition
 )
 
-// Item is one entry of a run's progress, a host projection of committed
-// transitions: what a reader shows of a step, never a journal record. A
-// local step reports its Outcome; a step that ran, or was resolved, reports
-// its execution.
+// InputItem is one admitted input as progress reports it, with bounded text.
+type InputItem struct {
+	InputID     string
+	Authority   harness.InputAuthority
+	Delivery    harness.InputDelivery
+	Disposition harness.InputDisposition
+	Source      string
+	Subject     string
+	Text        string
+	Truncated   bool
+}
+
+// Item is one entry of a run's progress, a host projection of the agent log:
+// what a reader shows of a step or an admitted input, never a journal record.
+// Pos is its agent-log position. A local step reports its Outcome; a step
+// that ran, or was resolved, reports its execution.
 type Item struct {
-	Seq  int64
-	Step int
-	Kind ItemKind
+	Pos   int64
+	RunID string
+	Seq   int64
+	Step  int
+	Kind  ItemKind
 
 	Command, Purpose string // ItemDecided: the decision's payload and purpose
 	Action           string // ItemDecided: the recorded action
 	Result           string // ItemReturned: the returned payload
 
-	Local     bool                // ItemCompleted: the harness performed it or cancelled it in process
-	Resolved  bool                // ItemCompleted: an operator recorded the outcome
-	Execution core.ExecutionState // ItemCompleted of an observation
-	ExitCode  *int
-	Preview   string
-	Detail    string
-	Outcome   *Outcome // ItemCompleted of a local action the harness performed
-	AnchorSeq int64
+	Local        bool                // ItemCompleted: the harness performed it or cancelled it in process
+	Resolved     bool                // ItemCompleted: an operator recorded the outcome
+	Execution    core.ExecutionState // ItemCompleted of an observation
+	ExitCode     *int
+	Preview      string
+	Detail       string
+	Outcome      *Outcome // ItemCompleted of a local action the harness performed
+	AnchorSeq    int64
+	SupersededBy int // ItemCompleted: the instruction that superseded the decision
+	Inputs       int // ItemInputsBound: the bound instruction count
+
+	Input     *InputItem // ItemInput
+	Withdrawn []string   // ItemWithdrawn: the inputs it took back, by ID or position, bounded
 
 	Reason  core.StopReason // ItemStopRequested, ItemStopped
 	Failure string          // ItemRetrying, ItemNeedsResolution, ItemStopRequested
@@ -171,84 +219,116 @@ type Outcome struct {
 	FocusSources   int
 }
 
-// Cursor names a position in the journal of one run: after its transition
-// at Seq, 0 before the first. It is not portable between runs: Progress and
-// Wait take no other run ID.
-type Cursor struct {
-	RunID string
-	Seq   int64
+// Cursor is an opaque agent-log position. It names no run: the log spans
+// every run of one state directory.
+type Cursor int64
+
+// ErrCursor reports a cursor that is not a position of the agent log.
+var ErrCursor = errors.New("host: the cursor names no position of the agent log")
+
+// cursor checks that c is a position of the agent log, and returns the
+// latest one.
+func (h *Host) cursor(ctx context.Context, c Cursor) (Cursor, error) {
+	if c < 0 {
+		return 0, fmt.Errorf("%w: %d is negative", ErrCursor, c)
+	}
+	last, err := h.logEnd(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if int64(c) > last {
+		return Cursor(last), fmt.Errorf("%w: %d is past the end %d of the agent log", ErrCursor, c, last)
+	}
+	return Cursor(last), nil
 }
 
-// ErrCursor reports a cursor that names no run of the state directory or a
-// position past the end of its run.
-var ErrCursor = errors.New("host: the cursor names no position of a run")
-
-// cursor checks that c names a run of the state directory and a position of
-// it, and returns the position of the run's latest snapshot.
-func (h *Host) cursor(ctx context.Context, c Cursor) (sqlite.Head, error) {
-	if c.RunID == "" || c.Seq < 0 {
-		return sqlite.Head{}, fmt.Errorf("%w: %+v", ErrCursor, c)
-	}
-	latest, err := h.store.Head(ctx, c.RunID)
-	switch {
-	case errors.Is(err, harness.ErrNotFound):
-		return latest, fmt.Errorf("%w: no run %q", ErrCursor, c.RunID)
-	case err != nil:
-		return latest, err
-	case c.Seq > latest.Seq:
-		return latest, fmt.Errorf("%w: %d is past the %d transitions of run %s", ErrCursor, c.Seq, latest.Seq, c.RunID)
-	}
-	return latest, nil
+func (h *Host) logEnd(ctx context.Context) (int64, error) {
+	last, err := h.store.LastPos(ctx)
+	return last, err
 }
 
-// Page is one page of a run's progress. Next is the cursor after the last
-// row the page read, also when those rows showed no item; More reports that
-// rows remain, and Halted that the run had halted when the page was read.
+// Page is one page of the agent log. Next is the cursor after the last row
+// the page read, also when those rows showed no item; More reports that rows
+// remain, and Quiescent that the latest run was closed when the page was read.
 type Page struct {
-	Items  []Item
-	Next   Cursor
-	More   bool
-	Halted bool
+	Items     []Item
+	Next      Cursor
+	More      bool
+	Quiescent bool
 }
 
 // The bounds of one page: the rows it reads, and the bytes of the items it
-// returns. Every text of an item is capped (sqlite.ProgressRowBytes), so
-// every item fits a page.
+// returns. Every text of an item is capped, so every item fits a page.
 const (
 	PageRows  = 64
 	PageBytes = 256 << 10
 )
 
-// Progress returns the page of the run of cursor after that follows it: at
-// most limit rows, PageRows when limit is not positive, and PageBytes of
-// items. A cursor of no run, or past the end of its run, is ErrCursor. It
-// reads the journal only, so a page read again is the same page.
+// Progress returns the page of the agent log after cursor: at most limit
+// rows, PageRows when limit is not positive, and PageBytes of items. A
+// cursor of no position of the log is ErrCursor. It reads the journal only,
+// so a page read again is the same page.
 func (h *Host) Progress(ctx context.Context, after Cursor, limit int) (Page, error) {
 	if limit <= 0 || limit > PageRows {
 		limit = PageRows
 	}
-	latest, err := h.cursor(ctx, after)
+	if _, err := h.cursor(ctx, after); err != nil {
+		return Page{}, err
+	}
+	rows, err := h.store.Log(ctx, int64(after), limit)
 	if err != nil {
 		return Page{}, err
 	}
-	rows, err := h.store.Progress(ctx, after.RunID, after.Seq, limit)
-	if err != nil {
-		return Page{}, err
-	}
-	p := Page{Next: after, More: len(rows) == limit, Halted: latest.Intent() == core.IntentHalt}
+	working := h.ownsWork()
+	p := Page{Next: after, More: len(rows) == limit, Quiescent: h.quiescent(ctx) && !working}
 	bytes := 0
 	for _, r := range rows {
-		item, ok := project(r)
-		if ok {
+		if r.Transition != nil {
+			if r.Transition.Seq == 1 && r.Transition.Kind == "request_frozen" {
+				item := Item{Pos: r.Pos, RunID: r.RunID, Seq: 1, Step: r.Transition.Step, Kind: ItemRunStarted}
+				p.Items = append(p.Items, item)
+				bytes += item.bytes()
+				p.Next = Cursor(r.Pos)
+				continue
+			}
+			item, ok := project(*r.Transition)
+			if !ok {
+				p.Next = Cursor(r.Pos)
+				continue
+			}
+			item.Pos = r.Pos
+			item.RunID = r.RunID
 			size := item.bytes()
 			if bytes+size > PageBytes {
 				p.More = true
-				break
+				return p, nil
+			}
+			bytes += size
+			p.Items = append(p.Items, item)
+		} else if r.Input != nil {
+			item := Item{Pos: r.Pos, RunID: r.Input.RunID, Kind: ItemInput, Input: &InputItem{
+				InputID: r.Input.InputID, Authority: r.Input.Authority, Delivery: r.Input.Delivery,
+				Disposition: r.Input.Disposition, Source: r.Input.Source, Subject: r.Input.Subject,
+				Text: r.Input.Text, Truncated: r.InputCut,
+			}}
+			size := item.bytes()
+			if bytes+size > PageBytes {
+				p.More = true
+				return p, nil
+			}
+			bytes += size
+			p.Items = append(p.Items, item)
+		} else if r.Withdrawn != nil {
+			item := Item{Pos: r.Pos, Kind: ItemWithdrawn, Withdrawn: r.Withdrawn, Truncated: r.WithdrawnCut}
+			size := item.bytes()
+			if bytes+size > PageBytes {
+				p.More = true
+				return p, nil
 			}
 			bytes += size
 			p.Items = append(p.Items, item)
 		}
-		p.Next.Seq = r.Seq
+		p.Next = Cursor(r.Pos)
 	}
 	return p, nil
 }
@@ -256,8 +336,14 @@ func (h *Host) Progress(ctx context.Context, after Cursor, limit int) (Page, err
 // bytes is what the texts of it take.
 func (it Item) bytes() int {
 	n := len(it.Command) + len(it.Purpose) + len(it.Action) + len(it.Result) + len(it.Execution) + len(it.Preview) + len(it.Detail) + len(it.Reason) + len(it.Failure)
+	for _, name := range it.Withdrawn {
+		n += len(name)
+	}
 	if o := it.Outcome; o != nil {
 		n += len(o.Status) + len(o.Detail) + len(o.RetrievalError)
+	}
+	if in := it.Input; in != nil {
+		n += len(in.InputID) + len(in.Text) + len(in.Source) + len(in.Subject)
 	}
 	return n
 }
@@ -271,6 +357,9 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 	switch r.Kind {
 	case "response_loaded":
 		switch {
+		case r.SupersedeBy > 0:
+			it.Kind, it.SupersededBy, it.Detail = ItemCompleted, r.SupersedeBy, "superseded by instruction #"+fmt.Sprint(r.SupersedeBy)
+			it.Execution = core.ExecutionSuperseded
 		case r.Phase == core.PhaseEffectSaved:
 			it.Kind, it.Command, it.Purpose, it.Action = ItemDecided, r.Decision.Payload, r.Decision.Purpose, r.Action
 			shown |= sqlite.ProgressPayload | sqlite.ProgressPurpose
@@ -290,6 +379,8 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 			it.Kind = ItemContextReset
 		}
 		shown |= sqlite.ProgressFailure
+	case "inputs_bound":
+		it.Kind, it.Inputs = ItemInputsBound, r.Inputs
 	case "performed":
 		it.Kind, it.Local, it.AnchorSeq, it.Command = ItemCompleted, true, r.AnchorSeq, r.Decision.Payload
 		it.Outcome = &Outcome{Status: harness.OutcomeStatus(r.Outcome), Detail: r.OutcomeDetail, Retrieval: r.Retrieval,
@@ -318,36 +409,37 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 	return it, true
 }
 
-// WaitResult is what a Wait observed: the cursor of the latest transition
-// of the run, whether the run has halted, and whether a drive or stop owns work.
+// WaitResult is what a Wait observed: the latest agent-log position, whether
+// the agent was quiescent, and whether a drive or operation owned work.
 type WaitResult struct {
-	Cursor  Cursor
-	Halted  bool
-	Driving bool
+	Cursor    Cursor
+	Quiescent bool
+	Driving   bool
 }
 
-// Wait returns once the run of cursor after has a transition after it, has
-// halted, or is not driven by the host, which then commits nothing to it by
-// itself, or when the host shuts down or ctx is done; a cursor of no run, or
-// past the end of its run, is ErrCursor. It registers for the host's next
-// change before it rereads the journal, so a commit that lands between the
-// two still wakes it: no wakeup is lost, and the journal, not the wakeup,
-// decides.
+// Wait returns once the agent log has a row after cursor, the agent is
+// quiescent and no drive or operation owns work, or the host shuts down.
+// A cursor of no position of the log is ErrCursor. It registers for the
+// host's next change before it rereads the journal, so a commit that lands
+// between the two still wakes it: no wakeup is lost, and the journal, not the
+// wakeup, decides.
 func (h *Host) Wait(ctx context.Context, after Cursor) (WaitResult, error) {
 	if _, err := h.cursor(ctx, after); err != nil {
 		return WaitResult{}, err
 	}
 	for {
 		h.mu.Lock()
-		changed, driving, closing := h.changed, h.workingLocked(after.RunID), h.closing
+		changed, closing := h.changed, h.closing
 		h.mu.Unlock()
+		working := h.ownsWork()
 		h.checkpoint(PointWaiting)
-		head, err := h.store.Head(ctx, after.RunID)
+		last, err := h.logEnd(ctx)
 		if err != nil {
 			return WaitResult{}, err
 		}
-		r := WaitResult{Cursor: Cursor{after.RunID, head.Seq}, Halted: head.Intent() == core.IntentHalt, Driving: driving}
-		if r.Cursor.Seq > after.Seq || r.Halted || !driving || closing {
+		quiescent := h.quiescent(ctx)
+		r := WaitResult{Cursor: Cursor(last), Quiescent: quiescent, Driving: working}
+		if Cursor(last) > after || !working || closing {
 			return r, nil
 		}
 		select {
@@ -356,4 +448,27 @@ func (h *Host) Wait(ctx context.Context, after Cursor) (WaitResult, error) {
 			return r, ctx.Err()
 		}
 	}
+}
+
+// quiescent reports whether the latest run of the state directory is closed,
+// or there is none.
+func (h *Host) quiescent(ctx context.Context) bool {
+	last, err := h.store.LastRun(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	snap, err := h.store.Latest(ctx, last.ID)
+	return err == nil && snap.State.Closed()
+}
+
+// ownsWork reports whether a drive, a stop, a resolution, or an admission
+// owns work that may still commit.
+func (h *Host) ownsWork() bool {
+	h.mu.Lock()
+	working := len(h.drivers) > 0 || len(h.runs) > 0
+	h.mu.Unlock()
+	return working || len(h.admission) > 0
 }

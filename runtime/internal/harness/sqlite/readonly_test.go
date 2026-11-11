@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
@@ -74,13 +75,13 @@ func TestOpenReadOnlyRejectsWritesIncludingIdempotentWrites(t *testing.T) {
 	d := newDriver(t, w, harness.Snapshot{State: initial})
 	d.freeze()
 	s := readOnly(t, path)
-	session := testRun("run-2")
-	session.SessionID, session.InputID = "session", "input"
+	next := testRun("run-2")
 	for name, write := range map[string]func() error{
 		"create": func() error { return s.CreateRun(ctx, run, initial) },
 		"commit": func() error { return s.Commit(ctx, d.commits[0]) },
-		"submit": func() error {
-			_, err := s.Submit(ctx, session, fresh(t, session.ID, limits))
+		"admit": func() error {
+			_, err := s.Admit(ctx, harness.InputSubmission{Authority: harness.AuthorityPrincipal, Text: "next", Run: next,
+				Initial: fresh(t, next.ID, limits), Now: time.Now()})
 			return err
 		},
 	} {
@@ -152,7 +153,7 @@ func TestOpenReadOnlyReadsWALWithReadonlyDirectoryAndExistingSidecars(t *testing
 func TestOpenReadOnlyRejectsUnknownSchemaAndCancelledContext(t *testing.T) {
 	path := tempPath(t)
 	w := open(t, path)
-	if _, err := w.db.Exec(`PRAGMA user_version = 5`); err != nil {
+	if _, err := w.db.Exec(`PRAGMA user_version = 6`); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := OpenReadOnly(context.Background(), path); !errors.Is(err, ErrIncompatible) {

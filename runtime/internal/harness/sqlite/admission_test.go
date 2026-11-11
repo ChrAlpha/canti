@@ -47,11 +47,8 @@ func TestAdmissionStoppedResolutionWithCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			s := open(t, tempPath(t))
-			r := sessionRun("run-1", "input-1")
-			if _, err := s.Submit(ctx, r, fresh(t, r.ID, limits)); err != nil {
-				t.Fatal(err)
-			}
-			d := newDriver(t, s, harness.Snapshot{State: fresh(t, r.ID, limits)})
+			first := createRun(t, s, "run-1", limits)
+			d := newDriver(t, s, first)
 			d.decide(execBody("printf ok"), harness.Usage{})
 			effectID := d.snap.State.EffectID
 			d.do(core.OutcomeUnknown{EffectID: effectID}, harness.Facts{Failure: "lost job"})

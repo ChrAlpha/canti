@@ -7,10 +7,10 @@ import (
 
 // Validation is a side-effect-free request to the runtime's `preflight`
 // executable mode. Credentials travel over stdin, never command arguments.
-// It is also accepted by a running host through OpValidate. An empty
-// SessionID validates a standalone submission with its supplied constraints;
-// a named session inherits constraints unless ExplicitConstraints is set.
-// Validation neither reserves admission nor performs input replay lookup.
+// It is also accepted by a running host through OpValidate. A non-fresh
+// submission without ExplicitConstraints receives the latest run's constraints
+// from the host; a fresh one keeps its own. Validation neither reserves
+// admission nor performs input replay lookup.
 type Validation struct {
 	State      string     `json:"state"`
 	Submission Submission `json:"submission"`

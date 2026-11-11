@@ -50,7 +50,7 @@ type RunConfig struct {
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 18
+const ContextVersion = 19
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -190,12 +190,16 @@ func PromptLimits(c RunConfig) harness.PromptLimits {
 // run are published in.
 func HistoryRoot(state string) string { return filepath.Join(state, "history") }
 
+// InputsRoot is the directory under state that the admitted inputs of the
+// agent log are published in.
+func InputsRoot(state string) string { return filepath.Join(state, "inputs") }
+
 // ExecutorConfig is the executor configuration of a run of c in state.
 func ExecutorConfig(c RunConfig, state string) docker.Config {
 	return docker.Config{
 		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
 		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit, PreviewLimit: PromptLimits(c).Preview,
-		Mounts: []docker.Mount{{Source: HistoryRoot(state), Target: archive.RunsRoot}},
+		Mounts: []docker.Mount{{Source: HistoryRoot(state), Target: archive.RunsRoot}, {Source: InputsRoot(state), Target: archive.InputsRoot}},
 	}
 }
 
@@ -212,6 +216,9 @@ func NewExecutor(c RunConfig, state string) (harness.Executor, error) {
 		return docker.NewAttached(AttachedConfig(c, state))
 	}
 	if err := os.MkdirAll(HistoryRoot(state), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(InputsRoot(state), 0o755); err != nil {
 		return nil, err
 	}
 	return docker.New(ExecutorConfig(c, state))

@@ -220,11 +220,11 @@ func TestTUIReplaysLostSubmitAcknowledgementWithoutAnotherRun(t *testing.T) {
 	}()
 	t.Cleanup(func() { listener.Close(); <-done; connections.Wait() })
 	before := len(f.model.requests())
-	_, wait := f.startWith(strings.NewReader("one accepted input\n"), nil, tuiCommand, "-host", "auto", "-session", "replay")
+	_, wait := f.startWith(strings.NewReader("one accepted input\n"), nil, tuiCommand, "-host", "auto")
 	if r := wait(); r.code != exitOK || r.stdout != "answer\n" {
 		t.Fatalf("lost ACK client: %+v", r)
 	}
-	if s := f.status(); s.Run.SessionID != "replay" || s.Run.SessionSeq != 1 || s.Run.Goal != "one accepted input" {
+	if s := f.status(); s.Run.InputID == "" || s.Run.Ordinal != 2 || s.Run.Goal != "one accepted input" {
 		t.Fatalf("replayed admission: %+v", s)
 	}
 	if len(f.model.requests()) != before+1 {

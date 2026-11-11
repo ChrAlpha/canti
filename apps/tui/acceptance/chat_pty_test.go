@@ -5,7 +5,6 @@ package acceptance
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -100,7 +99,7 @@ func startPTYChatOn(t *testing.T, f *fixture, master, slave, stderr *os.File, en
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
-	argv := append(append([]string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL, "-session", "pty"}, fixtureModel...), args...)
+	argv := append(append([]string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL}, fixtureModel...), args...)
 	exe, argv := executable(t, env, argv)
 	cmd := exec.CommandContext(ctx, exe, argv...)
 	for _, kv := range os.Environ() {
@@ -206,7 +205,7 @@ func (p *ptyChat) text() string {
 func (p *ptyChat) mark() frameCursor { p.mu.Lock(); defer p.mu.Unlock(); return p.frameSeq }
 func screenStatus(screen string) string {
 	lines := strings.Split(screen, "\n")
-	if len(lines) < 2 || !strings.HasPrefix(lines[0], "canti-tui · session ") {
+	if len(lines) < 2 || lines[0] != "canti-tui" {
 		return ""
 	}
 	status, _, _ := strings.Cut(lines[1], " · ")
@@ -496,134 +495,56 @@ func TestChatKeepsInheritedDescriptorsBlocking(t *testing.T) {
 	}
 }
 
-func TestChatPTYBusyInputDoesNotBecomeNextRun(t *testing.T) {
+func TestChatPTYEnterSteersWhileRunning(t *testing.T) {
 	// A noninteractive parent may supply TERM=dumb. The actual test terminal
 	// is our x/vt emulator and must advertise its own capabilities.
 	t.Setenv("TERM", "dumb")
-	for _, interrupted := range []bool{false, true} {
-		name := "returned"
-		if interrupted {
-			name = "interrupted"
-		}
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
-			f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second answer"}`})
-			entered := make(chan struct{}, 1)
-			release := make(chan struct{})
-			var releaseOnce sync.Once
-			releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-			var once sync.Once
-			served := make(chan struct{})
-			gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				r.Body = io.NopCloser(bytes.NewReader(body))
-				first := false
-				once.Do(func() {
-					first = true
-					entered <- struct{}{}
-					select {
-					case <-release:
-					case <-r.Context().Done():
-					}
-				})
-				f.model.ServeHTTP(w, r)
-				if first {
-					close(served)
-				}
-			}))
-			t.Cleanup(func() { releaseGate(); gate.Close() })
-			p := startPTYChat(t, f, nil, "-model-url", gate.URL)
-			pos := p.awaitStatus(t, "ready", 0)
-			p.send(t, "first request\r")
-			pos = p.awaitStatus(t, "running", pos)
+	f := newFixture(t, map[int]decision{
+		1: {Kind: "return", Payload: "first answer"},
+		2: {Kind: "return", Payload: "second answer"},
+	})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce, once sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		once.Do(func() {
+			entered <- struct{}{}
 			select {
-			case <-entered:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the model did not receive the first run")
+			case <-release:
+			case <-r.Context().Done():
 			}
-			p.send(t, "second request\r")
-			p.await(t, "Send unavailable", pos)
-			if interrupted {
-				p.send(t, "\x03")
-				deadline := time.Now().Add(5 * time.Second)
-				for f.status().Phase != "stopped" {
-					if time.Now().After(deadline) {
-						t.Fatal("Ctrl-C did not stop the active run")
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
-			releaseGate()
-			pos = p.awaitStatus(t, "ready", pos)
-			if s := f.status(); s.Run.SessionSeq != 1 || s.Run.Goal != "first request" {
-				t.Fatalf("busy input became a run: %+v", s.Run)
-			}
-			time.Sleep(200 * time.Millisecond)
-			if s := f.status(); s.Run.SessionSeq != 1 {
-				t.Fatalf("buffered busy input became a run: %+v", s.Run)
-			}
-			select {
-			case <-served:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the model did not answer the first run")
-			}
-			firstRun := f.status().Run
-			p.send(t, "\r")
-			p.await(t, "second answer", pos)
-			if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != "returned" {
-				t.Fatalf("explicit input did not finish: %+v", s)
-			}
-			secondRun := f.status().Run
-			prompts := f.model.prompts(1)
-			if len(prompts) != 2 || !strings.Contains(prompts[1], "## Goal\nsecond request\n") ||
-				!strings.Contains(prompts[1], "Session pty, sequence 2.") ||
-				!strings.Contains(prompts[1], "/canti/runs/"+secondRun.ID+"/session") ||
-				!strings.Contains(prompts[1], "Previous run: /canti/runs/"+firstRun.ID+"/.") {
-				t.Fatalf("wrong session navigation or current goal: %q", prompts)
-			}
-			read := func(runID, file string) string { t.Helper(); return archiveText(t, f, "/canti/runs/"+runID+"/"+file) }
-			var session struct {
-				SessionID     string `json:"session_id"`
-				Sequence      int64  `json:"sequence"`
-				InputID       string `json:"input_id"`
-				PreviousRunID string `json:"previous_run_id"`
-			}
-			if err := json.Unmarshal([]byte(read(secondRun.ID, "session")), &session); err != nil ||
-				session.SessionID != "pty" || session.Sequence != 2 || session.InputID != secondRun.InputID || session.PreviousRunID != firstRun.ID {
-				t.Fatalf("second session link: %+v, %v", session, err)
-			}
-			if got := read(session.PreviousRunID, "goal"); got != "first request" {
-				t.Fatalf("previous goal: %q", got)
-			}
-			wantResult := "phase: returned\n\nfirst answer"
-			if interrupted {
-				wantResult = "phase: stopped\nreason: cancelled\n"
-			}
-			if got := read(session.PreviousRunID, "result"); got != wantResult {
-				t.Fatalf("previous result: %q, want %q", got, wantResult)
-			}
-			session.PreviousRunID = ""
-			if err := json.Unmarshal([]byte(read(firstRun.ID, "session")), &session); err != nil ||
-				session.SessionID != "pty" || session.Sequence != 1 || session.InputID != firstRun.InputID || session.PreviousRunID != "" ||
-				firstRun.InputID == "" || firstRun.InputID == secondRun.InputID {
-				t.Fatalf("first session link or distinct inputs: %+v, %v", session, err)
-			}
-			entries, err := os.ReadDir(filepath.Join(f.state, "history"))
-			if err != nil || len(entries) != 2 {
-				t.Fatalf("persisted session must contain exactly two inputs: %v, %v", entries, err)
-			}
-			for _, entry := range entries {
-				goal := read(entry.Name(), "goal")
-				if !entry.IsDir() || (entry.Name() != firstRun.ID && entry.Name() != secondRun.ID) ||
-					(goal != "first request" && goal != "second request") {
-					t.Fatalf("unexpected persisted input %s: %q", entry.Name(), goal)
-				}
-			}
-
-			p.send(t, "\x03")
-			p.finish(t, exitOK)
 		})
+		f.model.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { releaseGate(); gate.Close() })
+	p := startPTYChat(t, f, nil, "-model-url", gate.URL)
+	pos := p.awaitStatus(t, "ready", 0)
+	p.send(t, "first request\r")
+	pos = p.awaitStatus(t, "running", pos)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the model did not receive the first run")
 	}
+	p.send(t, "second request\r")
+	pos = p.await(t, "steer steer", pos)
+	if s := f.status(); s.Run.Ordinal != 1 || s.Run.Goal != "first request" {
+		t.Fatalf("Enter while running opened a run instead of steering: %+v", s.Run)
+	}
+	releaseGate()
+	pos = p.await(t, "second answer", pos)
+	s := f.status()
+	if s.Phase != "returned" || s.Run.Ordinal != 1 || s.Run.Goal != "first request" {
+		t.Fatalf("the steered run did not return: %+v", s)
+	}
+	if s.Inputs < 1 {
+		t.Fatalf("the steer was not bound and seen: %+v", s)
+	}
+	p.send(t, "\x03")
+	p.finish(t, exitOK)
 }
 
 func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
@@ -653,7 +574,7 @@ func TestChatPTYStderrBackpressureCancelsActiveRun(t *testing.T) {
 	fillLivePipe(t, writeFD)
 	p.send(t, "\x03")
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.Ordinal != 1 {
 		t.Fatalf("output failure left an active or repeated run: %+v", s)
 	}
 }
@@ -694,14 +615,14 @@ func TestChatPTYHangupStopsTheActiveRun(t *testing.T) {
 		t.Fatal("chat did not exit after its terminal hung up")
 	}
 	s := f.status()
-	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("hangup: %v, exit %d, run %+v", p.cmd.ProcessState, code, s)
 	}
 	f.model.mu.Lock()
 	f.model.hold = nil
 	f.model.mu.Unlock()
-	if r := f.cli(nil, "run", "-session", "pty", "-input", "next", "-goal", "fresh"); r.code != exitOK || f.status().Run.SessionSeq != 2 {
-		t.Fatalf("the session did not continue after the hangup: %+v", r)
+	if r := f.cli(nil, "run", "-input", "next", "-goal", "fresh"); r.code != exitOK || f.status().Run.Ordinal != 2 {
+		t.Fatalf("the line did not continue after the hangup: %+v", r)
 	}
 }
 
@@ -726,7 +647,7 @@ func TestChatPTYEndsWithUsageWhenNoInputFits(t *testing.T) {
 	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti-tui: history imports: ") || !strings.Contains(out[altEnd:], "Usage: canti-tui [flags]") {
 		t.Fatalf("usage advice absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("an input was submitted after no input fit: %+v", s)
 	}
 }
@@ -739,13 +660,13 @@ func TestChatPTYResolutionGuidanceSurvivesAltScreen(t *testing.T) {
 	p.send(t, "needs inspection\r")
 	p.finish(t, exitResolution)
 	s := f.status()
-	if s.Phase != "needs_resolution" || s.Run.SessionSeq != 1 {
+	if s.Phase != "needs_resolution" || s.Run.Ordinal != 1 {
 		t.Fatalf("missing durable resolution state: %+v", s)
 	}
 	out := p.text()
 	altEnd := strings.LastIndex(out, "\x1b[?1049l")
-	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti resolve -run "+s.Run.ID) || !strings.Contains(out[altEnd:], "canti-tui -session pty") {
-		t.Fatalf("resolution and session guidance absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
+	if altEnd < 0 || !strings.Contains(out[altEnd:], "canti resolve -run "+s.Run.ID) {
+		t.Fatalf("resolution guidance absent after alt-screen exit: alt-end=%d, output tail=%q", altEnd, out[max(0, len(out)-1200):])
 	}
 }
 
@@ -791,13 +712,13 @@ func TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr(t *testing.T) {
 	p.send(t, "\x03")
 	p.finish(t, exitError)
 	s := f.status()
-	if s.Run.SessionSeq != 1 || s.Run.Goal != "request needing cleanup" || s.Phase == "stopped" {
+	if s.Run.Ordinal != 1 || s.Run.Goal != "request needing cleanup" || s.Phase == "stopped" {
 		t.Fatalf("blocked cleanup unexpectedly committed or started another run: %+v", s)
 	}
 	if result := f.cli(nil, "stop", "-run", s.Run.ID); result.code != exitStopped {
 		t.Fatalf("retrying stop after abandoned cleanup: %+v", result)
 	}
-	if final := f.status(); final.Phase != "stopped" || final.Reason != "cancelled" || final.Run.SessionSeq != 1 {
+	if final := f.status(); final.Phase != "stopped" || final.Reason != "cancelled" || final.Run.Ordinal != 1 {
 		t.Fatalf("manual stop did not finish original run: %+v", final)
 	}
 }
@@ -835,7 +756,7 @@ func TestChatPTYHangupDetachesFromAHostProcess(t *testing.T) {
 func TestScreenObserverRequiresExactStatusAndFreshFrame(t *testing.T) {
 	p := &ptyChat{screen: newScreen(100)}
 	defer p.screen.Close()
-	p.record([]byte("canti-tui · session pty\r\nrunning · draft editable\r\nEnter send when ready"))
+	p.record([]byte("canti-tui\r\nrunning · draft editable\r\nEnter send when ready"))
 	ready := func(screen string) bool { return screenStatus(screen) == "ready" }
 	if _, ok := p.frameAfter(0, ready); ok {
 		t.Fatal("footer matched ready status")
@@ -874,7 +795,7 @@ func TestScreenObserverRendersStatusTransitions(t *testing.T) {
 			for _, phase := range []string{"ready", "submitting · draft editable", "running · draft editable", "stopping · waiting for cleanup · draft editable", "ready"} {
 				row := phase + " · current launch flags apply to each new input"
 				buffer.Clear()
-				uv.NewStyledString("canti-tui · session pty\n"+row+"\n› retained draft").Draw(buffer, buffer.Bounds())
+				uv.NewStyledString("canti-tui\n"+row+"\n› retained draft").Draw(buffer, buffer.Bounds())
 				renderer.Render(buffer.RenderBuffer)
 				if err := renderer.Flush(); err != nil {
 					t.Fatal(err)
@@ -887,7 +808,7 @@ func TestScreenObserverRendersStatusTransitions(t *testing.T) {
 					raw = raw[n:]
 				}
 				lines := strings.Split(p.screen.String(), "\n")
-				if lines[0] != "canti-tui · session pty" || lines[1] != row || lines[2] != "› retained draft" {
+				if lines[0] != "canti-tui" || lines[1] != row || lines[2] != "› retained draft" {
 					t.Fatalf("phase %q reconstructed incorrectly: %q", phase, p.screen.String())
 				}
 			}

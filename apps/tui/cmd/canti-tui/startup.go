@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 )
 
 // setup consumes signals until the presenter takes over the same channel.
 // First interrupt cancels admission/preflight; the second forces owned reaping.
-func setup(ctx context.Context, c *session.Controller, signals <-chan os.Signal) (int, error) {
+func setup(ctx context.Context, c *chat.Controller, signals <-chan os.Signal) (int, error) {
 	work, cancel := context.WithCancel(ctx)
 	defer cancel()
 	shutdown, force := context.WithCancel(context.Background())
@@ -23,12 +23,12 @@ func setup(ctx context.Context, c *session.Controller, signals <-chan os.Signal)
 		select {
 		case err := <-done:
 			if interrupted {
-				return session.Stopped, fmt.Errorf("startup interrupted")
+				return chat.Stopped, fmt.Errorf("startup interrupted")
 			}
 			if err != nil {
 				return errorCode(err), err
 			}
-			return session.OK, nil
+			return chat.OK, nil
 		case <-signals:
 			if interrupted {
 				force()

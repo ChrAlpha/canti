@@ -3,7 +3,6 @@
 package acceptance
 
 import (
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,7 +12,7 @@ import (
 	"time"
 )
 
-func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
+func TestChatContinuesOneLineAcrossInputs(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})
 	f.model.answer(1, 2, reply{text: `{"kind":"return","payload":"second\u001b]0;t\u0007 ‮answer\r\n"}`})
 	f.model.answer(1, 3, reply{text: `{"kind":"return","payload":"third answer"}`})
@@ -31,21 +30,21 @@ func TestChatContinuesOneSessionAcrossInputs(t *testing.T) {
 		t.Fatalf("state directory: %v, %v", fi.Mode(), err)
 	}
 	s := f.status()
-	if s.Run.SessionSeq != 2 || s.Run.Goal != block || s.Run.Constraints != "Be brief" || !strings.Contains(r.stderr, s.Run.SessionID) {
-		t.Fatalf("session: %+v\nstderr: %s", s.Run, r.stderr)
+	if s.Run.Ordinal != 2 || s.Run.Goal != block || s.Run.Constraints != "Be brief" || s.Run.InputID == "" {
+		t.Fatalf("line: %+v\nstderr: %s", s.Run, r.stderr)
 	}
 	if strings.Contains(r.stderr, "level=INFO") {
 		t.Fatalf("info logs in chat: %s", r.stderr)
 	}
-	if p := f.model.prompts(1); len(p) != 2 || !strings.Contains(p[1], "Previous run: /canti/runs/") || !strings.Contains(p[1], block) {
+	if p := f.model.prompts(1); len(p) != 2 || !strings.Contains(p[1], "## Previous runs") || !strings.Contains(p[1], block) {
 		t.Fatalf("second prompt lacks current task or prior navigation: %q", p)
 	}
-	_, wait = f.startWith(strings.NewReader("third question"), nil, tuiCommand, "-session", s.Run.SessionID)
+	_, wait = f.startWith(strings.NewReader("third question"), nil, tuiCommand)
 	if r := wait(); r.code != exitOK || r.stdout != "third answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
-	if current := f.status(); current.Run.SessionSeq != 3 || current.Run.Constraints != "Be brief" || !strings.Contains(f.model.prompts(1)[2], "Previous run: /canti/runs/"+s.Run.ID+"/") {
-		t.Fatalf("continued session: %+v", s.Run)
+	if current := f.status(); current.Run.Ordinal != 3 || current.Run.Constraints != "Be brief" || !strings.Contains(f.model.prompts(1)[2], "- "+s.Run.ID+":") {
+		t.Fatalf("continued line: %+v", s.Run)
 	}
 }
 
@@ -69,7 +68,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 		!strings.Contains(r.stderr, "canti-tui: the input does not fit -request-bytes (") || !strings.Contains(r.stderr, "start a block with <<WORD") || !strings.Contains(r.stderr, "put an input that starts with << in a block") {
 		t.Fatalf("chat: %+v", r)
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Run.Ordinal != 1 {
 		t.Fatalf("refused inputs were submitted: %+v", s.Run)
 	}
 	_, wait = f.startWith(strings.NewReader("<<END\nhalf of it\nEN"), nil, tuiCommand)
@@ -92,7 +91,7 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	}
 	busy, calls := f.status().Run.ID, len(f.model.requests())
 	_, wait = f.startWith(strings.NewReader("next\nnever\n"), nil, tuiCommand)
-	if r := wait(); r.code != exitError || r.stdout != "" || strings.Count(r.stderr, "resume or stop it first") != 1 {
+	if r := wait(); r.code != exitOK || r.stdout != "" || strings.Count(r.stderr, "delivery") != 2 {
 		t.Fatalf("blocked chat: %+v", r)
 	}
 	if f.status().Run.ID != busy || len(f.model.requests()) != calls {
@@ -101,20 +100,20 @@ func TestChatReportsBadInputAndExitsWhenBlocked(t *testing.T) {
 	if r := f.cli(nil, "resume"); r.code != exitOK {
 		t.Fatalf("resume: %+v", r)
 	}
-	_, wait = f.startWith(strings.NewReader("with long rules\n"), nil, tuiCommand, "-session", "long", "-constraints", strings.Repeat("c", 16000))
+	_, wait = f.startWith(strings.NewReader("with long rules\n"), nil, tuiCommand, "-constraints", strings.Repeat("c", 16000))
 	if r := wait(); r.code != exitOK {
 		t.Fatalf("long constraints: %+v", r)
 	}
 	if err := os.Chmod(filepath.Join(f.state, "canti.db"), 0); err != nil {
 		t.Fatal(err)
 	}
-	_, wait = f.startWith(strings.NewReader("never\n"), nil, tuiCommand, "-session", "long")
+	_, wait = f.startWith(strings.NewReader("never\n"), nil, tuiCommand)
 	r = wait()
 	os.Chmod(filepath.Join(f.state, "canti.db"), 0o600)
 	if r.code != exitError || strings.Contains(r.stderr, "> ") {
 		t.Fatalf("unreadable journal: %+v", r)
 	}
-	for _, args := range [][]string{{"-max-steps", "-1"}, {"-session", "my session"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-session", "long", "-request-bytes", "12000"}} {
+	for _, args := range [][]string{{"-max-steps", "-1"}, {"-model-url", "http://example.com"}, {"-constraints", "\xff"}, {"-request-bytes", "12000"}} {
 		_, wait = f.startWith(strings.NewReader("never\n"), nil, tuiCommand, args...)
 		if r := wait(); r.code != exitUsage && r.code != exitError || strings.Contains(r.stderr, "> ") {
 			t.Fatalf("chat %q: %+v", args, r)
@@ -135,7 +134,7 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 	go func() { io.WriteString(w, "two\nthree\n"); w.Close() }()
 	r := wait()
 	in.Close()
-	if r.code != exitUsage || strings.Count(r.stderr, "history imports") != 1 || f.status().Run.SessionSeq != 1 {
+	if r.code != exitUsage || strings.Count(r.stderr, "history imports") != 1 || f.status().Run.Ordinal != 1 {
 		t.Fatalf("chat: %+v", r)
 	}
 }
@@ -143,13 +142,13 @@ func TestChatExitsWhenItsFixedContextStopsFitting(t *testing.T) {
 func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "done"}})
 	in, w := io.Pipe()
-	_, wait := f.startWith(in, nil, tuiCommand, "-session", "shared", "-request-bytes", "12000")
+	_, wait := f.startWith(in, nil, tuiCommand, "-request-bytes", "12000")
 	io.WriteString(w, "one\n")
 	waitFor(t, func() bool { r := f.cli(nil, "status"); return strings.Contains(r.stdout, `"phase":"returned"`) })
 	// The terminal transition precedes closing the journal and releasing the
 	// workspace lock. Retry only a busy admission, with the same input identity.
 	waitFor(t, func() bool {
-		r := f.cli(nil, "run", "-session", "shared", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000))
+		r := f.cli(nil, "run", "-input", "other", "-goal", "g", "-constraints", strings.Repeat("c", 16000))
 		if r.code == exitLocked {
 			return false
 		}
@@ -161,7 +160,7 @@ func TestChatEndsWhenAnotherProcessChangesItsConstraints(t *testing.T) {
 	go func() { io.WriteString(w, "two\nthree\n"); w.Close() }()
 	r := wait()
 	in.Close()
-	if r.code != exitUsage || strings.Contains(r.stderr, "does not fit") || f.status().Run.SessionSeq != 2 {
+	if r.code != exitUsage || strings.Contains(r.stderr, "does not fit") || f.status().Run.Ordinal != 2 {
 		t.Fatalf("chat: %+v", r)
 	}
 }
@@ -172,7 +171,7 @@ func TestChatExitsWhenATurnNeedsResolution(t *testing.T) {
 	if r := wait(); r.code != exitResolution || !strings.Contains(r.stderr, "needs resolution") {
 		t.Fatalf("chat: %+v", r)
 	}
-	if s := f.status(); s.Run.SessionSeq != 1 || s.Phase != "needs_resolution" {
+	if s := f.status(); s.Run.Ordinal != 1 || s.Phase != "needs_resolution" {
 		t.Fatalf("after resolution exit: %+v", s)
 	}
 }
@@ -199,7 +198,7 @@ func TestChatSignals(t *testing.T) {
 			go func() { io.WriteString(w, "again\n"); w.Close() }()
 			r := wait()
 			in.Close()
-			if r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") || r.stdout != "" || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") || r.stdout != "" || f.status().Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("chat continued after the signal: %+v, %+v", r, f.status())
 			}
 		})
@@ -226,9 +225,11 @@ func TestChatSignals(t *testing.T) {
 				if err := cmd.Process.Signal(s); err != nil {
 					t.Fatal(err)
 				}
+				// Let the first signal reach the chat before the next one
+				// abandons its cleanup.
 				time.Sleep(100 * time.Millisecond)
 			}
-			if res := wait(); res.code != exitError || !strings.Contains(res.stderr, "i/o timeout") || f.status().Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if res := wait(); res.code != exitError || !strings.Contains(res.stderr, "i/o timeout") || f.status().Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("chat continued after the signal: %+v", res)
 			}
 		})
@@ -258,21 +259,21 @@ func TestChatSignals(t *testing.T) {
 func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "last answer"}})
 	f.model.answer(1, 1, reply{text: `{"kind":"return","payload":"first answer"}`})
-	_, wait := f.startWith(strings.NewReader("first request\n"), nil, tuiCommand, "-session", "s")
+	_, wait := f.startWith(strings.NewReader("first request\n"), nil, tuiCommand)
 	if r := wait(); r.code != exitOK || r.stdout != "first answer\n" {
 		t.Fatalf("first chat: %+v", r)
 	}
 	held := f.model.holdRequests()
 	for i, input := range []string{"interrupted request\n", "interrupted again\n"} {
 		in, w := io.Pipe()
-		cmd, wait := f.startWith(in, nil, tuiCommand, "-session", "s")
+		cmd, wait := f.startWith(in, nil, tuiCommand)
 		io.WriteString(w, input)
 		waitFor(t, func() bool { return len(held) > 0 })
 		<-held
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
 			t.Fatal(err)
 		}
-		waitFor(t, func() bool { s := f.status(); return s.Run.SessionSeq == int64(i+2) && s.Phase == "stopped" })
+		waitFor(t, func() bool { s := f.status(); return s.Run.Ordinal == i+2 && s.Phase == "stopped" })
 		w.Close()
 		if r := wait(); r.code != exitStopped || !strings.Contains(r.stderr, "stopped: cancelled") {
 			t.Fatalf("interrupted chat %d: %+v", i+1, r)
@@ -282,7 +283,7 @@ func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 	f.model.mu.Lock()
 	f.model.hold = nil
 	f.model.mu.Unlock()
-	_, wait = f.startWith(strings.NewReader("last request\n"), nil, tuiCommand, "-session", "s")
+	_, wait = f.startWith(strings.NewReader("last request\n"), nil, tuiCommand)
 	if r := wait(); r.code != exitOK || r.stdout != "last answer\n" {
 		t.Fatalf("continued chat: %+v", r)
 	}
@@ -291,34 +292,29 @@ func TestChatKeepsTheDialogueAcrossInterrupts(t *testing.T) {
 		t.Fatalf("%d step 1 requests", len(p))
 	}
 	c := p[3]
-	if !strings.Contains(c, "## Goal\nlast request\n") || !strings.Contains(c, "Previous run: /canti/runs/") {
+	if !strings.Contains(c, "## Goal\nlast request\n") || !strings.Contains(c, "## Previous runs") {
 		t.Fatalf("last input lost task/navigation: %s", c)
 	}
-	// Resolve the session chain through published records after interrupted runs.
+	// Resolve the line chain through published records after interrupted runs.
 	id := f.status().Run.ID
 	for i, want := range []string{"last request", "interrupted again", "interrupted request", "first request"} {
 		root := filepath.Join(f.state, "history", id)
 		checkFile(t, filepath.Join(root, "goal"), want)
-		body, err := os.ReadFile(filepath.Join(root, "session"))
+		body, err := os.ReadFile(filepath.Join(root, "previous"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var meta struct {
-			Previous string `json:"previous_run_id"`
-		}
-		if err := json.Unmarshal(body, &meta); err != nil {
-			t.Fatal(err)
-		}
+		previous := strings.TrimSpace(string(body))
 		if i == 1 || i == 2 {
 			result, err := os.ReadFile(filepath.Join(root, "result"))
 			if err != nil || !strings.Contains(string(result), "reason: cancelled") {
 				t.Fatalf("lost cancellation evidence: %s, %v", result, err)
 			}
 		}
-		id = meta.Previous
+		id = previous
 	}
 	if id != "" {
-		t.Fatal("session chain did not end at first run")
+		t.Fatal("line chain did not end at the first run")
 	}
 
 }
