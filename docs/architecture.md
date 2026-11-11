@@ -39,11 +39,11 @@ is not.
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 6, with reported usage coverage, context anchors and focus outcomes), opaque run-bound cursors, side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 8, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, and opaque agent-log cursors), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
-| `apps/tui/internal/session`, `ui`, `pipe`, `present`, `terminal` | Session lifecycle and reconciliation, native editable drafts, pipe input, presentation of protocol projections, and bounded output | UI/session/transport tests; acceptance covers cancellation, retained drafts, archive navigation and output pressure |
+| `apps/tui/internal/chat`, `ui`, `pipe`, `present`, `terminal` | Chat lifecycle and reconciliation, native editable drafts, pipe input, presentation of protocol projections, and bounded output | UI/transport tests; acceptance covers steering, follow-ups, cancellation, held-input withdrawal, retained drafts, archive navigation and output pressure |
 
 The core imports only the standard library and holds no per-run state between
 calls. The journal uses `modernc.org/sqlite`, a cgo-free SQLite implementation. Model I/O, history, time, storage, and execution belong to the
@@ -125,14 +125,14 @@ let a new run adopt a previous run's job and records.
 `core.State` contains RunID, Step, Attempt, RequestRev, Phase, Limits, Decision,
 EffectID and Reason. It contains no physical owner or launch state. `NewState`
 starts at step/attempt 1; MaxSteps zero is unlimited, and MaxAttempts is positive.
-`Intent`, `Next` and `Validate` are pure. Semantics 5 is the only readable version.
+`Intent`, `Next` and `Validate` are pure. Semantics 8 is the only readable version. `State.Inputs` counts the principal instructions bound to a run and `State.Seen` those included in the current frozen request; `RequestFrozen` sets `Seen = Inputs`, and `InputsBound` advances `Inputs` to a prefix of the run's admitted steers. A bind may name fewer steers than are admitted when a concurrent steer arrived after the read; the rest bind at the next binding point, and a response cannot return while an admitted steer is unbound. A decodable decision from a request that did not include every bound instruction is superseded: it completes the step through `advance` with no effect and no return. Core validation requires `0 <= Seen <= Inputs`.
 
 | Phase | Intent | Legal events |
 | --- | --- | --- |
-| idle | prepare_request | RequestFrozen, StopRequested |
+| idle | prepare_request | RequestFrozen, InputsBound, StopRequested |
 | request_frozen | send_request | AttemptStarted, StopRequested |
 | request_sent | send_request | AttemptStarted, ResponseSaved, ResponseIncomplete, StopRequested |
-| response_saved | decode | ResponseLoaded, StopRequested |
+| response_saved | decode | ResponseLoaded, InputsBound, StopRequested |
 | effect_saved | effect | Observed, Performed, OutcomeUnknown, StopRequested |
 | cancelling | cancel | Observed, OutcomeUnknown, StopRequested |
 | needs_resolution | halt | EffectRecovered, Resolved, StopRequested |
@@ -186,7 +186,7 @@ physical owner for exited/timed-out assertions; it is never an inspected receipt
 
 ## Persistence and recovery
 
-SQLite schema 4 is current-only. A new empty database receives all tables and
+SQLite schema 5 is current-only. A new empty database receives all tables and
 indexes; other schema versions are refused without migration. State, event and
 fact readers are strict, including current semantics. WAL and synchronous=FULL
 retain the existing acknowledged-commit durability assumptions.
@@ -365,13 +365,22 @@ version, one whose effect's outcome is unknown, or one that needs a
 credential the host lacks, is left untouched, reported as not drivable with
 the reason, until a client acts on it.
 
-Readers follow a run through bounded progress pages, a projection of its
-committed transitions: one primary-key read of at most 64 rows that never
-selects a request, a response, or retrieved evidence, and that clips every
-text in SQL to its cap (a command or purpose 2 KiB, a returned result
-8 KiB, a preview 4 KiB, any other text 2 KiB), then cuts it at a rune
-boundary and marks the item `Truncated`. Every item therefore fits a page
-of 256 KiB, and `View` keeps the full result. A protocol answer is bounded
+Readers follow one total agent log, a projection of its committed transitions
+and admitted inputs: one page of at most 64 rows that never selects a request,
+a response, or retrieved evidence, and that clips every text in SQL to its cap
+(a command or purpose 2 KiB, a returned result 8 KiB, a preview 4 KiB, an input
+text 2 KiB, any other text 2 KiB), then cuts it at a rune boundary and marks the
+item `Truncated`. Every item therefore fits a page of 256 KiB, and `View` keeps
+the full result. Cursors are opaque agent-log positions; items carry the
+position and the run they belong to when they belong to one. Items report admitted principal inputs and
+observations, instruction bindings, run starts, superseded steps, and a
+withdrawal. A withdrawal is one agent-log fact at its own position: its
+transaction takes one position, records it as `withdrawn_pos` on every row it
+takes back, and projects one `withdrawn` item there naming up to 64 inputs by
+input ID or position, marked `Truncated` when more were taken back. `Wait`
+returns when the log passes the cursor, when no drive or operation owns work,
+or at shutdown; the journal, not the wake-up, decides. `View` reports pending
+steers, queued follow-ups, and held inputs beside the run. A protocol answer is bounded
 by the JSON its valid facts take at worst, six bytes per byte of a full
 result, goal, and constraints, plus 1 MiB (about 193 MiB); it is written
 without HTML escaping, and the client reads no further than that bound.
@@ -392,10 +401,18 @@ The stable prefix contains the exact current goal and constraints, environment,
 run and archive navigation, then compact completed-step receipts after the
 anchor. Each receipt names sequence, step, bounded purpose, status, exit code
 when present, and archive path. It contains no old full command, preview or
-retrieval body. One previous session run is linked through its `session` record;
-prior dialogue is retrieved explicitly. The replaceable tail contains selected
-focus evidence, execution position, the latest completed step and any protocol
-repair. A new receipt extends the prefix; focus, latest-result and repair changes
+retrieval body. The closed runs of the line render in the stable prefix, newest first, with
+their goal heads, outcomes, and archive paths; `history/<run>/previous` records
+the previous run ID, or nothing for a fresh run, and prior dialogue is retrieved
+explicitly. Bound principal instructions render verbatim at the position where
+they were bound, as `Instruction #k from the principal, received before step S`;
+after an anchor reset every bound instruction renders in order after the goal and
+constraints. The replaceable tail contains selected focus evidence, observations,
+execution position, the latest completed step and any protocol repair. An
+observation names a source and a subject, its latest position, a preview and
+its archive path; historical per-key counts are not rendered, because only the
+current state of a key is evidence under level semantics. An observation is
+never an instruction. A new receipt extends the prefix; focus, latest-result and repair changes
 affect only the tail. The latest result remains present throughout retries and
 protocol repair of that decision step. Reset removes its body while retaining
 navigation to its original record.
@@ -428,7 +445,18 @@ Acceptance, successful outcome, replacement ContextState and run progress are
 validated and committed atomically. Failed focus leaves the previous set intact.
 Unknown `canti:` names, including retired handover actions, fail locally.
 
-Each retrieval step publishes `evidence.json` plus `evidence/0000` and subsequent
+The input archive holds exactly what the agent was shown. A `RequestFrozen`
+transaction records `delivered_pos` on each input it renders for the first time;
+undelivered inputs stay in the journal and progress log and have no archive
+record. After that commit, the loop publishes exactly the rendered inputs,
+bounded by the request, under `/canti/inputs/<12-digit position>/`, without
+scanning the archive root or journal history. A record is an immutable
+projection of admission facts only: position, input ID, authority, delivery,
+source, subject, admitted time, and the run fixed at admission. Its directory
+is written under a temporary name, synced and renamed into place, never
+rewritten; a partial directory is replaced and stale temporaries for that input
+are removed. A native read of a missing record repairs it from the journal when
+`delivered_pos` is set and reports it absent otherwise. Each retrieval step publishes `evidence.json` plus `evidence/0000` and subsequent
 files containing exactly its observed bytes. A native read of a historical
 snapshot repairs missing derived files from the requested committed step before
 safe archive access, even after the original source has gone. The archive owns
@@ -658,8 +686,8 @@ bodies, and Docker's log of a running job are not counted. See
 
 Keep runtime, SDK, and TUI in their independent Go modules. V1 has one model protocol,
 one SQLite journal, and one queryable executor. Distributed scheduling,
-multi-tenant policy, generic workflow graphs, automatic planning, automatic
-memory compaction, and mid-run user input are outside the initial experiment;
-so are separate response IDs and input revisions, which stay derivable from
+multi-tenant policy, generic workflow graphs, automatic planning, and
+automatic memory compaction are outside the initial experiment; so are
+separate response IDs and input revisions, which stay derivable from
 the position identities above until a real consumer needs them. New run rules
 belong in `core.State.Next` with a transition-table test, not in the harness.

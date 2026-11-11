@@ -187,7 +187,7 @@ binds can share the environment. Put background-service output in separate log
 files and redirect stdin, stdout and stderr so command output can finish. Shell
 variables alone do not survive the next command.
 
-A return, session switch, or context reset leaves packages and services intact.
+A return or context reset leaves packages and services intact.
 `environment stop` ends foreground work and services; `environment start` retains
 the same filesystem with a new start epoch. Cancellation and job timeout also stop
 the whole environment, so explicitly start it before another command. Inspect the
@@ -280,28 +280,48 @@ job. `-token-budget` stops after the threshold of reported input plus output usa
 is reached. Unknown usage is retained as unknown; no counts are estimated.
 Status and TUI reports show coverage and lost attempts alongside reported totals.
 
-`run -input ID` names the submission: a later `run` with the same input ID,
-within its `-session` if one is given and otherwise among standalone inputs,
-names the same run instead of creating another, reporting it as it stands,
-and fails when the goal or the constraints differ. A run without `-input`
-always creates new work. Use the same ID to retry a submission whose outcome
-was lost.
+`run -input ID` names the input: a later `run` with the same input ID names
+the same input instead of admitting another, reporting its current disposition
+and run, and fails when the text, constraints, delivery, or freshness differ.
+An input without `-input` always creates new work. Use the same ID to retry a
+submission whose outcome was lost.
 
-`canti-tui` takes the flags of `run` except `-goal`, `-input`, and `-once`. Each
-accepted input becomes the next run of one serial session. `-session ID`
-continues a session; each new run uses the current launch flags. The log level
-defaults to `warn`.
+While the agent is working, a principal input must name `-delivery steer` to
+join the open run or `-delivery follow_up` to wait for its return. A steer is
+acknowledged, not driven: the printed acknowledgement names its input position
+and disposition. A follow-up opens after the current run returns, in the same
+state directory, and is driven by the host that holds its submission's
+credential or by a host credential for the run's pair. When the agent is
+quiescent, delivery is ignored and the input opens a run. Every input belongs
+to the state directory's one line; `-fresh` starts a new line, with no link to
+the previous run and no inherited constraints. A non-fresh input inherits the
+latest run's constraints unless `-constraints` is given.
+
+`run` accepts at most 32 KiB per steer and 32 KiB of bound steers per run;
+observations carry at most 16 KiB and name a source and subject of at most 256
+bytes. A new principal input is refused with `held` while a stopped run holds
+inputs; `canti withdraw` returns those texts, and they must be resubmitted.
+`canti observe -source S -subject K` admits evidence without touching a run;
+`canti cancel` cancels the latest or named run's current effect and leaves the
+run to continue.
+
+`canti-tui` takes the flags of `run` except `-goal`, `-input`, and `-once`. Its
+inputs and runs form the state directory's one line; `-fresh` applies to the
+first input of the invocation. Each new run uses the current launch flags. The
+log level defaults to `warn`.
 
 **Terminal input (TTY):** `canti-tui` uses a full-screen TUI on the alternate screen,
 rendered to standard error. There is currently no plain interactive terminal
 mode. Enter submits, Alt+Enter inserts a newline, and PgUp/PgDn scroll the
 retained display, including while submitting, running or stopping. Text and paste always edit the
-in-memory draft. Enter during an active run retains the draft and reports that
-send is unavailable. Completion enables manual sending; it never submits or
-replays a busy Enter. Alt+Enter continues to insert newlines while busy. A
-submitted snapshot is separate from newer edits: a rejected input can be restored
-with Ctrl+R into an empty draft. If acknowledgement remains unknown, Ctrl+R
-reconciles the same InputID while preserving the new draft.
+in-memory draft. Enter sends a new input when the agent is ready and submits the
+draft as a steer while a run is active; Ctrl+F submits it as a follow-up.
+Ctrl+X cancels the current effect and leaves the run continuing. Alt+Enter
+continues to insert newlines. A submitted snapshot is separate from newer
+edits: a rejected input can be restored with Ctrl+R into an empty draft. If
+acknowledgement remains unknown, Ctrl+R reconciles the same InputID while
+preserving the new draft. After a stop with held inputs, the footer notices
+them and Ctrl+R withdraws their texts into the draft.
 Ctrl+C stops the current run and waits for cleanup before returning to the
 editor; a second Ctrl+C abandons that cleanup wait, leaving recovery to
 `canti resume` or `canti stop`. Ctrl+C while idle exits.
@@ -311,13 +331,13 @@ viewport. Its typed progress queue retains at most 128 entries and 64 KiB; accep
 final outcome have separate bounded protocol slots. The transcript retains at
 most 256 entries and 64 KiB, with omission notices. Final outcome and recovery
 guidance survive progress eviction. Only text from this
-process invocation is displayed: reopening with `-session ID` does **not** load
-previous conversation or execution history. On exit, the retained transcript
+process invocation is displayed: a new invocation does **not** load previous
+conversation or execution history. On exit, the retained transcript
 is printed to standard error. The alternate screen and this bounded tail do
 not preserve a complete native terminal or tmux scrollback. Use `canti history`
 for a run's full recorded transitions. Display history is separate from the
-session context supplied to the model; the next input receives archive
-navigation to the previous run. Retrieve its dialogue explicitly.
+previous runs supplied to the model; the next request names the closed runs of
+the line and their archive paths. Retrieve earlier dialogue explicitly.
 
 **Host process.** Operational commands and `canti-tui` default to `-host auto`,
 which attaches to the shared host of the state directory and leaves it driving
@@ -345,8 +365,8 @@ PATH` selects the runtime executable; otherwise it finds `canti` on PATH.
 Before creating state it calls the runtime's versioned `preflight` interface,
 which validates configuration, layout, credentials, execution resource settings
 and context admission without writes. A live host binds validation to its own
-state/workspace and supplies inherited constraints. Empty SessionID validates a
-standalone submission with its supplied constraints. Validation reserves no
+state/workspace and supplies the constraints a non-fresh input inherits from
+the latest run, unless the submission states its own. Validation reserves no
 admission or input identity; Submit rechecks everything under the host lock.
 Preflight requires exactly one JSON request of at most 1 MiB. The client caps
 stdout at 1 MiB and stderr at 16 KiB, kills the process group on overflow or
@@ -478,11 +498,13 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 18. Schema 4, semantics 7, ephemeral executor
-record format 2, attached executor format 1 and host protocol 7 form one current contract. Unsupported
-formats and context versions are rejected; use a fresh state directory. No
-migration or old-run settlement path is supported. Same-version frozen bytes,
-provider bindings, accepted identities and results remain immutable.
+Each run stores current context version 19. Schema 5 keeps one agent log of
+transitions and admitted inputs, semantics 8 bounds and supersedes principal
+instructions, ephemeral executor record format 2, attached executor format 1 and
+host protocol 8 form one current contract. Unsupported formats and context
+versions are rejected; use a fresh state directory. No migration or old-run
+settlement path is supported. Same-version frozen bytes, provider bindings,
+accepted identities and results remain immutable.
 
 `canti status` and progress pages read only the journal. `canti inspect` performs
 one bounded non-starting physical inspection and reports its sample timestamp

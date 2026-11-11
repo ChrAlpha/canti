@@ -94,7 +94,7 @@ and must bump `core.SemanticsVersion`.
 The context version (`ContextVersion` in `runtime/internal/host/config.go`) names the
 rules that render and account for a request. Give the next one when, for the
 same committed facts, a rendered byte, a resource cap,
-the anchor or session navigation, or the evidence a request shows changes;
+the anchor or previous-run navigation, or the evidence a request shows changes;
 `TestContextVersionPinsItsRules` fails until it is recorded. A refactor that
 the frozen-request corpus proves byte-identical keeps the version, and a new
 version never rewrites frozen bytes.
