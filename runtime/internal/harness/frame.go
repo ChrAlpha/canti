@@ -18,15 +18,18 @@ type Frame struct {
 	RunID                                          string
 	Rejected                                       *Rejection
 	ContextState                                   *ContextState
-	Receipts                                       []StepReceipt
+	Steps                                          []StepRecord
+	Instructions                                   []Instruction
+	Handover                                       *HandoverNotice
+	Index                                          []StepReceipt
+	IndexTotal                                     int
 	Latest                                         *StepRecord
 	DecisionTool, RetrievalEnabled, ImportsEnabled bool
-	Instructions                                   []Instruction
 	Observations                                   []ObservationInput
 	Delivered                                      []Input
 	Previous                                       []PreviousRun
 	PreviousMore                                   int
-	Focused                                        []FocusedEvidence
+	PreviousUsage                                  *int64
 	capture                                        *ContextCapture
 	previousRun                                    string
 	preparation                                    string
@@ -47,9 +50,33 @@ type Instruction struct {
 // the decode error.
 type Rejection struct{ Error, Response string }
 
+// HandoverNotice is the carried handover resolved from its committed step
+// record: its reference and the exact text it recorded.
+type HandoverNotice struct {
+	Ref  HandoverRef
+	Text string
+}
+
 // Validate checks the minimum information needed to construct a model input
-// and that receipts account for every completed step since the anchor.
+// and that the resident steps account for every completed step since the
+// anchor.
 func (f Frame) Validate() error {
+	if err := f.validatePosition(); err != nil {
+		return err
+	}
+	if err := f.validateResident(); err != nil {
+		return err
+	}
+	if err := f.validateHandover(); err != nil {
+		return err
+	}
+	if err := f.validateIndex(); err != nil {
+		return err
+	}
+	return f.validateInputs()
+}
+
+func (f Frame) validatePosition() error {
 	if strings.TrimSpace(f.Goal) == "" || strings.TrimSpace(f.Environment) == "" || strings.TrimSpace(f.RunID) == "" {
 		return errors.New("harness: frame goal, environment and run ID are required")
 	}
@@ -62,6 +89,10 @@ func (f Frame) Validate() error {
 	if f.Rejected != nil && f.Attempt < 2 {
 		return errors.New("harness: repair requires a prior attempt")
 	}
+	return nil
+}
+
+func (f Frame) validateResident() error {
 	if f.ContextState == nil {
 		return errors.New("harness: frame context state is required")
 	}
@@ -69,19 +100,53 @@ func (f Frame) Validate() error {
 	if c.FirstStep < 1 || c.FirstStep > f.Step {
 		return errors.New("harness: invalid frame anchor")
 	}
-	if len(f.Receipts) != f.Step-c.FirstStep {
-		return fmt.Errorf("harness: missing receipts between anchor step %d and step %d", c.FirstStep, f.Step)
+	if len(f.Steps) != f.Step-c.FirstStep {
+		return fmt.Errorf("harness: missing resident steps between anchor step %d and step %d", c.FirstStep, f.Step)
 	}
-	for i, r := range f.Receipts {
+	for i, r := range f.Steps {
 		if r.Step != c.FirstStep+i || r.Seq <= c.AnchorSeq {
-			return errors.New("harness: invalid receipt identity or anchor boundary")
+			return errors.New("harness: invalid resident step identity or anchor boundary")
 		}
 	}
 	if f.Latest != nil && f.Latest.Step != f.Step-1 {
 		return errors.New("harness: latest result is not the previous completed step")
 	}
-	if err := f.validateInputs(); err != nil {
-		return err
+	return nil
+}
+
+func (f Frame) validateHandover() error {
+	c := f.contextState()
+	switch {
+	case c.Handover == nil && f.Handover != nil:
+		return errors.New("harness: a handover notice requires a carried reference")
+	case c.Handover == nil || c.Minimal:
+		return nil
+	case f.Handover == nil || !f.Handover.Ref.Equal(c.Handover):
+		return errors.New("harness: handover notice differs from the carried reference")
+	}
+	if err := (Handover{Text: f.Handover.Text}).Validate(); err != nil {
+		return fmt.Errorf("harness: carried handover: %w", err)
+	}
+	return nil
+}
+
+func (f Frame) validateIndex() error {
+	c := f.contextState()
+	if c.AnchorSeq == 0 && (len(f.Index) > 0 || f.IndexTotal != 0) {
+		return errors.New("harness: the initial head holds no index")
+	}
+	if c.Minimal && len(f.Index) > 0 {
+		return errors.New("harness: a minimal head reads no index")
+	}
+	last := 0
+	for _, r := range f.Index {
+		if r.Step <= last || r.Step >= c.FirstStep || r.Seq >= c.AnchorSeq || r.Step < 1 {
+			return errors.New("harness: invalid earlier-step entry")
+		}
+		last = r.Step
+	}
+	if f.IndexTotal < len(f.Index) || f.IndexTotal > 0 && len(f.Index) == 0 {
+		return fmt.Errorf("harness: invalid earlier-step total %d for %d entries", f.IndexTotal, len(f.Index))
 	}
 	return nil
 }

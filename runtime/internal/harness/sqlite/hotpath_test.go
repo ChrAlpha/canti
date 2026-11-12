@@ -185,6 +185,14 @@ var hotPlans = map[string]string{
 	"steerOrdinalSQL":       "4|0|50|SEARCH inputs USING INDEX inputs_disposition (disposition=? AND pos<?)\n",
 	"markWithdrawnSQL":      "4|0|33|SEARCH inputs USING INTEGER PRIMARY KEY (rowid=?)\n",
 	"withdrawnPositionSQL":  "2|0|33|SEARCH inputs USING INTEGER PRIMARY KEY (rowid=?)\n",
+	"priorRequestSQL":       "4|0|50|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq<?)\n",
+	"priorUsageSQL":         "5|0|49|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq>? AND seq<?)\n",
+	"acceptedInputSQL":      "4|0|50|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq<?)\n",
+	"lineRunsSQL":           "2|0|0|CO-ROUTINE line\n5|2|0|SETUP\n8|5|39|SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)\n29|2|0|RECURSIVE STEP\n31|29|216|SCAN l\n34|29|45|SEARCH r USING INTEGER PRIMARY KEY (rowid=?)\n47|0|206|SCAN line\n57|0|0|USE TEMP B-TREE FOR ORDER BY\n",
+	"latestHandoverSQL":     "5|0|61|SEARCH transitions USING INDEX transitions_performed (run_id=?)\n",
+	"rejectionSeqSQL":       "3|0|39|SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)\n",
+	"lineContainsSQL":       "2|0|0|CO-ROUTINE line\n5|2|0|SETUP\n8|5|39|SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)\n29|2|0|RECURSIVE STEP\n31|29|216|SCAN l\n34|29|45|SEARCH r USING INTEGER PRIMARY KEY (rowid=?)\n47|0|206|SCAN line\n",
+	"transitionBySeqSQL":    "3|0|39|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq=?)\n",
 }
 
 func hotQueries() []hotQuery {
@@ -222,6 +230,14 @@ func hotQueries() []hotQuery {
 		{name: "runOrdinalSQL", sql: runOrdinalSQL, args: []any{"run-1"}},
 		{name: "runPosSQL", sql: runPosSQL, args: []any{"run-1"}},
 		{name: "withdrawnPositionSQL", sql: withdrawnPositionSQL, args: []any{int64(1)}},
+		{name: "priorRequestSQL", sql: priorRequestSQL, args: []any{"run-1", int64(300)}},
+		{name: "priorUsageSQL", sql: priorUsageSQL, args: []any{"run-1", int64(0), int64(300)}},
+		{name: "acceptedInputSQL", sql: acceptedInputSQL, args: []any{"run-1", int64(300)}},
+		{name: "lineRunsSQL", sql: lineRunsSQL, args: []any{"run-4"}},
+		{name: "latestHandoverSQL", sql: latestHandoverSQL, args: []any{"run-1"}},
+		{name: "rejectionSeqSQL", sql: rejectionSeqSQL, args: []any{"run-1"}},
+		{name: "lineContainsSQL", sql: lineContainsSQL, args: []any{"run-4", "run-1"}},
+		{name: "transitionBySeqSQL", sql: transitionBySeqSQL, args: []any{"run-1", int64(1)}},
 	}
 }
 

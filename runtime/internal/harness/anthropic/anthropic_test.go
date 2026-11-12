@@ -226,7 +226,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		if c, want := bytes.Count(req.Body, []byte("cache_control")), min(2, p.Stable); c != want {
 			t.Errorf("step %d: %d cache breakpoints, want %d", n, c, want)
 		}
-		f.Receipts = append(f.Receipts, harness.StepReceipt{Seq: int64(n * 5), Step: n, Status: "exited"})
+		f.Steps = append(f.Steps, harness.StepRecord{Seq: int64(n * 5), Step: n, Command: "true", Observation: harness.Observation{Execution: core.ExecutionExited, Preview: "ok"}})
 	}
 }
 

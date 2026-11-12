@@ -1,0 +1,108 @@
+{
+  "validate": {
+    "state": "/state",
+    "submission": {
+      "goal": "chat",
+      "constraints": "",
+      "explicit_constraints": false,
+      "spec": {
+        "ephemeral": false,
+        "environment": "",
+        "environment_workdir": "",
+        "workspace": "",
+        "image": "",
+        "network": "",
+        "memory": "",
+        "cpus": "",
+        "pids": 0,
+        "output_limit": 0,
+        "api": "",
+        "model": "",
+        "max_tokens": 0,
+        "effort": "",
+        "structured": false,
+        "decision_format": "",
+        "fallbacks": false,
+        "request_bytes": 0,
+        "context_version": 0,
+        "history_imports": "",
+        "max_steps": 0,
+        "max_attempts": 0,
+        "wall_time": "",
+        "token_budget": 0,
+        "output_budget": 0,
+        "job_timeout": ""
+      }
+    },
+    "binding": {
+      "provider": "https://p.test"
+    }
+  },
+  "protocol": 9,
+  "op": "submit",
+  "run_id": "run_1",
+  "cursor": "pos:5",
+  "submit": {
+    "input_id": "in_1",
+    "goal": "g",
+    "constraints": "c",
+    "explicit_constraints": true,
+    "delivery": "steer",
+    "fresh": true,
+    "spec": {
+      "ephemeral": true,
+      "environment": "/environment",
+      "environment_workdir": "/workspace/subdir",
+      "workspace": "/w",
+      "image": "debian:bookworm-slim",
+      "network": "none",
+      "memory": "2g",
+      "cpus": "1",
+      "pids": 512,
+      "output_limit": 8388608,
+      "api": "anthropic-messages",
+      "model": "m",
+      "max_tokens": 1000,
+      "effort": "low",
+      "structured": true,
+      "decision_format": "tool",
+      "fallbacks": true,
+      "request_bytes": 262144,
+      "context_version": 13,
+      "history_imports": "/i",
+      "max_steps": 20,
+      "max_attempts": 3,
+      "wall_time": "30m0s",
+      "token_budget": 7,
+      "output_budget": 8,
+      "job_timeout": "10m0s"
+    }
+  },
+  "binding": {
+    "provider": "https://p.test",
+    "fallback": "https://f.test",
+    "anthropic_key": "test-key-1",
+    "anthropic_token": "test-key-2",
+    "openai_key": "test-key-3"
+  },
+  "observe": {
+    "input_id": "obs_1",
+    "source": "ci",
+    "subject": "build",
+    "text": "green"
+  },
+  "withdraw": {
+    "input_id": "in_1"
+  },
+  "once": true,
+  "limit": 6,
+  "timeout_ms": 7,
+  "cleanup_ms": 8,
+  "resolve": {
+    "job": true,
+    "execution": "exited",
+    "exit_code": 3,
+    "note": "n",
+    "owner_id": "owner_1"
+  }
+}

@@ -502,7 +502,7 @@ func localSteps(h []entry) []entry {
 
 func TestGateCrashAtLocalActionCommits(t *testing.T) {
 	list := core.Decision{Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`}
-	handover := core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`}
+	handover := core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "phase one"}
 	count := core.Decision{Kind: core.Exec, Payload: "echo x >> count; echo one"}
 	done := core.Decision{Kind: core.Return, Payload: "done"}
 	local := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded", "performed"}
@@ -514,7 +514,7 @@ func TestGateCrashAtLocalActionCommits(t *testing.T) {
 		kinds  []string
 	}{
 		{"retrieval", map[int]core.Decision{1: list, 2: done}, nil, slices.Concat(local, stepKinds[:4]), []string{"response_loaded", "performed"}},
-		{"focus", map[int]core.Decision{1: count, 2: handover, 3: done}, nil,
+		{"handover", map[int]core.Decision{1: count, 2: handover, 3: done}, nil,
 			slices.Concat(stepKinds, local, stepKinds[:4]), []string{"performed"}},
 	} {
 		for _, kind := range tc.kinds {
@@ -544,12 +544,13 @@ func TestGateCrashAtLocalActionCommits(t *testing.T) {
 					if len(performed) != 1 || performed[0].Facts.Outcome == nil || performed[0].Facts.Outcome.Status != harness.OutcomeDone {
 						t.Fatalf("performed %+v, want one done local action", performed)
 					}
-					if tc.name == "focus" {
-						if w := performed[0].Facts.ContextState; w == nil || w.FirstStep != 1 || len(w.Focus) != 0 {
-							t.Fatalf("the handover committed the window %+v", w)
+					if tc.name == "handover" {
+						w := performed[0].Facts.ContextState
+						if w == nil || w.AnchorSeq != performed[0].Seq || w.FirstStep != 3 || w.Handover == nil || w.Handover.Seq != performed[0].Seq || w.Handover.Step != 2 {
+							t.Fatalf("the handover committed the head %+v", w)
 						}
 						if last := h[len(h)-4]; last.Facts.Request == nil || last.Facts.Request.ContextState == nil || !last.Facts.Request.ContextState.Equal(*performed[0].Facts.ContextState) {
-							t.Fatalf("the next request renders %+v, not the committed window", last.Facts.Request)
+							t.Fatalf("the next request renders %+v, not the committed head", last.Facts.Request)
 						}
 					}
 					if requests := f.model.requests(); len(requests) != len(tc.script) {
@@ -569,7 +570,7 @@ func TestGateColdRestartAcrossLocalActions(t *testing.T) {
 	script := map[int]core.Decision{
 		1: {Kind: core.Exec, Payload: "echo x >> count; wc -l < count"},
 		2: {Kind: core.Exec, Payload: `canti:retrieve {"operation":"list","path":"/canti/runs","reason":"look"}`},
-		3: {Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`},
+		3: {Kind: core.Exec, Payload: harness.HandoverPrefix + "phase one"},
 		4: {Kind: core.Return, Payload: "done"},
 	}
 	flags := []string{"-goal", "count"}

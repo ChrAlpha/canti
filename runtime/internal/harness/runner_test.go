@@ -459,7 +459,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 		t.Fatal(err)
 	}
 	performed := Snapshot{Seq: 4, State: effect}
-	done := &Outcome{Status: OutcomeDone, Focus: &FocusSelection{}}
+	done := &Outcome{Status: OutcomeDone, Handover: &Handover{Text: "next"}}
 	bad := []struct {
 		name  string
 		snap  Snapshot

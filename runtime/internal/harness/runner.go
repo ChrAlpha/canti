@@ -210,8 +210,8 @@ func (f Facts) checkPerformed() error {
 	if err := f.Outcome.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrFacts, err)
 	}
-	if (f.ContextState != nil) != (f.Outcome.Focus != nil) {
-		return fmt.Errorf("%w: focus outcome and context commit together", ErrFacts)
+	if (f.ContextState != nil) != (f.Outcome.Handover != nil) {
+		return fmt.Errorf("%w: a handover outcome and its context commit together", ErrFacts)
 	}
 	return nil
 }
@@ -224,7 +224,7 @@ func (f Facts) checkObservation(execution core.ExecutionState) error {
 		return fmt.Errorf("%w: observation %q does not match event %q", ErrFacts, f.Observation.Execution, execution)
 	}
 	if f.Observation.Retrieval != nil {
-		return fmt.Errorf("%w: an observation holds no retrieval or focus; a performed outcome does", ErrFacts)
+		return fmt.Errorf("%w: an observation holds no retrieval or handover; a performed outcome does", ErrFacts)
 	}
 	return nil
 }

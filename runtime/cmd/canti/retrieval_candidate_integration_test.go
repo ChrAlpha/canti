@@ -97,19 +97,17 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			}
 		}
 		nextCall = 2
-		act(harness.FocusPrefix + `{"sources":[]}`)
-		if latestOutcome(t, f.history()).Focus == nil {
+		act(harness.HandoverPrefix + "checkpoint phase closed")
+		if latestOutcome(t, f.history()).Handover == nil {
 			t.Fatal("handover was not committed")
 		}
 	}
-	var latestHandles []sourceHandle
 	query := func(q archive.RetrievalQuery) archive.Retrieval {
 		t.Helper()
 		body, _ := json.Marshal(q)
 		act("canti:retrieve " + string(body))
 		history := f.history()
 		o := latestOutcome(t, history)
-		latestHandles = sourceHandles(t, history)
 		if o.Retrieval == nil || o.Retrieval.Error != "" {
 			t.Fatalf("retrieval failed: %+v", o)
 		}
@@ -180,26 +178,18 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 			t.Fatalf("missing original candidates: %v", found)
 		}
 		fresh := f.model.prompts(first)
-		if len(fresh) != 1 || strings.Contains(fresh[0], correction) || strings.Contains(fresh[0], draft) {
+		if len(fresh) == 0 || strings.Contains(fresh[0], correction) || strings.Contains(fresh[0], draft) {
 			t.Fatal("fresh window already contained prior decisions")
 		}
-		var selected []sourceHandle
 		for _, name := range []string{"draft", "approval"} {
 			query(archive.RetrievalQuery{Operation: "read", Path: paths[name], Reason: "inspect full decision and possible amendment", Limit: 4096})
-			selected = append(selected, latestHandles...)
 		}
-		focus, _ := json.Marshal(struct {
-			Sources []sourceHandle `json:"sources"`
-		}{selected})
-		act(harness.FocusPrefix + string(focus))
 		checkStep := step
 		if window == 0 {
-			// Keep all eight original work steps plus the explicit focus step.
 			handover(first + 1)
 		} else {
-			act("printf 'wait=47 retry=5\\n' > settings")
+			act("printf 'wait=47 retry=5\n' > settings")
 		}
-		checkSelectedRequest(t, f, checkStep, selected)
 		coverage := archiveText(t, f, fmt.Sprintf("/canti/runs/%s/steps/%08d/preview", run, coverageStep))
 		if !strings.Contains(coverage, `"incomplete":true`) || !strings.Contains(coverage, `"skipped_count":1`) {
 			t.Fatalf("committed binary/discovery coverage lost: %s", coverage)
@@ -215,8 +205,8 @@ func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 	if err != nil || string(settings) != "wait=47 retry=5\n" || f.status().Phase != core.PhaseReturned {
 		t.Fatalf("task result: %q %v", settings, err)
 	}
-	if status := f.status(); calls != 4 || len(f.model.requests()) != 28 || status.Step != 26 || status.Totals.Steps != 25 {
-		t.Fatalf("explicit-focus choreography counts: discover=%d requests=%d status=%+v", calls, len(f.model.requests()), status)
+	if status := f.status(); calls != 4 || len(f.model.requests()) != 27 || status.Step != 25 || status.Totals.Steps != 24 {
+		t.Fatalf("residency choreography counts: discover=%d requests=%d status=%+v", calls, len(f.model.requests()), status)
 	}
 	frozenBytes := 0
 	for _, e := range f.history() {

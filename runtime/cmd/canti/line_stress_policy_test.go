@@ -18,11 +18,11 @@ var (
 	stressRun        = regexp.MustCompile(`Run (run_[a-f0-9]+); anchor sequence`)
 	stressNavigation = regexp.MustCompile(`(?m)^- (run_[a-f0-9]+):`)
 	stressOrigin     = regexp.MustCompile(`origin=(/canti/runs/run_[a-f0-9]+/steps/00000001/preview)`)
-	stressLatest     = regexp.MustCompile(`Latest completed step (\d+), sequence (\d+);`)
 )
 
-// The policy learns history only through the native reader. Reset deliberately
-// discards its selection; the next read and focus explicitly restore evidence.
+// The policy learns history only through the native reader. Each phase closes
+// with a handover, and a provider rejection keeps the latest handover and an
+// index of the steps since it.
 func lineStressDecision(step int, prompt string) (core.Decision, error) {
 	bad := func(format string, args ...any) (core.Decision, error) {
 		return core.Decision{}, fmt.Errorf(format, args...)
@@ -71,15 +71,23 @@ func lineStressDecision(step int, prompt string) (core.Decision, error) {
 			return read(root + "/goal"), nil
 		}
 		return read("/canti/runs/" + previous + "/result"), nil
-	case 3, 5, 9:
-		latest := stressLatest.FindStringSubmatch(prompt)
-		if len(latest) == 0 || latest[1] != strconv.Itoa(step-1) {
-			return bad("missing preceding retrieval at step %d", step)
+	case 3:
+		if !strings.Contains(prompt, "### Step 2\n") {
+			return bad("the preceding retrieval left the resident epoch at step 3")
 		}
-		if round > 1 && !strings.Contains(prompt, fmt.Sprintf("completed run=%02d ", round-1)) {
-			return bad("prior result body missing at step %d", step)
+		return read(root + "/goal"), nil
+	case 5, 9:
+		if !strings.Contains(prompt, fmt.Sprintf("### Step %d\n", step-1)) {
+			return bad("the preceding retrieval left the resident epoch at step %d", step)
 		}
-		return core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:focus {"sources":[{"seq":%s,"source":0}]}`, latest[2])}, nil
+		marker := ""
+		if round > 1 {
+			marker = fmt.Sprintf(" completed run=%02d", round-1)
+			if !strings.Contains(prompt, fmt.Sprintf("completed run=%02d", round-1)) {
+				return bad("prior result body missing at step %d", step)
+			}
+		}
+		return core.Decision{Kind: core.Exec, Payload: fmt.Sprintf("canti:handover origin=%s%s stage=%d", origin, marker, step)}, nil
 	case 7:
 		return read(root + "/previous"), nil
 	case 10:

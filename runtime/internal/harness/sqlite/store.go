@@ -32,13 +32,14 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const (
-	journalModeSQL      = `PRAGMA journal_mode`
-	userVersionCheckSQL = `PRAGMA user_version`
-	schemaObjectsSQL    = `SELECT count(*) FROM sqlite_schema`
-	contextSeqUpdateSQL = `UPDATE runs SET context_seq=? WHERE id=?`
+	journalModeSQL        = `PRAGMA journal_mode`
+	userVersionCheckSQL   = `PRAGMA user_version`
+	schemaObjectsSQL      = `SELECT count(*) FROM sqlite_schema`
+	contextSeqUpdateSQL   = `UPDATE runs SET context_seq=? WHERE id=?`
+	rejectionSeqUpdateSQL = `UPDATE runs SET rejection_seq=? WHERE id=?`
 )
 
 var userVersionSQL = fmt.Sprintf("PRAGMA user_version = %d;", schemaVersion)
@@ -64,6 +65,7 @@ CREATE TABLE runs (
 	output_bytes INTEGER NOT NULL DEFAULT 0,
 	steps INTEGER NOT NULL DEFAULT 0,
 	context_seq INTEGER NOT NULL DEFAULT 0,
+	rejection_seq INTEGER NOT NULL DEFAULT 0,
 	usage_attempts INTEGER NOT NULL DEFAULT 0,
 	input_reports INTEGER NOT NULL DEFAULT 0,
 	output_reports INTEGER NOT NULL DEFAULT 0,
@@ -169,18 +171,39 @@ const (
 	savedSQL      = `SELECT seq FROM transitions WHERE run_id = ? AND kind = 'response_saved' AND step = ? AND attempt = ?`
 	acceptedSQL   = `SELECT kind, semantics, json_extract(to_state, '$.Phase'), json_extract(facts, '$.Action'), json_extract(facts, '$.Execution')
 		FROM transitions WHERE run_id = ? AND seq = ?`
+	// rejectionSeqSQL reads the sequence of the confirmed provider rejection
+	// that opened the run's current head lineage, zero before its first. A
+	// terminal or attempt-exhausted rejection opens no head and does not move
+	// it.
+	rejectionSeqSQL = `SELECT rejection_seq FROM runs WHERE id = ?`
 	// headSQL is latestSQL without the decision payload, which SQLite drops
 	// before the state crosses the SQL boundary.
 	headSQL = `SELECT seq, kind, semantics, json_remove(to_state, '$.Decision.payload') FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
+	// priorRequestSQL reads the sequence of the previous frozen request of a
+	// run, zero before its first. The scan is bounded by the transitions of
+	// the current and previous step.
+	priorRequestSQL = `SELECT COALESCE(max(seq), 0) FROM transitions WHERE run_id = ?1 AND kind = 'request_frozen' AND seq < ?2`
+	// priorUsageSQL reads the last settled attempt of that request, whose
+	// usage the execution position reports; it never reaches past it.
+	priorUsageSQL = `SELECT json_extract(facts,'$.Response.Usage.InputTokens'), json_extract(facts,'$.Response.Usage.InputReported')
+		FROM transitions WHERE run_id = ?1 AND seq > ?2 AND seq < ?3
+		AND kind IN ('response_saved','response_incomplete','request_rejected')
+		ORDER BY seq DESC LIMIT 1`
+	// acceptedInputSQL aggregates the largest reported input usage of the
+	// run's complete, accepted responses before a rejection.
+	acceptedInputSQL = `SELECT COALESCE(max(CASE WHEN json_extract(facts,'$.Response.Usage.InputReported') THEN CAST(json_extract(facts,'$.Response.Usage.InputTokens') AS INTEGER) END), 0),
+		COALESCE(max(CASE WHEN json_extract(facts,'$.Response.Usage.InputReported') THEN 1 ELSE 0 END), 0)
+		FROM transitions WHERE run_id = ?1 AND kind = 'response_saved' AND seq < ?2`
 )
 
 var queries = []string{
 	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 	stepsSQL, completionSQL, savedSQL, acceptedSQL, progressSQL, logWithdrawalsSQL,
-	contextSeqSQL, contextHeadSQL, receiptSQL, agentPosSQL, bumpPosSQL,
+	contextSeqSQL, contextHeadSQL, rejectionSeqSQL, receiptSQL, agentPosSQL, bumpPosSQL,
 	lastPosSQL, steerCountSQL, steersSQL, boundsSQL, observationsSQL,
 	previousIDsSQL, previousCountSQL, queuedSQL, queuedCountSQL,
+	priorRequestSQL, priorUsageSQL, acceptedInputSQL, lineRunsSQL, latestHandoverSQL, lineContainsSQL, transitionBySeqSQL,
 	inputByClientSQL, inputByPositionSQL, inputAtSQL, inputsAtSQL, deliveredSQL, observationKeySQL, steerBytesSQL, insertInputSQL, latestRunsSQL,
 }
 
@@ -362,6 +385,9 @@ func encodeRun(run harness.Run, initial core.State) (string, string, error) {
 	if run.InputPos < 0 {
 		return "", "", fmt.Errorf("sqlite: run %q has a negative input position", run.ID)
 	}
+	if len(run.ID) > harness.MaxRunIDBytes {
+		return "", "", fmt.Errorf("sqlite: run ID exceeds %d bytes", harness.MaxRunIDBytes)
+	}
 	for _, text := range []string{run.ID, run.Goal, run.Constraints, run.InputID} {
 		if !utf8.ValidString(text) {
 			return "", "", fmt.Errorf("sqlite: run %q holds invalid UTF-8", run.ID)
@@ -451,6 +477,14 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 	}
 	if t.Facts.ContextState != nil {
 		if _, err := tx.ExecContext(ctx, contextSeqUpdateSQL, t.Seq, r.run); err != nil {
+			return err
+		}
+	}
+	// Only a rejection that opens a context head moves the run's rejection
+	// pointer: a terminal or attempt-exhausted rejection opens no head, so the
+	// head it leaves behind still carries the older rejection and its usage.
+	if rejection := t.Facts.Rejection; rejection != nil && rejection.Signal.Confirmed() && t.Facts.ContextState != nil {
+		if _, err := tx.ExecContext(ctx, rejectionSeqUpdateSQL, t.Seq, r.run); err != nil {
 			return err
 		}
 	}

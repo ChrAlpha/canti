@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -23,21 +22,19 @@ import (
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
-// The joint tests drive a carry through the host process: a retrieval of an
-// imported file, a required handover that carries the retrieved range into
-// the next window, and a return.
+// The joint tests drive a handover through the host process: a retrieval of
+// an imported file, a handover that closes the phase, and a return.
 
 const jointNotes = "The parser was rewritten in v2.\nfunc parse is the entry point.\n"
 
 var jointScript = map[int]core.Decision{
 	1: {Kind: core.Exec, Purpose: "read", Payload: `canti:retrieve {"operation":"read","path":"/canti/imports/notes","reason":"Read the notes."}`},
-	2: {Kind: core.Exec, Purpose: "carry", Payload: `canti:focus {"sources":[{"seq":5,"source":0}]}`},
+	2: {Kind: core.Exec, Purpose: "handover", Payload: "canti:handover retrieved the notes; next answer"},
 	3: {Kind: core.Return, Payload: "done"},
 }
 
-// jointFixture is a fixture of the carry script whose imports directory
-// holds the notes, with the run flags that require a handover after every
-// step and import that directory.
+// jointFixture is a fixture of the handover script whose imports directory
+// holds the notes.
 func jointFixture(t *testing.T) (f *fixture, notes string, flags []string) {
 	t.Helper()
 	f = newFixture(t, jointScript)
@@ -49,13 +46,13 @@ func jointFixture(t *testing.T) (f *fixture, notes string, flags []string) {
 	return f, notes, []string{"-history-imports", dir}
 }
 
-// carryOf returns the transition of h that performed the carry, which it
-// requires to be the only one, and the request that followed it.
-func carryOf(t *testing.T, h []entry) (performed, next entry) {
+// handoverOf returns the transition of h that performed the handover, which
+// it requires to be the only one, and the request that followed it.
+func handoverOf(t *testing.T, h []entry) (performed, next entry) {
 	t.Helper()
 	n := 0
 	for i, e := range h {
-		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
+		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Handover != nil {
 			performed, n = e, n+1
 			for _, later := range h[i+1:] {
 				if later.Kind == "request_frozen" {
@@ -66,47 +63,47 @@ func carryOf(t *testing.T, h []entry) (performed, next entry) {
 		}
 	}
 	if n != 1 || next.Facts.Request == nil {
-		t.Fatalf("%d carry transitions, and the request after the carry %v; history %q", n, next.Facts.Request != nil, kinds(h))
+		t.Fatalf("%d handover transitions, and the request after the handover %v; history %q", n, next.Facts.Request != nil, kinds(h))
 	}
 	return performed, next
 }
 
-// carryFacts is the outcome and window that carry committed, and the bytes
-// the carry took in the request after it, with the run's ID replaced, so
-// that carries of two runs compare.
-func carryFacts(t *testing.T, carry, next entry) string {
+// handoverFacts is the outcome and head that the handover committed, and the
+// bytes its section took in the request after it, with the run's ID replaced,
+// so that handovers of two runs compare.
+func handoverFacts(t *testing.T, performed, next entry) string {
 	t.Helper()
 	b, err := json.Marshal(struct {
-		Outcome *harness.Outcome
-		Window  *harness.ContextState
-		Carry   int
-	}{carry.Facts.Outcome, carry.Facts.ContextState, next.Facts.Request.Context.Bytes.Focus})
+		Outcome  *harness.Outcome
+		Head     *harness.ContextState
+		Handover int
+	}{performed.Facts.Outcome, performed.Facts.ContextState, next.Facts.Request.Context.Bytes.Handover})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.ReplaceAll(string(b), carry.State.RunID, "RUN")
+	return strings.ReplaceAll(string(b), performed.State.RunID, "RUN")
 }
 
-// controlCarry is the carry facts of an uninterrupted run of the carry
-// script, embedded.
-func controlCarry(t *testing.T) string {
+// controlHandover is the handover facts of an uninterrupted run of the
+// handover script, embedded.
+func controlHandover(t *testing.T) string {
 	t.Helper()
 	f, _, flags := jointFixture(t)
 	if r := f.cli(nil, "run", append([]string{"-host", "embedded", "-goal", "g"}, flags...)...); r.code != exitOK || r.stdout != "done\n" {
 		t.Fatalf("control run: %+v", r)
 	}
-	carry, next := carryOf(t, f.history())
-	return carryFacts(t, carry, next)
+	performed, next := handoverOf(t, f.history())
+	return handoverFacts(t, performed, next)
 }
 
-// TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat requires that a
-// follower of a carry run through the host process that reads part of its
+// TestJointHandoverIsFollowedAcrossADetachWithoutGapOrRepeat requires that a
+// follower of a handover run through the host process that reads part of its
 // progress, loses its client, and reads on from its cursor sees exactly the
 // items a fresh read from the start shows, among them one decided item with
-// the protocol word of the carry action and one completed carry with its
+// the protocol word of the handover action and one completed handover with
 // window, and that a retry of the same input then names the same run without
 // a difference and commits nothing.
-func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
+func TestJointHandoverIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	f, _, flags := jointFixture(t)
 	f.autoHost()
 	reached, release := make(chan struct{}), make(chan struct{})
@@ -123,7 +120,7 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	select {
 	case <-reached:
 	case <-time.After(30 * time.Second):
-		t.Fatal("the carry's request never came")
+		t.Fatal("the handover's request never came")
 	}
 	ctx := context.Background()
 	c := &hostrpc.Client{Path: f.socket()}
@@ -155,7 +152,7 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	}
 	carries := 0
 	for _, it := range all {
-		if it.Kind == "completed" && it.Local && it.Outcome != nil && it.Outcome.Focus && it.Outcome.FocusSources == 1 {
+		if it.Kind == "completed" && it.Local && it.Outcome != nil && it.Outcome.HandoverBytes == len("retrieved the notes; next answer") {
 			carries++
 		}
 	}
@@ -165,31 +162,29 @@ func TestJointCarryIsFollowedAcrossADetachWithoutGapOrRepeat(t *testing.T) {
 	}
 	words := 0
 	for _, it := range resp.Page.Items {
-		if it.Kind == "decided" && it.Action == "focus" {
+		if it.Kind == "decided" && it.Action == "handover" {
 			words++
 		}
 	}
 	if carries != 1 || words != 1 {
-		t.Fatalf("%d completed carries and %d decided items with the carry word", carries, words)
+		t.Fatalf("%d completed handovers and %d decided items with the handover word", carries, words)
 	}
 	rows := len(f.history())
 	if r := f.cli(nil, "run", args...); r.code != exitOK || r.stdout != "done\n" || strings.Contains(r.stderr, "differs") || len(f.history()) != rows {
 		t.Fatalf("a retry of the input: %+v, rows %d -> %d", r, rows, len(f.history()))
 	}
-	carryOf(t, f.history())
+	handoverOf(t, f.history())
 }
 
-// TestJointACarryInterruptedAtItsCommitIsPerformedOnce requires that a carry
-// whose commit a host shutdown interrupts, before it lands or after it
-// landed with its acknowledgement lost, or whose host is killed right
+// TestJointAHandoverInterruptedAtItsCommitIsPerformedOnce requires that a
+// handover whose commit a host shutdown interrupts, before it lands or after
+// it landed with its acknowledgement lost, or whose host is killed right
 // before or right after it commits, is performed exactly once after the next
-// host resumes the run, with the outcome, window, and carried bytes of an
-// uninterrupted run, although the imported source was rewritten in between:
-// the carry is re-performed from the committed retrieval by point reads,
-// never by reading the source again. A shutdown commits nothing of its own
-// and nothing after it.
-func TestJointACarryInterruptedAtItsCommitIsPerformedOnce(t *testing.T) {
-	want := controlCarry(t)
+// host resumes the run, with the outcome, head, and handover bytes of an
+// uninterrupted run. A shutdown commits nothing of its own and nothing after
+// it.
+func TestJointAHandoverInterruptedAtItsCommitIsPerformedOnce(t *testing.T) {
+	want := controlHandover(t)
 	for _, tc := range []struct {
 		name, crash string
 		shutdown    bool
@@ -210,12 +205,12 @@ func TestJointACarryInterruptedAtItsCommitIsPerformedOnce(t *testing.T) {
 				held := f.history()
 				landed := 0
 				for _, e := range held {
-					if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
+					if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Handover != nil {
 						landed++
 					}
 				}
 				if want := map[bool]int{true: 1, false: 0}[strings.HasPrefix(tc.crash, "lose:")]; landed != want {
-					t.Fatalf("%d carry rows while the commit is held, want %d", landed, want)
+					t.Fatalf("%d handover rows while the commit is held, want %d", landed, want)
 				}
 				if r := f.cli(nil, "host", "-stop"); r.code != exitOK {
 					t.Fatalf("host -stop: %+v", r)
@@ -241,9 +236,9 @@ func TestJointACarryInterruptedAtItsCommitIsPerformedOnce(t *testing.T) {
 					t.Fatalf("a stop was committed: %q", kinds(h))
 				}
 			}
-			carry, next := carryOf(t, h)
-			if got := carryFacts(t, carry, next); got != want {
-				t.Fatalf("the carry committed\n%s\nwant, as an uninterrupted run,\n%s", got, want)
+			performed, next := handoverOf(t, h)
+			if got := handoverFacts(t, performed, next); got != want {
+				t.Fatalf("the handover committed\n%s\nwant, as an uninterrupted run,\n%s", got, want)
 			}
 		})
 	}
@@ -267,7 +262,7 @@ func (l smallSendBufferListener) Accept() (net.Conn, error) {
 }
 
 // TestJointAFollowerThatStopsReadingDelaysNoOtherClient requires that a
-// follower that sends a full progress request for a page of carry rows larger
+// follower that sends a full progress request for a page of handover rows larger
 // than a connection buffers, and then reads nothing, keeps no other client of
 // the host waiting: another client is answered, and the run, driven
 // on meanwhile, ends before the host's write timeout of 10 seconds passes.
@@ -302,7 +297,7 @@ func TestJointAFollowerThatStopsReadingDelaysNoOtherClient(t *testing.T) {
 				Payload: `canti:retrieve {"operation":"read","path":"/canti/imports/notes","reason":"` + backslashes + `"}`}, nil
 		default:
 			return core.Decision{Kind: core.Exec, Purpose: purpose,
-				Payload: fmt.Sprintf(`canti:focus %s{"sources":[{"seq":%d,"source":0}]}`, strings.Repeat(" ", sqlite.ProgressCommandBytes), 5*(step-1))}, nil
+				Payload: "canti:handover " + backslashes}, nil
 		}
 	})
 	_, wait := f.start(nil, "run", append([]string{"-host", "auto", "-goal", "g", "-max-steps", strconv.Itoa(last)}, flags...)...)
@@ -357,12 +352,12 @@ func TestJointAFollowerThatStopsReadingDelaysNoOtherClient(t *testing.T) {
 	}
 	carries := 0
 	for _, it := range fresh.Page.Items {
-		if it.Kind == "completed" && it.Outcome != nil && it.Outcome.Focus && it.Outcome.FocusSources > 0 {
+		if it.Kind == "completed" && it.Outcome != nil && it.Outcome.HandoverBytes > 0 {
 			carries++
 		}
 	}
 	if !fresh.Page.More || carries == 0 {
-		t.Fatalf("the page holds %d carries and more %v: it is no full page of carry rows", carries, fresh.Page.More)
+		t.Fatalf("the page holds %d handovers and more %v: it is no full page of handover rows", carries, fresh.Page.More)
 	}
 	again, err := (&hostrpc.Client{Path: f.socket()}).Call(ctx, hostrpc.Request{Op: hostrpc.OpProgress, Cursor: from})
 	if err != nil || !reflect.DeepEqual(again.Page, fresh.Page) {

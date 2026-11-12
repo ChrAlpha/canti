@@ -22,10 +22,12 @@ import (
 var updateRequests = flag.Bool("update-requests", false, "rewrite testdata/frozen-requests from the records the scenarios commit")
 
 const (
-	corpusRun     = "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31"
-	corpusNextRun = "run_c84e1b9f0a2d4c7e8b3f6a1d5e9c2b70"
-	corpusSteps   = "/canti/runs/" + corpusRun + "/steps"
-	corpusListing = `printf 'alpha\nbeta\ngamma\n'`
+	corpusRun      = "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31"
+	corpusNextRun  = "run_c84e1b9f0a2d4c7e8b3f6a1d5e9c2b70"
+	corpusThirdRun = "run_5d1e8c3a7b2f4e9d6a0c8b5f3e1d9a72"
+	corpusSteps    = "/canti/runs/" + corpusRun + "/steps"
+	corpusListing  = `printf 'alpha\nbeta\ngamma\n'`
+	corpusVersion  = 20
 )
 
 type frozenScenario struct {
@@ -47,6 +49,7 @@ type frozenScenario struct {
 type frozenRun struct {
 	id, goal    string
 	constraints string // instead of the corpus constraints
+	fresh       bool   // starts a new line
 	replies     []string
 	steps       []string // stepOutcome of every completed step, oldest first
 	budget      harness.Budget
@@ -69,19 +72,51 @@ func corpusRetrieve(operation, path, extra, reason string) string {
 func frozenScenarios() []frozenScenario {
 	limits := core.Limits{MaxSteps: 20, MaxAttempts: 4}
 	overflow := `raw:{"model":"claude-opus-5","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"never execute partial\"}"}],"usage":{"input_tokens":13,"output_tokens":2}}`
-	focus := func(seq int64) string {
-		return corpusDecision(core.Exec, fmt.Sprintf(`canti:focus {"sources":[{"seq":%d,"source":0}]}`, seq))
-	}
+	handover := func(text string) string { return corpusDecision(core.Exec, "canti:handover "+text) }
 	return slices.Concat(persistentScenarios(limits), []frozenScenario{
-		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}}},
-		{name: "reset-focus-repair", limits: limits, imports: map[string]string{"notes": "FROZEN_ORIGINAL_NOTES"}, runs: []frozenRun{{id: corpusRun, goal: "Recover original notes across provider rejection.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read notes."), overflow, focus(5), corpusDecision(core.Exec, "canti:focus {\"sources\":[]}"), "invalid decision", corpusDecision(core.Return, "Recovered notes.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources", "3 done focus 0 sources"}}}, marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "Its result predates this anchor"}, "run1-step03-rev1.json": {"Selected focus evidence", "FROZEN_ORIGINAL_NOTES"}, "run1-step04-rev2.json": {"Protocol repair"}}},
+		{name: "fresh-run", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Answer immediately.", replies: []string{corpusDecision(core.Return, "done")}}},
+			marks: map[string][]string{"run1-step01-rev1.json": {"## Steps since the anchor", "anchor sequence 0"}}},
+		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}},
+			marks: map[string][]string{"run1-step05-rev1.json": {"### Step 1\n", "### Step 4\n", "Command:\n```\n" + corpusListing + "\n```", "Path " + corpusSteps + "/00000001/preview:"}}},
+		{name: "mid-epoch", limits: limits, outputs: map[string]string{"ls": "alpha\n", "cat alpha": "alpha\n"}, runs: []frozenRun{{id: corpusRun, goal: "Keep the epoch resident.", replies: []string{corpusDecision(core.Exec, "ls"), corpusDecision(core.Exec, "cat alpha"), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read alpha."), corpusDecision(core.Return, "done")}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 done retrieval 1 sources 0 entries"}}},
+			marks: map[string][]string{"run1-step04-rev1.json": {"### Step 1\n", "### Step 2\n", "### Step 3\n", "## Steps since the anchor"}}},
+		{name: "after-agent-handover", limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Close a phase.", replies: []string{handover("gathered: go.mod exists; next list the tests"), corpusDecision(core.Exec, "ls"), corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 44 bytes", "2 exited 0 output complete"}}},
+			marks: map[string][]string{"run1-step02-rev1.json": {"## Handover", "gathered: go.mod exists", "## Steps since the anchor"}, "run1-step03-rev1.json": {"## Handover", "### Step 2\n"}}},
+		{name: "reset-handover-repair", limits: limits, imports: map[string]string{"notes": "FROZEN_ORIGINAL_NOTES"}, runs: []frozenRun{{id: corpusRun, goal: "Recover original notes across provider rejection.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read notes."), overflow, handover("recovered notes: FROZEN_ORIGINAL_NOTES"), "invalid decision", corpusDecision(core.Return, "Recovered notes.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done handover 38 bytes"}}},
+			marks: map[string][]string{"run1-step02-rev2.json": {"## Earlier steps", "## Context anchor"}, "run1-step03-rev1.json": {"## Handover", "FROZEN_ORIGINAL_NOTES"}, "run1-step03-rev2.json": {"## Protocol repair"}}},
+		{name: "rejection-handover-index", limits: limits, outputs: map[string]string{"ls": "a\n", "cat a": "a\n"}, runs: []frozenRun{{id: corpusRun, goal: "Index the uncovered steps.", replies: []string{handover("phase one done"), corpusDecision(core.Exec, "ls"), corpusDecision(core.Exec, "cat a"), overflow, corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 14 bytes", "2 exited 0 output complete", "3 exited 0 output complete"}}},
+			marks: map[string][]string{"run1-step04-rev2.json": {"## Handover", "phase one done", "## Earlier steps", "- Step 2:", "- Step 3:"}}},
+		{name: "linked-run-inherits-handover", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Carry the phase.", replies: []string{handover("inherited phase note"), corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 20 bytes"}}, {id: corpusNextRun, goal: "Continue the line.", replies: []string{corpusDecision(core.Return, "done")}}},
+			marks: map[string][]string{"run2-step01-rev1.json": {"## Handover", "inherited phase note", "From an earlier run of this line.", "run " + corpusRun}}},
+		{name: "fresh-line-no-inheritance", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Carry the phase.", replies: []string{handover("must not cross a fresh line"), corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 27 bytes"}}, {id: corpusThirdRun, fresh: true, goal: "Start a new line.", replies: []string{corpusDecision(core.Return, "done")}}},
+			edge: func(t *testing.T, requests map[string]harness.Request) {
+				body := string(requests["run2-step01-rev1.json"].Body)
+				if strings.Contains(body, "must not cross a fresh line") || strings.Contains(body, "## Handover") || strings.Contains(body, corpusRun) {
+					t.Fatalf("a fresh line inherited a handover: %s", body)
+				}
+			}},
+		{name: "minimal-after-rejected-optional", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Carry the phase.", replies: []string{handover("the inherited note"), corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 18 bytes"}}, {id: corpusNextRun, goal: "Reject the optional context floor.", replies: []string{overflow, corpusDecision(core.Return, "done")}}},
+			marks: map[string][]string{"run2-step01-rev1.json": {"## Handover", "the inherited note"}, "run2-step01-rev2.json": {"## Optional context omitted", "Handover record: /canti/runs/" + corpusRun + "/steps/00000001/command", "/canti/runs/. Inputs: /canti/inputs/."}},
+			edge: func(t *testing.T, requests map[string]harness.Request) {
+				for name, request := range requests {
+					if !strings.HasPrefix(name, "run2-") {
+						continue
+					}
+					capture := request.Context
+					if capture != nil && capture.Anchor.Minimal {
+						if capture.Bytes.Handover != 0 || capture.Bytes.Index != 0 || capture.Bytes.Previous != 0 || capture.Bytes.Observations != 0 {
+							t.Fatalf("%s rendered an optional body in minimal mode: %+v", name, capture.Bytes)
+						}
+					}
+				}
+			}},
 		{name: "observation-tail", limits: limits, observations: []harness.InputSubmission{
 			{Authority: harness.AuthorityObservation, Source: "ci", Subject: "build", Text: "RED", Now: corpusCreated},
 			{Authority: harness.AuthorityObservation, Source: "ci", Subject: "build", Text: "GREEN", Now: corpusCreated},
 		}, runs: []frozenRun{{id: corpusRun, goal: "Use the latest observation.", replies: []string{corpusDecision(core.Return, "done")}}},
 			marks: map[string][]string{"run1-step01-rev1.json": {"GREEN", "Position 2; archive /canti/inputs/000000000002"}}},
 		{name: "line-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"## Previous runs", "- " + corpusRun + ":", "/canti/runs/" + corpusRun + "/"}}},
-		{name: "legacy-actions-are-local-failures", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Reject retired actions locally.", replies: []string{corpusDecision(core.Exec, "canti:handover next"), corpusDecision(core.Exec, "canti:handover-carry {}"), corpusDecision(core.Return, "Retired actions failed locally.")}, steps: []string{"1 failed", "2 failed"}}}},
+		{name: "legacy-actions-are-local-failures", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Reject retired actions locally.", replies: []string{corpusDecision(core.Exec, "canti:handover-carry next"), corpusDecision(core.Exec, "canti:handover2 x"), corpusDecision(core.Return, "Retired actions failed locally.")}, steps: []string{"1 failed", "2 failed"}}}},
 		{name: "tool-transport", tool: true, limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Inspect files.", replies: []string{corpusDecision(core.Exec, "ls"), `{"kind":"exec"}`, corpusDecision(core.Return, "go.mod")}, steps: []string{"1 exited 0 output complete"}}}},
 		{name: "protocol-repair", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Repair a decision.", replies: []string{"not a decision", strings.Repeat("`", 2048), corpusDecision(core.Return, "repaired")}}}},
 	}, edgeScenarios(), failureScenarios(), retrievalScenarios(), boundaryScenarios())
@@ -151,7 +186,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 					}
 				}
 			}
-			dir := filepath.Join("testdata", "frozen-requests-v19", sc.name)
+			dir := filepath.Join("testdata", fmt.Sprintf("frozen-requests-v%d", corpusVersion), sc.name)
 			if *updateRequests {
 				if t.Failed() {
 					t.Fatal("-update-requests keeps the goldens of a failing scenario")
@@ -192,8 +227,8 @@ func stepOutcome(s harness.StepRecord) string {
 			if r.More {
 				out += " more"
 			}
-		case o.Focus != nil:
-			out += fmt.Sprintf(" focus %d sources", len(o.Focus.Sources))
+		case o.Handover != nil:
+			out += fmt.Sprintf(" handover %d bytes", len(o.Handover.Text))
 		}
 		return out
 	}
@@ -269,7 +304,7 @@ func elideBody(t *testing.T, facts, name string) string {
 // scenario passed.
 func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) (orphans []string) {
 	t.Helper()
-	root := filepath.Join("testdata", "frozen-requests-v19")
+	root := filepath.Join("testdata", fmt.Sprintf("frozen-requests-v%d", corpusVersion))
 	names := map[string]bool{}
 	for _, sc := range scenarios {
 		if names[sc.name] {
@@ -369,7 +404,7 @@ func TestCurrentVersionRequestsAreSentAsFrozen(t *testing.T) {
 
 func persistentScenarios(limits core.Limits) []frozenScenario {
 	overflow := `raw:{"model":"claude-opus-5","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"return\",\"payload\":\"partial\"}"}]}`
-	return []frozenScenario{{name: "persistent-native-retrieval-reset-focus", nativeArchive: true, limits: limits, imports: map[string]string{"notes": "PERSISTENT_ORIGINAL_EVIDENCE"},
-		runs:  []frozenRun{{id: corpusRun, goal: "Read original environment evidence across context reset.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read original evidence."), overflow, corpusDecision(core.Exec, `canti:focus {"sources":[{"seq":5,"source":0}]}`), corpusDecision(core.Return, "Evidence retained.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources"}}},
-		marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "logical addresses"}, "run1-step03-rev1.json": {"PERSISTENT_ORIGINAL_EVIDENCE", "Selected focus evidence"}}}}
+	return []frozenScenario{{name: "persistent-native-retrieval-reset-handover", nativeArchive: true, limits: limits, imports: map[string]string{"notes": "PERSISTENT_ORIGINAL_EVIDENCE"},
+		runs:  []frozenRun{{id: corpusRun, goal: "Read original environment evidence across context reset.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read original evidence."), overflow, corpusDecision(core.Exec, "canti:handover PERSISTENT_ORIGINAL_EVIDENCE retained; next report it"), corpusDecision(core.Return, "Evidence retained.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done handover 53 bytes"}}},
+		marks: map[string][]string{"run1-step02-rev2.json": {"## Earlier steps", "logical addresses"}, "run1-step03-rev1.json": {"PERSISTENT_ORIGINAL_EVIDENCE", "## Handover"}}}}
 }

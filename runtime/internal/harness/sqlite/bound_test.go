@@ -217,7 +217,8 @@ func TestProgressSelectsNoBodyAndClipsEveryText(t *testing.T) {
 	rest := regexp.MustCompile(`substr\(CAST\(json_extract\((from_state|to_state|facts), '[^']*'\) AS BLOB\), 1, \d+\)`).ReplaceAllString(progressSQL, "")
 	for _, m := range regexp.MustCompile(`json_extract\([^)]*\)`).FindAllString(rest, -1) {
 		switch m {
-		case `json_extract(from_state, '$.Step')`, `json_extract(facts, '$.Observation.ExitCode')`, `json_extract(facts, '$.ContextState.AnchorSeq')`:
+		case `json_extract(from_state, '$.Step')`, `json_extract(facts, '$.Observation.ExitCode')`, `json_extract(facts, '$.ContextState.AnchorSeq')`,
+			`json_extract(facts, '$.Outcome.Handover.Text')`:
 		default:
 			t.Errorf("progress selects %s without a cap", m)
 		}

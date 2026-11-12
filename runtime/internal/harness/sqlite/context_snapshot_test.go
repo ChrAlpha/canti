@@ -110,8 +110,8 @@ func TestContextHeadResetIsAtomicAndRejectsStaleReaders(t *testing.T) {
 	d.freeze()
 	d.send()
 	before := d.snap
-	rejection := &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}
-	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
+	rejection := &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: 1}
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: before.Seq + 1, Step: 1}}
 	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{"error":{"code":"context_length_exceeded"}}`)}, Failure: "confirmed overflow", Rejection: rejection, ContextState: &next}
 	bad := facts
 	invalid := next
@@ -154,8 +154,8 @@ func TestExhaustedRejectionDoesNotOpenContext(t *testing.T) {
 	d := newDriver(t, s, createRun(t, s, "exhausted", core.Limits{MaxAttempts: 1}))
 	d.freeze()
 	d.send()
-	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}}
-	next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: 1}}
+	next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: d.snap.Seq + 1, Step: 1}}
 	facts.ContextState = &next
 	if err := d.try(core.RequestRejected{Step: 1, Attempt: 1}, facts); !errors.Is(err, harness.ErrFacts) {
 		t.Fatalf("opened exhausted context: %v", err)
@@ -177,8 +177,8 @@ func TestContextHeadAndUsageOverflowRollBackTogether(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE runs SET input_tokens=? WHERE id=?`, int64(9223372036854775807), before.State.RunID); err != nil {
 		t.Fatal(err)
 	}
-	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
-	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{"error":{"code":"context_length_exceeded"}}`), Usage: harness.Usage{InputTokens: 1, InputReported: true}}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: before.Seq + 1, Step: 1}}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{"error":{"code":"context_length_exceeded"}}`), Usage: harness.Usage{InputTokens: 1, InputReported: true}}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: 1}, ContextState: &next}
 	if err := d.try(core.RequestRejected{Step: 1, Attempt: 1}, facts); err == nil {
 		t.Fatal("overflowing reset committed")
 	}
@@ -226,8 +226,8 @@ func TestContextHeadReadKeepsSnapshotWhenResetCommitsDuringPointerRead(t *testin
 	d.freeze()
 	d.send()
 	before := d.snap
-	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1}
-	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+	next := harness.ContextState{AnchorSeq: before.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: before.Seq + 1, Step: 1}}
+	facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: 1}, ContextState: &next}
 	transition := derive(t, before, core.RequestRejected{Step: 1, Attempt: 1}, facts)
 	var armed, committed atomic.Bool
 	name := fmt.Sprintf("head_snapshot_%d", contextSnapshotFunctions.Add(1))
@@ -283,11 +283,11 @@ func TestContextHeadReadKeepsSnapshotWhenResetCommitsDuringPointerRead(t *testin
 	}
 }
 
-func TestFocusSelectsBeforeAnchorAndCommitsReplacementWithProgress(t *testing.T) {
+func TestHandoverOpensTheMaterializedHeadAtomically(t *testing.T) {
 	ctx := context.Background()
 	file := tempPath(t)
 	s := open(t, file)
-	d := newDriver(t, s, createRun(t, s, "prior-anchor-focus", core.Limits{MaxSteps: 10, MaxAttempts: 3}))
+	d := newDriver(t, s, createRun(t, s, "materialized-handover", core.Limits{MaxSteps: 10, MaxAttempts: 3}))
 	imported := t.TempDir()
 	original := filepath.Join(imported, "source")
 	if err := os.WriteFile(original, []byte("EXACT_EARLIER_BYTES"), 0600); err != nil {
@@ -299,52 +299,57 @@ func TestFocusSelectsBeforeAnchorAndCommitsReplacementWithProgress(t *testing.T)
 	}
 	d.decide(execBody(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`), harness.Usage{})
 	d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Retrieval: &retrieval}})
-	sourceSeq := d.snap.Seq
+	// A handover at step 2, after the resident retrieval.
+	const text = "phase one: the source was captured"
 	d.freeze()
 	d.send()
-	anchor := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 2}
-	d.do(core.RequestRejected{Step: 2, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &anchor})
-	if err := os.Remove(original); err != nil {
-		t.Fatal(err)
-	}
-	d.decide(execBody(fmt.Sprintf(`canti:focus {"sources":[{"seq":%d,"source":0}]}`, sourceSeq)), harness.Usage{})
-	source := retrieval.Sources[0]
-	ref := harness.EvidenceRef{SourceSeq: sourceSeq, Step: 1, Source: 0, Length: source.Length, SHA256: source.SHA256}
-	selected := anchor
-	selected.Focus = []harness.EvidenceRef{ref}
-	outcome := &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{Sources: selected.Focus}}
+	body := []byte(execBody("canti:handover " + text))
+	d.save(body, harness.Usage{})
+	d.load(body)
 	before := d.snap
+	seq := before.Seq + 1
+	head := harness.ContextState{AnchorSeq: seq, FirstStep: before.State.Step + 1, Handover: &harness.HandoverRef{RunID: before.State.RunID, Seq: seq, Step: before.State.Step}}
+	outcome := &harness.Outcome{Status: harness.OutcomeDone, Handover: &harness.Handover{Text: text}}
 	if err := d.try(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: outcome}); err == nil {
-		t.Fatal("focus outcome without context committed")
+		t.Fatal("a handover outcome without its head committed")
 	}
 	if got := latestOf(t, s, before.State.RunID); got != before {
-		t.Fatal("invalid focus advanced progress")
+		t.Fatal("a headless handover advanced progress")
 	}
-	d.do(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: outcome, ContextState: &selected})
+	d.do(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: outcome, ContextState: &head})
 	saved := d.commits[len(d.commits)-1]
 	if err := s.Commit(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
 	reopened := open(t, file)
-	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(selected) {
-		t.Fatalf("prior-anchor focus after reopen: %+v %v", got, err)
+	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(head) {
+		t.Fatalf("handover head after reopen: %+v %v", got, err)
 	}
 	if got := totalsOf(t, reopened, before.State.RunID); got.Steps != 2 {
-		t.Fatalf("focus progress counted twice: %+v", got)
+		t.Fatalf("handover progress counted twice: %+v", got)
 	}
-	d.decide(execBody(`canti:focus {"sources":[]}`), harness.Usage{})
-	d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{}}, ContextState: &anchor})
-	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(anchor) {
-		t.Fatalf("release lost anchor or retained selection: %+v %v", got, err)
+	// A second handover replaces the carried reference.
+	d.freeze()
+	d.send()
+	second := []byte(execBody("canti:handover phase two"))
+	d.save(second, harness.Usage{})
+	d.load(second)
+	before = d.snap
+	seq = before.Seq + 1
+	next := harness.ContextState{AnchorSeq: seq, FirstStep: before.State.Step + 1, Handover: &harness.HandoverRef{RunID: before.State.RunID, Seq: seq, Step: before.State.Step}}
+	d.do(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Handover: &harness.Handover{Text: "phase two"}}, ContextState: &next})
+	if got, err := reopened.Context(ctx, d.snap); err != nil || !got.Equal(next) {
+		t.Fatalf("replacement lost the newer handover: %+v %v", got, err)
 	}
 }
 
-func TestContextHeadRequiresSuccessfulFocusAndRealAnchorProvenance(t *testing.T) {
-	for _, damage := range []string{"unrelated-performed", "missing-focus", "failed-focus", "fabricated-anchor"} {
+func TestContextHeadRequiresSuccessfulHandoverAndRealProvenance(t *testing.T) {
+	for _, damage := range []string{"unrelated-performed", "missing-handover", "failed-handover", "fabricated-anchor", "mismatched-text", "wrong-origin"} {
 		t.Run(damage, func(t *testing.T) {
 			ctx := context.Background()
 			s := open(t, tempPath(t))
 			d := newDriver(t, s, createRun(t, s, "head-provenance", core.Limits{MaxSteps: 5, MaxAttempts: 3}))
+			text := "phase one"
 			if damage == "unrelated-performed" {
 				d.decide(execBody("canti:unknown"), harness.Usage{})
 				d.perform()
@@ -352,17 +357,23 @@ func TestContextHeadRequiresSuccessfulFocusAndRealAnchorProvenance(t *testing.T)
 					t.Fatal(err)
 				}
 			} else {
-				d.decide(execBody(`canti:focus {"sources":[]}`), harness.Usage{})
-				initial := harness.InitialContext()
-				d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Focus: &harness.FocusSelection{}}, ContextState: &initial})
+				d.decide(execBody("canti:handover "+text), harness.Usage{})
+				before := d.snap
+				seq := before.Seq + 1
+				head := harness.ContextState{AnchorSeq: seq, FirstStep: before.State.Step + 1, Handover: &harness.HandoverRef{RunID: before.State.RunID, Seq: seq, Step: before.State.Step}}
+				d.do(core.Performed{EffectID: before.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Handover: &harness.Handover{Text: text}}, ContextState: &head})
 				var mutation string
 				switch damage {
-				case "missing-focus":
-					mutation = `json_remove(facts,'$.Outcome.Focus')`
-				case "failed-focus":
+				case "missing-handover":
+					mutation = `json_remove(facts,'$.Outcome.Handover')`
+				case "failed-handover":
 					mutation = `json_set(facts,'$.Outcome.Status','failed')`
 				case "fabricated-anchor":
 					mutation = `json_set(facts,'$.ContextState.AnchorSeq',3)`
+				case "mismatched-text":
+					mutation = `json_set(facts,'$.Outcome.Handover.Text','another phase')`
+				case "wrong-origin":
+					mutation = `json_set(facts,'$.ContextState.Handover.RunID','run_foreign')`
 				}
 				if _, err := s.db.Exec(`UPDATE transitions SET facts=`+mutation+` WHERE run_id=? AND seq=?`, d.snap.State.RunID, d.snap.Seq); err != nil {
 					t.Fatal(err)
@@ -400,7 +411,7 @@ func TestAutomaticRejectionRequiresRecordedSignalEvidence(t *testing.T) {
 				facts := harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "automatic overflow reset", Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: signal}}
 				var event core.Event = core.RequestRejected{Step: 1, Attempt: 1}
 				if mode == "reset" {
-					facts.ContextState = &harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
+					facts.ContextState = &harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: d.snap.Seq + 1, Step: 1}}
 				}
 				if mode == "terminal" {
 					event = core.StopRequested{Reason: core.StopUnrecoverable}
@@ -507,5 +518,71 @@ func TestCompletionAtStepUsesUniqueTargetIndexWithUnrelatedHistory(t *testing.T)
 	}
 	if !found {
 		t.Fatal("completion target index absent")
+	}
+}
+
+func TestRejectionPointerKeepsTheHeadAcrossTerminalRejections(t *testing.T) {
+	for _, form := range []string{"minimal-floor", "exhaustion"} {
+		t.Run(form, func(t *testing.T) {
+			ctx := context.Background()
+			path := tempPath(t)
+			s := open(t, path)
+			attempts := 3
+			if form == "exhaustion" {
+				attempts = 2
+			}
+			d := newDriver(t, s, createRun(t, s, "rejection-after-head", core.Limits{MaxSteps: 5, MaxAttempts: attempts}))
+			signal := harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+			freeze := func(optional bool) harness.ContextState {
+				current, err := s.Context(ctx, d.snap)
+				if err != nil {
+					t.Fatal(err)
+				}
+				capture := &harness.ContextCapture{Anchor: current}
+				if optional {
+					capture.Bytes.Handover = 1
+				}
+				request := requestFor(d.snap.State)
+				request.ContextState, request.Context = &current, capture
+				d.do(core.RequestFrozen{}, harness.Facts{Request: request})
+				d.send()
+				return current
+			}
+			// The first rejection opens a minimal head: no resident step, but
+			// optional content shown by the frozen capture.
+			current := freeze(true)
+			seq := d.snap.Seq + 1
+			rejection := &harness.ContextRejection{Previous: current, Signal: signal, OptionalContent: true}
+			head, class := rejection.Head(seq, 1, current)
+			if class != harness.RejectionOpensHead || !head.Minimal {
+				t.Fatalf("first rejection head = %+v, %v", head, class)
+			}
+			d.do(core.RequestRejected{Step: 1, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)},
+				Failure: "confirmed overflow", Rejection: rejection, ContextState: &head})
+			// A later rejection of the minimal head opens no head: either the
+			// minimal floor is terminal, or the attempts are exhausted.
+			current = freeze(false)
+			rejection = &harness.ContextRejection{Previous: current, Signal: signal, Minimal: true}
+			switch form {
+			case "minimal-floor":
+				d.do(core.StopRequested{Reason: core.StopUnrecoverable}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)},
+					Failure: "provider rejected the minimal context", Rejection: rejection})
+			case "exhaustion":
+				d.do(core.RequestRejected{Step: 1, Attempt: 2}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)},
+					Failure: "confirmed overflow", Rejection: rejection})
+			}
+			var pointer int64
+			if err := s.db.QueryRow(`SELECT rejection_seq FROM runs WHERE id='rejection-after-head'`).Scan(&pointer); err != nil {
+				t.Fatal(err)
+			}
+			if pointer != seq {
+				t.Fatalf("a rejection that opened no head moved the pointer to %d, want %d", pointer, seq)
+			}
+			reopened := open(t, path)
+			got, err := reopened.Context(ctx, d.snap)
+			if err != nil || got.AnchorSeq != seq || !got.Minimal || got.Rejection == nil || got.Rejection.Seq != seq {
+				t.Fatalf("reopened head = %+v, %v", got, err)
+			}
+		})
 	}
 }

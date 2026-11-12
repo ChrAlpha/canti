@@ -1,0 +1,319 @@
+{
+  "validated": {
+    "state": "/state",
+    "spec": {
+      "ephemeral": false,
+      "environment": "",
+      "environment_workdir": "",
+      "workspace": "",
+      "image": "",
+      "network": "",
+      "memory": "",
+      "cpus": "",
+      "pids": 0,
+      "output_limit": 0,
+      "api": "",
+      "model": "",
+      "max_tokens": 0,
+      "effort": "",
+      "structured": false,
+      "decision_format": "",
+      "fallbacks": false,
+      "request_bytes": 0,
+      "context_version": 0,
+      "history_imports": "",
+      "max_steps": 0,
+      "max_attempts": 0,
+      "wall_time": "",
+      "token_budget": 0,
+      "output_budget": 0,
+      "job_timeout": ""
+    },
+    "constraints": "rules",
+    "goal_limit": 32768,
+    "constraints_limit": 16384
+  },
+  "inspection": {
+    "run_id": "run_1",
+    "cursor": "pos:9",
+    "effect_id": "effect_1",
+    "sampled_at": "2026-11-07T00:00:00Z",
+    "receipt": {
+      "dispatched_at": "2026-11-07T00:00:00Z",
+      "binding": {
+        "backend_id": "daemon_1",
+        "environment_id": "container_1",
+        "start_epoch": "epoch_1",
+        "authority_id": "authority_1",
+        "incarnation": 1,
+        "generation": 2
+      },
+      "cessation": {
+        "binding": {
+          "backend_id": "daemon_1",
+          "environment_id": "container_1",
+          "start_epoch": "epoch_1",
+          "authority_id": "authority_1",
+          "incarnation": 1,
+          "generation": 2
+        },
+        "effect_id": "effect_1",
+        "spec": "spec_1",
+        "owner_id": "owner_1",
+        "stop_intent": "stop_1",
+        "kind": "environment_stopped",
+        "requested_at": "2026-11-07T00:00:01Z",
+        "confirmed_at": "2026-11-07T00:00:02Z"
+      },
+      "effect_id": "effect_1",
+      "spec": "spec_1",
+      "owner_id": "owner_1",
+      "status": "failed",
+      "fenced": true,
+      "exit_code": 3,
+      "started_at": "2026-11-07T00:00:00Z",
+      "finished_at": "2026-11-07T00:00:01Z",
+      "preview": "output",
+      "output_path": "effect_1/output",
+      "output_bytes": 6,
+      "output_available": true,
+      "output_complete": true,
+      "detail": "retained"
+    },
+    "unavailable": "diagnostic"
+  },
+  "protocol": 9,
+  "error": {
+    "code": "failed",
+    "message": "m"
+  },
+  "hello": {
+    "protocol": 9,
+    "version": "dev",
+    "context_version": 13,
+    "semantics_version": 4,
+    "pid": 1,
+    "bindings": [
+      {
+        "api": "anthropic-messages",
+        "provider": "https://p.test"
+      }
+    ]
+  },
+  "ack": {
+    "replayed": true,
+    "differs": [
+      "model",
+      "limits.max_steps"
+    ],
+    "input_id": "in_1",
+    "disposition": "steer",
+    "pos": 5,
+    "run": {
+      "environment": {
+        "directory": "/environment",
+        "container_id": "container_1",
+        "daemon_id": "daemon_1",
+        "incarnation": 1,
+        "workdir": "/workspace"
+      },
+      "ephemeral": true,
+      "run_id": "run_1",
+      "input_id": "in_1",
+      "input_pos": 5,
+      "fresh": true,
+      "goal": "g",
+      "constraints": "c",
+      "status": "stopped",
+      "phase": "stopped",
+      "step": 4,
+      "stop_reason": "cancelled",
+      "result": "r",
+      "effect_id": "effect_1",
+      "cursor": "pos:9",
+      "context_version": 13,
+      "api": "anthropic-messages",
+      "provider": "https://p.test",
+      "driver": "idle",
+      "drivable": false,
+      "why": "w",
+      "drive_error": "e",
+      "pending_steers": 2,
+      "queued": 1,
+      "held": 3,
+      "totals": {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "output_bytes": 3,
+        "steps": 4,
+        "coverage": {
+          "attempts": 7,
+          "input_reports": 3,
+          "output_reports": 4,
+          "lost": 2
+        }
+      },
+      "budget": {
+        "wall_time": "30m0s",
+        "tokens": 5,
+        "output_bytes": 6,
+        "job_timeout": "10m0s"
+      }
+    }
+  },
+  "run": {
+    "environment": {
+      "directory": "/environment",
+      "container_id": "container_1",
+      "daemon_id": "daemon_1",
+      "incarnation": 1,
+      "workdir": "/workspace"
+    },
+    "ephemeral": true,
+    "run_id": "run_1",
+    "input_id": "in_1",
+    "input_pos": 5,
+    "fresh": true,
+    "goal": "g",
+    "constraints": "c",
+    "status": "stopped",
+    "phase": "stopped",
+    "step": 4,
+    "stop_reason": "cancelled",
+    "result": "r",
+    "effect_id": "effect_1",
+    "cursor": "pos:9",
+    "context_version": 13,
+    "api": "anthropic-messages",
+    "provider": "https://p.test",
+    "driver": "idle",
+    "drivable": false,
+    "why": "w",
+    "drive_error": "e",
+    "pending_steers": 2,
+    "queued": 1,
+    "held": 3,
+    "totals": {
+      "input_tokens": 1,
+      "output_tokens": 2,
+      "output_bytes": 3,
+      "steps": 4,
+      "coverage": {
+        "attempts": 7,
+        "input_reports": 3,
+        "output_reports": 4,
+        "lost": 2
+      }
+    },
+    "budget": {
+      "wall_time": "30m0s",
+      "tokens": 5,
+      "output_bytes": 6,
+      "job_timeout": "10m0s"
+    }
+  },
+  "page": {
+    "items": [
+      {
+        "pos": 1,
+        "run_id": "run_1",
+        "step": 0,
+        "kind": "input",
+        "input": {
+          "pos": 1,
+          "input_id": "in_1",
+          "authority": "principal",
+          "delivery": "steer",
+          "disposition": "steer",
+          "text": "t"
+        }
+      },
+      {
+        "pos": 2,
+        "run_id": "run_1",
+        "step": 2,
+        "kind": "inputs_bound",
+        "inputs": 1
+      },
+      {
+        "pos": 3,
+        "run_id": "run_1",
+        "seq": 2,
+        "step": 1,
+        "kind": "decided",
+        "command": "canti:handover phase one",
+        "purpose": "p",
+        "action": "handover"
+      },
+      {
+        "pos": 4,
+        "run_id": "run_1",
+        "seq": 3,
+        "step": 1,
+        "kind": "completed",
+        "command": "x",
+        "purpose": "p",
+        "action": "retrieve",
+        "result": "r",
+        "local": true,
+        "resolved": true,
+        "execution": "exited",
+        "exit_code": 3,
+        "preview": "pv",
+        "detail": "d",
+        "outcome": {
+          "status": "done",
+          "detail": "d",
+          "retrieval": true,
+          "retrieval_error": "re",
+          "sources": 1,
+          "entries": 2,
+          "handover_bytes": 34
+        },
+        "anchor_seq": 5,
+        "stop_reason": "cancelled",
+        "failure": "f",
+        "superseded_by": 3,
+        "truncated": true
+      },
+      {
+        "pos": 5,
+        "run_id": "run_1",
+        "seq": 5,
+        "step": 2,
+        "kind": "context_reset",
+        "anchor_seq": 5,
+        "failure": "confirmed provider overflow"
+      },
+      {
+        "pos": 6,
+        "step": 0,
+        "kind": "withdrawn",
+        "withdrawn": [
+          "in_1",
+          "pos:5"
+        ],
+        "truncated": true
+      }
+    ],
+    "next": "pos:9",
+    "more": true,
+    "quiescent": true
+  },
+  "wait": {
+    "cursor": "pos:9",
+    "quiescent": true,
+    "driver": "driving"
+  },
+  "constraints": "",
+  "withdrawn": [
+    {
+      "pos": 1,
+      "input_id": "in_1",
+      "authority": "principal",
+      "delivery": "steer",
+      "disposition": "withdrawn",
+      "text": "t"
+    }
+  ]
+}

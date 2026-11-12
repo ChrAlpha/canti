@@ -311,7 +311,7 @@ func TestGateTrustBoundaryProtectsFacts(t *testing.T) {
 			t.Errorf("workspace %s = %q, %v", name, data, err)
 		}
 	}
-	if p := f.model.prompts(3); len(p) != 1 || !strings.Contains(p[0], fmt.Sprintf("Source: /canti/runs/%s/steps/00000001", runID)) {
+	if p := f.model.prompts(3); len(p) != 1 || !strings.Contains(p[0], "Run records: /canti/runs/"+runID+"/") || !strings.Contains(p[0], "### Step 1\n") {
 		t.Fatalf("trusted original navigation missing: %q", p)
 	}
 	if p := f.model.prompts(4); len(p) != 1 || !strings.Contains(p[0], fact.Output.Path) {
@@ -387,7 +387,7 @@ func TestGateTrustBoundaryProtectsStepRecords(t *testing.T) {
 			t.Errorf("tampering output lacks %q:\n%s", want, s["tamper"])
 		}
 	}
-	if p := f.model.prompts(2); len(p) != 1 || strings.Contains(p[0], long) || !strings.Contains(p[0], "…[truncated ") || !strings.Contains(p[0], own+"/steps/") {
+	if p := f.model.prompts(2); len(p) != 1 || strings.Contains(p[0], long) || !strings.Contains(p[0], "…[truncated ") || !strings.Contains(p[0], "Run records: /canti/runs/"+id+"/") {
 		t.Errorf("step 2 prompt does not cut the command and name the records: %q", p)
 	}
 	for _, name := range []string{filepath.Join(id, "x"), "forged"} {

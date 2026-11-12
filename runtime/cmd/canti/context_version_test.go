@@ -77,15 +77,20 @@ func contextRules(t *testing.T) string {
 		Config         host.RunConfig
 		Limits         harness.PromptLimits
 		MaximumRequest int
-		MaximumFocus   int
+		HandoverBytes  int
+		IndexSteps     int
+		IndexBytes     int
+		IndexPurpose   int
 		ReadBytes      int
-	}{spec.Config, cfg.Limits, harness.MaxRequestBytes, harness.MaxFocus, archive.MaxBytes})
-	fmt.Fprintf(&b, "context version %d\nsemantics %d\ndefaults %s\nactions %q %q\n", host.ContextVersion, core.SemanticsVersion, defaults, harness.RetrievePrefix, harness.FocusPrefix)
+		MaxRunID       int
+	}{spec.Config, cfg.Limits, harness.MaxRequestBytes, harness.HandoverBytes, harness.IndexSteps, harness.IndexBytes, harness.IndexPurposeBytes, archive.MaxBytes, harness.MaxRunIDBytes})
+	fmt.Fprintf(&b, "context version %d\nsemantics %d\ndefaults %s\nactions %q %q\n", host.ContextVersion, core.SemanticsVersion, defaults, harness.RetrievePrefix, harness.HandoverPrefix)
 	text := "frozen original evidence"
 	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
-	ref := harness.EvidenceRef{SourceSeq: 5, Step: 1, Source: 0, Length: len(text), SHA256: sum}
 	retrieval := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: archive.ImportsRoot + "/notes", Reason: "recover"}, Sources: []archive.SourceRange{{Path: archive.ImportsRoot + "/notes", Length: len(text), SHA256: sum}}, Evidence: []string{text}, More: true, NextOffset: int64(len(text))}
 	latest := harness.StepRecord{Seq: 5, Step: 1, Command: harness.RetrievePrefix + `{"operation":"read"}`, Outcome: &harness.Outcome{Status: harness.OutcomeDone, Retrieval: &retrieval}}
+	tokens := int64(1234)
+	zero := 0
 	for _, tool := range []bool{false, true} {
 		initial := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: host.Environment(spec.Config, spec.Budget), RunID: run.ID, Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 4, DecisionTool: tool, RetrievalEnabled: true, ImportsEnabled: true, ContextState: &harness.ContextState{FirstStep: 1}}
 		frames := []harness.Frame{initial}
@@ -95,23 +100,35 @@ func contextRules(t *testing.T) string {
 		frames = append(frames, persistent)
 		recent := initial
 		recent.Step = 2
-		recent.Receipts = []harness.StepReceipt{{Step: 1, Seq: 5, Purpose: "Inspect original", Status: "done"}}
-		recent.Latest = &latest
+		recent.Steps = []harness.StepRecord{latest}
+		recent.PreviousUsage = &tokens
 		frames = append(frames, recent)
+		handover := harness.HandoverRef{RunID: run.ID, Seq: 8, Step: 2}
+		anchored := initial
+		anchored.Step = 3
+		anchored.ContextState = &harness.ContextState{AnchorSeq: 8, FirstStep: 3, Handover: &handover}
+		anchored.Handover = &harness.HandoverNotice{Ref: handover, Text: "phase one verified; next " + text}
+		frames = append(frames, anchored)
+		rejected := harness.ContextState{AnchorSeq: 9, FirstStep: 2, Handover: &harness.HandoverRef{RunID: "run_previous", Seq: 4, Step: 1},
+			Rejection: &harness.RejectionRef{Seq: 9, Step: 1, MaxAcceptedInput: 4096, MaxAcceptedReported: true}}
 		reset := initial
 		reset.Step = 2
 		reset.Attempt = 2
-		reset.ContextState = &harness.ContextState{AnchorSeq: 8, FirstStep: 2}
+		reset.ContextState = &rejected
+		reset.Handover = &harness.HandoverNotice{Ref: *rejected.Handover, Text: "inherited note"}
+		reset.Index = []harness.StepReceipt{{Seq: 5, Step: 1, Purpose: "Inspect original", Status: "done", ExitCode: &zero, Retrieval: &harness.ReceiptRetrieval{Operation: "read", Path: archive.ImportsRoot + "/notes", Offset: 0, Limit: 4096}}}
+		reset.IndexTotal = 1
 		reset.Latest = &latest
 		frames = append(frames, reset)
-		focus := reset
-		focus.ContextState = &harness.ContextState{AnchorSeq: 8, FirstStep: 2, Focus: []harness.EvidenceRef{ref}}
-		focus.Focused = []harness.FocusedEvidence{{Ref: ref, Operation: "read", Path: retrieval.Sources[0].Path, More: true, NextOffset: int64(len(text)), Bytes: text}}
-		frames = append(frames, focus)
-		repair := focus
+		repair := reset
 		repair.Attempt = 3
 		repair.Rejected = &harness.Rejection{Error: "invalid decision", Response: `{"wrong":true}`}
 		frames = append(frames, repair)
+		minimal := reset
+		minimal.ContextState = &harness.ContextState{AnchorSeq: 9, FirstStep: 2, Handover: rejected.Handover, Minimal: true, Rejection: rejected.Rejection}
+		minimal.Attempt = 3
+		minimal.Index, minimal.IndexTotal, minimal.Previous = nil, 0, nil
+		frames = append(frames, minimal)
 		for i, frame := range frames {
 			prompt, err := frame.Prompt(cfg.Limits)
 			if err != nil {
@@ -131,7 +148,7 @@ func contextRules(t *testing.T) string {
 
 func corpusRules(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v19")
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v20")
 	scenarios, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)

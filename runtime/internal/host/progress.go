@@ -207,7 +207,8 @@ type Item struct {
 }
 
 // Outcome is the result of a local action as progress reports it: its
-// status and detail, and what a read found, without the evidence.
+// status and detail, what a read found without the evidence, and the byte
+// count of a handover's text.
 type Outcome struct {
 	Status         harness.OutcomeStatus
 	Detail         string
@@ -215,8 +216,7 @@ type Outcome struct {
 	RetrievalError string
 	Sources        int
 	Entries        int
-	Focus          bool
-	FocusSources   int
+	HandoverBytes  int
 }
 
 // Cursor is an opaque agent-log position. It names no run: the log spans
@@ -384,7 +384,7 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 	case "performed":
 		it.Kind, it.Local, it.AnchorSeq, it.Command = ItemCompleted, true, r.AnchorSeq, r.Decision.Payload
 		it.Outcome = &Outcome{Status: harness.OutcomeStatus(r.Outcome), Detail: r.OutcomeDetail, Retrieval: r.Retrieval,
-			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, Focus: r.Focus, FocusSources: r.FocusSources}
+			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, HandoverBytes: r.HandoverBytes}
 		shown |= sqlite.ProgressPayload | sqlite.ProgressOutcomeDetail | sqlite.ProgressRetrievalError
 	case "observed", "resolved":
 		it.Kind, it.Resolved, it.Command = ItemCompleted, r.ResolutionSource == harness.ResolutionOperator, r.Decision.Payload

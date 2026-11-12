@@ -40,7 +40,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 				case step == 23:
 					d = core.Decision{Kind: core.Return, Payload: "done"}
 				case step%4 == 0:
-					d.Payload = harness.FocusPrefix + `{"sources":[]}`
+					d.Payload = harness.HandoverPrefix + "phase done"
 				}
 				body, _ := json.Marshal(d)
 				f.model.answer(step, 1, reply{text: string(body)})
@@ -99,7 +99,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 						t.Fatalf("attempt started out of order: %+v", e.State)
 					}
 				}
-				if e.Kind == "request_rejected" && e.Facts.ContextState != nil {
+				if (e.Kind == "request_rejected" || e.Kind == "performed") && e.Facts.ContextState != nil {
 					currentContext = *e.Facts.ContextState
 				}
 				if req := e.Facts.Request; req != nil {
@@ -112,7 +112,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 					}
 				}
 				if o := e.Facts.Outcome; o != nil {
-					if o.Focus != nil {
+					if o.Handover != nil {
 						handovers++
 					}
 					builtin[evEvent[core.Performed](t, e).EffectID] = true

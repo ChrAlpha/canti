@@ -28,7 +28,15 @@ const receiptSQL = `WITH selected AS (
     json_extract(t.facts,'$.Observation.ExitCode'),
     COALESCE(json_extract(t.facts,'$.Resolution.Source')='operator',0),
     COALESCE(json_extract(t.facts,'$.Supersede.Instruction'),0),
-    COALESCE(json_extract(t.facts,'$.Supersede.Kind'),'')
+    COALESCE(json_extract(t.facts,'$.Supersede.Kind'),''),
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Outcome.Retrieval') END)='object'
+        THEN json_extract(t.facts,'$.Outcome.Retrieval.Query.Operation') END,
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Outcome.Retrieval') END)='object'
+        THEN json_extract(t.facts,'$.Outcome.Retrieval.Query.Path') END,
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Outcome.Retrieval') END)='object'
+        THEN json_extract(t.facts,'$.Outcome.Retrieval.Query.Offset') END,
+    CASE WHEN (CASE WHEN json_valid(t.facts) THEN json_type(t.facts,'$.Outcome.Retrieval') END)='object'
+        THEN json_extract(t.facts,'$.Outcome.Retrieval.Query.Limit') END
     FROM selected CROSS JOIN transitions t INDEXED BY sqlite_autoindex_transitions_1
     WHERE t.run_id=?1 AND t.seq=selected.seq ORDER BY t.seq DESC`
 
@@ -48,9 +56,10 @@ func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit 
 	for rows.Next() {
 		var r harness.StepReceipt
 		var semantics int
-		var purpose, kind sql.NullString
-		var code sql.NullInt64
-		if err := rows.Scan(&r.Seq, &semantics, &r.Step, &purpose, &r.Status, &code, &r.Resolved, &r.SupersededBy, &kind); err != nil {
+		var purpose, kind, operation, retrievalPath sql.NullString
+		var code, offset, limit sql.NullInt64
+		if err := rows.Scan(&r.Seq, &semantics, &r.Step, &purpose, &r.Status, &code, &r.Resolved, &r.SupersededBy, &kind,
+			&operation, &retrievalPath, &offset, &limit); err != nil {
 			return nil, err
 		}
 		if err := core.KnownSemantics(semantics); err != nil {
@@ -67,6 +76,9 @@ func (s *Store) Receipts(ctx context.Context, runID string, before int64, limit 
 		}
 		if r.SupersededBy > 0 && (r.DecisionKind != core.Exec && r.DecisionKind != core.Return || r.Status != "superseded") {
 			return nil, fmt.Errorf("%w: invalid superseded receipt at sequence %d", ErrIncompatible, r.Seq)
+		}
+		if operation.Valid || retrievalPath.Valid {
+			r.Retrieval = &harness.ReceiptRetrieval{Operation: operation.String, Path: retrievalPath.String, Offset: offset.Int64, Limit: limit.Int64}
 		}
 		out = append(out, r)
 	}

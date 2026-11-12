@@ -22,12 +22,18 @@ const (
 // process ran, so it has no execution state, exit code, or output. Detail
 // is a failure or refusal, clipped to actionFailureBytes and a truncation
 // marker; Retrieval is a performed read, also one the archive reports an
-// error for; Focus is an accepted replacement selection.
+// error for; Handover is the text a successful handover carries.
 type Outcome struct {
 	Status    OutcomeStatus
 	Detail    string             `json:",omitempty"`
 	Retrieval *archive.Retrieval `json:",omitempty"`
-	Focus     *FocusSelection    `json:",omitempty"`
+	Handover  *Handover          `json:",omitempty"`
+}
+
+// Handover is the text a successful handover carries, byte-equal to the text
+// of the committed payload. The harness names the run, step and anchor.
+type Handover struct {
+	Text string
 }
 
 const actionFailure, actionFailureBytes = "Context action failed: ", 2048
@@ -47,11 +53,21 @@ func (o Outcome) Validate() error {
 	}
 	switch o.Status {
 	case OutcomeDone:
-		if o.Detail == "" && (o.Retrieval != nil) != (o.Focus != nil) && (o.Retrieval == nil || o.Retrieval.Error == "") {
+		n := 0
+		if o.Retrieval != nil && o.Retrieval.Error == "" {
+			n++
+		}
+		if o.Handover != nil {
+			if err := o.Handover.Validate(); err != nil {
+				return err
+			}
+			n++
+		}
+		if o.Detail == "" && n == 1 {
 			return nil
 		}
 	case OutcomeFailed:
-		if o.Focus == nil && (o.Detail != "") != (o.Retrieval != nil) && (o.Retrieval == nil || o.Retrieval.Error != "") {
+		if o.Handover == nil && (o.Detail != "") != (o.Retrieval != nil) && (o.Retrieval == nil || o.Retrieval.Error != "") {
 			return nil
 		}
 	}
@@ -77,8 +93,8 @@ func (r StepRecord) presented() Observation {
 	switch {
 	case o.Detail != "":
 		p.Preview = actionFailure + o.Detail
-	case o.Focus != nil:
-		p.Preview = fmt.Sprintf("Focus replaced with %d frozen source ranges.", len(o.Focus.Sources))
+	case o.Handover != nil:
+		p.Preview = fmt.Sprintf("Handover recorded: %d bytes.", len(o.Handover.Text))
 	case o.Retrieval != nil:
 		refs := *o.Retrieval
 		refs.Evidence = nil
@@ -116,7 +132,7 @@ func (r StepRecord) Validate(semantics int, performed bool) error {
 	case r.Outcome != nil || r.Observation.Execution == "":
 		return errors.New("harness: an observed or resolved step needs an observation and no outcome or context mutation")
 	case r.Observation.Retrieval != nil:
-		return errors.New("harness: an observation of this version holds no retrieval or focus")
+		return errors.New("harness: an observation of this version holds no retrieval or handover")
 	}
 	return nil
 }

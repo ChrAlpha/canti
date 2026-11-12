@@ -57,7 +57,7 @@ var (
 		harness.OutcomeDone: "done", harness.OutcomeFailed: "failed",
 	}
 	actionWords = map[harness.ActionName]string{
-		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionFocus: "focus", harness.ActionUnknown: "unknown",
+		harness.ActionCommand: "command", harness.ActionRetrieve: "retrieve", harness.ActionHandover: "handover", harness.ActionUnknown: "unknown",
 	}
 )
 
@@ -211,7 +211,7 @@ func PageOf(p host.Page) Page {
 			Withdrawn: append([]string{}, it.Withdrawn...), Truncated: it.Truncated}
 		if o := it.Outcome; o != nil {
 			item.Outcome = &Outcome{Status: word(outcomeWords, o.Status), Detail: o.Detail, Retrieval: o.Retrieval, RetrievalError: o.RetrievalError,
-				Sources: o.Sources, Entries: o.Entries, Focus: o.Focus, FocusSources: o.FocusSources}
+				Sources: o.Sources, Entries: o.Entries, HandoverBytes: o.HandoverBytes}
 		}
 		if in := it.Input; in != nil {
 			item.Input = &Input{Pos: it.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),

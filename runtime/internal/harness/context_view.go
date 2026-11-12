@@ -111,6 +111,10 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 		if t.Facts.ContextState != nil {
 			v.Outcome = "context_reset"
 		}
+	case core.Performed:
+		if t.Facts.Outcome != nil && t.Facts.Outcome.Handover != nil {
+			v.Outcome = "context_handover"
+		}
 	case core.ResponseLoaded:
 		switch t.To.Phase {
 		case core.PhaseReturned:

@@ -289,10 +289,10 @@ func outcomePreview(t *testing.T, o harness.Outcome) string {
 		}
 		return string(data)
 	}
-	if o.Focus == nil {
-		t.Fatal("successful local outcome has neither retrieval nor focus")
+	if o.Handover == nil {
+		t.Fatal("successful local outcome has neither a retrieval nor a handover")
 	}
-	return fmt.Sprintf("Focus replaced with %d frozen source ranges.", len(o.Focus.Sources))
+	return fmt.Sprintf("Handover recorded: %d bytes.", len(o.Handover.Text))
 }
 
 func decodeEvent[E core.Event](raw string) (core.Event, error) {
@@ -363,9 +363,9 @@ func checkReplay(t *testing.T, runID string, h []entry) {
 				t.Fatalf("seq %d rejection lost sent-request/typed-signal/response/usage provenance", e.Seq)
 			}
 			if next.Phase == core.PhaseIdle {
-				want := harness.ContextState{AnchorSeq: e.Seq, FirstStep: s.Step}
-				if next.Step != s.Step || next.Attempt != s.Attempt+1 || next.RequestRev != s.RequestRev || e.Facts.ContextState == nil || !e.Facts.ContextState.Equal(want) {
-					t.Fatalf("seq %d rejection did not consume one attempt and atomically reset focus", e.Seq)
+				want, class := r.Head(e.Seq, s.Step, contextHead)
+				if class != harness.RejectionOpensHead || next.Step != s.Step || next.Attempt != s.Attempt+1 || next.RequestRev != s.RequestRev || e.Facts.ContextState == nil || !e.Facts.ContextState.Equal(want) {
+					t.Fatalf("seq %d rejection did not consume one attempt and atomically reset its head", e.Seq)
 				}
 				prior := s
 				rebuild = &prior
@@ -373,10 +373,15 @@ func checkReplay(t *testing.T, runID string, h []entry) {
 				t.Fatalf("seq %d exhausted rejection invented context or progress", e.Seq)
 			}
 		}
-		if e.Facts.Outcome != nil && e.Facts.Outcome.Focus != nil {
-			if e.Facts.Outcome.Status != harness.OutcomeDone || e.Facts.ContextState == nil ||
-				!slices.Equal(e.Facts.ContextState.Focus, e.Facts.Outcome.Focus.Sources) || next.Step != s.Step+1 {
-				t.Fatalf("seq %d focus selection/release and progress were not committed together", e.Seq)
+		if o := e.Facts.Outcome; o != nil && o.Handover != nil {
+			want := harness.ContextState{AnchorSeq: e.Seq, FirstStep: next.Step,
+				Handover: &harness.HandoverRef{RunID: s.RunID, Seq: e.Seq, Step: s.Step}, Rejection: contextHead.Rejection}
+			if o.Status != harness.OutcomeDone || e.Facts.ContextState == nil || !e.Facts.ContextState.Equal(want) || next.Step < s.Step {
+				t.Fatalf("seq %d handover outcome and head were not committed together", e.Seq)
+			}
+			text, err := harness.HandoverText(s.Decision.Payload)
+			if err != nil || text != o.Handover.Text {
+				t.Fatalf("seq %d handover text differs from its payload", e.Seq)
 			}
 		}
 		if e.Facts.ContextState != nil {
@@ -526,47 +531,4 @@ func latestOutcome(t *testing.T, h []entry) harness.Outcome {
 	}
 	t.Fatal("no completed step")
 	return harness.Outcome{}
-}
-
-// sourceHandles derives explicit focus handles only from the completed retrieval.
-type sourceHandle struct {
-	Seq    int64 `json:"seq"`
-	Source int   `json:"source"`
-}
-
-func sourceHandles(t *testing.T, h []entry) []sourceHandle {
-	t.Helper()
-	for _, e := range slices.Backward(h) {
-		if e.Kind == "performed" && e.Facts.Outcome != nil && e.Facts.Outcome.Retrieval != nil {
-			var handles []sourceHandle
-			for index := range e.Facts.Outcome.Retrieval.Sources {
-				handles = append(handles, sourceHandle{e.Seq, index})
-			}
-			if len(handles) == 0 {
-				t.Fatal("completed retrieval has no focusable sources")
-			}
-			return handles
-		}
-	}
-	t.Fatal("no completed retrieval for focus")
-	return nil
-}
-func checkSelectedRequest(t *testing.T, f *fixture, step int, selected []sourceHandle) {
-	t.Helper()
-	for _, e := range f.history() {
-		if e.Kind != "request_frozen" || e.State.Step != step {
-			continue
-		}
-		request := e.Facts.Request
-		if request == nil || request.ContextState == nil || len(request.ContextState.Focus) != len(selected) {
-			t.Fatalf("selected request lost handles: %+v", request)
-		}
-		for index, ref := range request.ContextState.Focus {
-			if ref.SourceSeq != selected[index].Seq || ref.Source != selected[index].Source {
-				t.Fatalf("selected handles changed: %+v", request.ContextState.Focus)
-			}
-		}
-		return
-	}
-	t.Fatalf("no frozen request for selected step%d", step)
 }
