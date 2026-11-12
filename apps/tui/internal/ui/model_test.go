@@ -252,12 +252,12 @@ func TestContextRecoveryAndReportedUsagePreserveContinuousDraft(t *testing.T) {
 			m := model()
 			m.phase = running
 			m.editor.SetValue("editable next draft")
-			for _, item := range []hostrpc.Item{{Kind: "context_reset", Step: 7, AnchorSeq: 42}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true, FocusSources: 2}}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", Focus: true}}} {
+			for _, item := range []hostrpc.Item{{Kind: "context_reset", Step: 7, AnchorSeq: 42}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done", HandoverBytes: 2048}}, {Kind: "completed", Outcome: &hostrpc.Outcome{Status: "done"}}} {
 				updated, _ := m.fact(fact{event: chat.Event{Item: &item}})
 				m = updated.(Model)
 			}
 			transcript := strings.Join(m.entries, "")
-			for _, want := range []string{"context reset at sequence 42; continuing step 7", "focus replaced with 2 frozen sources", "focus replaced with 0 frozen sources"} {
+			for _, want := range []string{"context reset at sequence 42; continuing step 7", "handover recorded: 2048 bytes", "handover recorded: 0 bytes"} {
 				if !strings.Contains(transcript, want) {
 					t.Fatalf("missing %q: %s", want, transcript)
 				}

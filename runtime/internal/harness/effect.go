@@ -151,11 +151,14 @@ func checkPerformed(t Transition, a Action) error {
 	ok := true
 	switch {
 	case a.Invalid != "":
-		ok = o.Status == OutcomeFailed && o.Detail == problemText(a.Invalid) && o.Retrieval == nil
+		ok = o.Status == OutcomeFailed && o.Detail == problemText(a.Invalid) && o.Retrieval == nil && t.Facts.ContextState == nil
 	case a.Name == ActionRetrieve:
-		ok = o.Focus == nil
-	case a.Name == ActionFocus:
-		ok = o.Retrieval == nil && ((o.Status == OutcomeDone) == (o.Focus != nil)) && ((o.Status == OutcomeDone) == (t.Facts.ContextState != nil))
+		ok = (o.Status == OutcomeFailed || o.Retrieval != nil) && t.Facts.ContextState == nil
+	case a.Name == ActionHandover:
+		text, err := HandoverText(t.From.Decision.Payload)
+		valid := err == nil && ValidateHandoverNote(text) == nil
+		ok = (valid && *o == Outcome{Status: OutcomeDone} && t.Facts.ContextState != nil) ||
+			(o.Status == OutcomeFailed && o.Detail != "" && o.Retrieval == nil && t.Facts.ContextState == nil)
 	default:
 		ok = false
 	}

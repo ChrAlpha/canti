@@ -100,11 +100,6 @@ type Journal interface {
 	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Receipts(ctx context.Context, runID string, before int64, limit int) ([]StepReceipt, error)
-	// Completion returns the step that the transition at seq completed, by a
-	// point read that needs no history scan: ErrNotFound when the run holds
-	// no transition at seq, and ErrIncompatible when the transition there
-	// completes no step or does not decode as one.
-	Completion(ctx context.Context, runID string, seq int64) (StepRecord, error)
 	CompletionAtStep(ctx context.Context, runID string, step int) (StepRecord, error)
 	Totals(ctx context.Context, runID string) (Totals, error)
 	// Steers returns the principal steer rows of runID in admission order,
@@ -121,7 +116,18 @@ type Journal interface {
 	// recent first, at most MaxPreviousRuns, and how many earlier runs the
 	// page leaves out.
 	PreviousRuns(ctx context.Context, runID string) ([]PreviousRun, int, error)
+	// PriorUsage returns the provider usage of the last settled attempt of the
+	// previous frozen request revision of runID before seq, and whether that
+	// request has a settled attempt at all. It never substitutes older usage.
+	PriorUsage(ctx context.Context, runID string, before int64) (Usage, bool, error)
+	// MaxAcceptedInput returns the largest reported input usage among the run's
+	// complete, accepted responses before seq, and whether any reported it.
+	MaxAcceptedInput(ctx context.Context, runID string, before int64) (int64, bool, error)
 }
+
+// MaxRunIDBytes bounds a run ID, so the archive paths a request and the
+// minimal context notice render stay within their byte budgets.
+const MaxRunIDBytes = 200
 
 // Run is the immutable record a run is created with. Config is opaque host
 // wiring, such as executor and model settings, that a resume must reuse.
@@ -354,7 +360,7 @@ type Transition struct {
 // surrounding states, so records carry only content and provenance. Each
 // event permits a fixed subset; Runner.Commit rejects anything else. Action
 // belongs to the ResponseLoaded that accepts an exec decision; Outcome and
-// ContextState, the anchor/focus the next request renders when it changes, to Performed.
+// ContextState, the handover head the next request renders, to Performed.
 type Delivered struct {
 	Positions []int64 `json:",omitempty"`
 }
@@ -375,8 +381,9 @@ type Facts struct {
 	Failure      string
 }
 
-// StepReceipt is the bounded historical projection needed by a request.
-// Whole commands and result/evidence bodies stay in the archive and journal.
+// StepReceipt is the bounded historical projection the earlier-steps index
+// needs. Whole commands and result/evidence bodies stay in the archive and
+// journal.
 type StepReceipt struct {
 	Seq          int64
 	Step         int
@@ -384,6 +391,16 @@ type StepReceipt struct {
 	Status       string
 	ExitCode     *int
 	Resolved     bool
-	SupersededBy int       `json:",omitempty"`
-	DecisionKind core.Kind `json:",omitempty"`
+	SupersededBy int               `json:",omitempty"`
+	DecisionKind core.Kind         `json:",omitempty"`
+	Retrieval    *ReceiptRetrieval `json:",omitempty"`
+}
+
+// ReceiptRetrieval names the query a retrieval step made, so a smaller range
+// can be requested without repeating discovery.
+type ReceiptRetrieval struct {
+	Operation string
+	Path      string
+	Offset    int64
+	Limit     int64
 }

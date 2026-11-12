@@ -147,7 +147,7 @@ func (r contextReport) writeText(w io.Writer) error {
 	t.line("Model %s; protocol %s; adapter %s", q.Model, q.Protocol, q.Adapter)
 	t.line("Frozen request bytes: %d; sha256 %s", q.BodyBytes, q.SHA256)
 	if q.Anchor != nil {
-		t.line("Anchor sequence %d; first step %d; selected focus sources %d", q.Anchor.AnchorSeq, q.Anchor.FirstStep, len(q.Anchor.Focus))
+		t.line("Anchor sequence %d; first step %d; minimal %t; rejection %t", q.Anchor.AnchorSeq, q.Anchor.FirstStep, q.Anchor.Minimal, q.Anchor.Rejection != nil)
 	}
 	if q.Capture == nil {
 		t.line("Context capture unavailable for this recorded request.")
@@ -181,10 +181,10 @@ func (r contextReport) writeText(w io.Writer) error {
 func (t *textLines) capture(c *harness.ContextCapture) {
 	t.line("Rendered prompt bytes: %d / %d", c.Bytes.Total, c.Bytes.Limit)
 	b := c.Bytes
-	t.line("Composition bytes: system %d; goal %d; constraints %d; environment %d; anchor %d; previous %d; instructions %d; observations %d; focus %d; latest %d",
-		b.System, b.Goal, b.Constraints, b.Environment, b.Anchor, b.Previous, b.Instructions, b.Observations, b.Focus, b.Latest)
-	t.line("Preparation: %s; latest step %d sequence %d; selected sources %d; bound instructions %d; observation keys %d; latest observation position %d",
-		c.Preparation, c.LatestStep, c.LatestSeq, len(c.Focus), c.InstructionCount, c.ObservationKeys, c.ObservationPos)
+	t.line("Composition bytes: system %d; goal %d; constraints %d; head instructions %d; environment %d; anchor %d; previous %d; index %d; notice %d; epoch header %d; epoch instructions %d; observations %d; latest %d",
+		b.System, b.Goal, b.Constraints, b.HeadInstructions, b.Environment, b.Anchor, b.Previous, b.Index, b.Notice, b.EpochHeader, b.EpochInstructions, b.Observations, b.Latest)
+	t.line("Preparation: %s; latest step %d sequence %d; resident sources %d; bound instructions %d; observation keys %d; latest observation position %d",
+		c.Preparation, c.LatestStep, c.LatestSeq, len(c.Sources), c.InstructionCount, c.ObservationKeys, c.ObservationPos)
 	if c.PreviousRun != "" {
 		t.line("Previous run: %s", c.PreviousRun)
 	}
@@ -195,7 +195,7 @@ func (t *textLines) capture(c *harness.ContextCapture) {
 		}
 	}
 	for _, s := range c.Sources {
-		t.line("Source sequence %d source %d, step %d: %s [%d,%d) sha256 %s; selected %t", s.Seq, s.Index, s.Step, s.Source.Path, s.Source.Offset, s.Source.Offset+int64(s.Source.Length), s.Source.SHA256, s.Selected)
+		t.line("Resident source sequence %d source %d, step %d: %s [%d,%d) sha256 %s", s.Seq, s.Index, s.Step, s.Source.Path, s.Source.Offset, s.Source.Offset+int64(s.Source.Length), s.Source.SHA256)
 	}
 }
 

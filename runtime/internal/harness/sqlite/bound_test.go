@@ -143,7 +143,6 @@ func TestReadsStayBoundedByTheirLimit(t *testing.T) {
 		"Latest":                {latestSQL, "sqlite_autoindex_transitions_1", []any{"long"}},
 		"Transitions":           {transitionsSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
 		"Progress":              {progressSQL, "sqlite_autoindex_transitions_1", []any{"long", 100, 10}},
-		"Completion":            {completionSQL, "sqlite_autoindex_transitions_1", []any{"long", 100}},
 		"Request":               {requestSQL, "transitions_request", []any{"long", 7, 1}},
 		"Response":              {responseSQL, "transitions_response", []any{"long", 7, 1}},
 		"Recent before actions": {recentSQL, "transitions_steps (run_id=? AND seq<?)", []any{"long", int64(math.MaxInt64), 5}},
@@ -214,7 +213,10 @@ func BenchmarkRecent(b *testing.B) {
 // a response, or retrieved evidence, so that what it returns is bounded
 // whatever a row holds.
 func TestProgressSelectsNoBodyAndClipsEveryText(t *testing.T) {
-	rest := regexp.MustCompile(`substr\(CAST\(json_extract\((from_state|to_state|facts), '[^']*'\) AS BLOB\), 1, \d+\)`).ReplaceAllString(progressSQL, "")
+	// The handover count is a scalar derived from the complete payload; it
+	// returns no text, so the cap check skips that expression.
+	rest := strings.ReplaceAll(progressSQL, handoverNoteBytesSQL, "")
+	rest = regexp.MustCompile(`substr\(CAST\(json_extract\((from_state|to_state|facts), '[^']*'\) AS BLOB\), 1, \d+\)`).ReplaceAllString(rest, "")
 	for _, m := range regexp.MustCompile(`json_extract\([^)]*\)`).FindAllString(rest, -1) {
 		switch m {
 		case `json_extract(from_state, '$.Step')`, `json_extract(facts, '$.Observation.ExitCode')`, `json_extract(facts, '$.ContextState.AnchorSeq')`:

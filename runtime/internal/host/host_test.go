@@ -1601,7 +1601,7 @@ func TestStopAndInspectedResolutionReuseTheAcceptedExecutionConfiguration(t *tes
 	}
 }
 
-func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t *testing.T) {
+func TestProgressPublishesHandoverAndProviderResetWithoutAdvancingTheRejectedStep(t *testing.T) {
 	h := testHost(t, Options{})
 	var mu sync.Mutex
 	var id string
@@ -1621,7 +1621,7 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 		case 1:
 			decision = core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/runs/%s/goal","reason":"retain original task"}`, id)}
 		case 2:
-			decision = core.Decision{Kind: core.Exec, Payload: `canti:focus {"sources":[{"seq":5,"source":0}]}`}
+			decision = core.Decision{Kind: core.Exec, Payload: "canti:handover phase one done"}
 		}
 		text, _ := json.Marshal(decision)
 		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
@@ -1639,17 +1639,17 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 	if err != nil || snap.State.Phase != core.PhaseReturned || snap.State.Step != 3 {
 		t.Fatalf("drive=%+v %v", snap, err)
 	}
-	focus, reset := 0, 0
+	handover, reset := 0, 0
 	for after := Cursor(0); ; {
 		page, err := h.Progress(context.Background(), after, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, item := range page.Items {
-			if item.Outcome != nil && item.Outcome.Focus {
-				focus++
-				if item.Step != 2 || item.Outcome.FocusSources != 1 {
-					t.Fatalf("focus=%+v", item)
+			if item.Outcome != nil && item.Outcome.HandoverBytes > 0 {
+				handover++
+				if item.Step != 2 || item.Outcome.HandoverBytes != len("phase one done") {
+					t.Fatalf("handover=%+v", item)
 				}
 			}
 			if item.Kind == ItemContextReset {
@@ -1665,8 +1665,8 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 		}
 	}
 	view, err := h.View(context.Background(), id)
-	if err != nil || focus != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
-		t.Fatalf("projection lost reset/focus/unknown usage: focus=%d reset=%d view=%+v error=%v", focus, reset, view, err)
+	if err != nil || handover != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
+		t.Fatalf("projection lost reset/handover/unknown usage: handover=%d reset=%d view=%+v error=%v", handover, reset, view, err)
 	}
 }
 

@@ -936,8 +936,8 @@ func TestTheRequestBytesOfTheRunBoundEveryPrompt(t *testing.T) {
 				t.Fatalf("resume = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 			}
 			p := f.model.prompts(steps + 1)
-			if len(p) != 1 || strings.Contains(p[0], "### Step 1 (sequence ") != tc.shown {
-				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "### Step 1 (sequence "), tc.shown, p)
+			if len(p) != 1 || strings.Contains(p[0], "### Step 1\n") != tc.shown {
+				t.Fatalf("last prompt shows step 1 %v, want %v:\n%s", strings.Contains(p[0], "### Step 1\n"), tc.shown, p)
 			}
 		})
 	}

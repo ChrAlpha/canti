@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
-	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
@@ -61,33 +60,6 @@ func BenchmarkCommitFile(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.StartTimer()
-			}
-		})
-	}
-}
-
-// BenchmarkCompletion reads, by its sequence, the performed step of a
-// retrieval that committed 8 KiB of evidence, under a decision of a typical
-// size and of 1 MiB: the point read a carried reference costs at every
-// preparation of the window that carries it.
-func BenchmarkCompletion(b *testing.B) {
-	for _, size := range []int{128, 1 << 20} {
-		b.Run(fmt.Sprintf("decision_%dB", size), func(b *testing.B) {
-			ctx := context.Background()
-			s := open(b, tempPath(b))
-			d := newDriver(b, s, createRun(b, s, "run-1", limits))
-			d.decide(execBody(fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/imports/x","reason":%q}`, strings.Repeat("r", size))), harness.Usage{})
-			evidence := strings.Repeat("e", archive.MaxBytes)
-			d.do(core.Performed{EffectID: d.snap.State.EffectID}, harness.Facts{Outcome: &harness.Outcome{Status: harness.OutcomeDone, Retrieval: &archive.Retrieval{
-				Query:   archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/x", Reason: "r"},
-				Sources: []archive.SourceRange{{Path: "/canti/imports/x", Length: len(evidence), SHA256: strings.Repeat("a", 64)}}, Evidence: []string{evidence}}}})
-			seq := d.snap.Seq
-			b.ReportAllocs()
-			b.ResetTimer()
-			for b.Loop() {
-				if r, err := s.Completion(ctx, "run-1", seq); err != nil || r.Outcome == nil {
-					b.Fatal(r, err)
-				}
 			}
 		})
 	}

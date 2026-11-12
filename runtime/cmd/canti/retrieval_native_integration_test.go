@@ -81,7 +81,7 @@ func TestNativeDiscoveryOwnRunAcrossRestartsAndWindows(t *testing.T) {
 			}
 		}
 		nextCall = 2
-		act(harness.FocusPrefix + `{"sources":[]}`)
+		act(harness.HandoverPrefix + "native retrieval phase closed")
 	}
 	act("cat input; rm input")
 	original := observe()

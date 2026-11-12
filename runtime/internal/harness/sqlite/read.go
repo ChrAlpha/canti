@@ -336,38 +336,6 @@ func (s *Store) Recent(ctx context.Context, runID string, before int64, limit in
 	return out, nil
 }
 
-// Completion returns the step that the transition at seq of the run
-// completed: one read by primary key, which needs no index. It fails with
-// harness.ErrNotFound when the run holds no transition at seq, and with both
-// ErrIncompatible and harness.ErrIncompatible when the transition there
-// completes no step or does not decode as a step its version records; a
-// done context and a failed read are returned as they are.
-func (s *Store) Completion(ctx context.Context, runID string, seq int64) (harness.StepRecord, error) {
-	return s.completion(ctx, nil, runID, seq)
-}
-
-func (s *Store) completion(ctx context.Context, tx *sql.Tx, runID string, seq int64) (harness.StepRecord, error) {
-	rows, err := s.stmt(ctx, tx, completionSQL).QueryContext(ctx, runID, seq)
-	if err != nil {
-		return harness.StepRecord{}, err
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return harness.StepRecord{}, err
-		}
-		return harness.StepRecord{}, fmt.Errorf("sqlite: transition %d of run %q: %w", seq, runID, harness.ErrNotFound)
-	}
-	step, err := scanStep(rows)
-	if err != nil && ctx.Err() == nil {
-		return harness.StepRecord{}, fmt.Errorf("%w: %w", harness.ErrIncompatible, err)
-	}
-	if err != nil {
-		return harness.StepRecord{}, err
-	}
-	return step, rows.Close()
-}
-
 // CompletionAtStep resolves one archived step through its bounded unique index.
 func (s *Store) CompletionAtStep(ctx context.Context, runID string, step int) (harness.StepRecord, error) {
 	rows, err := s.db.QueryContext(ctx, completionStepSQL, runID, step)

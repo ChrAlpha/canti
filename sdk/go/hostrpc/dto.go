@@ -16,9 +16,10 @@ import "log/slog"
 // versions refuse each other. Version 5 adds validation and cursor-free
 // initial progress requests; version 8 makes input typed, adds steer,
 // follow-up, observation, withdrawal and cancellation, and makes cursors
-// opaque agent-log positions. Records live with the runtime server contract
+// opaque agent-log positions; version 9 replaces focus with handover_bytes on
+// a local action's outcome. Records live with the runtime server contract
 // tests.
-const Protocol = 8
+const Protocol = 9
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -329,7 +330,9 @@ type Input struct {
 	Truncated   bool   `json:"truncated,omitempty"`
 }
 
-// Outcome is the result of a local action.
+// Outcome is the result of a local action. A handover step reports the byte
+// count of its text; the text itself is available through step inspection and
+// the archive.
 type Outcome struct {
 	Status         string `json:"status"`
 	Detail         string `json:"detail,omitempty"`
@@ -337,8 +340,7 @@ type Outcome struct {
 	RetrievalError string `json:"retrieval_error,omitempty"`
 	Sources        int    `json:"sources,omitempty"`
 	Entries        int    `json:"entries,omitempty"`
-	Focus          bool   `json:"focus,omitempty"`
-	FocusSources   int    `json:"focus_sources,omitempty"`
+	HandoverBytes  int    `json:"handover_bytes,omitempty"`
 }
 
 // Wait is what a wait observed: the latest agent-log position, whether the

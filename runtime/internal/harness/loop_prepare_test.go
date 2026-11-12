@@ -27,6 +27,15 @@ type tampered struct {
 	done        bool
 }
 
+func (j *tampered) PriorUsage(ctx context.Context, runID string, before int64) (harness.Usage, bool, error) {
+	v, found, err := j.Store.PriorUsage(ctx, runID, before)
+	if j.done || err != nil || j.method != "PriorUsage" || j.run != "" && runID != j.run {
+		return v, found, err
+	}
+	j.done = true
+	return v, found, errTransient
+}
+
 func tamper[T any](j *tampered, method, run string, v T, err error) (T, error) {
 	if j.done || err != nil || method != j.method || j.run != "" && run != j.run {
 		return v, err
@@ -144,7 +153,7 @@ func lineTransitions(t *testing.T, f *fixture) []harness.Transition {
 }
 
 func TestPrepareRetriesAJournalReadThatFailed(t *testing.T) {
-	for _, method := range []string{"Context", "Receipts", "Recent", "PreviousRuns"} {
+	for _, method := range []string{"Context", "PriorUsage", "Recent", "PreviousRuns"} {
 		t.Run(method, func(t *testing.T) {
 			f := lineAfterAStep(t)
 			before := lineTransitions(t, f)

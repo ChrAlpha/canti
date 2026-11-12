@@ -130,23 +130,23 @@ func TestDecisionPurposeReachesLaterRequestsAcrossRestarts(t *testing.T) {
 			}
 			rev1, rev2, last := parseFrozen(t, frozen[[2]int{2, 1}]), parseFrozen(t, frozen[[2]int{2, 2}]), parseFrozen(t, frozen[[2]int{3, 1}])
 			runID := h[0].State.RunID
-			receipt := func(step int, seq int, purpose string) string {
-				return fmt.Sprintf("### Step %d (sequence %d)\nPurpose: %s\nOutcome: exited, exit code 0\nSource: /canti/runs/%s/steps/%08d\n", step, seq, purpose, runID, step)
+			stepBlock := func(step int, purpose, command string) string {
+				return fmt.Sprintf("### Step %d\nPurpose: %s\nCommand:\n```\n%s\n```\n", step, purpose, command)
 			}
-			stepOne := receipt(1, 5, first)
-			if len(rev1.Blocks) != 3 || rev1.Blocks[1] != stepOne || !strings.HasSuffix(rev1.Blocks[0], "## Completed step receipts\n") ||
-				!strings.HasPrefix(rev1.Blocks[2], "## Execution position\n") || !strings.Contains(rev1.Blocks[2], "## Latest completion\n") ||
-				!strings.Contains(rev1.Blocks[2], "Purpose: "+first+"\nCommand:\n```\nprintf 'one\\n' > one.txt\n```\n") {
-				t.Fatalf("step2 stable receipt/latest-tail ordering: %+v", rev1)
+			if len(rev1.Blocks) != 3 || !strings.HasPrefix(rev1.Blocks[1], stepBlock(1, first, "printf 'one\\n' > one.txt")) ||
+				!strings.Contains(rev1.Blocks[0], "## Steps since the anchor") ||
+				!strings.HasPrefix(rev1.Blocks[2], "## Execution position\n") || strings.Contains(rev1.Blocks[2], "## Latest completion") {
+				t.Fatalf("step2 resident-epoch/tail ordering: %+v", rev1)
 			}
 			if rev2.System != rev1.System || len(rev2.Blocks) != 3 || rev2.Blocks[0] != rev1.Blocks[0] || rev2.Blocks[1] != rev1.Blocks[1] ||
-				!strings.Contains(rev2.Blocks[2], "## Protocol repair\n") || strings.Index(rev2.Blocks[2], "## Protocol repair") <= strings.Index(rev2.Blocks[2], "## Latest completion") {
-				t.Fatalf("repair changed stable receipt or tail ordering: %+v %+v", rev1, rev2)
+				!strings.Contains(rev2.Blocks[2], "## Protocol repair\n") || strings.Index(rev2.Blocks[2], "## Protocol repair") <= strings.Index(rev2.Blocks[2], "## Execution position") {
+				t.Fatalf("repair changed the stable epoch or tail ordering: %+v %+v", rev1, rev2)
 			}
 			clipped := "read the file back " + strings.Repeat("é", 246) + "…[truncated 108 bytes]"
-			if last.System != rev1.System || len(last.Blocks) != 4 || last.Blocks[0] != rev1.Blocks[0] || last.Blocks[1] != stepOne || last.Blocks[2] != receipt(2, 14, clipped) ||
-				!strings.Contains(last.Blocks[3], "### Step 2\nPurpose: "+clipped+"\nCommand:\n```\ncat one.txt\n```\n") {
-				t.Fatalf("step3 clipped committed purpose/stable receipt/latest tail: %+v", last)
+			if last.System != rev1.System || len(last.Blocks) != 4 || last.Blocks[0] != rev1.Blocks[0] || last.Blocks[1] != rev1.Blocks[1] ||
+				!strings.HasPrefix(last.Blocks[2], stepBlock(2, clipped, "cat one.txt")) ||
+				!strings.HasPrefix(last.Blocks[3], "## Execution position\n") || strings.Contains(last.Blocks[3], "## Latest completion") {
+				t.Fatalf("step3 clipped purpose in the resident epoch: %+v", last)
 			}
 			for _, request := range []frozenBody{rev1, rev2, last} {
 				for index, cached := range request.Cached {

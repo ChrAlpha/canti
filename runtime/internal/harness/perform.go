@@ -44,10 +44,11 @@ func (l *Loop) descriptor(run Run, s core.State, a Accepted) (Effect, error) {
 }
 
 // perform carries out the local action a of snap and commits its outcome,
-// with the focus selection it changes, and the step's progress as one Performed.
-// Nothing is committed once ctx is done, so a resume performs it again: a
-// read from its sources as they are then, a local change identically.
-// Committed context that fails an integrity check stops the run instead.
+// with the context head a successful handover opens, and the step's progress
+// as one Performed. Nothing is committed once ctx is done, so a resume
+// performs it again: a read from its sources as they are then, a local change
+// identically. Committed context that fails an integrity check stops the run
+// instead.
 func (l *Loop) perform(ctx context.Context, run Run, snap Snapshot, a Action) (Snapshot, error) {
 	s := snap.State
 	o, err := l.outcome(ctx, snap, a)
@@ -58,13 +59,20 @@ func (l *Loop) perform(ctx context.Context, run Run, snap Snapshot, a Action) (S
 		return snap, ctx.Err()
 	}
 	facts := Facts{Outcome: &o}
-	if o.Focus != nil {
+	if a.Name == ActionHandover && o.Status == OutcomeDone {
 		current, err := l.journal.Context(ctx, snap)
 		if err != nil {
 			return snap, err
 		}
-		current.Focus = o.Focus.Sources
-		facts.ContextState = &current
+		event := core.Performed{EffectID: s.EffectID}
+		next, err := s.Next(event)
+		if err != nil {
+			return snap, err
+		}
+		facts.ContextState = &ContextState{
+			AnchorSeq: snap.Seq + 1, FirstStep: next.Step,
+			Rejection: current.Rejection,
+		}
 	}
 	return l.runner.Commit(ctx, snap, core.Performed{EffectID: s.EffectID}, facts)
 }
@@ -80,8 +88,8 @@ func (l *Loop) outcome(ctx context.Context, snap Snapshot, a Action) (Outcome, e
 	if err != nil {
 		return failed(err), nil
 	}
-	if a.Name == ActionFocus {
-		return l.focus(ctx, snap, args)
+	if a.Name == ActionHandover {
+		return l.handover(args)
 	}
 	return l.retrieve(ctx, args)
 }

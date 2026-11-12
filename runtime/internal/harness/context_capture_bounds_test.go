@@ -43,7 +43,6 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				f := newFixture(t, limits, harness.Budget{}, execReply("canti:retrieve "+string(encoded)),
 					reply{body: "invalid decision"},
 					execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"recover with valid input","limit":8}`),
-					execReply(`canti:focus {"sources":[]}`),
 					returnReply("Original evidence verified; retrieval recovered."))
 				imported := t.TempDir()
 				if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("ORIGINAL_EVIDENCE"), 0600); err != nil {
@@ -63,14 +62,14 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					}
 					if s.State.Intent() == core.IntentHalt {
 						wantState(t, s, core.PhaseReturned, "")
-						if s.State.Step != 4 || s.State.Decision.Payload != "Original evidence verified; retrieval recovered." {
+						if s.State.Step != 3 || s.State.Decision.Payload != "Original evidence verified; retrieval recovered." {
 							t.Fatalf("recovery did not complete: %+v", s.State)
 						}
 						break
 					}
 				}
 				steps, err := f.open().Recent(ctx, runID, 0, 3)
-				if err != nil || len(steps) != 3 {
+				if err != nil || len(steps) != 2 {
 					t.Fatalf("observations = %d, %v", len(steps), err)
 				}
 				failed := steps[0].Outcome
@@ -80,10 +79,10 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 				if len(f.exec.log()) != 0 {
 					t.Fatal("builtin retrieval called the executor")
 				}
-				if len(f.model.prompts) != 5 {
-					t.Fatalf("prepares = %d, want 5", len(f.model.prompts))
+				if len(f.model.prompts) != 4 {
+					t.Fatalf("prepares = %d, want 4", len(f.model.prompts))
 				}
-				for i, id := range [][2]int{{1, 1}, {2, 1}, {2, 2}, {3, 1}, {4, 1}} {
+				for i, id := range [][2]int{{1, 1}, {2, 1}, {2, 2}, {3, 1}} {
 					req := capturedRequest(t, f, id[0], id[1])
 					checkCapturedBytes(t, req, f.model.prompts[i])
 					t.Logf("request %d/%d body_sha256=%x", id[0], id[1], sha256.Sum256(req.Body))
@@ -124,12 +123,9 @@ func TestContextCaptureBoundsRejectedRetrievalAcrossReopen(t *testing.T) {
 					t.Fatal("protocol repair lost the original capture identity")
 				}
 				trigger := capturedRequest(t, f, 3, 1)
-				if len(trigger.Context.Retrievals) != 1 || !trigger.Context.Retrievals[0].More || len(trigger.Context.Sources) != 1 || !strings.Contains(string(trigger.Body), "ORIGINAL") {
-					t.Fatal("valid retrieval did not reach the next decision")
-				}
-				next := capturedRequest(t, f, 4, 1)
-				if next.ContextState.AnchorSeq != 0 || len(next.ContextState.Focus) != 0 || len(next.Context.Retrievals) != 0 || strings.Contains(string(next.Body), "ORIGINAL") {
-					t.Fatal("completed focus did not release transient evidence and preserve next-step progress")
+				if len(trigger.Context.Retrievals) != 2 || !trigger.Context.Retrievals[1].More || len(trigger.Context.Sources) != 1 ||
+					!strings.Contains(string(trigger.Body), "ORIGINAL") || trigger.ContextState.AnchorSeq != 0 {
+					t.Fatal("the resident epoch lost a retrieval or its provenance")
 				}
 			})
 		}

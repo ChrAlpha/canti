@@ -178,59 +178,7 @@ func TestDirectorySearchGeneratedCursorCanAlwaysBeResumed(t *testing.T) {
 	}
 }
 
-func TestFocusReplacesFrozenSelectionAndInvalidSelectionPreservesIt(t *testing.T) {
-	imported := t.TempDir()
-	for name, text := range map[string]string{"a": "ORIGINAL_A", "b": "ORIGINAL_B"} {
-		if err := os.WriteFile(filepath.Join(imported, name), []byte(text), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f := newFixture(t, core.Limits{MaxSteps: 10, MaxAttempts: 3}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/a","reason":"a"}`),
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/b","reason":"b"}`),
-		execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`),
-		execReply(`canti:focus {"sources":[{"seq":10,"source":0}]}`),
-		execReply(`canti:focus {"sources":[{"seq":10,"source":0},{"seq":10,"source":0}]}`),
-		execReply(`canti:focus {"sources":[]}`), returnReply("done"))
-	f.cfg.Reader = &archive.Reader{Imports: imported}
-	f.steps(f.loop(), 12)
-	first, err := f.store.Context(context.Background(), focusSnapshot(t, f))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.Focus) != 1 || first.Focus[0].SourceSeq != 5 {
-		t.Fatalf("first selection=%+v", first)
-	}
-	if err := os.RemoveAll(imported); err != nil {
-		t.Fatal(err)
-	}
-	f.steps(f.fresh(), 4)
-	second, err := f.store.Context(context.Background(), focusSnapshot(t, f))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(second.Focus) != 1 || second.Focus[0].SourceSeq != 10 {
-		t.Fatalf("replacement=%+v", second)
-	}
-	f.steps(f.fresh(), 4)
-	invalid, err := f.store.Context(context.Background(), focusSnapshot(t, f))
-	if err != nil || !invalid.Equal(second) {
-		t.Fatalf("invalid changed selection=%+v %v", invalid, err)
-	}
-	if got := f.last().Facts.Outcome; got == nil || got.Status != harness.OutcomeFailed {
-		t.Fatalf("duplicate selection result=%+v", got)
-	}
-	f.run(f.fresh())
-	cleared, err := f.store.Context(context.Background(), focusSnapshot(t, f))
-	if err != nil || len(cleared.Focus) != 0 || cleared.AnchorSeq != 0 {
-		t.Fatalf("clear=%+v %v", cleared, err)
-	}
-	if len(f.exec.calls) != 0 {
-		t.Fatalf("focus reached executor: %v", f.exec.calls)
-	}
-}
-
-func focusSnapshot(t *testing.T, f *fixture) harness.Snapshot {
+func latestSnapshot(t *testing.T, f *fixture) harness.Snapshot {
 	t.Helper()
 	snap, err := f.store.Latest(context.Background(), runID)
 	if err != nil {
@@ -263,8 +211,8 @@ func TestConfirmedOverflowResetsSameStepAndNeverExecutesPartialDecision(t *testi
 	}
 	for _, rev := range []int{2, 3} {
 		raw := f.frozen(2, rev)
-		if bytes.Contains(raw, []byte("TRANSIENT_BEFORE_RESET")) || !bytes.Contains(raw, []byte("Its result predates this anchor")) {
-			t.Fatalf("reset revision %d lost orientation or replayed body: %s", rev, raw)
+		if bytes.Contains(raw, []byte("TRANSIENT_BEFORE_RESET")) || !bytes.Contains(raw, []byte("## Earlier steps")) || !bytes.Contains(raw, []byte("- Step 1:")) {
+			t.Fatalf("reset revision %d lost its index or replayed the body: %s", rev, raw)
 		}
 	}
 	if len(f.exec.calls) != 0 {
@@ -285,7 +233,7 @@ func TestConfirmedOverflowResetsSameStepAndNeverExecutesPartialDecision(t *testi
 	}
 }
 
-func TestLatestRetrievalSurvivesSameStepRetryAndRepairThenExpires(t *testing.T) {
+func TestRetrievalStaysResidentAcrossSameStepRetryAndRepair(t *testing.T) {
 	imported := t.TempDir()
 	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("LATEST_RESULT_LIFETIME"), 0o600); err != nil {
 		t.Fatal(err)
@@ -303,10 +251,10 @@ func TestLatestRetrievalSurvivesSameStepRetryAndRepairThenExpires(t *testing.T) 
 	if !bytes.Equal(f.model.sent[1], f.model.sent[2]) {
 		t.Fatal("transport retry rebuilt input")
 	}
-	if bytes.Contains(f.frozen(3, 1), []byte("LATEST_RESULT_LIFETIME")) {
-		t.Fatal("completed step retained transient retrieval body")
+	if !bytes.Contains(f.frozen(3, 1), []byte("LATEST_RESULT_LIFETIME")) {
+		t.Fatal("the completed retrieval left the resident epoch")
 	}
-	// Receipts remain stable while the dynamic result is replaced.
+	// The repair keeps the stable epoch byte-identical.
 	a, b := f.model.prompts[1], f.model.prompts[2]
 	if !reflect.DeepEqual(a.Blocks[:a.Stable], b.Blocks[:b.Stable]) {
 		t.Fatal("repair changed the stable prefix")
@@ -416,7 +364,7 @@ func TestNativeHistoricalSnapshotReadRepairsOnlyRequestedFrozenStep(t *testing.T
 			if err := os.WriteFile(original, []byte(text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`), execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`)}
+			replies := []reply{execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`), execReply("canti:handover-carry retired")}
 			const unrelated = 8
 			for range unrelated {
 				replies = append(replies, execReply("canti:unrelated"))
@@ -438,7 +386,7 @@ func TestNativeHistoricalSnapshotReadRepairsOnlyRequestedFrozenStep(t *testing.T
 				t.Fatal("reset boundary not reached")
 			}
 			f.steps(f.fresh(), 3)
-			before := focusSnapshot(t, f)
+			before := latestSnapshot(t, f)
 			if before.State.Phase != core.PhaseEffectSaved {
 				t.Fatal("native read not accepted")
 			}
@@ -480,7 +428,7 @@ func TestNativeHistoricalSnapshotReadRepairsOnlyRequestedFrozenStep(t *testing.T
 				if _, err := resumed.Step(ctx, runID); !errors.Is(err, context.Canceled) {
 					t.Fatalf("cancelled read: %v", err)
 				}
-				if got := focusSnapshot(t, f); got != before {
+				if got := latestSnapshot(t, f); got != before {
 					t.Fatal("cancelled read committed")
 				}
 				if _, err := os.Stat(evidence); !errors.Is(err, os.ErrNotExist) {
@@ -541,41 +489,38 @@ func TestInitialOrientationOverflowStopsWithoutEmptyReset(t *testing.T) {
 	}
 }
 
-func TestFocusRetainsFrozenBytesAcrossRepairAndResendUntilReset(t *testing.T) {
+func TestEpochRetainsFrozenBytesAcrossRepairAndResendUntilHandover(t *testing.T) {
 	imported := t.TempDir()
-	text := "FOCUS_EVIDENCE_LIFETIME"
+	text := "RESIDENT_EVIDENCE_LIFETIME"
 	if err := os.WriteFile(filepath.Join(imported, "source"), []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 5}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
-		execReply(`canti:focus {"sources":[{"seq":5,"source":0}]}`), execReply("canti:unrelated"),
+	f := newFixture(t, core.Limits{MaxSteps: 10, MaxAttempts: 5}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","offset":0,"limit":8192,"reason":"capture"}`),
+		execReply("canti:unrelated"),
 		reply{err: errors.New("transport interrupted")}, reply{body: `{"wrong":"shape"}`},
-		reply{body: `{}`, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, returnReply("done"))
+		returnReply("done"))
 	f.cfg.Reader = &archive.Reader{Imports: imported}
 	f.run(f.loop())
-	for _, position := range [][2]int{{3, 1}, {4, 1}, {4, 2}} {
+	for _, position := range [][]int{{2, 1}, {3, 1}, {3, 2}} {
 		if !bytes.Contains(f.frozen(position[0], position[1]), []byte(text)) {
-			t.Fatalf("focus vanished at step/rev %v", position)
+			t.Fatalf("resident evidence vanished at step/rev %v", position)
 		}
 	}
-	if bytes.Contains(f.frozen(4, 3), []byte(text)) {
-		t.Fatal("reset retained old focus body")
+	if !bytes.Equal(f.model.sent[2], f.model.sent[3]) {
+		t.Fatal("same-revision resend changed bytes")
 	}
-	if !bytes.Equal(f.model.sent[3], f.model.sent[4]) {
-		t.Fatal("same-step resend changed bytes")
+	if len(f.model.prompts) != 4 {
+		t.Fatalf("prompts = %d, want 4", len(f.model.prompts))
 	}
-	p3, p4, repair := f.model.prompts[2], f.model.prompts[3], f.model.prompts[4]
-	prefix3, prefix4 := strings.Join(p3.Blocks[:p3.Stable], ""), strings.Join(p4.Blocks[:p4.Stable], "")
-	if !strings.HasPrefix(prefix4, prefix3) || prefix4 != strings.Join(repair.Blocks[:repair.Stable], "") {
-		t.Fatal("receipts did not append or repair changed stable prefix")
+	resident, repair := f.model.prompts[2], f.model.prompts[3]
+	prefix := strings.Join(resident.Blocks[:resident.Stable], "")
+	if prefix != strings.Join(repair.Blocks[:repair.Stable], "") || !strings.Contains(prefix, text) {
+		t.Fatal("the repair changed the stable epoch or lost the resident evidence")
 	}
-	if strings.Contains(prefix4, text) {
-		t.Fatal("replaceable focus entered stable prefix")
-	}
-	current, err := f.store.Context(context.Background(), focusSnapshot(t, f))
-	if err != nil || current.AnchorSeq == 0 || len(current.Focus) != 0 {
-		t.Fatalf("reset did not release focus: %+v %v", current, err)
+	current, err := f.store.Context(context.Background(), latestSnapshot(t, f))
+	if err != nil || current.AnchorSeq != 0 || current.Minimal {
+		t.Fatalf("unexpected head: %+v %v", current, err)
 	}
 }
 
@@ -585,7 +530,7 @@ func TestLoopExhaustedOverflowSettlesUsageWithoutNewAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 1}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","offset":0,"limit":8192,"reason":"capture"}`),
 		reply{body: `{}`, usage: harness.Usage{InputTokens: 7, InputReported: true, OutputReported: true}, err: &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}})
 	f.cfg.Reader = &archive.Reader{Imports: imported}
 	got := f.run(f.loop())
@@ -680,11 +625,11 @@ func TestNativeSnapshotCancellationAfterLookupPreventsPublicationAndProgress(t *
 	}
 	target := fmt.Sprintf("/canti/runs/%s/steps/00000001/evidence/0000", runID)
 	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 4}, harness.Budget{},
-		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"capture"}`),
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","offset":0,"limit":8192,"reason":"capture"}`),
 		execReply("canti:unrelated"), execReply(fmt.Sprintf(`canti:retrieve {"operation":"read","path":%q,"reason":"recover exact snapshot"}`, target)), returnReply("done"))
 	f.cfg.Reader = &archive.Reader{Imports: imported, History: f.cfg.History}
 	f.steps(f.loop(), 11)
-	before := focusSnapshot(t, f)
+	before := latestSnapshot(t, f)
 	if before.State.Phase != core.PhaseEffectSaved {
 		t.Fatal("historical read not accepted")
 	}
@@ -705,7 +650,7 @@ func TestNativeSnapshotCancellationAfterLookupPreventsPublicationAndProgress(t *
 	if !errors.Is(err, context.Canceled) || ctx.Err() != context.Canceled || journal.lookups != 1 {
 		t.Fatalf("interleaved cancellation: error=%v context=%v lookups=%d", err, ctx.Err(), journal.lookups)
 	}
-	if got := focusSnapshot(t, f); got != before {
+	if got := latestSnapshot(t, f); got != before {
 		t.Fatalf("cancelled repair committed progress: %+v", got)
 	}
 	if after := tree(t, stepDir); !reflect.DeepEqual(priorFiles, after) {
@@ -713,5 +658,302 @@ func TestNativeSnapshotCancellationAfterLookupPreventsPublicationAndProgress(t *
 	}
 	if journal.recentReads != 0 || journal.receiptReads != 0 {
 		t.Fatal("cancelled repair scanned unrelated history")
+	}
+}
+
+func TestExecutionPositionReportsCommittedUsage(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	exec := execReply("true")
+	returned := returnReply("done")
+	for _, tc := range []struct {
+		name     string
+		replies  []reply
+		want     []string
+		absent   []string
+		rejected bool
+	}{
+		{
+			name: "previous accepted and rejection maximum",
+			replies: []reply{
+				{body: exec.body, usage: harness.Usage{InputTokens: 100, InputReported: true}},
+				{body: "{}", err: signal, usage: harness.Usage{InputTokens: 200, InputReported: true}},
+				{body: returned.body, usage: harness.Usage{InputTokens: 0, InputReported: true}},
+			},
+			want: []string{"Previous request: 100 input tokens (provider-reported).",
+				"Previous request: 200 input tokens (provider-reported).",
+				"Provider context rejection at step 2; the largest earlier accepted request reported 100 input tokens."},
+			rejected: true,
+		},
+		{
+			name: "reported zero is shown",
+			replies: []reply{
+				{body: exec.body, usage: harness.Usage{InputTokens: 0, InputReported: true}},
+				{body: returned.body, usage: harness.Usage{}},
+			},
+			want: []string{"Previous request: 0 input tokens (provider-reported)."},
+		},
+		{
+			name: "an unreported previous attempt omits the line",
+			replies: []reply{
+				{body: exec.body, usage: harness.Usage{InputReported: false}},
+				{body: returned.body, usage: harness.Usage{}},
+			},
+			absent: []string{"Previous request:"},
+		},
+		{
+			name: "an unknown final attempt does not substitute older usage",
+			replies: []reply{
+				{body: exec.body, usage: harness.Usage{InputTokens: 300, InputReported: true}, err: errors.New("transport interrupted")},
+				{body: exec.body, usage: harness.Usage{InputReported: false}},
+				{body: returned.body, usage: harness.Usage{}},
+			},
+			absent: []string{"Previous request: 300"},
+		},
+		{
+			name: "the maximum is taken strictly before the rejection",
+			replies: []reply{
+				{body: exec.body, usage: harness.Usage{InputTokens: 100, InputReported: true}},
+				{body: execReply("true").body, usage: harness.Usage{InputTokens: 500, InputReported: true}},
+				{body: "{}", err: signal, usage: harness.Usage{InputTokens: 900, InputReported: true}},
+				{body: returned.body, usage: harness.Usage{}},
+			},
+			want:     []string{"Provider context rejection at step 3; the largest earlier accepted request reported 500 input tokens."},
+			rejected: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{}, tc.replies...)
+			f.run(f.loop())
+			var all []string
+			for _, tr := range f.transitions() {
+				if tr.Facts.Request != nil {
+					all = append(all, string(tr.Facts.Request.Body))
+				}
+			}
+			joined := strings.Join(all, "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("requests lack %q:\n%s", want, joined)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(joined, absent) {
+					t.Fatalf("requests hold %q:\n%s", absent, joined)
+				}
+			}
+			if tc.rejected {
+				var rejection *harness.ContextRejection
+				for _, tr := range f.transitions() {
+					if tr.Facts.Rejection != nil {
+						rejection = tr.Facts.Rejection
+					}
+				}
+				if rejection == nil || !rejection.Signal.Confirmed() || rejection.MaxAcceptedInput == 0 && tc.name != "previous accepted and rejection maximum" {
+					t.Fatalf("rejection record = %+v", rejection)
+				}
+			}
+		})
+	}
+}
+
+func TestMinimalStaysThroughARejectionAfterAStep(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "source"), []byte("0123456789SMALL_RANGE"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 4}, harness.Budget{},
+		handoverReply("a phase note"), returnReply("done"),
+		reply{body: "{}", err: signal},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"read","limit":12}`),
+		reply{body: "{}", err: signal},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","reason":"read","offset":10,"limit":5}`),
+		returnReply("done"))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	f.run(f.loop())
+	const second = "run-2"
+	state, err := core.NewState(second, core.Limits{MaxSteps: 6, MaxAttempts: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.CreateRun(context.Background(), harness.Run{ID: second, Goal: "Continue.", Constraints: "Do not modify files.", Created: created}, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.loop().Run(f.bounded(), second); err != nil {
+		t.Fatal(err)
+	}
+	// The request that the second rejection rejected still had the first
+	// retrieval resident.
+	if rejected, err := f.store.Request(f.bounded(), second, 2, 1); err != nil || rejected.ContextState == nil || !rejected.ContextState.Minimal || rejected.Context == nil || len(rejected.Context.Bytes.Steps) != 1 {
+		t.Fatalf("the request before the second rejection = %+v, %v", rejected.ContextState, err)
+	}
+	// After the second rejection the head stays minimal, and the epoch keeps
+	// the resident step without re-expanding optional content.
+	minimal, err := f.store.Request(f.bounded(), second, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minimal.ContextState == nil || !minimal.ContextState.Minimal || minimal.Context == nil || len(minimal.Context.Bytes.Steps) != 0 {
+		t.Fatalf("the head after the second rejection = %+v", minimal.ContextState)
+	}
+	if minimal.Context.Bytes.Index != 0 || minimal.Context.Bytes.Previous != 0 || minimal.Context.Bytes.Observations != 0 || minimal.Context.Bytes.Notice == 0 {
+		t.Fatalf("the request after the second rejection rendered an optional body: %+v", minimal.Context.Bytes)
+	}
+	// The small read makes progress in the minimal epoch; the next request
+	// keeps both resident steps and still omits every optional body.
+	next, err := f.store.Request(f.bounded(), second, 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ContextState == nil || !next.ContextState.Minimal || next.Context == nil || len(next.Context.Bytes.Steps) != 1 {
+		t.Fatalf("the request after the small read = %+v", next.ContextState)
+	}
+	if next.Context.Bytes.Index != 0 || next.Context.Bytes.Previous != 0 || next.Context.Bytes.Observations != 0 || next.Context.Bytes.Notice == 0 {
+		t.Fatalf("a minimal request rendered an optional body: %+v", next.Context.Bytes)
+	}
+	if !strings.Contains(string(next.Body), "SMALL") || !strings.Contains(string(next.Body), "### Step 2") {
+		t.Fatalf("the small read did not reach the next request: %s", next.Body)
+	}
+	if snap, err := f.store.Latest(f.bounded(), second); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("the run did not continue to completion: %+v, %v", snap.State, err)
+	}
+}
+
+func TestMinimalRejectionIsTerminal(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 4}, harness.Budget{},
+		handoverReply("a phase note"), returnReply("done"),
+		reply{body: "{}", err: signal}, reply{body: "{}", err: signal})
+	f.run(f.loop())
+	const second = "run-2"
+	state, err := core.NewState(second, core.Limits{MaxSteps: 6, MaxAttempts: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.CreateRun(context.Background(), harness.Run{ID: second, Goal: "Continue.", Created: created}, state); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := f.loop().Run(f.bounded(), second)
+	if err != nil || snap.State.Phase != core.PhaseStopped || snap.State.Reason != core.StopUnrecoverable {
+		t.Fatalf("minimal rejection = %+v, %v", snap.State, err)
+	}
+	all, err := f.store.Transitions(context.Background(), second, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := all[len(all)-1]
+	if last.Event.Kind() != "stop_requested" || !strings.Contains(last.Facts.Failure, "minimal context") || strings.Contains(last.Facts.Failure, "authoritative orientation in fresh") {
+		t.Fatalf("terminal wording = %+v", last)
+	}
+}
+
+func TestRejectionClassifiesTheFrozenRequestNotNewObservations(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 3}, harness.Budget{}, reply{body: "{}", err: signal})
+	f.model.replies[0].hook = func() {
+		if _, err := f.store.Admit(context.Background(), harness.InputSubmission{Authority: harness.AuthorityObservation,
+			Source: "ci", Subject: "build", Text: "admitted after the freeze", Now: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := f.run(f.loop())
+	if snap.State.Phase != core.PhaseStopped || snap.State.Reason != core.StopUnrecoverable {
+		t.Fatalf("late observation changed the classification: %+v", snap.State)
+	}
+	last := f.last()
+	if last.Event.Kind() != "stop_requested" || !strings.Contains(last.Facts.Failure, "authoritative orientation") ||
+		last.Facts.Rejection == nil || last.Facts.Rejection.OptionalContent {
+		t.Fatalf("terminal rejection = %+v", last)
+	}
+	for _, tr := range f.transitions() {
+		if tr.Event.Kind() == "request_rejected" {
+			t.Fatal("a late observation opened a head")
+		}
+	}
+}
+
+func TestUsageLineFollowsAnInvalidDecision(t *testing.T) {
+	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 3}, harness.Budget{},
+		reply{body: "not a decision", usage: harness.Usage{InputTokens: 100, InputReported: true}},
+		returnReply("done"))
+	f.run(f.loop())
+	if body := string(f.frozen(1, 2)); !strings.Contains(body, "Previous request: 100 input tokens (provider-reported).") || !strings.Contains(body, "## Protocol repair") {
+		t.Fatalf("a repair lost the invalid decision's usage: %s", body)
+	}
+}
+
+func TestUsageLineFollowsASupersededDecision(t *testing.T) {
+	decision := core.Decision{Kind: core.Exec, Payload: "true"}
+	body, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 4, MaxAttempts: 3}, harness.Budget{},
+		reply{body: string(body), usage: harness.Usage{InputTokens: 100, InputReported: true}},
+		returnReply("done"))
+	f.model.replies[0].hook = func() {
+		if _, err := f.store.Admit(context.Background(), harness.InputSubmission{InputID: "steer-usage", Authority: harness.AuthorityPrincipal,
+			Delivery: harness.DeliverySteer, Text: "use sync", Now: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.run(f.loop())
+	if body := string(f.frozen(2, 1)); !strings.Contains(body, "Previous request: 100 input tokens (provider-reported).") || !strings.Contains(body, "use sync") {
+		t.Fatalf("a superseded decision's usage or instruction was lost: %s", body)
+	}
+}
+
+func TestIncompleteResponseDoesNotCountTowardTheRejectionMaximum(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	exec := execReply("true")
+	f := newFixture(t, core.Limits{MaxSteps: 5, MaxAttempts: 4}, harness.Budget{},
+		reply{body: "partial", err: errors.New("transport interrupted"), usage: harness.Usage{InputTokens: 5000, InputReported: true}},
+		reply{body: exec.body, usage: harness.Usage{InputTokens: 100, InputReported: true}},
+		reply{body: "{}", err: signal, usage: harness.Usage{InputTokens: 300, InputReported: true}},
+		returnReply("done"))
+	f.run(f.loop())
+	var rejection *harness.ContextRejection
+	for _, tr := range f.transitions() {
+		if tr.Facts.Rejection != nil {
+			rejection = tr.Facts.Rejection
+		}
+	}
+	if rejection == nil || rejection.MaxAcceptedInput != 100 || !rejection.MaxAcceptedReported {
+		t.Fatalf("the incomplete response counted toward the maximum: %+v", rejection)
+	}
+	if body := string(f.frozen(2, 2)); !strings.Contains(body, "the largest earlier accepted request reported 100 input tokens") || strings.Contains(body, "5000 input tokens") {
+		t.Fatalf("the rejection usage line counted the incomplete response: %s", body)
+	}
+}
+
+// TestIndexLeadsBackToEvidenceAfterANoteLessHandover requires that a
+// note-less handover lists its earlier step, that the scripted decision can
+// retrieve that step's record through the index path, and that the retrieved
+// result stays for the epoch.
+func TestIndexLeadsBackToEvidenceAfterANoteLessHandover(t *testing.T) {
+	const evidence = "KEY_EVIDENCE_FROM_STEP_ONE"
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "source"), []byte(evidence), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{},
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/source","offset":0,"limit":8192,"reason":"capture"}`),
+		execReply("canti:handover"),
+		execReply(`canti:retrieve {"operation":"read","path":"/canti/runs/run-1/steps/00000001/evidence/0000","reason":"recall"}`),
+		returnReply("done"))
+	f.cfg.Reader = &archive.Reader{History: f.cfg.History, Imports: imported}
+	f.run(f.loop())
+	post := string(f.frozen(3, 1))
+	for _, want := range []string{"## Earlier steps", "retrieval read /canti/imports/source offset=0 limit=8192", "- Step 2: done;", "Step records: /canti/runs/run-1/steps/"} {
+		if !strings.Contains(post, want) {
+			t.Fatalf("the request after the handover lacks %q:\n%s", want, post)
+		}
+	}
+	if strings.Contains(post, "## Handover") || strings.Contains(post, "KEY_EVIDENCE_FROM_STEP_ONE") {
+		t.Fatalf("the request after the handover carried the note or the old evidence:\n%s", post)
+	}
+	last := string(f.frozen(4, 1))
+	if !strings.Contains(last, "### Step 3") || !strings.Contains(last, evidence) {
+		t.Fatalf("the retrieved result did not stay resident for the epoch:\n%s", last)
 	}
 }

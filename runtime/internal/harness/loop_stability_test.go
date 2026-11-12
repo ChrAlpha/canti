@@ -269,10 +269,14 @@ func TestLoopLongStability(t *testing.T) {
 			}
 			if outcome := tr.Facts.Outcome; outcome != nil && outcome.Retrieval != nil {
 				retrievals++
+				record, err := f.store.CompletionAtStep(ctx, runID, tr.From.Step)
+				if err != nil || record.Outcome == nil || record.Outcome.Retrieval == nil || len(record.Outcome.Retrieval.Evidence) != len(outcome.Retrieval.Sources) {
+					t.Fatal("committed evidence does not read back")
+				}
 				for i, source := range outcome.Retrieval.Sources {
-					ref := harness.EvidenceRef{SourceSeq: tr.Seq, Step: tr.From.Step, Source: i, Length: source.Length, SHA256: source.SHA256}
-					record, err := f.store.Completion(ctx, runID, tr.Seq)
-					if err != nil || harness.ValidateEvidence(record, ref) != nil {
+					text := record.Outcome.Retrieval.Evidence[i]
+					sum := sha256.Sum256([]byte(text))
+					if len(text) != source.Length || fmt.Sprintf("%x", sum) != source.SHA256 {
 						t.Fatal("committed evidence differs from source hash")
 					}
 					unique[source.Path] = true

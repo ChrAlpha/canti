@@ -459,7 +459,8 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 		t.Fatal(err)
 	}
 	performed := Snapshot{Seq: 4, State: effect}
-	done := &Outcome{Status: OutcomeDone, Focus: &FocusSelection{}}
+	performed.State.Decision = core.Decision{Kind: core.Exec, Payload: "canti:handover next"}
+	done := &Outcome{Status: OutcomeDone}
 	bad := []struct {
 		name  string
 		snap  Snapshot
@@ -471,7 +472,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 		{"action on a rejected decision", saved, reject, Facts{Action: &commandAction}},
 		{"outcome on an acceptance", saved, accept, Facts{Action: &commandAction, Outcome: done}},
 		{"performed without outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{}},
-		{"invalid outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: &Outcome{Status: OutcomeDone}}},
+		{"invalid outcome", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: &Outcome{Status: OutcomeDone, Detail: "x"}}},
 		{"observation on a performance", performed, core.Performed{EffectID: effect.EffectID}, Facts{Outcome: done, Observation: &Observation{Execution: core.ExecutionExited}}},
 		{"window on an observation", performed, core.Observed{EffectID: effect.EffectID, Execution: core.ExecutionFailedToStart},
 			Facts{Observation: &Observation{Execution: core.ExecutionFailedToStart}, ContextState: &ContextState{FirstStep: 1}}},
@@ -486,7 +487,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 	}
 	rec := &recorder{}
 	if _, err := newRunner(t, rec).Commit(ctx, performed, core.Performed{EffectID: effect.EffectID},
-		Facts{Outcome: done, ContextState: &ContextState{FirstStep: 1}}); err != nil {
+		Facts{Outcome: done, ContextState: &ContextState{AnchorSeq: performed.Seq + 1, FirstStep: effect.Step + 1}}); err != nil {
 		t.Fatalf("a performed handover: %v", err)
 	}
 }

@@ -3,6 +3,7 @@
 package harness_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -91,6 +92,11 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 			}
 			request := historyRequest(s.Step)
 			request.ContextState = &current
+			capture := &harness.ContextCapture{Anchor: current}
+			if n := s.Step - current.FirstStep; n > 0 {
+				capture.Bytes.Steps = make([]harness.ContextStepBytes, n)
+			}
+			request.Context = capture
 			event, facts = core.RequestFrozen{}, harness.Facts{Request: request}
 		case core.PhaseRequestFrozen:
 			event = core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}
@@ -100,8 +106,16 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: s.Step}
-				event, facts = core.RequestRejected{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next}
+				frozen, err := f.store.Request(ctx, runID, s.Step, s.RequestRev)
+				if err != nil || frozen.Context == nil {
+					t.Fatalf("the rejected request has no capture: %v", err)
+				}
+				capture := frozen.Context
+				optional := capture.Bytes.Index > 0 || capture.Bytes.Previous > 0 || capture.Bytes.Observations > 0
+				rejection := &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"},
+					EpochSteps: len(capture.Bytes.Steps), Repair: capture.Preparation == "protocol_repair", OptionalContent: optional, Minimal: capture.Anchor.Minimal}
+				next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: s.Step, Minimal: current.Minimal, Rejection: &harness.RejectionRef{Seq: snap.Seq + 1, Step: s.Step}}
+				event, facts = core.RequestRejected{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: rejection, ContextState: &next}
 			} else {
 				event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
 			}
@@ -218,7 +232,7 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 		user += b.Text
 	}
 	s.prompt, s.shown = len(body.System)+len(user), len(s.req.Context.Bytes.Steps)
-	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are not shown.\n", n-s.shown), fmt.Sprintf("### Step %d (sequence ", n-s.shown+1),
+	wantContains(t, user, fmt.Sprintf("\n%d earlier steps are before this anchor.\n", n-s.shown), fmt.Sprintf("### Step %d\n", n-s.shown+1),
 		fmt.Sprintf("\n### Step %d\n", n), historyPreview(n), fmt.Sprintf("anchor sequence %d; first step %d", s.req.ContextState.AnchorSeq, n-s.shown+1))
 
 	for _, name := range []string{f.path, f.path + "-wal"} {
@@ -242,8 +256,8 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	}
 	limits := harness.DefaultPromptLimits()
 	budget := limits.Total + requestSlack
-	// All receipts after the committed anchor remain visible; only the latest
-	// completion renders its whole command and preview.
+	// The epoch after the last seeded rejection holds one step; the index
+	// before it holds the newest receipts.
 	fit := seedPageSteps
 	// Preparation also reads the previous step's completion, which selects
 	// the latest body: one record in one page.
@@ -312,8 +326,8 @@ func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	if one.Step != 1 || one.Decision.Payload != historyCommand(1) {
 		t.Errorf("step 1 state = %+v, want its command", one)
 	}
-	if got := ts[0].Facts.Request; !reflect.DeepEqual(got, historyRequest(1)) {
-		t.Errorf("step 1 request = %+v, want %+v", got, historyRequest(1))
+	if got := ts[0].Facts.Request; got == nil || !bytes.Equal(got.Body, historyRequest(1).Body) || got.Context == nil || got.Context.Anchor.AnchorSeq != 0 {
+		t.Errorf("step 1 request = %+v, want the seeded body and its initial capture", got)
 	}
 	if got := ts[2].Facts.Response; !reflect.DeepEqual(got, historyResponse(1)) {
 		t.Errorf("step 1 response = %+v, want %+v", got, historyResponse(1))

@@ -98,7 +98,8 @@ func TestContextRequestBeforeFirstFreezeAndCurrentMetadata(t *testing.T) {
 	if _, err := s.ContextRequest(context.Background(), "run-1", 0, 0); !errors.Is(err, harness.ErrNotFound) {
 		t.Fatalf("before first freeze error = %v", err)
 	}
-	d.freeze()
+	request := requestFor(d.snap.State)
+	d.do(core.RequestFrozen{}, harness.Facts{Request: request})
 	s = readOnly(t, path)
 	got, err := s.ContextRequest(context.Background(), "run-1", 0, 0)
 	if err != nil || !reflect.DeepEqual(got, d.commits[0]) || got.Facts.Request.Context != nil {

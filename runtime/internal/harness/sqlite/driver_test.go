@@ -87,6 +87,8 @@ func (d *driver) freeze() {
 			d.t.Fatal(err)
 		}
 		request.ContextState = &current
+		capture := &harness.ContextCapture{Anchor: current, Bytes: harness.ContextBytes{Steps: []harness.ContextStepBytes{{Step: current.FirstStep, Bytes: 1}}}}
+		request.Context = capture
 	}
 	d.do(core.RequestFrozen{}, harness.Facts{Request: request})
 }

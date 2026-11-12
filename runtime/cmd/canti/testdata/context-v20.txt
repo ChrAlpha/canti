@@ -1,0 +1,121 @@
+context version 20
+semantics 8
+defaults {"Config":{"ephemeral":true,"workspace":"","image":"debian:bookworm-slim","network":"none","memory":"2g","cpus":"","pids":512,"output_limit":8388608,"api":"anthropic-messages","model":"fixture-model","provider":"http://127.0.0.1:1","max_tokens":16000,"structured":true,"fallbacks":false,"request_bytes":8388608,"context_version":20},"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"MaximumRequest":8388608,"HandoverBytes":2048,"IndexSteps":16,"IndexBytes":2048,"IndexPurpose":120,"ReadBytes":8192,"MaxRunID":200}
+actions "canti:retrieve " "canti:handover "
+transport tool=false frame=0 stable=1 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 60 bytes, sha256 ed2e6e1a026fdd9ab4bba9923d1419f0fc036a58f5947dd4a86aa8cf7018a67f
+transport tool=false frame=1 stable=1 system=5319 bytes, sha256 a05006b3155c1d0e5e544366500fa2a0d2c2a9d1964870c0e73045397863654a
+ block 0 1702 bytes, sha256 9b6da47c2b180103e4669aa3cb4279aaa1e35273b90934f363f28da722a24a1c
+ block 1 60 bytes, sha256 ed2e6e1a026fdd9ab4bba9923d1419f0fc036a58f5947dd4a86aa8cf7018a67f
+transport tool=false frame=2 stable=2 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 386 bytes, sha256 9d03b8e05981c13d1322a18886e925c6df41ea2ac693364036ecd1b19fca4b5c
+ block 2 117 bytes, sha256 9bcfb13581a7d7f625ffad6602a571604a7bc3bf31c98a06f2c729b59bf0fcac
+transport tool=false frame=3 stable=3 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 386 bytes, sha256 9d03b8e05981c13d1322a18886e925c6df41ea2ac693364036ecd1b19fca4b5c
+ block 2 92 bytes, sha256 a9f6820939ce4e8aa0c502136a4a1a1886af599797cc04f27805f446d8cf36a3
+ block 3 276 bytes, sha256 7266420d47da6bb81c9d11ec6994511557850a3fb82f1fa3eb3919b6b54ac528
+transport tool=false frame=4 stable=1 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1028 bytes, sha256 495faadf23f3380da27565a6de018e59e464bc56d62302b258077716e27592fe
+ block 1 100 bytes, sha256 2e9e0e553b79a7d20b8d058f588106bda475b5ec694ac0fa989abbd8c399df85
+transport tool=false frame=5 stable=1 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1192 bytes, sha256 2c8e1fafeaa17f42561e6d09be6d8412f81010345e891610fda419596aed84bf
+ block 1 201 bytes, sha256 6afff51d61de9fe6fbe0e0a576e428e5f73412e98a3628f4c449247021cacaee
+transport tool=false frame=6 stable=1 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1192 bytes, sha256 2c8e1fafeaa17f42561e6d09be6d8412f81010345e891610fda419596aed84bf
+ block 1 389 bytes, sha256 8c4df93bf418081512bba91088e69b33fa7a0e49e6dde2508e59e9d9ee29c3a9
+transport tool=false frame=7 stable=1 system=5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf
+ block 0 1178 bytes, sha256 db3865e39f4f7b8f00d8ae9f700249fc8609e498807b8e1ea47c672dc9c0b783
+ block 1 384 bytes, sha256 c85c38c6b1ba7ec00f70d990e67a24648e33466ef0f5bfe92a68d0421421220c
+transport tool=true frame=0 stable=1 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 60 bytes, sha256 ed2e6e1a026fdd9ab4bba9923d1419f0fc036a58f5947dd4a86aa8cf7018a67f
+transport tool=true frame=1 stable=1 system=5196 bytes, sha256 2412727d3377bb6721f01b4f8054b37402efa56d191f2f078505d2039d6f78a8
+ block 0 1702 bytes, sha256 9b6da47c2b180103e4669aa3cb4279aaa1e35273b90934f363f28da722a24a1c
+ block 1 60 bytes, sha256 ed2e6e1a026fdd9ab4bba9923d1419f0fc036a58f5947dd4a86aa8cf7018a67f
+transport tool=true frame=2 stable=2 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 386 bytes, sha256 9d03b8e05981c13d1322a18886e925c6df41ea2ac693364036ecd1b19fca4b5c
+ block 2 117 bytes, sha256 9bcfb13581a7d7f625ffad6602a571604a7bc3bf31c98a06f2c729b59bf0fcac
+transport tool=true frame=3 stable=3 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1028 bytes, sha256 f49f0114caa0898259c25e3c3aa9a049f94c7f90d725ed08ab39d169e017dc10
+ block 1 386 bytes, sha256 9d03b8e05981c13d1322a18886e925c6df41ea2ac693364036ecd1b19fca4b5c
+ block 2 92 bytes, sha256 a9f6820939ce4e8aa0c502136a4a1a1886af599797cc04f27805f446d8cf36a3
+ block 3 276 bytes, sha256 7266420d47da6bb81c9d11ec6994511557850a3fb82f1fa3eb3919b6b54ac528
+transport tool=true frame=4 stable=1 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1028 bytes, sha256 495faadf23f3380da27565a6de018e59e464bc56d62302b258077716e27592fe
+ block 1 100 bytes, sha256 2e9e0e553b79a7d20b8d058f588106bda475b5ec694ac0fa989abbd8c399df85
+transport tool=true frame=5 stable=1 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1192 bytes, sha256 2c8e1fafeaa17f42561e6d09be6d8412f81010345e891610fda419596aed84bf
+ block 1 201 bytes, sha256 6afff51d61de9fe6fbe0e0a576e428e5f73412e98a3628f4c449247021cacaee
+transport tool=true frame=6 stable=1 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1192 bytes, sha256 2c8e1fafeaa17f42561e6d09be6d8412f81010345e891610fda419596aed84bf
+ block 1 389 bytes, sha256 8c4df93bf418081512bba91088e69b33fa7a0e49e6dde2508e59e9d9ee29c3a9
+transport tool=true frame=7 stable=1 system=5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e
+ block 0 1178 bytes, sha256 db3865e39f4f7b8f00d8ae9f700249fc8609e498807b8e1ea47c672dc9c0b783
+ block 1 384 bytes, sha256 c85c38c6b1ba7ec00f70d990e67a24648e33466ef0f5bfe92a68d0421421220c
+runtime transport anthropic-messages text effort="high" structured=true fallbacks=true retrieval=false imports=false: system 3293 bytes, sha256 ab2d49c7322a55953d4c4ea457e69dffa07011ae194e0d00e56eb0ad501b7fbb; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4 5113 bytes, sha256 527e7b1646673fe605b8d1793a70d8e680fc3b1c398fc5a3b77430cc096eb342
+runtime transport anthropic-messages text effort="" structured=false fallbacks=false retrieval=false imports=false: system 3293 bytes, sha256 ab2d49c7322a55953d4c4ea457e69dffa07011ae194e0d00e56eb0ad501b7fbb; anthropic-messages/2023-06-01 canti-anthropic/4 4711 bytes, sha256 085820b4031cbb36605fe9e9d1e22488da6899f55eca16e1f9c7192e429a838b
+runtime transport anthropic-messages tool effort="high" structured=false fallbacks=true retrieval=false imports=false: system 3170 bytes, sha256 901650b35033415c66e02f4994bc79d7f017cb1711143dc52c4204588e20c5f1; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4-tool 5172 bytes, sha256 f7f7a12e6aca47341140986874ea6bc7af7cb466bd79bbce52819025d60735e7
+runtime transport openai-responses text effort="high" structured=true fallbacks=false retrieval=false imports=false: system 3293 bytes, sha256 ab2d49c7322a55953d4c4ea457e69dffa07011ae194e0d00e56eb0ad501b7fbb; openai-responses/v1 canti-openai-responses/2 5157 bytes, sha256 ad8707440a4c8fa2ff1bf1366489a1c694d98c8bd459197fff9f218434df484d
+runtime transport openai-responses text effort="" structured=false fallbacks=false retrieval=false imports=false: system 3293 bytes, sha256 ab2d49c7322a55953d4c4ea457e69dffa07011ae194e0d00e56eb0ad501b7fbb; openai-responses/v1 canti-openai-responses/2 4734 bytes, sha256 ec1b04d741ab6d6e1fb7734cb49e6092c4e7812671233a9047e4ec3fe6c67205
+runtime transport openai-responses tool effort="high" structured=false fallbacks=false retrieval=false imports=false: system 3170 bytes, sha256 901650b35033415c66e02f4994bc79d7f017cb1711143dc52c4204588e20c5f1; openai-responses/v1 canti-openai-responses/2-tool 5171 bytes, sha256 eb3d19efe0766965773b64ce61a8c0cf03d13cf069ca12df856d49898a5f9d44
+runtime transport anthropic-messages text effort="high" structured=true fallbacks=true retrieval=true imports=false: system 5320 bytes, sha256 d4321889d485e3ae4220c9e30d04c9b1fd56f74076f6733df6bbe8d1af590af4; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4 7169 bytes, sha256 60ab2f1963544f6f2595d25ab8f1e917a50785c03c09f0c30e794fc2568e8b00
+runtime transport anthropic-messages text effort="" structured=false fallbacks=false retrieval=true imports=false: system 5320 bytes, sha256 d4321889d485e3ae4220c9e30d04c9b1fd56f74076f6733df6bbe8d1af590af4; anthropic-messages/2023-06-01 canti-anthropic/4 6767 bytes, sha256 d2f560e247c3cd33e5aea90d92a8865c447fb92331e1a9475943675fef6e7606
+runtime transport anthropic-messages tool effort="high" structured=false fallbacks=true retrieval=true imports=false: system 5197 bytes, sha256 0d11871adc9b82ed9561af042aeb78c12dc52f66c2fa65624e4153f8c1641d40; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4-tool 7228 bytes, sha256 14d89de0c3550eac28bed71e0d9b8635576b5d650d12d28d962131f63ef5b48a
+runtime transport openai-responses text effort="high" structured=true fallbacks=false retrieval=true imports=false: system 5320 bytes, sha256 d4321889d485e3ae4220c9e30d04c9b1fd56f74076f6733df6bbe8d1af590af4; openai-responses/v1 canti-openai-responses/2 7213 bytes, sha256 0ca929118dd25f7ad6cbb14ffea9821dee010402d632e54a47723bc615fd0416
+runtime transport openai-responses text effort="" structured=false fallbacks=false retrieval=true imports=false: system 5320 bytes, sha256 d4321889d485e3ae4220c9e30d04c9b1fd56f74076f6733df6bbe8d1af590af4; openai-responses/v1 canti-openai-responses/2 6790 bytes, sha256 aee4e6c51277612a4417b06990d96023c7a96fa32b58bafb61c6fb06d4452b29
+runtime transport openai-responses tool effort="high" structured=false fallbacks=false retrieval=true imports=false: system 5197 bytes, sha256 0d11871adc9b82ed9561af042aeb78c12dc52f66c2fa65624e4153f8c1641d40; openai-responses/v1 canti-openai-responses/2-tool 7227 bytes, sha256 a096f4cb81d69831e692e96785fb8c6aa890c2b8175d8ef5f509f07e6f6a6ba7
+runtime transport anthropic-messages text effort="high" structured=true fallbacks=true retrieval=true imports=true: system 5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4 7351 bytes, sha256 37cb5ad23c11d10547ea8b2825ea742291b72034e10da8cd2097d329e730f5cb
+runtime transport anthropic-messages text effort="" structured=false fallbacks=false retrieval=true imports=true: system 5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf; anthropic-messages/2023-06-01 canti-anthropic/4 6949 bytes, sha256 c69803f6658951e49d2c19fdae8f5f65232a99270c477479bd80796751bacdbd
+runtime transport anthropic-messages tool effort="high" structured=false fallbacks=true retrieval=true imports=true: system 5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e; anthropic-messages/2023-06-01+server-side-fallback-2026-07-01 canti-anthropic/4-tool 7410 bytes, sha256 1705db27db6fa378365a6741772aa289ea76f7c18cb4082d9a4f607acd57e6b7
+runtime transport openai-responses text effort="high" structured=true fallbacks=false retrieval=true imports=true: system 5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf; openai-responses/v1 canti-openai-responses/2 7395 bytes, sha256 d52ceebd232233b9f094a1e87cff5a930eb9f80725ec6c9165c5dc62e8e4b5a9
+runtime transport openai-responses text effort="" structured=false fallbacks=false retrieval=true imports=true: system 5501 bytes, sha256 2df5318de1414d86cd139263c7639577cbe737388b9a136fe81521ee4d42efdf; openai-responses/v1 canti-openai-responses/2 6972 bytes, sha256 b1fcf8348ef9242409bde1c622608525a9521ceb85e8a1a73dafce517680cbf8
+runtime transport openai-responses tool effort="high" structured=false fallbacks=false retrieval=true imports=true: system 5378 bytes, sha256 972a58b8709767ac950a8750cdcda61768f5903eb2b0454dfcdcbba1df43981e; openai-responses/v1 canti-openai-responses/2-tool 7409 bytes, sha256 ec1bf60563400d9af6d0976a31e2ae7d485a176cfbafa26c8c1d283eff750e06
+runtime config "": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773; prompt 6417 bytes, sha256 24c1c988cc327b53848a407e13b59d1327933dfbbe948f8af25639884773cfdc; error <nil>
+runtime config "-history-imports DIR": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":true}; environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773; prompt 6598 bytes, sha256 1a794deb3410e74ed5fe4938a97d0de01855100d28163981acf33333d6e0d229; error <nil>
+runtime config "-max-steps 0 -max-attempts 1": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":0,"MaxAttempts":1},"Tool":false,"Reader":true,"Imports":false}; environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773; prompt 6421 bytes, sha256 2f5b2cebb3c11d9ab5153c78a2dacc32e3db0410016783b0ecc42a56ab5cf4e2; error <nil>
+runtime config "-pids 0 -job-timeout 0 -memory  -cpus 4 -network bridge": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 261 bytes, sha256 4ff1dea32fd62532c7691977024668a3d289e364aea5f02fe11e193f6bf0e454; prompt 6428 bytes, sha256 7903e27688e444078845378a802a3cf20806618c0eed4a373c068383b3a8566a; error <nil>
+runtime config "-image custom-image:tag -output-limit 4096 -job-timeout 1s": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 243 bytes, sha256 79f88d82197d9c7ae7dfb2a702e27e7417cb5edf0f5dd7e901ae80f5d7f467c4; prompt 6410 bytes, sha256 46ce962dcf4850c3cbd3f523dbf3bdd0745d9b2127f4f42cbf3343509fc12268; error <nil>
+runtime config "-image xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 2277 bytes, sha256 3e05174a9896d3b403d9d622b7fa5fabc8b76f69e6d98d841fd8bfe92fe1d7e4; prompt 0 bytes, sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; error harness: environment exceeds its 2048-byte limit
+runtime config "-image debian\xff": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 237 bytes, sha256 76d38b814ac8f5b72ca4743c77af97593d63809fb0a2571a9cccf8c9bb7268c9; prompt 0 bytes, sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; error harness: authoritative orientation must be valid UTF-8
+runtime config "-api anthropic-messages -model test-model -effort max -fallbacks": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false}; environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773; prompt 6417 bytes, sha256 24c1c988cc327b53848a407e13b59d1327933dfbbe948f8af25639884773cfdc; error <nil>
+runtime config "-api openai-responses -model test-model -max-tokens 4096 -effort none -structured=false -decision-format tool -request-bytes 131072": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":131072,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":true,"Reader":true,"Imports":false}; environment 250 bytes, sha256 69e153f90b7e03353f63445c52e2fa8725bd4bb80369e8c331b5548c8d7a4773; prompt 6294 bytes, sha256 052e9027a2bf26e7c8e8862191595ba5499daae8b93aa2c37a64c2d6d2fa1aa2; error <nil>
+runtime config "attached environment": {"Limits":{"Goal":32768,"Constraints":16384,"Environment":2048,"Command":2048,"Preview":4096,"Rejected":2048,"Total":8388608,"Purpose":512,"Instructions":32768},"Core":{"MaxSteps":20,"MaxAttempts":3},"Tool":false,"Reader":true,"Imports":false,"NativeArchive":true}; environment 1012 bytes, sha256 ab8d4a3766fd26da0e4ca93e976565fd770024b9eeea77aef1ccf0f9e964f7bc; prompt 6997 bytes, sha256 7075378c5ee4c05dbfb8080256dc589fb6e1f0f0df420e8af8bc19c1a22e1c4b; error <nil>
+stored run step 1 revision 1: 9878 bytes, sha256 113180c071f8d5d399abff55e200044665d3e97991228a6fac0a5f209aedf2ca
+stored run step 2 revision 1: 11015 bytes, sha256 6c2b4ee1fdec6a5493b96ba7eba784e9602cfdfc3ddc00c7bb0e81762629cdff
+stored run step 2 revision 2: 10415 bytes, sha256 9a26b506ca768f1667d35919ee3f1db52929e03e7c66845d04338ba8c5882659
+stored tool run step 1 revision 1: 10054 bytes, sha256 b79f5bcca5d250cac0aa9f6a2fab6b7abc4db7194fcbbbccc7708ddc4730ad52
+stored tool run step 1 revision 2: 10800 bytes, sha256 06aa93d99e1e6f31029e25e2bb90e29b40c9ecd53e805be28d3a58ebb8fe7721
+stored tool run step 1 revision 3: 10800 bytes, sha256 1dcbc088f498b3dd5fc04dd2df682a7f1972c5f0ed63ba30cbcbafc7664f2541
+stored stepping tool run step 1 revision 1: 10318 bytes, sha256 04c61ee38075e1d6def7943d88c9492a122421e77d42c481fa55fa9a669b6077
+stored stepping tool run step 1 revision 2: 11372 bytes, sha256 23fdc8de00d500bf816fdd562e7b01d2a77f4935cfd7c26c2a5160569a7ca162
+stored stepping tool run step 2 revision 1: 11511 bytes, sha256 adfd859635ad37d2bd4a636e4535cee50af749ff221c84e6145381f69b263db4
+stored text run step 1 revision 1: 9997 bytes, sha256 aa2c8958e54294af145d17f8461b1a108d4d9b672cca89035435332d3e938e59
+stored text Responses run step 1 revision 1: 10102 bytes, sha256 c2abb6d3a7debccbf8b77e4e843039bb0de7e68478cdb06561dd7abd07cabd8f
+stored tool Responses run step 1 revision 1: 10127 bytes, sha256 4bf4e0edd3c88a5318097578a2f19cb9d0e1e32c54c9207603c2ec49d073c571
+long receipt history: 66 requests, sha256 7244e59fd0905fb8465daba6e4075ef06092fcbfce4fa065cf5cbba7394b9f0b
+corpus after-agent-handover: sha256 a193571c13648f6423a83df09f6148b760f634516ebee7944b934bbc6c437be0
+corpus bounded-local-failures: sha256 d7943c1762b6c943026ad6e092873230a07300891eca8ab871ccbec747e6305e
+corpus caps-and-encoding: sha256 a29e337f9c1bdc3c17f63b9bc3bbb8a107bef3b40595d58ce3c6e009e246392f
+corpus failed-job: sha256 5abd05ca335d342e9fb994061a2bfa60a2f1c6d37be6f0a0e912b04a69126e33
+corpus fresh-line-navigation: sha256 8b9e5f046fa127237b5c54e874ee943e2a6821fc4fa63a11f3fc9f389462c76f
+corpus fresh-run: sha256 e48b0353cd50c5046d9daec238d8cad0efb5ccd5ac46461ebc96ac4a080890a7
+corpus historical-frozen-evidence: sha256 66f10ee7a113422faffe7a4e109d4f802959fd89650f1560f8d6744435481fa6
+corpus history-imports: sha256 6b84c64c60df43ad637dfebee505d50aa211702d88acbdfc96d9a1f1ddfd3a22
+corpus legacy-actions-are-local-failures: sha256 9e8cf9e41bfbc761aae09ec880d34095b201a4b29ed26c256c8381c49806f0b0
+corpus line-amended: sha256 0f0ce16c2c1e6b90405ca4b95ebe31ccd56fd535602279a8d63f5c5a1c8638d7
+corpus line-navigation: sha256 be2f99122e94d51d33f16211883f12d0fbd41c3b844a3459dd5561a99bbda521
+corpus linked-run-after-handover: sha256 5eee4b876f395d72732b607c88fefe67a8ceb497463fc71d9947cde5e09b66de
+corpus maximum-fenced-read: sha256 747b620d84e198eba984abd21efcab800cc7195ce2466a9a06aaa5958e345de0
+corpus mid-epoch: sha256 de92a289ed4b7ca5e2cdf18758b4abb0e73173a7f2e888e2dcd2d4b264e358fb
+corpus minimal-after-rejected-optional: sha256 20ce992a960158726ac421588d049a5ed6a3ee4e42d828c1b6d5e5f924ee4700
+corpus observation-tail: sha256 c6347c85eff3b8609cde6b6de541606056f5e34ac0541065d538e12ee3c24719
+corpus persistent-native-retrieval-reset-handover: sha256 c61c58b716a3669456f8c37e231237ddf0b066a83969a2e74aea99ba70095bd4
+corpus protocol-repair: sha256 3efd8e55a26528281228c47542b1587b7405a03b19b68c982b49ceb0335070ff
+corpus rejection-handover-index: sha256 db709609ab8a44bc14058cd97e37965dbf33385f7f4fa35f63040811a73b55a2
+corpus reset-handover-repair: sha256 3ac49203d205040c23f1dfbb8e55af4485c854163206e698f45830a866e9b2f1
+corpus shell-and-retrieval: sha256 9d8709126ee8696deb5adb3628fc58ff73702d9e540948c5f4053079681f0a7e
+corpus tool-transport: sha256 2e323e4fdaaa94332469a97b20207caee69b69d29742508888d778fb23e381a5

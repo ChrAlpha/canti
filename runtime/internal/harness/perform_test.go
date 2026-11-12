@@ -98,7 +98,7 @@ func TestRetrievalCommitsItsEvidenceWithItsOutcome(t *testing.T) {
 // reader, cancels it in process: no executor call, and the effect observed
 // cancelled without a job.
 func TestLocalActionStopNeverCallsTheExecutor(t *testing.T) {
-	for _, payload := range []string{readEvidence, harness.FocusPrefix + `{"sources":[]}`} {
+	for _, payload := range []string{readEvidence, harness.HandoverPrefix + "resume the phase"} {
 		for _, disabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reader disabled %v", payload[:14], disabled), func(t *testing.T) {
 				f := newFixture(t, limits, harness.Budget{}, execReply(payload))
@@ -234,7 +234,7 @@ func (j racingStop) Commit(ctx context.Context, tr harness.Transition) error {
 // handover's commit makes that commit stale, opens no window, and cancels
 // the handover in process.
 func TestStopRacingAPerformanceWins(t *testing.T) {
-	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"), execReply(harness.FocusPrefix+`{"sources":[]}`))
+	f := newFixture(t, limits, harness.Budget{}, execReply("printf ok"), execReply(harness.HandoverPrefix+"resume the phase"))
 	ctx := f.bounded()
 	f.stepUntil(ctx, core.PhaseIdle)
 	f.stepUntil(ctx, core.PhaseEffectSaved)

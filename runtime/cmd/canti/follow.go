@@ -163,8 +163,8 @@ func outcomeSummary(o hostrpc.Outcome) string {
 		return "retrieval error: " + o.RetrievalError
 	case o.Retrieval:
 		return fmt.Sprintf("retrieved %d sources and %d directory entries", o.Sources, o.Entries)
-	case o.Focus:
-		return fmt.Sprintf("focus replaced with %d frozen sources", o.FocusSources)
+	case o.Status == "done" && o.Detail == "" && !o.Retrieval:
+		return fmt.Sprintf("handover recorded: %d bytes", o.HandoverBytes)
 	}
 	return ""
 }

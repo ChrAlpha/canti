@@ -20,10 +20,10 @@ func TestStoredRunConfigKeepsItsEncoding(t *testing.T) {
 			args: []string{"-ephemeral", "-api", "openai-responses", "-model", "test-model"},
 			stored: `{"ephemeral":true,"workspace":"/srv/project","image":"debian:bookworm-slim","network":"none","memory":"2g","cpus":"","pids":512,` +
 				`"output_limit":8388608,"api":"openai-responses","model":"test-model","provider":"http://127.0.0.1:1","max_tokens":16000,"structured":true,"fallbacks":false,` +
-				`"request_bytes":8388608,"context_version":19}`,
+				`"request_bytes":8388608,"context_version":20}`,
 			want: host.RunConfig{Ephemeral: true, Workspace: "/srv/project", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512,
 				OutputLimit: 8388608, API: "openai-responses", Model: "test-model", Provider: "http://127.0.0.1:1", MaxTokens: 16000, Structured: true,
-				RequestBytes: 8388608, ContextVersion: 19},
+				RequestBytes: 8388608, ContextVersion: 20},
 		},
 		{
 			name: "every field",
@@ -32,10 +32,10 @@ func TestStoredRunConfigKeepsItsEncoding(t *testing.T) {
 				"-decision-format", "tool", "-fallbacks", "-request-bytes", "131072", "-history-imports", "/"},
 			stored: `{"ephemeral":true,"workspace":"/srv/project","image":"alpine:3.23","network":"bridge","memory":"512m","cpus":"1.5","pids":64,` +
 				`"output_limit":1048576,"api":"anthropic-messages","model":"claude-sonnet-5","provider":"http://127.0.0.1:1","max_tokens":4096,"effort":"low","structured":false,"decision_format":"tool",` +
-				`"fallbacks":true,"request_bytes":131072,"context_version":19,"history_imports":"/"}`,
+				`"fallbacks":true,"request_bytes":131072,"context_version":20,"history_imports":"/"}`,
 			want: host.RunConfig{Ephemeral: true, Workspace: "/srv/project", Image: "alpine:3.23", Network: "bridge", Memory: "512m", CPUs: "1.5", Pids: 64,
 				OutputLimit: 1048576, API: "anthropic-messages", Model: "claude-sonnet-5", Provider: "http://127.0.0.1:1", MaxTokens: 4096, Effort: "low", DecisionFormat: "tool", Fallbacks: true,
-				RequestBytes: 131072, ContextVersion: 19, HistoryImports: "/"},
+				RequestBytes: 131072, ContextVersion: 20, HistoryImports: "/"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

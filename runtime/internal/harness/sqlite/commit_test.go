@@ -394,8 +394,8 @@ func TestUsageSettlementCoverageAndReplay(t *testing.T) {
 			if terminal {
 				d.do(core.StopRequested{Reason: core.StopUnrecoverable}, harness.Facts{Response: response, Failure: "provider failure"})
 			} else {
-				next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1}
-				d.do(core.RequestRejected{Step: 1, Attempt: 3}, harness.Facts{Response: response, Failure: "confirmed overflow", ContextState: &next, Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}})
+				next := harness.ContextState{AnchorSeq: d.snap.Seq + 1, FirstStep: 1, Rejection: &harness.RejectionRef{Seq: d.snap.Seq + 1, Step: 1}}
+				d.do(core.RequestRejected{Step: 1, Attempt: 3}, harness.Facts{Response: response, Failure: "confirmed overflow", ContextState: &next, Rejection: &harness.ContextRejection{Previous: harness.InitialContext(), Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: 1}})
 			}
 			last := d.commits[len(d.commits)-1]
 			if err := s.Commit(ctx, last); err != nil {
