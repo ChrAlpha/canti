@@ -482,15 +482,26 @@ path against every environment mount before creating state. It holds `canti.db` 
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which ephemeral jobs see
 at `/canti/runs/<run ID>/`; persistent commands use these logical addresses
-through native `canti:retrieve` and `canti:focus`.
-Each run is bound to the workspace it was created in. Confirmed provider overflow
-opens a fresh anchor at the same unfinished step when retry remains possible.
-The goal, constraints and archive navigation survive; old receipts and selected
-focus are removed. A fresh orientation-only overflow stops immediately. No
-summary is required. `canti:focus {"sources":[{"seq":N,"source":I}]}` replaces
-the selected frozen source ranges; an empty array clears them. Exact historical
-snapshots remain readable from step `evidence.json` and `evidence/0000` files.
-Removed handover/window flags and actions are rejected. See [Input](architecture.md#input).
+through native `canti:retrieve`.
+Each run is bound to the workspace it was created in. A request keeps every step
+completed since its current anchor in full, with the steps before it reachable
+through the read-only archive. `canti:handover`, optionally followed by a note,
+closes a phase: the steps before it leave later requests, and the earlier-steps
+index shows the newest steps before the anchor within its 16-entry and
+2,048-byte bounds, the handover step included; it is omitted under `Minimal`,
+and older records stay in the archive. The note is archived with its step and
+not rendered automatically; ordinary retrieval can read it. Confirmed provider
+overflow opens a new anchor at the same unfinished step when retry remains
+possible; the exact goal, constraints and archive navigation survive. A minimal
+context stays minimal through further resets until a successful handover. A
+rejection of a minimal head is terminal only when the rejected request had no
+resident epoch step and no protocol repair; either one opens another reset that
+keeps `Minimal`. A rejection of authoritative orientation alone is terminal. No
+summary is required. As Bub's handoff does, a handover moves only the read
+boundary: it generates no summary and deletes no history. Exact historical
+snapshots remain readable from step
+`evidence.json` and `evidence/0000` files. Removed focus/handover flags and
+actions are rejected. See [Input](architecture.md#input).
 History retrieval is always available; `-history-imports` adds a read-only
 archive, a directory named relative to the command's working directory and
 stored canonical. A new run needs it to exist; a retry of an input names its
@@ -498,10 +509,10 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 19. Schema 5 keeps one agent log of
+Each run stores current context version 20. Schema 6 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 1 and
-host protocol 8 form one current contract. Unsupported formats and context
+host protocol 9 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. Same-version frozen bytes, provider bindings,
 accepted identities and results remain immutable.
@@ -554,7 +565,8 @@ The current corpus verifies same-version frozen requests, including cold restart
 and lost acknowledgements. Historical files remain audit evidence; current
 readers do not interpret old semantics or migrate old databases. Rejection tests
 cover unsupported formats. Same-version corruption tests cover accepted identity,
-receipt provenance, focus references and exact immutable request bytes.
+handover and rejection provenance, the resident epoch capture and exact immutable
+request bytes.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

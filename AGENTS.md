@@ -23,7 +23,7 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   rules. It holds no per-run state between calls and must not acquire model
   I/O, history, storage, clocks, execution, or dependencies outside the
   standard library. Its events name recovery semantics, not capabilities: a
-  capability, such as retrieval or focus, adds no event kind or core
+  capability, such as retrieval or handover, adds no event kind or core
   rule, and a new event kind needs a recovery semantic that no existing
   event expresses. The core never interprets an exec payload, an archive
   query, or a context window.
@@ -86,7 +86,7 @@ specify its durable commit point, attached facts, and behavior after restart.
 Model request bytes and provenance must be committed before sending; a
 decision and its normalized action before it is performed or bound; the executor publishes its durable owner binding before consuming its launch
 latch; a result together with run progress, and with any
-change of harness state it causes, such as a context anchor or focus selection, in one
+change of harness state it causes, such as the handover head it opens, in one
 `Transition`. Events carry the step, attempt, or effect they belong to, and
 commits are sequenced: changing either identity scheme is a semantics change
 and must bump `core.SemanticsVersion`.
