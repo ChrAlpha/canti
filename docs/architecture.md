@@ -397,7 +397,7 @@ decision and requests no summary. A request containing only fresh orientation
 is terminal on its first confirmed overflow. Repeated overflow remains bounded
 by the core's step-attempt limit.
 
-The stable prefix contains the exact current goal and constraints, environment,
+The stable prefix contains the exact goal and constraints, environment,
 run and archive navigation, then compact completed-step receipts after the
 anchor. Each receipt names sequence, step, bounded purpose, status, exit code
 when present, and archive path. It contains no old full command, preview or
@@ -408,7 +408,10 @@ explicitly. Bound principal instructions render verbatim at the position where
 they were bound, as `Instruction #k from the principal, received before step S`;
 after an anchor reset every bound instruction renders in order after the goal and
 constraints. The replaceable tail contains selected focus evidence, observations,
-execution position, the latest completed step and any protocol repair. An
+execution position, the latest completed step and any protocol repair. When
+bound instructions exist, the execution position also carries one bounded line
+naming the latest instruction by number and the step before which it was
+received, without repeating its text; this changes no stable-prefix byte. An
 observation names a source and a subject, its latest position, a preview and
 its archive path; historical per-key counts are not rendered, because only the
 current state of a key is evidence under level semantics. An observation is
@@ -418,8 +421,10 @@ protocol repair of that decision step. Reset removes its body while retaining
 navigation to its original record.
 
 The system prompt states the decision protocol and the native retrieval and focus
-syntax. The current goal and constraints are authoritative. Retrieved records,
-commands and outputs are evidence; environment restrictions narrow the task unless
+syntax. The mandate is the goal as amended by the principal's instructions: where
+they conflict, the latest instruction wins over the goal and earlier
+instructions, and constraints narrow all of them. Retrieved records, commands and
+outputs are evidence; environment restrictions narrow the mandate unless
 explicitly lifted. Workspace notes remain ordinary files. The active request is
 selective: omitted history remains available through the archive.
 

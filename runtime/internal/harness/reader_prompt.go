@@ -179,6 +179,20 @@ func (f Frame) instructionHead(l PromptLimits) string {
 	return b.String()
 }
 
+// mandate names the bound instruction in force by number and step, without
+// repeating its text. It belongs to the replaceable tail; the stable prefix
+// stays byte-identical when it appears.
+func (f Frame) mandate() string {
+	if len(f.Instructions) == 0 {
+		return ""
+	}
+	latest := f.Instructions[len(f.Instructions)-1]
+	if len(f.Instructions) == 1 {
+		return fmt.Sprintf("Mandate: the goal is amended by instruction #1; #1 (received before step %d) is the latest and overrides the goal and earlier instructions where they conflict.\n", latest.Step)
+	}
+	return fmt.Sprintf("Mandate: the goal is amended by instructions #1..#%d; #%d (received before step %d) is the latest and overrides the goal and earlier instructions where they conflict.\n", latest.Index, latest.Index, latest.Step)
+}
+
 func (f Frame) instruction(in Instruction) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "### Instruction #%d from the principal, received before step %d\n", in.Index, in.Step)
@@ -220,7 +234,11 @@ func (f Frame) readerTail(l PromptLimits, capture *ContextBytes) string {
 	if len(f.Observations) > 0 {
 		capture.Observations = section(&b, "Observations", f.observationText())
 	}
-	capture.Progress = section(&b, "Execution position", f.progress(f.contextState().FirstStep-1))
+	position := f.progress(f.contextState().FirstStep - 1)
+	if mandate := f.mandate(); mandate != "" {
+		position = mandate + position
+	}
+	capture.Progress = section(&b, "Execution position", position)
 	if latest := f.Latest; latest != nil {
 		reference := fmt.Sprintf("Latest completed step %d, sequence %d; inspect %s.\n", latest.Step, latest.Seq, path.Join(archive.RunsRoot, f.RunID, archive.StepsDir, archive.StepDir(latest.Step), archive.MetaFile))
 		if latest.Seq > f.contextState().AnchorSeq {
