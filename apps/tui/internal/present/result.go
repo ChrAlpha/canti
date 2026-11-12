@@ -4,12 +4,23 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
 // Result keeps the answer separate from diagnostic and recovery text.
-func Result(out session.Result) (answer, diagnostic string) {
+func Result(out chat.Result) (answer, diagnostic string) {
+	return result(out, false)
+}
+
+// ResultAfterTerminal is Result for a run whose terminal progress item was
+// already shown: it keeps the diagnostic and recovery text but not the answer
+// or stop line that the item displayed.
+func ResultAfterTerminal(out chat.Result) (answer, diagnostic string) {
+	return result(out, true)
+}
+
+func result(out chat.Result, terminalShown bool) (answer, diagnostic string) {
 	r := out.Run
 	var b strings.Builder
 	if out.Detached {
@@ -31,12 +42,16 @@ func Result(out session.Result) (answer, diagnostic string) {
 	}
 	switch r.Status {
 	case hostrpc.StatusReturned:
-		answer = r.Result + "\n"
+		if !terminalShown {
+			answer = r.Result + "\n"
+		}
 	case hostrpc.StatusStopped:
 		if r.Environment != nil {
 			fmt.Fprintf(&b, "canti: inspect the persistent environment gate with canti environment inspect -environment %q; start explicitly after an acknowledged stop.\n", r.Environment.Directory)
 		}
-		fmt.Fprintf(&b, "canti: run %s stopped: %s\n", r.RunID, r.StopReason)
+		if !terminalShown {
+			fmt.Fprintf(&b, "canti: run %s stopped: %s\n", r.RunID, r.StopReason)
+		}
 	case hostrpc.StatusNeedsResolution:
 		fmt.Fprintf(&b, "canti: run %s needs resolution: the outcome of effect %s is unknown. Inspect it, then record its job with \"canti resolve -run %[1]s -job\" or its outcome with \"canti resolve -run %[1]s -execution STATE\"; -execution records the outcome only and leaves a job that may still run untouched.\n", r.RunID, r.EffectID)
 		if r.StopReason != "" {
@@ -55,6 +70,6 @@ func Result(out session.Result) (answer, diagnostic string) {
 }
 
 // Reconciliation is mandatory outcome guidance, independent of log level.
-func Reconciliation(inputID, sessionID string) string {
-	return fmt.Sprintf("canti: acceptance of input %s is unknown; reconcile with \"canti run -session %s -input %[1]s\" and the original goal and launch flags before starting new input.\n", inputID, sessionID)
+func Reconciliation(inputID string) string {
+	return fmt.Sprintf("canti: acceptance of input %s is unknown; reconcile with \"canti run -input %[1]s\" and the original goal and launch flags before starting new input.\n", inputID)
 }

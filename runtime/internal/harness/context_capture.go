@@ -12,15 +12,20 @@ type ContextCapture struct {
 	LatestStep        int
 	Preparation       string
 	OrientationOnly   bool
-	SessionNavigation string             `json:",omitempty"`
+	InstructionCount  int                `json:",omitempty"`
+	InstructionsBytes int                `json:",omitempty"`
+	ObservationPos    int64              `json:",omitempty"`
+	ObservationKeys   int                `json:",omitempty"`
+	PreviousRun       string             `json:",omitempty"`
 	Retrievals        []ContextRetrieval `json:",omitempty"`
 	Sources           []ContextSource    `json:",omitempty"`
 }
 
 type ContextBytes struct {
-	Total, Limit, System, Goal, Constraints, Environment   int
-	Anchor, ReceiptHeader, Focus, Progress, Latest, Repair int
-	Steps                                                  []ContextStepBytes `json:",omitempty"`
+	Total, Limit, System, Goal, Constraints, Environment               int
+	Anchor, Previous, ReceiptHeader, Instructions, Focus, Observations int
+	Progress, Latest, Repair                                           int
+	Steps                                                              []ContextStepBytes `json:",omitempty"`
 }
 
 type ContextStepBytes struct{ Step, Bytes int }

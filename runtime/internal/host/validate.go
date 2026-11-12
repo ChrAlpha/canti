@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
@@ -32,8 +33,9 @@ func Validate(ctx context.Context, state string, sub Submission) error {
 }
 
 // ReadInherited inspects existing state without acquiring a writer or creating
-// a journal. A running host exposes the same information through Inherited.
-func ReadInherited(ctx context.Context, state, session string) (string, error) {
+// a journal. A running host exposes the same information through
+// InheritedConstraints.
+func ReadInherited(ctx context.Context, state string) (string, error) {
 	path := filepath.Join(state, "canti.db")
 	if fi, err := os.Stat(path); errors.Is(err, os.ErrNotExist) || err == nil && fi.Size() == 0 {
 		return "", nil
@@ -43,22 +45,19 @@ func ReadInherited(ctx context.Context, state, session string) (string, error) {
 		return "", err
 	}
 	defer store.Close()
-	prior, err := store.SessionRuns(ctx, session, 0, 1)
-	if err != nil || len(prior) == 0 {
+	last, err := store.LastRun(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
 		return "", err
 	}
-	return prior[0].Constraints, nil
+	return last.Constraints, nil
 }
 
-// ValidateLayout checks identity and filesystem layout before reading state.
-func ValidateLayout(workspace, state, session string) error {
-	if session != "" && !sqlite.ValidKey(session) {
-		return SpecError{Err: errors.New("-session must be 1 to 128 ASCII letters, digits, underscores, or hyphens")}
-	}
-	if err := docker.CheckLayout(workspace, state); err != nil {
-		return err
-	}
-	return nil
+// ValidateLayout checks the filesystem layout before reading state.
+func ValidateLayout(workspace, state string) error {
+	return docker.CheckLayout(workspace, state)
 }
 
 // CheckLocation refuses a client's preflight for another host's directories.

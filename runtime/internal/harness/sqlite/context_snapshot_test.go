@@ -246,7 +246,11 @@ func TestContextHeadReadKeepsSnapshotWhenResetCommitsDuringPointerRead(t *testin
 				return nil, err
 			}
 			defer tx.Rollback()
-			if _, err = tx.ExecContext(ctx, insertSQL, encoded.run, transition.Seq, transition.EventID, encoded.kind, encoded.semantics, encoded.event, encoded.from, encoded.to, encoded.facts, transition.To.Step, transition.To.Attempt, transition.To.RequestRev); err != nil {
+			pos, posErr := nextPos(ctx, tx)
+			if posErr != nil {
+				return nil, posErr
+			}
+			if _, err = tx.ExecContext(ctx, insertSQL, encoded.run, transition.Seq, pos, transition.EventID, encoded.kind, encoded.semantics, encoded.event, encoded.from, encoded.to, encoded.facts, transition.To.Step, transition.To.Attempt, transition.To.RequestRev); err != nil {
 				return nil, err
 			}
 			if _, err = tx.ExecContext(ctx, `UPDATE runs SET stored_context_seq=? WHERE id=?`, transition.Seq, encoded.run); err != nil {

@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/muesli/cancelreader"
 )
 
@@ -48,12 +48,12 @@ func (r *inputReader) read(prompt io.Writer, limit int) {
 func (r *inputReader) Close() { close(r.closing); r.reader.Cancel(); <-r.done; r.reader.Close() }
 func (r *inputReader) Next(ctx context.Context, signals <-chan os.Signal, failures <-chan error) (input, int, error) {
 	if pendingSignal(signals) {
-		return input{}, session.Stopped, nil
+		return input{}, chat.Stopped, nil
 	}
 	select {
 	case r.requests <- struct{}{}:
 	case <-ctx.Done():
-		return input{}, session.Error, ctx.Err()
+		return input{}, chat.Error, ctx.Err()
 	}
 	return r.await(ctx, signals, failures)
 }
@@ -65,15 +65,15 @@ func (r *inputReader) await(ctx context.Context, signals <-chan os.Signal, failu
 	select {
 	case entry := <-r.inputs:
 		if pendingSignal(signals) {
-			return input{}, session.Stopped, nil
+			return input{}, chat.Stopped, nil
 		}
-		return entry, session.OK, nil
+		return entry, chat.OK, nil
 	case <-signals:
-		return input{}, session.Stopped, nil
+		return input{}, chat.Stopped, nil
 	case err := <-failures:
-		return input{}, session.Error, err
+		return input{}, chat.Error, err
 	case <-ctx.Done():
-		return input{}, session.Error, ctx.Err()
+		return input{}, chat.Error, ctx.Err()
 	}
 }
 

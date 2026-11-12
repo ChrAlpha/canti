@@ -76,7 +76,7 @@ func TestChatPipeOutputLossCancelsPendingStep(t *testing.T) {
 	s := f.status()
 	h := f.history()
 	t.Logf("no signal: exit=%d phase=%s reason=%s seq=%d history=%v", r.code, s.Phase, s.Reason, s.Seq, kinds(h))
-	if r.code != exitError || r.stdout != "" || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+	if r.code != exitError || r.stdout != "" || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 		t.Fatalf("output loss did not cancel the only admitted input: result=%+v status=%+v", r, s)
 	}
 	observations := 0

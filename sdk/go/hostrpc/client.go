@@ -28,6 +28,8 @@ func (e *RemoteError) Is(target error) bool {
 	switch e.Code {
 	case CodeConflict:
 		return target == ErrConflict
+	case CodeHeld:
+		return target == ErrHeld
 	case CodeClosing:
 		return target == ErrClosing
 	case CodeDriving:
@@ -142,8 +144,8 @@ func (c *Client) run(ctx context.Context, req Request) (Run, error) {
 	return r, err
 }
 
-// Submit admits a run and has the host drive it with the binding, unless the
-// input names a run already admitted.
+// Submit admits one input. When it opened a run, the host drives it with the
+// binding unless the input was already admitted.
 func (c *Client) Submit(ctx context.Context, s Submission, b Binding, once bool) (Ack, error) {
 	resp, err := c.Call(ctx, Request{Op: OpSubmit, Submit: &s, Binding: &b, Once: once})
 	if err == nil && resp.Ack == nil {
@@ -175,13 +177,41 @@ func (c *Client) Resolve(ctx context.Context, id string, r Resolution) (Run, err
 	return c.run(ctx, Request{Op: OpResolve, RunID: id, Resolve: &r})
 }
 
-// Inherited returns the constraints a new input of session inherits.
-func (c *Client) Inherited(ctx context.Context, session string) (string, error) {
-	resp, err := c.Call(ctx, Request{Op: OpInherited, SessionID: session})
+// Inherited returns the constraints a new non-fresh input inherits: those of
+// the latest run.
+func (c *Client) Inherited(ctx context.Context) (string, error) {
+	resp, err := c.Call(ctx, Request{Op: OpInherited})
 	if err != nil || resp.Constraints == nil {
 		return "", err
 	}
 	return *resp.Constraints, nil
+}
+
+// Observe admits evidence from source about subject. It never starts a run.
+func (c *Client) Observe(ctx context.Context, o Observation) (Ack, error) {
+	resp, err := c.Call(ctx, Request{Op: OpObserve, Observe: &o})
+	if err == nil && resp.Ack == nil {
+		err = errors.New("hostrpc: observe without an acknowledgement")
+	}
+	if err != nil {
+		return Ack{}, err
+	}
+	return *resp.Ack, nil
+}
+
+// Withdraw takes back the named held input, or every held input when inputID
+// is empty, and returns them in position order.
+func (c *Client) Withdraw(ctx context.Context, inputID string) ([]Input, error) {
+	resp, err := c.Call(ctx, Request{Op: OpWithdraw, Withdraw: &Withdrawal{InputID: inputID}})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Withdrawn, nil
+}
+
+// CancelEffect cancels the accepted effect of run id without stopping the run.
+func (c *Client) CancelEffect(ctx context.Context, id string) (Run, error) {
+	return c.run(ctx, Request{Op: OpCancel, RunID: id})
 }
 
 // ShutdownHost asks the host to shut down.
@@ -190,9 +220,10 @@ func (c *Client) ShutdownHost(ctx context.Context) error {
 	return err
 }
 
-// Progress reads runID after the opaque cursor, or from its start when empty.
-func (c *Client) Progress(ctx context.Context, runID, after string, limit int) (Page, error) {
-	resp, err := c.Call(ctx, Request{Op: OpProgress, RunID: runID, Cursor: after, Limit: limit})
+// Progress reads the agent log after the opaque cursor, or from its start
+// when empty.
+func (c *Client) Progress(ctx context.Context, after string, limit int) (Page, error) {
+	resp, err := c.Call(ctx, Request{Op: OpProgress, Cursor: after, Limit: limit})
 	if err != nil {
 		return Page{}, err
 	}
@@ -202,9 +233,10 @@ func (c *Client) Progress(ctx context.Context, runID, after string, limit int) (
 	return *resp.Page, nil
 }
 
-// Wait waits for runID to advance beyond the opaque cursor.
-func (c *Client) Wait(ctx context.Context, runID, after string) (Wait, error) {
-	resp, err := c.Call(ctx, Request{Op: OpWait, RunID: runID, Cursor: after, TimeoutMS: maxWait.Milliseconds()})
+// Wait waits for the agent log to advance beyond the opaque cursor, or for
+// the agent to become quiescent.
+func (c *Client) Wait(ctx context.Context, after string) (Wait, error) {
+	resp, err := c.Call(ctx, Request{Op: OpWait, Cursor: after, TimeoutMS: maxWait.Milliseconds()})
 	if err != nil {
 		return Wait{}, err
 	}

@@ -47,10 +47,11 @@ type Options struct {
 
 // The points a host reports to Options.Checkpoint.
 const (
-	PointAdmitting = "submit.admitting" // the checks of admission passed, before its transaction
-	PointSubmitted = "submit.committed" // the admission transaction committed, before Submit returns
-	PointWaiting   = "wait.registered"  // a Wait registered for changes, before it rereads the journal
-	PointClosing   = "shutdown.linearized"
+	PointAdmitting   = "submit.admitting"   // the checks of admission passed, before its transaction
+	PointSubmitted   = "submit.committed"   // the admission transaction committed, before Submit returns
+	PointWaiting     = "wait.registered"    // a Wait registered for changes, before it rereads the journal
+	PointWithdrawing = "withdraw.admitting" // a Withdraw holds admission, before its transaction
+	PointClosing     = "shutdown.linearized"
 )
 
 // Host is the runtime host of one state directory: it owns the state
@@ -72,11 +73,15 @@ type Host struct {
 	// admission, a slot of capacity one, serializes the checks and the
 	// commit of admission.
 	admission chan struct{}
+	// binding, a mutex, makes a queued follow-up's credential publication
+	// and the start that opens it one critical section.
+	binding sync.Mutex
 
 	mu       sync.Mutex
 	changed  chan struct{} // closed and replaced whenever progress or operational ownership changes
 	drivers  map[string]*driver
 	runs     map[string]*runLock
+	bindings map[int64]Binding // a queued follow-up's credential, in memory only
 	ended    ended
 	ops      sync.WaitGroup // the operations Enter admitted and that have not ended
 	active   int            // how many ops counts
@@ -118,17 +123,27 @@ func Open(ctx context.Context, opts Options, create bool) (*Host, error) {
 		f.Close()
 		return nil, err
 	}
+	if err := os.MkdirAll(InputsRoot(opts.State), 0o755); err != nil {
+		store.Close()
+		f.Close()
+		return nil, err
+	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
 	life, endLife := context.WithCancel(context.Background())
 	h := &Host{opts: opts, store: store, lock: f, life: life, endLife: endLife, admission: make(chan struct{}, 1),
-		changed: make(chan struct{}), drivers: map[string]*driver{}, runs: map[string]*runLock{}}
+		changed: make(chan struct{}), drivers: map[string]*driver{}, runs: map[string]*runLock{}, bindings: map[int64]Binding{}}
+	// Every committed store write, not only a transition commit, may advance
+	// the agent log or change an input fact. The store's one post-commit hook
+	// wakes the waits for all of them: admission, observation, withdrawal and
+	// follow-up opening included.
+	store.SetOnCommit(h.notify)
 	var j harness.Journal = store
 	if opts.WrapJournal != nil {
 		j = opts.WrapJournal(j)
 	}
-	h.journal = notifying{j, h}
+	h.journal = j
 	return h, nil
 }
 
@@ -168,19 +183,12 @@ func (h *Host) notify() {
 	h.mu.Unlock()
 }
 
-// notifying wakes the waits of a host after each commit the store
-// acknowledged.
-type notifying struct {
-	harness.Journal
-	h *Host
-}
-
-func (n notifying) Commit(ctx context.Context, t harness.Transition) error {
-	err := n.Journal.Commit(ctx, t)
-	if err == nil {
-		n.h.notify()
-	}
-	return err
+// releaseAdmission releases the admission slot and wakes the waits: the slot
+// is part of whether an operation still owns work, so a waiter that saw it
+// held must get another chance to recheck after the operation ends.
+func (h *Host) releaseAdmission() {
+	<-h.admission
+	h.notify()
 }
 
 // Find returns run id, or the latest run when id is empty, with its stored
@@ -219,19 +227,30 @@ func (h *Host) loop(run harness.Run, c RunConfig, m harness.Model) (*harness.Loo
 		return nil, err
 	}
 	cfg := ContextConfig(c, run.Budget)
-	cfg.History, cfg.Logger = HistoryRoot(h.opts.State), h.opts.Logger
-	cfg.Reader.History, cfg.Reader.Artifacts = cfg.History, filepath.Join(h.opts.State, "artifacts")
+	cfg.History, cfg.Inputs, cfg.Logger = HistoryRoot(h.opts.State), InputsRoot(h.opts.State), h.opts.Logger
+	cfg.Reader.History, cfg.Reader.Artifacts, cfg.Reader.Inputs = cfg.History, filepath.Join(h.opts.State, "artifacts"), cfg.Inputs
 	return harness.NewLoop(h.journal, x, m, cfg)
 }
 
-// InheritedConstraints returns the constraints a new input of session
-// inherits: those of its latest run.
-func (h *Host) InheritedConstraints(ctx context.Context, session string) (string, error) {
-	prior, err := h.store.SessionRuns(ctx, session, 0, 1)
-	if err != nil || len(prior) == 0 {
-		return "", err
-	}
-	return prior[0].Constraints, nil
+// rememberBinding keeps a queued follow-up's credential binding in memory,
+// keyed by its agent-log position, until it is opened or withdrawn.
+func (h *Host) rememberBinding(pos int64, b Binding) {
+	h.mu.Lock()
+	h.bindings[pos] = b
+	h.mu.Unlock()
+}
+
+func (h *Host) forgetBinding(pos int64) {
+	h.mu.Lock()
+	delete(h.bindings, pos)
+	h.mu.Unlock()
+}
+
+func (h *Host) bindingFor(pos int64) (Binding, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b, ok := h.bindings[pos]
+	return b, ok
 }
 
 // Workspace is the workspace of the host's runs.

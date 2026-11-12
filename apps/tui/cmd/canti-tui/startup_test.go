@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
@@ -150,7 +150,7 @@ func TestStartupSignalsCancelPreflightAndEscalateOwnedChildren(t *testing.T) {
 			}
 			select {
 			case <-done:
-				if cmd.ProcessState.ExitCode() != session.Stopped {
+				if cmd.ProcessState.ExitCode() != chat.Stopped {
 					t.Fatalf("startup exit=%d stderr=%s", cmd.ProcessState.ExitCode(), stderr.String())
 				}
 			case <-time.After(2 * time.Second):
@@ -172,7 +172,7 @@ func TestStartupSignalsCancelPreflightAndEscalateOwnedChildren(t *testing.T) {
 
 func TestChatRequiresExplicitExecutionModeAndRejectsProvisioningFlags(t *testing.T) {
 	for _, args := range [][]string{nil, {"-environment", "/environment", "-ephemeral"}, {"-environment", "/environment", "-memory", "1g"}, {"-ephemeral", "-environment-workdir", "/workspace"}} {
-		if _, code, err := parse(args, &bytes.Buffer{}); err == nil || code != session.Usage {
+		if _, code, err := parse(args, &bytes.Buffer{}); err == nil || code != chat.Usage {
 			t.Fatalf("accepted %v: %d, %v", args, code, err)
 		}
 	}

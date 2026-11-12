@@ -11,31 +11,29 @@ import (
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
-// progressSource is what a follower reads a run's progress from: a host in
-// this process or one that a client reaches.
+// progressSource is what a follower reads the agent log from: a host in this
+// process or one that a client reaches.
 type progressSource interface {
-	Progress(ctx context.Context, runID, after string, limit int) (hostrpc.Page, error)
-	Wait(ctx context.Context, runID, after string) (hostrpc.Wait, error)
+	Progress(ctx context.Context, after string, limit int) (hostrpc.Page, error)
+	Wait(ctx context.Context, after string) (hostrpc.Wait, error)
 }
 
-// follower shows the progress of one run on w as its transitions are
-// committed: each committed command, and each completed step. It reads the
-// journal through its source, so a display that is slow or blocked delays
+// follower shows the agent log on w as its facts are committed: each
+// admitted input, each committed command, and each completed step. It reads
+// the journal through its source, so a display that is slow or blocked delays
 // only itself, never a commit.
 type follower struct {
 	src    progressSource
 	next   string
-	runID  string
 	w      io.Writer
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-// follow prepares to show on a.steps the progress of run id that the host
-// commits after now; start begins showing it. It shows nothing without
-// a.steps.
+// follow prepares to show on a.steps the agent log after the position of run
+// id; start begins showing it. It shows nothing without a.steps.
 func (a *app) follow(h *host.Host, id string) (*follower, error) {
-	f := &follower{src: embeddedProgress{h}, runID: id, w: a.steps, done: make(chan struct{})}
+	f := &follower{src: embeddedProgress{h}, w: a.steps, done: make(chan struct{})}
 	if a.steps == nil {
 		return f, nil
 	}
@@ -47,8 +45,8 @@ func (a *app) follow(h *host.Host, id string) (*follower, error) {
 	return f, nil
 }
 
-// start shows the progress of a drive that has started, until the host no
-// longer drives the run or finish is called.
+// start shows the log of a drive that has started, until the agent is
+// quiescent with nothing owned or finish is called.
 func (f *follower) start() {
 	if f.w == nil || f.cancel != nil {
 		return
@@ -65,16 +63,15 @@ func (f *follower) start() {
 			if more {
 				continue
 			}
-			r, err := f.src.Wait(ctx, f.runID, f.next)
-			if err != nil || r.Cursor == f.next && (r.Halted || r.Driver != hostrpc.DriverDriving) {
+			r, err := f.src.Wait(ctx, f.next)
+			if err != nil || r.Cursor == f.next && r.Quiescent && r.Driver != hostrpc.DriverDriving {
 				return
 			}
 		}
 	}()
 }
 
-// finish stops following and shows what remains to the run's latest
-// transition.
+// finish stops following and shows what remains to the log's latest row.
 func (f *follower) finish() {
 	if f.w == nil {
 		return
@@ -92,7 +89,7 @@ func (f *follower) finish() {
 
 // page shows one page of progress and reports whether more follows.
 func (f *follower) page(ctx context.Context) (bool, error) {
-	p, err := f.src.Progress(ctx, f.runID, f.next, 0)
+	p, err := f.src.Progress(ctx, f.next, 0)
 	if err != nil {
 		return false, err
 	}
@@ -103,10 +100,16 @@ func (f *follower) page(ctx context.Context) (bool, error) {
 	return p.More, nil
 }
 
-// render shows item it: the command of an accepted exec decision, and the
-// result of a completed step.
+// render shows item it: an admitted input, the start of a run, the command of
+// an accepted exec decision, and the result of a completed step.
 func render(w io.Writer, it hostrpc.Item) {
 	switch {
+	case it.Kind == "input":
+		renderInput(w, it)
+	case it.Kind == "run_started":
+		fmt.Fprintf(w, "▶ run %s started\n", it.RunID)
+	case it.Kind == "inputs_bound":
+		fmt.Fprintf(w, "↳ %d instruction(s) bound before step %d\n", it.Inputs, it.Step)
 	case it.Kind == "context_reset":
 		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":
@@ -134,6 +137,22 @@ func render(w io.Writer, it hostrpc.Item) {
 	}
 }
 
+func renderInput(w io.Writer, it hostrpc.Item) {
+	in := it.Input
+	if in == nil {
+		return
+	}
+	label := string(in.Authority)
+	switch {
+	case in.Authority == "principal" && in.Disposition != "":
+		label = "instruction " + in.Disposition
+	case in.Authority == "observation":
+		label = "observation " + in.Source + "/" + in.Subject
+	}
+	text := strings.Join(excerpt(in.Text, false), " ")
+	fmt.Fprintf(w, "› %s at %d: %s\n", label, it.Pos, text)
+}
+
 // outcomeSummary describes the outcome of an action the harness performed,
 // which ran no process.
 func outcomeSummary(o hostrpc.Outcome) string {
@@ -154,22 +173,24 @@ func outcomeSummary(o hostrpc.Outcome) string {
 // contract as the SDK; it performs no socket or protocol client operation.
 type embeddedProgress struct{ h *host.Host }
 
-func embeddedCursor(id, after string) (host.Cursor, error) {
+func embeddedCursor(after string) (host.Cursor, error) {
 	if after == "" {
-		return host.Cursor{RunID: id}, nil
+		return 0, nil
 	}
 	return hostserver.ParseCursor(after)
 }
-func (p embeddedProgress) Progress(ctx context.Context, id, after string, limit int) (hostrpc.Page, error) {
-	c, err := embeddedCursor(id, after)
+
+func (p embeddedProgress) Progress(ctx context.Context, after string, limit int) (hostrpc.Page, error) {
+	c, err := embeddedCursor(after)
 	if err != nil {
 		return hostrpc.Page{}, err
 	}
 	page, err := p.h.Progress(ctx, c, limit)
 	return hostserver.PageOf(page), err
 }
-func (p embeddedProgress) Wait(ctx context.Context, id, after string) (hostrpc.Wait, error) {
-	c, err := embeddedCursor(id, after)
+
+func (p embeddedProgress) Wait(ctx context.Context, after string) (hostrpc.Wait, error) {
+	c, err := embeddedCursor(after)
 	if err != nil {
 		return hostrpc.Wait{}, err
 	}
@@ -178,5 +199,5 @@ func (p embeddedProgress) Wait(ctx context.Context, id, after string) (hostrpc.W
 	if w.Driving {
 		driver = hostrpc.DriverDriving
 	}
-	return hostrpc.Wait{Cursor: hostserver.CursorOf(w.Cursor), Halted: w.Halted, Driver: driver}, err
+	return hostrpc.Wait{Cursor: hostserver.CursorOf(w.Cursor), Quiescent: w.Quiescent, Driver: driver}, err
 }

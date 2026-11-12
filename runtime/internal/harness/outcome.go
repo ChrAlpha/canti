@@ -61,6 +61,9 @@ func (o Outcome) Validate() error {
 // presented renders a local outcome using the current context's execution
 // vocabulary. It is a presentation rule, never a physical execution fact.
 func (r StepRecord) presented() Observation {
+	if r.Superseded != nil {
+		return Observation{Execution: core.ExecutionSuperseded}
+	}
 	o := r.Outcome
 	if o == nil {
 		return r.Observation
@@ -90,6 +93,15 @@ func (r StepRecord) presented() Observation {
 func (r StepRecord) Validate(semantics int, performed bool) error {
 	if err := core.KnownSemantics(semantics); err != nil {
 		return err
+	}
+	if r.Superseded != nil {
+		if performed || r.Outcome != nil || r.Observation != (Observation{}) || r.Resolved {
+			return errors.New("harness: a superseded step has no outcome or observation")
+		}
+		if r.Superseded.Instruction < 1 || (r.Superseded.Kind != core.Exec && r.Superseded.Kind != core.Return) {
+			return errors.New("harness: invalid superseded decision")
+		}
+		return nil
 	}
 	if performed {
 		if r.Outcome == nil || r.Observation != (Observation{}) {

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -23,6 +25,7 @@ type LoopConfig struct {
 	NativeArchive  bool             // archive paths are logical addresses, without shell mounts
 	Environment    string           // Frame.Environment
 	History        string           // host directory for published step records; archive.RunsRoot is their logical address
+	Inputs         string           // host directory for published inputs; archive.InputsRoot is their logical address
 	Limits         PromptLimits     // DefaultPromptLimits(); Total bounds one complete context page
 	Poll           time.Duration    // interval between inspections; 500ms
 	Backoff        time.Duration    // wait after an incomplete response, doubling per consumed attempt up to 30s; 1s, none if negative
@@ -43,16 +46,33 @@ type Loop struct {
 	model    Model
 	runner   Runner
 	cfg      LoopConfig
+	// cancels carries a principal's request to cancel the accepted effect to
+	// the effect watch of the drive that owns it.
+	cancels  chan effectCancel
+	watching atomic.Bool
 }
+
+type effectCancel struct {
+	done     chan error
+	effectID string
+}
+
+// errCancelStale reports a cancellation whose inspected effect is no longer
+// the one the watch owns. It is never applied to the current effect.
+var errCancelStale = errors.New("harness: the effect to cancel is no longer current")
 
 // NewLoop validates cfg, applies its defaults, and builds a Loop that
 // commits every transition through a Runner on j and x.
 func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
+	reader := cfg.Reader
 	if j == nil || m == nil || x == nil {
 		return nil, errors.New("harness: loop journal, executor and model are required")
 	}
 	if strings.TrimSpace(cfg.History) == "" {
 		return nil, errPaths
+	}
+	if strings.TrimSpace(cfg.Inputs) == "" {
+		cfg.Inputs = filepath.Join(filepath.Dir(cfg.History), "inputs")
 	}
 	cfg, err := normalize(cfg)
 	if err != nil {
@@ -62,7 +82,14 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg}, nil
+	l := &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg, cancels: make(chan effectCancel, 1)}
+	if cfg.Reader != nil {
+		cfg.Reader.RepairInput = l.repairInput
+	}
+	if reader != nil {
+		reader.RepairInput = l.repairInput
+	}
+	return l, nil
 }
 
 var errPaths = errors.New("harness: loop environment and history path are required")
@@ -126,7 +153,16 @@ func (l *Loop) Run(ctx context.Context, runID string) (Snapshot, error) {
 // resumes from the journal.
 func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 	snap, err := l.load(ctx, runID)
-	if err != nil || snap.State.Intent() == core.IntentHalt {
+	if err != nil {
+		return snap, err
+	}
+	if snap.State.Phase != core.PhaseEffectSaved {
+		// A cancellation request that reached the loop after its effect left
+		// effect_saved cannot be served; answer it instead of holding its
+		// caller's run lock.
+		l.drainStepCancels(snap.State.EffectID)
+	}
+	if snap.State.Intent() == core.IntentHalt {
 		return snap, err
 	}
 	run, err := l.journal.Run(ctx, runID)
@@ -153,6 +189,120 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 		return l.effect(ctx, run, snap)
 	}
 	return snap, nil
+}
+
+// RequestCancelEffect asks the effect watch that owns the accepted effect of
+// runID to cancel it once and record its result, without stopping the run.
+// The watch continues the run to its next step. It returns after that
+// observation is committed, or with a bounded failure when the run left
+// effect_saved without observing it; a caller waits under its own deadline.
+func (l *Loop) RequestCancelEffect(ctx context.Context, runID string) (Snapshot, error) {
+	snap, err := l.load(ctx, runID)
+	if err != nil {
+		return snap, err
+	}
+	if snap.State.Phase != core.PhaseEffectSaved {
+		return snap, fmt.Errorf("run %s in phase %q has no accepted effect to cancel", runID, snap.State.Phase)
+	}
+	req := effectCancel{done: make(chan error, 1), effectID: snap.State.EffectID}
+	select {
+	case l.cancels <- req:
+	case <-ctx.Done():
+		return snap, ctx.Err()
+	}
+	select {
+	case err := <-req.done:
+		next, loadErr := l.load(ctx, runID)
+		if err != nil {
+			return next, err
+		}
+		return next, loadErr
+	case <-ctx.Done():
+		return snap, ctx.Err()
+	}
+}
+
+// CancelEffect cancels the accepted effect of runID through a loop that owns
+// no drive, as a stop does without a model, and records its result so the
+// run continues. It refuses when the run holds no accepted effect.
+func (l *Loop) CancelEffect(ctx context.Context, runID string) (Snapshot, error) {
+	snap, err := l.load(ctx, runID)
+	if err != nil {
+		return snap, err
+	}
+	if snap.State.Phase != core.PhaseEffectSaved {
+		return snap, fmt.Errorf("run %s in phase %q has no accepted effect to cancel", runID, snap.State.Phase)
+	}
+	run, err := l.journal.Run(ctx, runID)
+	if err != nil {
+		return snap, err
+	}
+	effect, err := l.effectOf(ctx, snap)
+	if err != nil {
+		return snap, err
+	}
+	w := &effectWatch{Loop: l, run: run, snap: snap, effect: effect, userCancel: true, cancelIssued: true}
+	next, done, err := w.cancelAndComplete(ctx)
+	if done {
+		return next, err
+	}
+	for {
+		next, done, err = w.step(ctx)
+		if done {
+			return next, err
+		}
+	}
+}
+
+// effectOf reconstructs the accepted effect of snap, which must be in
+// effect_saved.
+func (l *Loop) effectOf(ctx context.Context, snap Snapshot) (Effect, error) {
+	a, err := ActionOf(ctx, l.journal, snap.State)
+	if err != nil {
+		return Effect{}, err
+	}
+	if a.Local() {
+		return Effect{}, errors.New("harness: the accepted action is local")
+	}
+	run, err := l.journal.Run(ctx, snap.State.RunID)
+	if err != nil {
+		return Effect{}, err
+	}
+	return l.descriptor(run, snap.State, a)
+}
+
+// cancelMatches is the one EffectID check for every path that receives a
+// cancellation request. A request for another effect is answered stale and is
+// never applied to the current one.
+func cancelMatches(req effectCancel, effectID string) bool {
+	if req.effectID != effectID {
+		req.done <- errCancelStale
+		return false
+	}
+	return true
+}
+
+// drainStepCancels answers requests that reached the loop after their effect
+// left effect_saved, without applying them to the run's current effect.
+func (l *Loop) drainStepCancels(effectID string) {
+	for {
+		select {
+		case req := <-l.cancels:
+			if cancelMatches(req, effectID) {
+				replyCancel(req, false)
+			}
+		default:
+			return
+		}
+	}
+}
+
+func replyCancel(req effectCancel, observed bool) {
+	if observed {
+		req.done <- nil
+		return
+	}
+	req.done <- errCancelUnobserved
 }
 
 // Stop records a persistent stop for reason, unless the run is closed or
@@ -355,32 +505,74 @@ func (l *Loop) backoff(attempt int) time.Duration {
 	return min(d, maxBackoff)
 }
 
+// bind commits the instructions admitted to the run that its state has not
+// bound yet, so the next request or decision sees every instruction admitted
+// before its commit. A steer admitted between the bind and the following
+// commit is caught by the store's return guard or by decode's retry.
+func (l *Loop) bind(ctx context.Context, snap Snapshot) (Snapshot, error) {
+	steers, err := l.journal.Steers(ctx, snap.State.RunID)
+	if err != nil {
+		return snap, err
+	}
+	switch {
+	case len(steers) < snap.State.Inputs:
+		return snap, contextError{fmt.Errorf("harness: run %s holds %d steers but %d are bound", snap.State.RunID, len(steers), snap.State.Inputs)}
+	case len(steers) == snap.State.Inputs:
+		return snap, nil
+	}
+	return l.runner.Commit(ctx, snap, core.InputsBound{Count: len(steers)}, Facts{})
+}
+
 // decode commits the decision of the saved response and, when it accepts an
 // exec decision, the action the harness reads it as under the request it
-// answers.
+// answers. It binds instructions admitted since the request was frozen first;
+// such a decision is superseded, and the step completes without an effect.
 func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt)
 	if err != nil {
 		return snap, err
 	}
-	event, facts := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: l.decision(resp)}, Facts{}
-	if accepted, err := s.Next(event); err == nil && accepted.Phase == core.PhaseEffectSaved {
-		a := NormalizeAction(accepted.Decision.Payload, l.cfg.Reader != nil)
-		facts.Action = &a
-		if a.Recovery == RecoveryExternal {
-			run, err := l.journal.Run(ctx, s.RunID)
-			if err != nil {
-				return snap, err
-			}
-			facts.Execution = &ExecutionIdentity{Spec: l.executor.Specification(accepted.Decision.Payload), ConfigDigest: ConfigDigest(run.Config)}
+	body := l.decision(resp)
+	event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}
+	for {
+		if snap, err = l.bind(ctx, snap); err != nil {
+			return snap, err
 		}
+		s = snap.State
+		if s.Step != event.Step || s.Attempt != event.Attempt {
+			return snap, contextError{fmt.Errorf("harness: response of step %d attempt %d no longer belongs to the run", event.Step, event.Attempt)}
+		}
+		facts := Facts{}
+		decision, superseded := s.Superseded(body)
+		if superseded {
+			facts.Supersede = &Superseded{Instruction: s.Seen + 1, Kind: decision.Kind, Purpose: decision.Purpose}
+		} else if accepted, err := s.Next(event); err == nil && accepted.Phase == core.PhaseEffectSaved {
+			a := NormalizeAction(accepted.Decision.Payload, l.cfg.Reader != nil)
+			facts.Action = &a
+			if a.Recovery == RecoveryExternal {
+				run, err := l.journal.Run(ctx, s.RunID)
+				if err != nil {
+					return snap, err
+				}
+				facts.Execution = &ExecutionIdentity{Spec: l.executor.Specification(accepted.Decision.Payload), ConfigDigest: ConfigDigest(run.Config)}
+			}
+		}
+		next, err := l.runner.Commit(ctx, snap, event, facts)
+		if errors.Is(err, ErrInputsPending) {
+			continue
+		}
+		if err != nil {
+			return next, err
+		}
+		switch {
+		case facts.Supersede != nil:
+			l.note(ctx, slog.LevelInfo, "superseded a decision with a later instruction", next, "instruction", facts.Supersede.Instruction, "decision", facts.Supersede.Kind)
+		case next.State.Phase == core.PhaseIdle:
+			l.note(ctx, slog.LevelWarn, "retrying an undecodable response", next, "attempt", next.State.Attempt)
+		}
+		return next, nil
 	}
-	next, err := l.runner.Commit(ctx, snap, event, facts)
-	if err == nil && next.State.Phase == core.PhaseIdle {
-		l.note(ctx, slog.LevelWarn, "retrying an undecodable response", next, "attempt", next.State.Attempt)
-	}
-	return next, err
 }
 
 // decision is the model's decision text of resp, or its raw body when the
@@ -396,6 +588,10 @@ func (l *Loop) decision(resp Response) []byte {
 // No transient backend phase is recorded as Run progress.
 func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot, effect Effect) (Snapshot, error) {
 	w := effectWatch{Loop: l, run: run, snap: snap, effect: effect, stopping: snap.State.Phase == core.PhaseCancelling}
+	defer func() {
+		w.drainCancels(w.observed)
+		w.replyCancels(w.cancelResult())
+	}()
 	for {
 		next, done, err := w.step(ctx)
 		if done {
@@ -403,6 +599,10 @@ func (l *Loop) watch(ctx context.Context, run Run, snap Snapshot, effect Effect)
 		}
 	}
 }
+
+// errCancelUnobserved is the bounded failure of a cancellation whose effect
+// left effect_saved without a terminal observation.
+var errCancelUnobserved = errors.New("harness: the run left effect_saved before the cancellation was observed")
 
 type effectWatch struct {
 	*Loop
@@ -413,13 +613,27 @@ type effectWatch struct {
 	failures         int
 	timeoutRequested bool
 	early            bool
+	userCancel       bool
+	cancelIssued     bool
+	observed         bool
+	cancelRequests   []effectCancel
 }
 
 func (w *effectWatch) step(ctx context.Context) (Snapshot, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return w.snap, true, err
 	}
-	if !w.stopping {
+	if w.takeCancel() {
+		w.userCancel = true
+	}
+	if w.userCancel && !w.cancelIssued {
+		next, done, err := w.cancelAndComplete(ctx)
+		if done {
+			w.replyCancels(w.cancelResultFor(err))
+			return next, true, err
+		}
+	}
+	if !w.stopping && !w.userCancel {
 		reason, why, err := w.spent(ctx, w.run)
 		if err != nil {
 			return w.snap, true, err
@@ -452,7 +666,7 @@ func (w *effectWatch) step(ctx context.Context) (Snapshot, bool, error) {
 	case JobPending, JobRunning:
 		return w.pending(ctx, job)
 	default:
-		next, err := w.complete(ctx, w.run, w.snap, job)
+		next, err := w.complete(ctx, job)
 		return next, true, err
 	}
 }
@@ -463,13 +677,98 @@ func (w *effectWatch) sample(ctx context.Context) (Job, bool, error) {
 		return job, false, err
 	}
 	call, cancel := ctx, context.CancelFunc(func() {})
-	budgeted := w.run.Budget.WallTime > 0
+	budgeted := w.run.Budget.WallTime > 0 && !w.userCancel
 	if budgeted {
 		call, cancel = context.WithTimeout(ctx, w.run.Created.Add(w.run.Budget.WallTime).Sub(w.cfg.Now()))
 	}
 	defer cancel()
 	job, err := w.executor.Drive(call, w.effect)
 	return job, budgeted && call.Err() != nil, err
+}
+
+// takeCancel keeps every pending principal cancellation for the watch to
+// answer once its effect is observed, or to fail with the bounded result when
+// the watch ends first.
+func (w *effectWatch) takeCancel() bool {
+	taken := false
+	for {
+		select {
+		case req := <-w.cancels:
+			if !cancelMatches(req, w.effect.ID) {
+				continue
+			}
+			w.cancelRequests = append(w.cancelRequests, req)
+			taken = true
+		default:
+			if w.observed && taken {
+				w.replyCancels(nil)
+			}
+			return taken
+		}
+	}
+}
+
+// drainCancels answers requests received after the watch ended. A request
+// for another effect is stale; a request for this effect is unobserved.
+func (w *effectWatch) drainCancels(observed bool) {
+	for {
+		select {
+		case req := <-w.cancels:
+			if cancelMatches(req, w.effect.ID) {
+				replyCancel(req, observed)
+			}
+		default:
+			return
+		}
+	}
+}
+
+// replyCancels answers every cancellation this watch took, once.
+func (w *effectWatch) replyCancels(err error) {
+	for _, req := range w.cancelRequests {
+		req.done <- err
+	}
+	w.cancelRequests = nil
+}
+
+// cancelResult is what a taken request learns when the watch ends: the
+// committed observation, or the bounded failure.
+func (w *effectWatch) cancelResult() error {
+	if w.observed {
+		return nil
+	}
+	return errCancelUnobserved
+}
+
+func (w *effectWatch) cancelResultFor(err error) error {
+	if err != nil {
+		return err
+	}
+	return w.cancelResult()
+}
+
+// cancelAndComplete calls Executor.Cancel once for the accepted effect and,
+// when that is terminal, commits its observation. It reports whether the
+// effect was completed.
+func (w *effectWatch) cancelAndComplete(ctx context.Context) (Snapshot, bool, error) {
+	w.cancelIssued, w.userCancel = true, true
+	job, err := w.executor.Cancel(ctx, w.effect)
+	if err != nil {
+		return w.snap, true, err
+	}
+	if err := job.Validate(w.effect); err != nil {
+		next, err := w.unknown(ctx, w.snap, err.Error(), &job)
+		return next, true, err
+	}
+	switch job.Status {
+	case JobSucceeded, JobFailed, JobFailedToStart, JobCancelled:
+		next, err := w.complete(ctx, job)
+		return next, true, err
+	case JobPending, JobRunning:
+		return w.snap, false, nil
+	}
+	next, err := w.unknown(ctx, w.snap, fmt.Sprintf("effect %s reports %s: %s", w.effect.ID, job.Status, job.Output.Detail), &job)
+	return next, true, err
 }
 
 func (w *effectWatch) failed(ctx context.Context, cause error) (Snapshot, bool, error) {
@@ -495,7 +794,7 @@ func (w *effectWatch) failed(ctx context.Context, cause error) (Snapshot, bool, 
 
 func (w *effectWatch) pending(ctx context.Context, job Job) (Snapshot, bool, error) {
 	timeout := w.run.Budget.JobTimeout
-	if !w.stopping && !w.timeoutRequested && job.Status == JobRunning && timeout > 0 && !job.budgetOrigin().IsZero() && w.cfg.Now().Sub(job.budgetOrigin()) >= timeout {
+	if !w.stopping && !w.userCancel && !w.timeoutRequested && job.Status == JobRunning && timeout > 0 && !job.budgetOrigin().IsZero() && w.cfg.Now().Sub(job.budgetOrigin()) >= timeout {
 		var err error
 		job, err = w.executor.Cancel(ctx, w.effect)
 		if err != nil {
@@ -507,7 +806,7 @@ func (w *effectWatch) pending(ctx context.Context, job Job) (Snapshot, bool, err
 		}
 		w.timeoutRequested = true
 		if job.Status != JobRunning && job.Status != JobPending {
-			next, err := w.complete(ctx, w.run, w.snap, job)
+			next, err := w.complete(ctx, job)
 			return next, true, err
 		}
 	}
@@ -543,7 +842,29 @@ func (w *effectWatch) await(ctx context.Context, job Job) error {
 	began := time.Now()
 	call, cancel := context.WithTimeout(ctx, w.waitLimit(job, maxWait))
 	defer cancel()
-	err := waiter.Wait(call, w.effect)
+	done := make(chan error, 1)
+	go func() { done <- waiter.Wait(call, w.effect) }()
+	var err error
+	for {
+		select {
+		case err = <-done:
+		case req := <-w.cancels:
+			if !cancelMatches(req, w.effect.ID) {
+				continue
+			}
+			w.cancelRequests = append(w.cancelRequests, req)
+			w.userCancel = true
+			w.cancelIssued = false
+			cancel()
+			<-done
+			return nil
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return ctx.Err()
+		}
+		break
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -575,13 +896,21 @@ func observationOf(job Job, execution core.ExecutionState) Observation {
 	return Observation{Execution: execution, ExitCode: job.ExitCode, Preview: job.Preview, Output: job.Output}
 }
 
-func (l *Loop) complete(ctx context.Context, run Run, snap Snapshot, job Job) (Snapshot, error) {
-	execution := resultExecution(job, run.Budget.JobTimeout, snap.State.Phase == core.PhaseCancelling)
+func (w *effectWatch) complete(ctx context.Context, job Job) (Snapshot, error) {
+	timeout := w.run.Budget.JobTimeout
+	if w.userCancel {
+		timeout = 0
+	}
+	execution := resultExecution(job, timeout, w.snap.State.Phase == core.PhaseCancelling)
 	if execution == core.ExecutionUnknown {
-		return l.unknown(ctx, snap, "executor reports unknown after cancellation", &job)
+		return w.unknown(ctx, w.snap, "executor reports unknown after cancellation", &job)
 	}
 	obs := observationOf(job, execution)
-	return l.runner.Commit(ctx, snap, core.Observed{EffectID: snap.State.EffectID, Execution: execution}, Facts{Observation: &obs, Receipt: &job})
+	next, err := w.runner.Commit(ctx, w.snap, core.Observed{EffectID: w.snap.State.EffectID, Execution: execution}, Facts{Observation: &obs, Receipt: &job})
+	if err == nil {
+		w.observed = true
+	}
+	return next, err
 }
 
 func (l *Loop) unknown(ctx context.Context, snap Snapshot, why string, receipt *Job) (Snapshot, error) {

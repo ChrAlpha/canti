@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
@@ -38,6 +39,7 @@ type frozenScenario struct {
 	finals        map[string]harness.Job                  // final job of a command instead of success
 	imports       map[string]string                       // files of a read-only imported history archive
 	changes       map[string]func(imports *os.Root) error // what a command does to the imported archive while it runs
+	observations  []harness.InputSubmission               // observations admitted before the first run
 	runs          []frozenRun
 	marks         map[string][]string
 	edge          func(t *testing.T, requests map[string]harness.Request) // checks the boundary the scenario sits on
@@ -47,6 +49,7 @@ type frozenRun struct {
 	id, goal    string
 	constraints string // instead of the corpus constraints
 	replies     []string
+	steers      []string // principal steers admitted before the first request
 	steps       []string // stepOutcome of every completed step, oldest first
 	budget      harness.Budget
 	resolve     *harness.Observation // operator resolution of an unknown outcome
@@ -74,7 +77,13 @@ func frozenScenarios() []frozenScenario {
 	return slices.Concat(persistentScenarios(limits), []frozenScenario{
 		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}}},
 		{name: "reset-focus-repair", limits: limits, imports: map[string]string{"notes": "FROZEN_ORIGINAL_NOTES"}, runs: []frozenRun{{id: corpusRun, goal: "Recover original notes across provider rejection.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read notes."), overflow, focus(5), corpusDecision(core.Exec, "canti:focus {\"sources\":[]}"), "invalid decision", corpusDecision(core.Return, "Recovered notes.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 1 sources", "3 done focus 0 sources"}}}, marks: map[string][]string{"run1-step02-rev2.json": {"anchor sequence 8", "Its result predates this anchor"}, "run1-step03-rev1.json": {"Selected focus evidence", "FROZEN_ORIGINAL_NOTES"}, "run1-step04-rev2.json": {"Protocol repair"}}},
-		{name: "session-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"previous_run_id", "/canti/runs/" + corpusRun + "/"}}},
+		{name: "observation-tail", limits: limits, observations: []harness.InputSubmission{
+			{Authority: harness.AuthorityObservation, Source: "ci", Subject: "build", Text: "RED", Now: corpusCreated},
+			{Authority: harness.AuthorityObservation, Source: "ci", Subject: "build", Text: "GREEN", Now: corpusCreated},
+		}, runs: []frozenRun{{id: corpusRun, goal: "Use the latest observation.", replies: []string{corpusDecision(core.Return, "done")}}},
+			marks: map[string][]string{"run1-step01-rev1.json": {"GREEN", "Position 2; archive /canti/inputs/000000000002"}}},
+		{name: "line-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"## Previous runs", "- " + corpusRun + ":", "/canti/runs/" + corpusRun + "/"}}},
+		{name: "line-amended", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Write ORIGINAL.", steers: []string{"Changed requirement: write STEERRED."}, replies: []string{corpusDecision(core.Return, "STEERRED written.")}}, {id: corpusNextRun, goal: "Continue the line.", replies: []string{corpusDecision(core.Return, "continued")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"amended by instructions at " + archive.InputsRoot + "/000000000001", "Write ORIGINAL."}}},
 		{name: "legacy-actions-are-local-failures", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Reject retired actions locally.", replies: []string{corpusDecision(core.Exec, "canti:handover next"), corpusDecision(core.Exec, "canti:handover-carry {}"), corpusDecision(core.Return, "Retired actions failed locally.")}, steps: []string{"1 failed", "2 failed"}}}},
 		{name: "tool-transport", tool: true, limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Inspect files.", replies: []string{corpusDecision(core.Exec, "ls"), `{"kind":"exec"}`, corpusDecision(core.Return, "go.mod")}, steps: []string{"1 exited 0 output complete"}}}},
 		{name: "protocol-repair", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Repair a decision.", replies: []string{"not a decision", strings.Repeat("`", 2048), corpusDecision(core.Return, "repaired")}}}},
@@ -145,7 +154,7 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 					}
 				}
 			}
-			dir := filepath.Join("testdata", "frozen-requests-v18", sc.name)
+			dir := filepath.Join("testdata", "frozen-requests-v19", sc.name)
 			if *updateRequests {
 				if t.Failed() {
 					t.Fatal("-update-requests keeps the goldens of a failing scenario")
@@ -263,7 +272,7 @@ func elideBody(t *testing.T, facts, name string) string {
 // scenario passed.
 func checkScenarioDirectories(t *testing.T, scenarios []frozenScenario) (orphans []string) {
 	t.Helper()
-	root := filepath.Join("testdata", "frozen-requests-v18")
+	root := filepath.Join("testdata", "frozen-requests-v19")
 	names := map[string]bool{}
 	for _, sc := range scenarios {
 		if names[sc.name] {

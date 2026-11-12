@@ -143,7 +143,7 @@ func execDecision(command string) core.Decision {
 func TestPublishHistoryLaysOutTheCommittedSteps(t *testing.T) {
 	f := newFixture(t, limits, harness.Budget{})
 	r, dir := runner(t, f), filepath.Join(f.cfg.History, runID)
-	want := map[string]string{"goal": "Count the Go files.", "constraints": "Do not modify files.", "steps/": "/"}
+	want := map[string]string{"goal": "Count the Go files.", "constraints": "Do not modify files.", "previous": "", "steps/": "/"}
 	publish(t, f, f.store, runID)
 	wantTree(t, dir, want)
 
@@ -202,8 +202,8 @@ func TestPublishHistoryRecordsAStoppedRunWithoutConstraints(t *testing.T) {
 	publish(t, f, f.store, "run-2")
 	publish(t, f, f.store, runID)
 	wantTree(t, f.cfg.History, map[string]string{
-		"run-2/": "/", "run-2/goal": " Stop at once. ", "run-2/steps/": "/", "run-2/result": "phase: stopped\nreason: cancelled\n",
-		runID + "/": "/", runID + "/goal": "Count the Go files.", runID + "/constraints": "Do not modify files.", runID + "/steps/": "/",
+		"run-2/": "/", "run-2/goal": " Stop at once. ", "run-2/previous": "run-1", "run-2/steps/": "/", "run-2/result": "phase: stopped\nreason: cancelled\n",
+		runID + "/": "/", runID + "/goal": "Count the Go files.", runID + "/constraints": "Do not modify files.", runID + "/previous": "", runID + "/steps/": "/",
 		runID + "/result": "phase: stopped\nreason: cancelled\n",
 	})
 }
@@ -219,7 +219,7 @@ func TestPublishHistoryRebuildsALostProjection(t *testing.T) {
 		publish(t, f, f.store, runID)
 	}
 	want := tree(t, dir)
-	if len(want) != 3+5*n {
+	if len(want) != 4+5*n {
 		t.Fatalf("%d records for %d steps", len(want), n)
 	}
 	for _, lose := range []string{dir, filepath.Join(dir, "steps")} {

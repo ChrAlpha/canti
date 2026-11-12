@@ -229,8 +229,18 @@ func (a *app) remoteSubmit(ctx context.Context, sub hostrpc.Submission, b host.B
 	if err != nil {
 		return submitCode(err), err
 	}
-	if ack.Replayed {
-		a.noteDiffers(sub.InputID, ack.Run.RunID, ack.Differs)
+	if ack.Run == nil {
+		// A steer or a queued follow-up opened no run: acknowledge and stop.
+		if len(ack.Differs) > 0 {
+			fmt.Fprintf(a.stderr, "canti: input %s at position %d keeps its own settings; this submission differs in %s\n",
+				sub.InputID, ack.Pos, strings.Join(ack.Differs, ", "))
+		}
+		return exitOK, a.encoder().Encode(wireAck(ack))
+	}
+	r := *ack.Run
+	if ack.Replayed && len(ack.Differs) > 0 {
+		fmt.Fprintf(a.stderr, "canti: input %s names run %s, which keeps its own settings; this submission differs in %s\n",
+			sub.InputID, r.RunID, strings.Join(ack.Differs, ", "))
 	}
 	after := followFrom(ack, lost)
 	switch {
@@ -239,18 +249,22 @@ func (a *app) remoteSubmit(ctx context.Context, sub hostrpc.Submission, b host.B
 		// was lost. Drive the run, once, if it is open and no host drives
 		// it, and show all of it from its start, also when it has halted
 		// meanwhile, since this invocation has shown none of it.
-		if ack.Run.Status == hostrpc.StatusActive && ack.Run.Driver != hostrpc.DriverDriving {
-			if _, err := c.Drive(ctx, ack.Run.RunID, wire, once); err != nil && !errors.Is(err, hostrpc.ErrDriving) {
+		if r.Status == hostrpc.StatusActive && r.Driver != hostrpc.DriverDriving {
+			if _, err := c.Drive(ctx, r.RunID, wire, once); err != nil && !errors.Is(err, hostrpc.ErrDriving) {
 				return exitError, err
 			}
 		}
-		return a.attach(ctx, ack.Run.RunID, after)
-	case ack.Replayed && ack.Run.Driver == hostrpc.DriverDriving:
-		return a.attach(ctx, ack.Run.RunID, after)
+		return a.attach(ctx, r.RunID, after)
+	case ack.Replayed && r.Driver == hostrpc.DriverDriving:
+		return a.attach(ctx, r.RunID, after)
 	case ack.Replayed:
-		return a.remoteReport(ack.Run, nil)
+		return a.remoteReport(r, nil)
 	}
-	return a.attach(ctx, ack.Run.RunID, after)
+	return a.attach(ctx, r.RunID, after)
+}
+
+func wireAck(ack hostrpc.Ack) inputAck {
+	return inputAck{InputID: ack.InputID, Disposition: ack.Disposition, Pos: ack.Pos, Replayed: ack.Replayed, Differs: ack.Differs}
 }
 
 // followFrom is where a client that submitted and got ack follows the run
@@ -259,8 +273,12 @@ func (a *app) remoteSubmit(ctx context.Context, sub hostrpc.Submission, b host.B
 // shown none of it; the run's state when the ack replays an input that an
 // earlier invocation submitted.
 func followFrom(ack hostrpc.Ack, lost bool) string {
-	if !ack.Replayed || lost {
+	if ack.Run == nil {
 		return ""
+	}
+	if !ack.Replayed || lost {
+		// Start before the opening input so that it is shown too.
+		return hostserver.CursorOf(host.Cursor(max(0, ack.Pos-1)))
 	}
 	return ack.Run.Cursor
 }
@@ -325,14 +343,19 @@ func (a *app) attach(ctx context.Context, id, after string) (int, error) {
 			}
 		}()
 	}
-	f := &follower{src: c, runID: id, next: after, w: a.steps, done: make(chan struct{})}
+	f := &follower{src: c, next: after, w: a.steps, done: make(chan struct{})}
 	f.start()
 	halted, lost := make(chan struct{}), make(chan error, 1)
 	go func() {
 		defer close(halted)
 		for cur := after; detachCtx.Err() == nil; {
-			w, err := c.Wait(detachCtx, id, cur)
-			if err != nil || w.Halted || w.Driver != hostrpc.DriverDriving {
+			v, err := c.View(detachCtx, id)
+			if err != nil || v.Status != hostrpc.StatusActive || v.Driver != hostrpc.DriverDriving {
+				lost <- err
+				return
+			}
+			w, err := c.Wait(detachCtx, cur)
+			if err != nil {
 				lost <- err
 				return
 			}

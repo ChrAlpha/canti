@@ -33,7 +33,7 @@ func testPreflightValidation(t *testing.T) hostrpc.Validation {
 	return hostrpc.Validation{
 		State: filepath.Join(dir, "state"),
 		Submission: hostrpc.Submission{
-			SessionID: "session-qa", Goal: "qa preflight", ExplicitConstraints: true,
+			Goal: "qa preflight", ExplicitConstraints: true,
 			Spec: hostrpc.Spec{Ephemeral: true,
 				Workspace: workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g",
 				Pids: 512, OutputLimit: 8 << 20, API: "openai-responses", Model: "qa-model",
@@ -106,9 +106,8 @@ func TestPreflightRejectsInvalidSpecsWithoutCreatingState(t *testing.T) {
 	}
 }
 
-func TestPreflightStandaloneKeepsSuppliedConstraintsWithoutCreatingState(t *testing.T) {
+func TestPreflightKeepsSuppliedConstraintsWithoutCreatingState(t *testing.T) {
 	validation := testPreflightValidation(t)
-	validation.Submission.SessionID = ""
 	validation.Submission.ExplicitConstraints = false
 	validation.Submission.Constraints = "supplied standalone rules"
 	response := callPreflight(t, preflightRequest(t, validation))

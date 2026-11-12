@@ -18,11 +18,11 @@ import (
 
 func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.T) {
 	f, image := dockerFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "Earlier answer: verify original evidence."}})
-	if r := f.cli(nil, "run", "-session", "diagnostic", "-input", "first", "-goal", "prior goal", "-image", image); r.code != exitOK {
+	if r := f.cli(nil, "run", "-input", "first", "-goal", "prior goal", "-image", image); r.code != exitOK {
 		t.Fatalf("prior: %+v", r)
 	}
 	priorID := f.status().Run.ID
-	if r := f.cli(nil, "run", "-once", "-session", "diagnostic", "-input", "second", "-goal", "verify evidence and create done.txt", "-image", image, "-max-steps", "8", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
+	if r := f.cli(nil, "run", "-once", "-input", "second", "-goal", "verify evidence and create done.txt", "-image", image, "-max-steps", "8", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
 		t.Fatalf("freeze: %+v", r)
 	}
 	runID := f.status().Run.ID
@@ -73,12 +73,12 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 		if err := json.Unmarshal([]byte(r.stdout), &report); r.code != exitOK || err != nil {
 			t.Fatalf("inspect: %+v %v", r, err)
 		}
-		if report.AsOfSeq != before[len(before)-1].Seq || report.Request.Seq != tr.Seq || !report.Request.CaptureAvailable || report.SessionID != "diagnostic" || report.SessionSeq != 2 {
+		if report.AsOfSeq != before[len(before)-1].Seq || report.Request.Seq != tr.Seq || !report.Request.CaptureAvailable || report.InputID != "second" || report.InputPos == 0 {
 			t.Fatalf("identity: %+v", report)
 		}
 		capture := report.Request.Capture
-		if capture.SessionNavigation != priorID {
-			t.Fatalf("session provenance: %+v", capture.SessionNavigation)
+		if capture.PreviousRun != priorID {
+			t.Fatalf("previous-run provenance: %+v", capture.PreviousRun)
 		}
 		raw := f.cli(nil, "context", append(args, "-raw")...)
 		if raw.code != exitOK || raw.stdout != string(tr.Facts.Request.Body) {

@@ -108,9 +108,9 @@ func rawJournalSnapshot(t *testing.T, db *sql.DB) [3]string {
 	t.Helper()
 	var snapshot [3]string
 	for i, query := range []string{
-		`SELECT json_group_array(json_array(n, id, semantics, run, initial, input_tokens, output_tokens, output_bytes, steps)) FROM (SELECT * FROM runs ORDER BY n)`,
-		`SELECT json_group_array(json_array(run_id, seq, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)) FROM (SELECT * FROM transitions ORDER BY run_id, seq)`,
-		`SELECT json_group_array(json_array(session_id, seq, input_id, run_id)) FROM (SELECT * FROM session_runs ORDER BY session_id, seq)`,
+		`SELECT json_group_array(json_array(n, id, semantics, run, initial, input_pos, fresh, input_tokens, output_tokens, output_bytes, steps)) FROM (SELECT * FROM runs ORDER BY n)`,
+		`SELECT json_group_array(json_array(run_id, seq, pos, event_id, kind, semantics, event, from_state, to_state, facts, step, attempt, rev)) FROM (SELECT * FROM transitions ORDER BY run_id, seq)`,
+		`SELECT json_group_array(json_array(pos, input_id, authority, delivery, disposition, run_id, text, constraints, explicit_constraints, fresh, spec, source, subject, admitted_at)) FROM (SELECT * FROM inputs ORDER BY pos)`,
 	} {
 		if err := db.QueryRow(query).Scan(&snapshot[i]); err != nil {
 			t.Fatal(err)

@@ -40,16 +40,16 @@ func TestChatPTYDisplayFailureWaitsForCancellation(t *testing.T) {
 	time.Sleep(3 * 250 * time.Millisecond)
 	releaseLock()
 	p.finish(t, exitError)
-	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 || s.Run.Goal != "first" || len(f.model.requests()) != 1 {
+	if s := f.status(); s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.Ordinal != 1 || s.Run.Goal != "first" || len(f.model.requests()) != 1 {
 		t.Fatalf("display failure abandoned cancellation or admitted busy input: %+v, requests=%d", s, len(f.model.requests()))
 	}
 	f.model.mu.Lock()
 	f.model.hold = nil
 	f.model.mu.Unlock()
-	if r := f.cli(nil, "run", "-session", "pty", "-input", "next", "-goal", "fresh"); r.code != exitOK {
-		t.Fatalf("next session input failed: %+v", r)
+	if r := f.cli(nil, "run", "-input", "next", "-goal", "fresh"); r.code != exitOK {
+		t.Fatalf("next line input failed: %+v", r)
 	}
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 2 || s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
-		t.Fatalf("session did not continue after cancellation: %+v", s)
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 2 || s.Run.Goal != "fresh" || len(f.model.requests()) != 2 {
+		t.Fatalf("the line did not continue after cancellation: %+v", s)
 	}
 }

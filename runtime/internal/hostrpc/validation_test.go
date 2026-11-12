@@ -9,30 +9,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ChrAlpha/canti/runtime/internal/host"
 	wire "github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
-func TestServingHostValidateRejectsWrongLocationBeforeInheritedFacts(t *testing.T) {
+func TestServingHostValidateRejectsWrongLocationFirst(t *testing.T) {
 	h, _, client, _ := servingWith(t, slog.New(slog.DiscardHandler))
 	state := filepath.Dir(client.Path)
 	base := wire.Validation{
 		State: state,
 		Submission: wire.Submission{
-			SessionID: "invalid/session", Goal: "input",
-			Spec: wire.Spec{Workspace: h.Workspace(), WallTime: "30m", JobTimeout: "10m"},
+			Goal: "input",
+			Spec: wire.Spec{Ephemeral: true, Workspace: h.Workspace(), Image: "debian:bookworm-slim", Network: "none",
+				API: "anthropic-messages", Model: "m", MaxTokens: 1000, OutputLimit: 8 << 20, RequestBytes: 262144,
+				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m", JobTimeout: "10m", OutputBudget: 8 << 20},
 		},
+		Binding: wire.Binding{AnthropicKey: "test-key"},
 	}
-	_, err := client.Validate(context.Background(), base)
-	if err == nil || !strings.Contains(err.Error(), "-session") {
-		t.Fatalf("control validation = %v; want session error at correct location", err)
-	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	control := base
-	control.Submission.SessionID = "session-qa"
-	_, err = Validate(cancelled, &control, h)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("inherited lookup at correct location = %v, want canceled context", err)
+	if v, err := client.Validate(context.Background(), base); err != nil || v.State != state || v.Spec.Workspace != h.Workspace() {
+		t.Fatalf("control validation = %+v, %v", v, err)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -52,18 +47,15 @@ func TestServingHostValidateRejectsWrongLocationBeforeInheritedFacts(t *testing.
 			wrong := tc.change(&validation)
 			_, err := client.Validate(context.Background(), validation)
 			var spec wire.SpecError
-			if !errors.As(err, &spec) || !strings.Contains(err.Error(), "this host's directories") || strings.Contains(err.Error(), "-session") {
-				t.Fatalf("validation at wrong location = %v; want location error before session facts", err)
+			if !errors.As(err, &spec) || !strings.Contains(err.Error(), "this host's directories") || strings.Contains(err.Error(), wrong) {
+				t.Fatalf("validation at wrong location = %v; want the location error that names no path", err)
 			}
-			control := validation
-			control.Submission.SessionID = "session-qa"
-			_, err = Validate(cancelled, &control, h)
-			if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "this host's directories") {
-				t.Fatalf("validation with canceled inherited lookup = %v; want location refusal first", err)
-			}
-			if _, statErr := os.Stat(wrong); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("wrong location was created: %v", statErr)
+			if _, err := Validate(context.Background(), &validation, h); !errors.As(err, new(host.SpecError)) {
+				t.Fatalf("direct validation at wrong location = %v", err)
 			}
 		})
+	}
+	if _, err := os.Stat(base.Submission.Spec.Workspace); err != nil {
+		t.Fatal(err)
 	}
 }

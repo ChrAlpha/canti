@@ -13,7 +13,7 @@ import (
 // artifact metadata is capture-time evidence; archive reads check current data.
 type Inspection struct {
 	RunID       string
-	Seq         int64
+	Pos         int64
 	EffectID    string
 	SampledAt   time.Time
 	Receipt     *harness.Job
@@ -40,7 +40,11 @@ func (h *Host) Inspect(ctx context.Context, id string) (Inspection, error) {
 		return Inspection{}, err
 	}
 	snap, job, err := l.Inspect(call, run.ID)
-	sample := Inspection{RunID: run.ID, Seq: snap.Seq, EffectID: snap.State.EffectID, SampledAt: time.Now().UTC()}
+	pos, posErr := h.store.RunPos(call, run.ID)
+	if posErr != nil {
+		return Inspection{}, posErr
+	}
+	sample := Inspection{RunID: run.ID, Pos: pos, EffectID: snap.State.EffectID, SampledAt: time.Now().UTC()}
 	if err != nil {
 		sample.Unavailable = err.Error()
 	} else {

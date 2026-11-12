@@ -51,6 +51,17 @@ func fresh(t testing.TB, id string, limits core.Limits) core.State {
 	return state
 }
 
+// stopRun commits a persistent stop to a run that is otherwise idle.
+func stopRun(t testing.TB, s *Store, run harness.Run) {
+	t.Helper()
+	snap, err := s.Latest(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newDriver(t, s, snap)
+	d.do(core.StopRequested{Reason: core.StopCancelled}, harness.Facts{})
+}
+
 func createRun(t testing.TB, s *Store, id string, limits core.Limits) harness.Snapshot {
 	t.Helper()
 	initial := fresh(t, id, limits)
@@ -67,7 +78,7 @@ func unadmitted(t testing.TB, s *Store, id string, limits core.Limits) harness.S
 	initial := fresh(t, id, limits)
 	data, state, err := encodeRun(testRun(id), initial)
 	if err == nil {
-		_, err = s.db.Exec(insertRunSQL, id, core.SemanticsVersion, data, state)
+		_, err = s.db.Exec(insertRunSQL, id, core.SemanticsVersion, data, state, nil, false)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +102,7 @@ func TestOpenConfiguresDurableJournal(t *testing.T) {
 		"foreign_keys": "1",
 		"busy_timeout": "5000",
 		"fullfsync":    "1",
-		"user_version": "4",
+		"user_version": "5",
 	}
 	for pragma, value := range want {
 		var got string
@@ -111,7 +122,7 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("PRAGMA user_version = 5"); err != nil {
+	if _, err := s.db.Exec("PRAGMA user_version = 6"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

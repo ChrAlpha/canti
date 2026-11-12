@@ -16,19 +16,19 @@ func TestChatPTYExitPreservesCompleteTranscript(t *testing.T) {
 	pos := p.awaitStatus(t, "ready", 0)
 	p.send(t, "keep the complete answer\r")
 	p.await(t, "answer-complete", pos)
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 1 {
 		t.Fatalf("answer did not return: %+v", s)
 	}
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
-	p.awaitFinalOutput(t, "new runs use the current launch flags.")
+	p.awaitFinalOutput(t, "the current launch flags apply to inputs that open a run.")
 	out := p.text()
 	end := strings.LastIndex(out, "\x1b[?1049l")
 	if end < 0 {
 		t.Fatal("chat did not leave the alternate screen")
 	}
 	transcript := strings.ReplaceAll(ansi.Strip(out[end:]), "\r\n", "\n")
-	if !strings.Contains(transcript, answer+"\n") {
-		t.Fatalf("complete answer missing after alternate screen exit: transcript bytes=%d, tail=%q", len(transcript), transcript[max(0, len(transcript)-200):])
+	if strings.Count(transcript, answer+"\n") != 1 {
+		t.Fatalf("complete answer is not shown exactly once after alternate screen exit: transcript bytes=%d, tail=%q", len(transcript), transcript[max(0, len(transcript)-200):])
 	}
 }

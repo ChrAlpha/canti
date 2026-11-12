@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
@@ -73,8 +74,8 @@ func publishHistory(ctx context.Context, j Journal, root string, run Run, s core
 	if err == nil && run.Constraints != "" {
 		err = putFile(dir, "constraints", run.Constraints)
 	}
-	if err == nil && run.SessionID != "" {
-		err = publishSession(ctx, j, dir, run)
+	if err == nil {
+		err = publishPrevious(ctx, j, dir, run)
 	}
 	steps, found := filepath.Join(dir, archive.StepsDir), false
 	if err == nil {
@@ -97,32 +98,132 @@ func publishHistory(ctx context.Context, j Journal, root string, run Run, s core
 	return err
 }
 
-func publishSession(ctx context.Context, journal Journal, dir string, run Run) error {
-	j := journal
-	if run.SessionSeq < 1 {
-		return errors.New("harness: session sequence is required")
+// publishPrevious records the previous run of the run's line in the run
+// directory, or an empty record when it starts the line. The projection is
+// derived from the journal, never an authority.
+func publishPrevious(ctx context.Context, journal Journal, dir string, run Run) error {
+	previous := ""
+	if !run.Fresh {
+		prior, _, err := journal.PreviousRuns(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+		if len(prior) > 0 {
+			previous = prior[0].Run.ID
+		}
 	}
-	prior, err := j.SessionRuns(ctx, run.SessionID, run.SessionSeq, 1)
+	return putFile(dir, "previous", previous)
+}
+
+// publishDelivered installs exactly the input records a RequestFrozen
+// rendered. The list is bounded by the request; publication never scans the
+// archive root or journal history.
+func publishDelivered(ctx context.Context, root string, inputs []Input) error {
+	for _, in := range inputs {
+		if err := installInputRecord(ctx, root, in); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installInputRecord installs one input directory atomically. A complete
+// directory is never rewritten; a partial directory left by an interrupted
+// writer is replaced. The fixed per-position temporary is removed before use,
+// so a stale temporary for this input is not left behind.
+func installInputRecord(ctx context.Context, root string, in Input) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.Pos < 1 {
+		return newIntegrityError("input position %d", in.Pos)
+	}
+	final := filepath.Join(root, archive.InputDir(in.Pos))
+	tmp := filepath.Join(root, ".tmp-"+archive.InputDir(in.Pos))
+	if err := os.RemoveAll(tmp); err != nil {
+		return err
+	}
+	files := inputFiles(in)
+	if info, err := os.Lstat(final); err == nil {
+		if !info.IsDir() {
+			return newIntegrityError("published input record %s is not a directory", final)
+		}
+		complete, err := inputRecordComplete(ctx, root, in.Pos, files)
+		if err != nil {
+			return err
+		}
+		if complete {
+			return nil
+		}
+		if err := os.RemoveAll(final); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return err
+	}
+	for _, file := range files {
+		if err := putFile(tmp, file.name, file.data); err != nil {
+			return err
+		}
+	}
+	if err := syncDir(tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	return syncDir(root)
+}
+
+type inputFile struct{ name, data string }
+
+func inputFiles(in Input) []inputFile {
+	meta := archive.InputMeta{
+		Authority: string(in.Authority), Delivery: string(in.Delivery), Run: in.AdmittedRunID,
+		InputID: in.InputID, Source: in.Source, Subject: in.Subject,
+	}
+	if !in.Admitted.IsZero() {
+		meta.Admitted = in.Admitted.UTC().Format(time.RFC3339Nano)
+	}
+	return []inputFile{{archive.MetaFile, meta.Encode()}, {"text", in.Text}}
+}
+
+// inputRecordComplete reports whether every file is already installed with
+// the journal's bytes. A missing file is an incomplete directory; a present
+// file with other bytes is an integrity conflict and is never overwritten.
+func inputRecordComplete(ctx context.Context, root string, pos int64, files []inputFile) (bool, error) {
+	reader := archive.Reader{Inputs: root}
+	present := 0
+	for _, file := range files {
+		body, err := reader.InputFile(ctx, pos, file.name, len(file.data))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			return false, err
+		}
+		present++
+		if string(body) != file.data {
+			return false, newIntegrityError("published input record %s has conflicting bytes", filepath.Join(root, archive.InputDir(pos), file.name))
+		}
+	}
+	return present == len(files), nil
+}
+
+// repairInput installs the archive record of one delivered input on a native
+// read. An undelivered input is reported absent.
+func (l *Loop) repairInput(ctx context.Context, pos int64) error {
+	in, err := l.journal.InputAt(ctx, pos)
 	if err != nil {
 		return err
 	}
-	if len(prior) > 1 || len(prior) == 1 && (prior[0].SessionID != run.SessionID || prior[0].SessionSeq < 1 || prior[0].SessionSeq >= run.SessionSeq) {
-		return errors.New("harness: invalid previous session run")
+	if in.DeliveredPos == 0 {
+		return archive.ErrInputAbsent
 	}
-	var previous string
-	if len(prior) == 1 {
-		previous = prior[0].ID
-	}
-	data, err := json.Marshal(struct {
-		SessionID     string `json:"session_id"`
-		Sequence      int64  `json:"sequence"`
-		InputID       string `json:"input_id"`
-		PreviousRunID string `json:"previous_run_id,omitempty"`
-	}{run.SessionID, run.SessionSeq, run.InputID, previous})
-	if err != nil {
-		return err
-	}
-	return putFile(dir, "session", string(data)+"\n")
+	return installInputRecord(ctx, l.cfg.Inputs, in)
 }
 
 // rebuild publishes the steps directory of the run in dir with every

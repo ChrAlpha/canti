@@ -17,11 +17,10 @@ LONG_SECONDS = {
     "TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows": 84.47,
     "TestLoopBoundsRequestsAsHistoryGrows": 50.23,
     "TestNativeDiscoveryOwnRunAcrossRestartsAndWindows": 25.13,
-    "TestRetrievalDiscoveryAcrossFreshPages": 114.68,
-    "TestSessionDialogueSurvivesHandoverRetryAndRestart": 22.74,
-    "TestSessionGrowthRemainsBoundedAndIsolated": 35.12,
-    "TestSessionMultiRunWindowStress": 30.57,
-    "TestSessionUnknownResolutionPreservesTheRunningEffect": 79.57,
+    "TestRetrievalDiscoveryAcrossFreshPages": 100.0,
+    "TestLineDialogueSurvivesHandoverRetryAndRestart": 22.74,
+    "TestLineMultiRunWindowStress": 35.0,
+    "TestLineUnknownResolutionPreservesTheRunningEffect": 70.0,
     "TestUnlimitedStepsAcrossCrashHandoverAndRestart": 49.75,
 }
 

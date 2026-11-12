@@ -109,7 +109,7 @@ func TestJointAnUnknownResultSurvivesCredentialedHostStarts(t *testing.T) {
 		t.Fatalf("the second credentialed host committed %q", kinds(again[len(h):]))
 	}
 
-	if r := f.cli(nil, "run", "-host", "auto", "-goal", "other", "-image", image); r.code != exitError || !strings.Contains(r.stderr, "needs resolution") {
+	if r := f.cli(nil, "run", "-host", "auto", "-goal", "other", "-image", image); r.code != exitUsage || !strings.Contains(r.stderr, "delivery") {
 		t.Fatalf("a new input beside the unresolved run: %+v", r)
 	}
 	r := runCLI(t, nil, "stop", "-host", "auto", "-workspace", f.workspace, "-state", f.state)

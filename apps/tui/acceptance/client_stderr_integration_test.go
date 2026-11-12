@@ -33,10 +33,10 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 				return err == nil && string(data) == "started\n"
 			})
 			started := f.status()
-			if started.Phase != "effect_saved" || started.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if started.Phase != "effect_saved" || started.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("unexpected execution before interrupt: %+v", started)
 			}
-			t.Logf("before backpressure: phase=%s seq=%d session_seq=%d; effect wrote started", started.Phase, started.Seq, started.Run.SessionSeq)
+			t.Logf("before backpressure: phase=%s seq=%d ordinal=%d; effect wrote started", started.Phase, started.Seq, started.Run.Ordinal)
 			// Establish a running effect before applying backpressure. Filling
 			// stderr before Submit races automatic owned output-loss cancellation
 			// against Docker launch, so the effects marker may never be written.
@@ -62,7 +62,7 @@ func TestChatStopsDockerWithBlockedStderr(t *testing.T) {
 			if r.code != want || r.stdout != "" {
 				t.Fatalf("interrupted chat: %+v", r)
 			}
-			if s := f.status(); s.Run.ID != started.Run.ID || s.Run.SessionSeq != 1 || len(f.model.requests()) != 1 {
+			if s := f.status(); s.Run.ID != started.Run.ID || s.Run.Ordinal != 1 || len(f.model.requests()) != 1 {
 				t.Fatalf("queued input was executed: %+v", s)
 			}
 			if !abandon {

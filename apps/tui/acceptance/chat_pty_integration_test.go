@@ -37,13 +37,13 @@ func TestChatPTYHangupCancelsTheDockerJob(t *testing.T) {
 		t.Fatal("chat did not exit after its terminal hung up")
 	}
 	s := f.status()
-	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.SessionSeq != 1 {
+	if code := p.cmd.ProcessState.ExitCode(); code != exitError || s.Phase != "stopped" || s.Reason != "cancelled" || s.Run.Ordinal != 1 {
 		t.Fatalf("hangup: %v, exit %d, run %+v", p.cmd.ProcessState, code, s)
 	}
 	checkReleased(t, f, f.history("-run", s.Run.ID))
 }
 
-func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
+func TestChatPTYInterruptsDockerJobAndKeepsLine(t *testing.T) {
 	f, image := recoveryFixture(t, map[int]decision{
 		1: {Kind: "exec", Payload: "echo started > started; sleep 60"},
 	})
@@ -66,7 +66,7 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 	p.send(t, "\x03")
 	ready = p.awaitStatus(t, "ready", ready)
 	stopped := f.status()
-	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.SessionSeq != 1 {
+	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.Ordinal != 1 {
 		t.Fatalf("PTY Ctrl-C did not stop the Docker run: %+v", stopped)
 	}
 	firstHistory := f.history("-run", stopped.Run.ID)
@@ -86,11 +86,11 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 	p.send(t, "\x03")
 	ready = p.awaitStatus(t, "ready", ready)
 	stopped = f.status()
-	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.SessionSeq != 2 {
+	if stopped.Phase != "stopped" || stopped.Reason != "cancelled" || stopped.Run.Ordinal != 2 {
 		t.Fatalf("second PTY Ctrl-C did not stop the Docker run: %+v", stopped)
 	}
 	checkReleased(t, f, append(firstHistory, f.history("-run", stopped.Run.ID)...))
-	p.send(t, "continue session\r")
+	p.send(t, "continue line\r")
 	p.await(t, "after interrupts", ready)
 	deadline = time.Now().Add(5 * time.Second)
 	for f.status().Phase != "returned" {
@@ -99,18 +99,17 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 3 || s.Run.Goal != "continue session" {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 3 || s.Run.Goal != "continue line" {
 		t.Fatalf("next input did not complete: %+v", s)
 	}
 	prompts := f.model.prompts(1)
 	if len(prompts) != 3 {
-		t.Fatalf("%d requests, want exactly3 session inputs", len(prompts))
+		t.Fatalf("%d requests, want exactly three line inputs", len(prompts))
 	}
-	checkSessionLink(t, f, prompts[2], f.status().Run.ID, stopped.Run.ID, "continue session", 3)
-	second := archiveSession(t, f, stopped.Run.ID)
-	firstID := second.PreviousRunID
-	if first := archiveSession(t, f, firstID); first.Sequence != 1 || first.PreviousRunID != "" || first.InputID == second.InputID {
-		t.Fatalf("first session link: %+v", first)
+	checkLineLink(t, f, prompts[2], f.status().Run.ID, stopped.Run.ID, "continue line")
+	firstID := archivePrevious(t, f, stopped.Run.ID)
+	if firstID == "" || archivePrevious(t, f, firstID) != "" {
+		t.Fatalf("previous run chain: %q", firstID)
 	}
 	for path, want := range map[string]string{
 		firstID + "/goal": "start job", stopped.Run.ID + "/goal": "second job",
@@ -121,6 +120,57 @@ func TestChatPTYInterruptsDockerJobAndKeepsSession(t *testing.T) {
 		}
 	}
 
+	p.send(t, "\x03")
+	p.finish(t, exitOK)
+}
+
+// TestChatPTYCtrlXCancelsTheEffect requires that Ctrl+X cancels the accepted
+// effect, that the run continues to its next step with a cancelled
+// observation, and that a stop is not recorded.
+func TestChatPTYCtrlXCancelsTheEffect(t *testing.T) {
+	f, image := recoveryFixture(t, map[int]decision{
+		1: {Kind: "exec", Payload: "echo started > started; sleep 60"},
+		2: {Kind: "return", Payload: "after cancel"},
+	})
+	p := startPTYChat(t, f, nil, "-image", image)
+	pos := p.awaitStatus(t, "ready", 0)
+	p.send(t, "start job\r")
+	pos = p.awaitStatus(t, "running", pos)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(f.workspace, "started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Docker command never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p.send(t, "\x18")
+	pos = p.await(t, "└ cancelled", pos)
+	deadline = time.Now().Add(30 * time.Second)
+	for f.status().Phase != "returned" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the run did not continue after cancel: %+v history=%q", f.status(), kinds(f.history("-run", f.status().Run.ID)))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	s := f.status()
+	if s.Phase != "returned" || s.Reason != "" {
+		t.Fatalf("cancel stopped the run or lost its return: %+v", s)
+	}
+	history := f.history("-run", s.Run.ID)
+	cancelled := false
+	for _, e := range history {
+		if e.Kind == "observed" && e.Facts.Observation != nil && e.Facts.Observation.Execution == "cancelled" {
+			cancelled = true
+		}
+	}
+	if !cancelled {
+		t.Fatalf("no cancelled observation in %q", kinds(history))
+	}
+	checkReleased(t, f, history)
+	pos = p.awaitStatus(t, "ready", pos)
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
 }

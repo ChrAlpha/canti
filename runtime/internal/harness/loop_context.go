@@ -90,6 +90,10 @@ func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 }
 
 func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
+	snap, err := l.bind(ctx, snap)
+	if err != nil {
+		return snap, err
+	}
 	f, err := l.readerFrame(ctx, run, snap)
 	if err != nil {
 		return l.refuse(ctx, snap, err)
@@ -106,7 +110,22 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	request.ContextState, request.Context = f.ContextState, f.capture
-	return l.runner.Commit(ctx, snap, core.RequestFrozen{}, Facts{Request: &request})
+	facts := Facts{Request: &request}
+	if len(f.Delivered) > 0 {
+		delivered := &Delivered{Positions: make([]int64, 0, len(f.Delivered))}
+		for _, in := range f.Delivered {
+			delivered.Positions = append(delivered.Positions, in.Pos)
+		}
+		facts.Delivered = delivered
+	}
+	next, err := l.runner.Commit(ctx, snap, core.RequestFrozen{}, facts)
+	if err != nil {
+		return next, err
+	}
+	if err := publishDelivered(ctx, l.cfg.Inputs, f.Delivered); err != nil {
+		return next, err
+	}
+	return next, nil
 }
 
 func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, error) {
@@ -116,65 +135,139 @@ func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, 
 		return f, err
 	}
 	f.ContextState = &current
-	if err := l.sessionContext(ctx, run, &f); err != nil {
+	if err := l.fillFrame(ctx, run, snap, current, &f); err != nil {
 		return f, err
 	}
-	if f.Focused, err = l.focusedEvidence(ctx, run.ID, current.Focus, nil); err != nil {
-		return f, err
-	}
-	if f.Receipts, err = l.epochReceipts(ctx, snap, f); err != nil {
-		return f, err
-	}
-	if snap.State.Step > 1 {
-		f.Latest, err = l.completion(ctx, snap)
-		if err != nil {
-			return f, err
-		}
-	}
-	reason := "first_request"
-	if snap.State.RequestRev > 0 {
-		if snap.Seq == current.AnchorSeq {
-			reason = "request_rejected"
-		} else {
-			reason = "protocol_repair"
-			response, err := l.journal.Response(ctx, run.ID, snap.State.Step, snap.State.Attempt-1)
-			if err != nil {
-				return f, err
-			}
-			body := l.decision(response)
-			_, err = core.Decode(body)
-			if err == nil {
-				return f, contextError{errors.New("harness: protocol repair lacks an invalid decision")}
-			}
-			f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
-		}
-	}
-	f.capture = &ContextCapture{Anchor: current, Focus: current.Focus, Preparation: reason, SessionNavigation: f.sessionNavigation}
-	if f.Latest != nil {
-		f.capture.LatestStep, f.capture.LatestSeq = f.Latest.Step, f.Latest.Seq
-	}
-	for _, selected := range f.Focused {
-		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: selected.Ref.SourceSeq, Step: selected.Ref.Step, Index: selected.Ref.Source, Source: archive.SourceRange{Path: selected.Path, Offset: selected.Offset, Length: selected.Ref.Length, SHA256: selected.Ref.SHA256}, Selected: true})
-	}
-	if f.Latest != nil && f.Latest.Seq > current.AnchorSeq {
-		if retrieval := f.Latest.retrieval(); retrieval != nil {
-			captured := ContextRetrieval{Seq: f.Latest.Seq, Step: f.Latest.Step, Operation: retrieval.Query.Operation, More: retrieval.More, Incomplete: retrieval.Incomplete, Error: clip(retrieval.Error, 512)}
-			captured.Operation = captured.OperationName()
-			f.capture.Retrievals = append(f.capture.Retrievals, captured)
-			for i, source := range retrieval.Sources {
-				f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: f.Latest.Seq, Step: f.Latest.Step, Index: i, Source: source})
-			}
-		}
-	}
-	f.capture.OrientationOnly = len(f.Receipts) == 0 && len(current.Focus) == 0 && f.Rejected == nil && (f.Latest == nil || f.Latest.Seq <= current.AnchorSeq)
+	f.captureFrame(current, snap)
 	var latest []StepRecord
 	if f.Latest != nil {
 		latest = []StepRecord{*f.Latest}
+	}
+	positions := make([]int64, 0, 1+len(f.Instructions)+len(f.Observations))
+	seen := map[int64]bool{}
+	add := func(pos int64) {
+		if pos > 0 && !seen[pos] {
+			seen[pos] = true
+			positions = append(positions, pos)
+		}
+	}
+	add(run.InputPos)
+	for _, in := range f.Instructions {
+		add(in.Pos)
+	}
+	for _, o := range f.Observations {
+		add(o.Pos)
+	}
+	f.Delivered, err = l.journal.InputsAt(ctx, positions)
+	if err != nil {
+		return f, err
 	}
 	if err := publishHistory(ctx, l.journal, l.cfg.History, run, snap.State, latest); err != nil {
 		return f, err
 	}
 	return f, nil
+}
+
+// fillFrame reads the instructions, observations, previous runs, focus,
+// receipts, latest completion, and repair text one request shows.
+func (l *Loop) fillFrame(ctx context.Context, run Run, snap Snapshot, current ContextState, f *Frame) error {
+	if err := l.lineContext(ctx, run, f); err != nil {
+		return err
+	}
+	var err error
+	if f.Instructions, err = l.boundInstructions(ctx, run.ID, snap.State.Inputs); err != nil {
+		return err
+	}
+	if f.Observations, err = l.journal.Observations(ctx); err != nil {
+		return err
+	}
+	if f.Focused, err = l.focusedEvidence(ctx, run.ID, current.Focus, nil); err != nil {
+		return err
+	}
+	if f.Receipts, err = l.epochReceipts(ctx, snap, *f); err != nil {
+		return err
+	}
+	if snap.State.Step > 1 {
+		if f.Latest, err = l.completion(ctx, snap); err != nil {
+			return err
+		}
+	}
+	return l.repairFrame(ctx, run, snap, current, f)
+}
+
+// repairFrame records why the request is prepared and, for a protocol repair,
+// the rejected response of the previous attempt.
+func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current ContextState, f *Frame) error {
+	f.preparation = "first_request"
+	if snap.State.RequestRev == 0 {
+		return nil
+	}
+	if snap.Seq == current.AnchorSeq {
+		f.preparation = "request_rejected"
+		return nil
+	}
+	f.preparation = "protocol_repair"
+	response, err := l.journal.Response(ctx, run.ID, snap.State.Step, snap.State.Attempt-1)
+	if err != nil {
+		return err
+	}
+	body := l.decision(response)
+	if _, err := core.Decode(body); err == nil {
+		return contextError{errors.New("harness: protocol repair lacks an invalid decision")}
+	} else {
+		f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
+	}
+	return nil
+}
+
+// captureFrame records the provenance of what the frozen request includes.
+func (f *Frame) captureFrame(current ContextState, snap Snapshot) {
+	f.capture = &ContextCapture{Anchor: current, Focus: current.Focus, Preparation: f.preparation, PreviousRun: f.previousRun}
+	if f.Latest != nil {
+		f.capture.LatestStep, f.capture.LatestSeq = f.Latest.Step, f.Latest.Seq
+	}
+	for _, selected := range f.Focused {
+		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: selected.Ref.SourceSeq, Step: selected.Ref.Step, Index: selected.Ref.Source,
+			Source: archive.SourceRange{Path: selected.Path, Offset: selected.Offset, Length: selected.Ref.Length, SHA256: selected.Ref.SHA256}, Selected: true})
+	}
+	if f.Latest != nil && f.Latest.Seq > current.AnchorSeq {
+		f.captureLatestRetrieval(current)
+	}
+	f.capture.OrientationOnly = len(f.Receipts) == 0 && len(current.Focus) == 0 && f.Rejected == nil && (f.Latest == nil || f.Latest.Seq <= current.AnchorSeq)
+}
+
+func (f *Frame) captureLatestRetrieval(current ContextState) {
+	retrieval := f.Latest.retrieval()
+	if retrieval == nil {
+		return
+	}
+	captured := ContextRetrieval{Seq: f.Latest.Seq, Step: f.Latest.Step, Operation: retrieval.Query.Operation, More: retrieval.More, Incomplete: retrieval.Incomplete, Error: clip(retrieval.Error, 512)}
+	captured.Operation = captured.OperationName()
+	f.capture.Retrievals = append(f.capture.Retrievals, captured)
+	for i, source := range retrieval.Sources {
+		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: f.Latest.Seq, Step: f.Latest.Step, Index: i, Source: source})
+	}
+}
+
+// boundInstructions returns the first count principal steers of the run, in
+// binding order, with the transition and step that bound each one.
+func (l *Loop) boundInstructions(ctx context.Context, runID string, count int) ([]Instruction, error) {
+	steers, err := l.journal.Steers(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(steers) < count {
+		return nil, contextError{fmt.Errorf("harness: run %s holds %d steers but %d are bound", runID, len(steers), count)}
+	}
+	out := make([]Instruction, 0, count)
+	for i := 0; i < count; i++ {
+		s := steers[i]
+		if s.BoundSeq < 1 || s.BoundStep < 1 || s.Authority != AuthorityPrincipal || s.Text == "" {
+			return nil, contextError{fmt.Errorf("harness: steer %d of run %s is not a bound instruction", i+1, runID)}
+		}
+		out = append(out, Instruction{Index: i + 1, Text: s.Text, Pos: s.Pos, Seq: s.BoundSeq, Step: s.BoundStep, InputID: s.InputID})
+	}
+	return out, nil
 }
 
 func (l *Loop) epochReceipts(ctx context.Context, snap Snapshot, f Frame) ([]StepReceipt, error) {

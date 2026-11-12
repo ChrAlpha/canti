@@ -39,7 +39,7 @@ import (
 // creates that file, and then holds until the context is done and returns
 // its error, as a commit whose acknowledgement was lost. KIND@STEP narrows
 // any of them to a transition of KIND that leaves step STEP. CANTI_TEST_SETUP=signal holds the setup of
-// the loop, and CANTI_TEST_SETUP=checked a session input after its checks,
+// the loop, and CANTI_TEST_SETUP=checked an input after its checks,
 // after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
 	if filepath.Base(os.Args[0]) == "docker" {
@@ -107,10 +107,8 @@ func atoi(s string) int {
 	return n
 }
 
-func (c crashing) SessionRuns(ctx context.Context, sessionID string, before int64, limit int) ([]harness.Run, error) {
-	return c.Journal.(interface {
-		SessionRuns(context.Context, string, int64, int) ([]harness.Run, error)
-	}).SessionRuns(ctx, sessionID, before, limit)
+func (c crashing) PreviousRuns(ctx context.Context, runID string) ([]harness.PreviousRun, int, error) {
+	return c.Journal.PreviousRuns(ctx, runID)
 }
 
 func (c crashing) Commit(ctx context.Context, t harness.Transition) error {
@@ -214,7 +212,7 @@ func TestUsageAndVersion(t *testing.T) {
 
 func TestCommandsWithoutACredentialTouchNothing(t *testing.T) {
 	f := newFixture(t, nil)
-	for _, args := range [][]string{append([]string{"run", "-goal", "g"}, fixtureModel...), append([]string{"run", "-session", "s", "-input", "i", "-goal", "g"}, fixtureModel...), {"resume"}} {
+	for _, args := range [][]string{append([]string{"run", "-goal", "g"}, fixtureModel...), append([]string{"run", "-input", "i", "-goal", "g"}, fixtureModel...), {"resume"}} {
 		r := runCLI(t, nil, append(args, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL)...)
 		if r.code != exitError || !strings.Contains(r.stderr, "ANTHROPIC_API_KEY") {
 			t.Errorf("canti %q = %d\nstderr: %s", args, r.code, r.stderr)
@@ -328,7 +326,7 @@ func TestUnsupportedContextVersionsRejectEveryCommandWithoutProgress(t *testing.
 		for _, version := range []string{"", "0", strconv.Itoa(host.ContextVersion - 1), strconv.Itoa(host.ContextVersion + 1)} {
 			t.Run(phase+"/"+version, func(t *testing.T) {
 				f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
-				args := []string{"-session", "s", "-input", "one", "-goal", "g"}
+				args := []string{"-input", "one", "-goal", "g"}
 				if phase == "request_frozen" {
 					args = append(args, "-once")
 				}
@@ -339,7 +337,7 @@ func TestUnsupportedContextVersionsRejectEveryCommandWithoutProgress(t *testing.
 				id := f.status().Run.ID
 				before, sent := f.history(), len(f.model.requests())
 				setContextVersion(t, f.state, id, version)
-				for _, command := range [][]string{{"status"}, {"history"}, {"context"}, {"context", "-raw"}, {"inspect"}, {"resume"}, {"resume", "-once"}, {"stop"}, {"resolve", "-job"}, {"resolve", "-execution", "failed_to_start", "-note", "checked"}, {"run", "-goal", "new"}, {"run", "-session", "s", "-input", "one", "-goal", "g"}} {
+				for _, command := range [][]string{{"status"}, {"history"}, {"context"}, {"context", "-raw"}, {"inspect"}, {"resume"}, {"resume", "-once"}, {"stop"}, {"resolve", "-job"}, {"resolve", "-execution", "failed_to_start", "-note", "checked"}, {"run", "-goal", "new"}, {"run", "-input", "one", "-goal", "g"}} {
 					r := f.cli(nil, command[0], command[1:]...)
 					if r.code != exitError || !strings.Contains(r.stderr, "unsupported context version") || !strings.Contains(r.stderr, "use fresh state") || r.stdout != "" {
 						t.Errorf("%q: %+v", command, r)
@@ -404,16 +402,15 @@ func setConfig(t *testing.T, state, id, field, value string) {
 	}
 }
 
-func TestRefusedSessionInputsTouchNothing(t *testing.T) {
+func TestRefusedInputsTouchNothing(t *testing.T) {
 	for _, tc := range []struct {
 		args   []string
 		code   int
 		stderr string
 	}{
-		{[]string{"-session", "s s", "-input", "i"}, exitUsage, "-session and -input must be"},
-		{[]string{"-session", "s", "-input", "i/i"}, exitUsage, "-session and -input must be"},
-		{[]string{"-session", "s", "-input", "i", "-request-bytes", "1"}, exitUsage, "-request-bytes: "},
-		{[]string{"-session", "s", "-input", "i", "-model-url", "ftp://model"}, exitError, "BaseURL"},
+		{[]string{"-input", "i/i"}, exitUsage, "-input must be"},
+		{[]string{"-input", "i", "-request-bytes", "1"}, exitUsage, "-request-bytes: "},
+		{[]string{"-input", "i", "-model-url", "ftp://model"}, exitError, "BaseURL"},
 	} {
 		f := newFixture(t, nil)
 		r := f.cli(nil, "run", append([]string{"-goal", "g"}, tc.args...)...)
@@ -427,7 +424,7 @@ func TestRefusedSessionInputsTouchNothing(t *testing.T) {
 }
 
 func TestAStateDockerCannotMountIsRefusedBeforeItExists(t *testing.T) {
-	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-session", "s", "-input", "i", "-goal", "g"}} {
+	for _, args := range [][]string{{"run", "-goal", "g"}, {"run", "-input", "i", "-goal", "g"}} {
 		f := newFixture(t, nil)
 		state := filepath.Join(t.TempDir(), "a:b", "state")
 		r := f.cli(nil, args[0], slices.Concat(args[1:], []string{"-state", state})...)
@@ -457,7 +454,7 @@ func TestStateInsideTheWorkspaceIsRefused(t *testing.T) {
 			args []string
 		}{
 			{"run", []string{"run", "-goal", "g"}},
-			{"run -session", []string{"run", "-session", "s", "-input", "i", "-goal", "g"}},
+			{"run -input", []string{"run", "-input", "i", "-goal", "g"}},
 		} {
 			t.Run(layout.name+"/"+command.name, func(t *testing.T) {
 				f := newFixture(t, nil)
@@ -579,7 +576,7 @@ func TestRunRefusesWhileTheLatestRunIsOpen(t *testing.T) {
 		t.Fatalf("run -once = %d\nstderr: %s", r.code, r.stderr)
 	}
 	first := f.status().Run.ID
-	if r := f.cli(nil, "run", "-goal", "second"); r.code != exitError || !strings.Contains(r.stderr, "resume or stop") {
+	if r := f.cli(nil, "run", "-goal", "second"); r.code != exitUsage || !strings.Contains(r.stderr, "-delivery") {
 		t.Fatalf("run over an open run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	if r := f.cli(nil, "resolve", "-job"); r.code != exitError || !strings.Contains(r.stderr, "no unknown outcome") {
@@ -852,7 +849,7 @@ func TestAnUnknownOutcomeWaitsForAnExplicitResolution(t *testing.T) {
 	if r := f.cli(noDocker, "resume"); r.code != exitResolution {
 		t.Errorf("resume = %d\nstderr: %s", r.code, r.stderr)
 	}
-	if r := f.cli(noDocker, "run", "-goal", "again"); r.code != exitError || !strings.Contains(r.stderr, "resolve it first") {
+	if r := f.cli(noDocker, "run", "-goal", "again"); r.code != exitUsage || !strings.Contains(r.stderr, "-delivery") {
 		t.Errorf("run over an unresolved run = %d\nstderr: %s", r.code, r.stderr)
 	}
 	if r := f.cli(noDocker, "resolve", "-job"); r.code != exitError {
@@ -1090,7 +1087,8 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	}
 	x := host.ExecutorConfig(c, "/state")
 	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
-		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, PreviewLimit: harness.DefaultPromptLimits().Preview, Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}}}) {
+		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, PreviewLimit: harness.DefaultPromptLimits().Preview,
+		Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}, {Source: "/state/inputs", Target: "/canti/inputs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}
 	if l := host.PromptLimits(c); l.Total != 98304 || l.Goal != harness.DefaultPromptLimits().Goal {

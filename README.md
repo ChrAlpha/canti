@@ -83,8 +83,8 @@ bin/canti-tui -workspace ~/canti-demo/workspace \
 
 New runs and chat select `-environment DIRECTORY` or `-ephemeral`. The normal
 engineering workflow uses a private persistent environment: tools, HOME,
-configuration, files, caches and services survive commands, runs, sessions and
-context resets. Each command starts a fresh shell in the mapped workspace.
+configuration, files, caches and services survive commands, runs and context
+resets. Each command starts a fresh shell in the mapped workspace.
 [Development](docs/development.md#persistent-development-environments) provides
 ordinary Docker/Dev Container and official Docker-in-Docker examples, including
 preparation, attachment, package installation, networking and rebuilds.
@@ -107,8 +107,11 @@ explicit resolution.
 
 | Command | Effect |
 | --- | --- |
-| `canti run -environment DIR -goal TEXT` | Start a run and drive it until it returns or stops |
-| `canti-tui -environment DIR [-session ID]` | Talk with the agent: each input becomes the next run of one session |
+| `canti run -environment DIR -goal TEXT` | Start a run and drive it until it returns or stops; `-delivery steer` or `follow_up` reaches a working agent, and `-fresh` starts a new line |
+| `canti observe -source S -subject K` | Admit evidence about a subject; it never starts or wakes a run |
+| `canti withdraw [-input ID]` | Take back held inputs and print them as JSON Lines |
+| `canti cancel` | Cancel the current effect; the run continues with a cancelled observation |
+| `canti-tui -environment DIR [-fresh]` | Talk with the agent: all inputs and runs form one line, and a run follows the previous run of that line |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
@@ -166,7 +169,7 @@ limits; three gates are partial.
 Live provider evidence is three manual samples with the earlier adapter
 `canti-anthropic/1`; a live evaluation in 50 runs, 44 of them with
 `canti-anthropic/2`, whose decisions passed a proxy that enforces the decision
-schema; a feedback-round evaluation in nine sessions with
+schema; a feedback-round evaluation in nine runs with
 `canti-anthropic/3-tool` and no proxy; and a comparison of the retrieval system
 prompts of context versions 7 and 8 in twelve runs. Each used one model through
 an Anthropic Messages-compatible gateway; the last two reported cache reads for

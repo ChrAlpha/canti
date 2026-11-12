@@ -67,7 +67,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 		t.Fatal("second request did not reach provider")
 	}
 	pos = p.mark()
-	p.send(t, "draft text\r\x1b[200~draft paste\x1b[5~\x1b[201~\x1b[5")
+	p.send(t, "draft text\x1b[200~draft paste\x1b[5~\x1b[201~\x1b[5")
 	p.awaitInputRead(t)
 	p.send(t, "~")
 	// The 24-row layout reserves nine rows. The completed turn's reported
@@ -89,7 +89,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	pos = p.mark()
 	p.send(t, "\x1b[6~")
 	pos = p.await(t, line(39), pos)
-	if s := f.status(); s.Run.SessionSeq != 2 || s.Run.Goal != "second request" || s.Phase != "request_sent" {
+	if s := f.status(); s.Run.Ordinal != 2 || s.Run.Goal != "second request" || s.Phase != "request_sent" {
 		t.Fatalf("navigation changed the active run: %+v", s)
 	}
 	unblock()
@@ -97,7 +97,7 @@ func TestChatPTYBusyScrollDoesNotQueueInput(t *testing.T) {
 	pos = p.awaitStatus(t, "ready", pos)
 	p.send(t, "\r")
 	p.await(t, "third answer", pos)
-	if s := f.status(); s.Run.SessionSeq != 3 || s.Run.Goal != "draft textdraft paste" || s.Phase != "returned" {
+	if s := f.status(); s.Run.Ordinal != 3 || s.Run.Goal != "draft textdraft paste" || s.Phase != "returned" {
 		t.Fatalf("busy input leaked into the next run: %+v", s)
 	}
 	if prompts := f.model.prompts(1); len(prompts) != 3 || !strings.Contains(prompts[2], "draft textdraft paste") {

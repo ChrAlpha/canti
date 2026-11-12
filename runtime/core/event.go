@@ -17,6 +17,10 @@ const (
 	ExecutionCancelled     ExecutionState = "cancelled"
 	ExecutionFailedToStart ExecutionState = "failed_to_start"
 	ExecutionUnknown       ExecutionState = "unknown"
+	// ExecutionSuperseded is the execution of a completed decision that was
+	// not performed: a principal instruction arrived after the request that
+	// produced it was frozen. It is a step record, never an effect outcome.
+	ExecutionSuperseded ExecutionState = "superseded"
 )
 
 // StopReason records why a run stopped without a return decision. The first
@@ -44,8 +48,19 @@ type Event interface {
 }
 
 // RequestFrozen reports that the request bytes and provenance are recorded
-// under the next request revision of the current step.
+// under the next request revision of the current step. It includes exactly
+// the instructions bound so far.
 type RequestFrozen struct{}
+
+// InputsBound reports that the named number of principal instructions is now
+// bound to the run: the run's first Count steer rows, in admission order.
+// Count is a prefix of the admitted steers, not necessarily all of them: a
+// bind may commit what it read before a concurrent steer arrived, and the
+// remaining steers bind at the next binding point. A later bind names a
+// greater Count. Binding is durable so that the position at which a principal
+// instruction entered the run survives restart. A decision from a request
+// frozen before the binding is superseded.
+type InputsBound struct{ Count int }
 
 // AttemptStarted reports that the named attempt of the named step is about to
 // be sent. In request_frozen it names the current attempt; in request_sent it
@@ -115,6 +130,7 @@ type Resolved struct {
 }
 
 func (RequestFrozen) event()      {}
+func (InputsBound) event()        {}
 func (AttemptStarted) event()     {}
 func (ResponseSaved) event()      {}
 func (ResponseIncomplete) event() {}
@@ -128,6 +144,7 @@ func (StopRequested) event()      {}
 func (Resolved) event()           {}
 
 func (RequestFrozen) Kind() string      { return "request_frozen" }
+func (InputsBound) Kind() string        { return "inputs_bound" }
 func (AttemptStarted) Kind() string     { return "attempt_started" }
 func (ResponseSaved) Kind() string      { return "response_saved" }
 func (ResponseIncomplete) Kind() string { return "response_incomplete" }
@@ -143,7 +160,7 @@ func (Resolved) Kind() string           { return "resolved" }
 // Events returns a zero value of every event kind, in protocol order.
 func Events() []Event {
 	return []Event{
-		RequestFrozen{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
+		RequestFrozen{}, InputsBound{}, AttemptStarted{}, ResponseSaved{}, ResponseIncomplete{},
 		RequestRejected{}, ResponseLoaded{}, EffectRecovered{}, Observed{}, Performed{},
 		OutcomeUnknown{}, StopRequested{}, Resolved{},
 	}

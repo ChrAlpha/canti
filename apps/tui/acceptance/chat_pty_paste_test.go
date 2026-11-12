@@ -45,7 +45,7 @@ func TestChatPTYSplitBracketedPasteSubmitsOneMultilineGoal(t *testing.T) {
 	p.send(t, "\r")
 	awaitPTYPhase(t, f, "returned")
 	p.await(t, "paste accepted", pos)
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 || s.Run.Goal != "line one\nline two" {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 1 || s.Run.Goal != "line one\nline two" {
 		t.Fatalf("paste changed the submitted goal: %+v", s)
 	}
 	p.send(t, "\x03")
@@ -86,18 +86,18 @@ func TestChatPTYPasteSpansCompletionAndRequiresManualSend(t *testing.T) {
 	releaseGate()
 	awaitPTYPhase(t, f, "returned")
 	pos = p.awaitStatus(t, "ready", pos)
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 1 {
 		t.Fatalf("first request did not finish before paste suffix: %+v", s)
 	}
 	p.send(t, "draft suffix\r\x1b[201~")
 	p.awaitInputRead(t)
 	pos = p.awaitStatus(t, "ready", pos)
-	if s := f.status(); s.Run.SessionSeq != 1 {
+	if s := f.status(); s.Run.Ordinal != 1 {
 		t.Fatalf("busy paste tail created a run: %+v", s.Run)
 	}
 	p.send(t, "\r")
 	p.await(t, "second answer", pos)
-	if s := f.status(); s.Phase != "returned" || s.Run.SessionSeq != 2 || s.Run.Goal != "draft prefix\ndraft suffix" {
+	if s := f.status(); s.Phase != "returned" || s.Run.Ordinal != 2 || s.Run.Goal != "draft prefix\ndraft suffix" {
 		t.Fatalf("next input after busy paste did not finish: %+v", s)
 	}
 	if prompts := f.model.prompts(1); len(prompts) != 2 || !strings.Contains(prompts[1], "draft prefix\ndraft suffix") {

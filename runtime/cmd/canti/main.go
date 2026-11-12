@@ -23,7 +23,6 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
-	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
@@ -54,7 +53,7 @@ const usage = `canti drives an agent run in a workspace until it returns or stop
 
 Usage:
   canti run -goal TEXT [-constraints TEXT] [flags]  start a run and drive it until it halts
-  canti-tui [-session ID] [flags]                   chat with the independent client
+  canti-tui [-fresh] [flags]                        chat with the independent client
   canti resume [-run ID] [flags]                    continue the latest or the named run
   canti stop [-run ID] [-cleanup 30s]               stop a run, cancelling and recording its job;
                                                     an unknown outcome must be resolved first
@@ -88,6 +87,7 @@ var commands = map[string]func(*flag.FlagSet, *app) action{
 	"run": runCommand, "resume": resumeCommand, "stop": stopCommand,
 	"resolve": resolveCommand, "status": statusCommand, "inspect": inspectCommand, "history": historyCommand,
 	"context": contextCommand, "host": hostCommand,
+	"observe": observeCommand, "withdraw": withdrawCommand, "cancel": cancelCommand,
 }
 
 type app struct {
@@ -240,64 +240,48 @@ func modelURL(fs *flag.FlagSet) *string {
 }
 
 func runCommand(fs *flag.FlagSet, a *app) action {
-	goal := fs.String("goal", "", "the task of the run; required")
+	goal := fs.String("goal", "", "the task or instruction of the input; required")
 	constraints := fs.String("constraints", "", "rules the agent must follow")
-	session := fs.String("session", "", "serial conversation ID; requires -input; reuse the same workspace and state")
-	input := fs.String("input", "", "submission ID, within the session if any; a retry with the same ID names the same run")
+	input := fs.String("input", "", "input ID; a retry with the same ID names the same input")
+	fresh := fs.Bool("fresh", false, "open a new line: no link to the previous run and no inherited constraints")
+	delivery := fs.String("delivery", "", "how an input reaches a working agent: steer or follow_up; omitted when the agent is quiescent")
 	once := fs.Bool("once", false, "perform exactly one step after creating the run")
 	url := modelURL(fs)
-	var s host.Spec
-	registerSpec(fs, &s)
+	var spec host.Spec
+	registerSpec(fs, &spec)
 	hostFlags(fs, a)
 	return func(ctx context.Context) (int, error) {
-		if err := a.prepareRunConfig(fs, &s.Config, *goal, *constraints, *input != ""); err != nil {
+		setConstraints := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "constraints" {
+				setConstraints = true
+			}
+		})
+		if err := a.prepareRunConfig(fs, &spec.Config, *goal, *constraints, *input != ""); err != nil {
 			return exitUsage, err
 		}
-		if *session != "" || *input != "" {
-			setConstraints := false
-			fs.Visit(func(f *flag.Flag) {
-				if f.Name == "constraints" {
-					setConstraints = true
-				}
-			})
-			return a.submitSession(ctx, *session, *input, *goal, *constraints, setConstraints, s, *url, *once)
-		}
-		if _, _, err := host.NewRun(*goal, *constraints, s, time.Now()); err != nil {
-			return exitUsage, err
-		}
-		if err := host.Validate(ctx, a.state, host.Submission{Goal: *goal, Constraints: *constraints, Spec: s}); err != nil {
-			return exitUsage, err
-		}
-		if err := a.checkCredential(ctx, s.Config, *url); err != nil {
-			return exitError, err
-		}
-		drive, release := a.drive(ctx, *once)
-		defer release()
-		if err := docker.CheckLayout(a.workspace, a.state); err != nil {
-			return exitError, err
-		}
-		if a.remoteMode() {
-			return a.remoteSubmit(ctx, hostrpc.Submission{Goal: *goal, Constraints: *constraints, ExplicitConstraints: true, Spec: hostserver.SpecOf(s)},
-				a.binding(s.Config.API, *url), *once)
-		}
-		if err := os.MkdirAll(a.state, 0o700); err != nil {
-			return exitError, err
-		}
-		h, err := a.openHost(ctx, true)
+		d, err := parseDelivery(*delivery)
 		if err != nil {
-			return exitError, err
+			return exitUsage, err
 		}
-		defer h.Close()
-		b := a.binding(s.Config.API, *url)
-		ack, err := h.Submit(ctx, host.Submission{Goal: *goal, Constraints: *constraints, Spec: s, Binding: b, Now: time.Now()})
-		if err != nil {
-			return submitCode(err), err
+		if *fresh && d == harness.DeliverySteer {
+			return exitUsage, errors.New("-fresh cannot steer a working agent; it starts a new line only when the input opens a run")
 		}
-		a.log.Info("created run", "run_id", ack.Run.ID, "workspace", a.workspace, "state", a.state)
-		snap, err := drive(h, ack.Run.ID, b)
-		h.Close()
-		return a.report(snap, err, exitActive, ack.Config)
+		return a.submit(ctx, *input, *goal, *constraints, setConstraints, spec, *url, *fresh, d, *once)
 	}
+}
+
+// parseDelivery reads the flag's word for the protocol's delivery.
+func parseDelivery(s string) (harness.InputDelivery, error) {
+	switch s {
+	case "":
+		return "", nil
+	case string(harness.DeliverySteer):
+		return harness.DeliverySteer, nil
+	case string(harness.DeliveryFollowUp):
+		return harness.DeliveryFollowUp, nil
+	}
+	return "", fmt.Errorf("-delivery must be steer or follow_up, not %q", s)
 }
 
 // submitCode is the exit status of a submission that err refused: usage for

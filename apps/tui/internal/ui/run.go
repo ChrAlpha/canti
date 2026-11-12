@@ -2,20 +2,19 @@ package ui
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/ChrAlpha/canti/apps/tui/internal/chat"
 	"github.com/ChrAlpha/canti/apps/tui/internal/present"
-	"github.com/ChrAlpha/canti/apps/tui/internal/session"
 )
 
 // Run gives native Tea exclusive input and terminal-mode ownership. The relay
 // carries only OS signals and output faults, never bytes or decoded key events.
-func Run(ctx context.Context, c *session.Controller, input *os.File, output io.Writer, signals <-chan os.Signal, failures <-chan error) (int, error) {
+func Run(ctx context.Context, c *chat.Controller, input *os.File, output io.Writer, signals <-chan os.Signal, failures <-chan error) (int, error) {
 	m := New(ctx, c)
 	p := tea.NewProgram(m, tea.WithInput(input), tea.WithOutput(output), tea.WithInputLimits(64<<10, c.GoalLimit), tea.WithWindowSize(80, 24), tea.WithoutSignalHandler())
 	relayCtx, cancel := context.WithCancel(context.Background())
@@ -60,22 +59,24 @@ func Run(ctx context.Context, c *session.Controller, input *os.File, output io.W
 		updated, _ := m.complete(out)
 		m = updated.(Model)
 	}
-	if err := writeExit(output, m, c.ID()); runErr == nil {
+	if err := writeExit(output, m); err != nil {
+		// A terminal that cannot show the final state is the failure the
+		// caller must report, even when cleanup was abandoned as canceled.
 		runErr = err
 	}
 	return m.result(runErr)
 }
 func (m Model) result(runErr error) (int, error) {
 	if runErr != nil {
-		return session.Error, runErr
+		return chat.Error, runErr
 	}
 	if m.err != nil {
-		return max(m.code, session.Error), m.err
+		return max(m.code, chat.Error), m.err
 	}
 	return m.code, nil
 }
 
-func writeExit(output io.Writer, m Model, id string) error {
+func writeExit(output io.Writer, m Model) error {
 	transcript := m.transcript()
 	if transcript != "" {
 		if _, err := io.WriteString(output, transcript); err != nil {
@@ -88,9 +89,9 @@ func writeExit(output io.Writer, m Model, id string) error {
 		}
 	}
 	if m.pending != nil {
-		_, err := io.WriteString(output, present.Reconciliation(m.pending.InputID, id))
+		_, err := io.WriteString(output, present.Reconciliation(m.pending.InputID))
 		return err
 	}
-	_, err := fmt.Fprintf(output, "canti: continue session with \"canti-tui -session %s\"; new runs use the current launch flags.\n", id)
+	_, err := io.WriteString(output, "canti: new inputs continue the agent's line; the current launch flags apply to inputs that open a run.\n")
 	return err
 }

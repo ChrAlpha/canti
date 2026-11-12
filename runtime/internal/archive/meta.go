@@ -29,6 +29,56 @@ var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ")
 
 func StepDir(step int) string { return fmt.Sprintf("%08d", step) }
 
+// InputDir is the published input directory of agent-log position pos.
+func InputDir(pos int64) string { return fmt.Sprintf("%012d", pos) }
+
+// ErrInputAbsent reports an input the agent was never shown; it has no
+// archive record and none may be created.
+var ErrInputAbsent = errors.New("archive: input was not delivered")
+
+// inputPosition parses the input position from a virtual input path.
+func inputPosition(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, InputsRoot+"/")
+	if !ok {
+		return 0, false
+	}
+	first, _, _ := strings.Cut(rest, "/")
+	pos, err := strconv.ParseInt(first, 10, 64)
+	if err != nil || pos < 1 || InputDir(pos) != first {
+		return 0, false
+	}
+	return pos, true
+}
+
+// InputMeta is the immutable content of an input's meta file. Run is the run
+// the input opened or targeted at admission, empty for a queued input and an
+// observation. A later opening, withdrawal or disposition change is a log
+// fact and never rewrites this record.
+type InputMeta struct {
+	Authority string
+	Delivery  string
+	Run       string
+	InputID   string
+	Source    string
+	Subject   string
+	Admitted  string
+}
+
+// Encode returns one "key: value" line per field, line breaks in a value
+// replaced by spaces.
+func (m InputMeta) Encode() string {
+	var b strings.Builder
+	line := func(key, value string) { b.WriteString(key + ": " + lineBreaks.Replace(value) + "\n") }
+	line("authority", m.Authority)
+	line("delivery", m.Delivery)
+	line("run", m.Run)
+	line("input_id", m.InputID)
+	line("source", m.Source)
+	line("subject", m.Subject)
+	line("admitted", m.Admitted)
+	return b.String()
+}
+
 // StepMeta is the content of MetaFile. Output is the artifact path of the
 // step's output, empty when it is unavailable.
 type StepMeta struct {

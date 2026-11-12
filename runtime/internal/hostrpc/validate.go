@@ -33,7 +33,7 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 			return nil, err
 		}
 	}
-	if err := host.ValidateLayout(spec.Config.Workspace, state, v.Submission.SessionID); err != nil {
+	if err := host.ValidateLayout(spec.Config.Workspace, state); err != nil {
 		return nil, err
 	}
 	if spec.Config.ContextVersion == 0 {
@@ -46,39 +46,46 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 		}
 	}
 	constraints := v.Submission.Constraints
-	if v.Submission.SessionID != "" && !v.Submission.ExplicitConstraints {
+	if !v.Submission.ExplicitConstraints && !v.Submission.Fresh {
 		if h != nil {
-			constraints, err = h.InheritedConstraints(ctx, v.Submission.SessionID)
+			var inherited string
+			inherited, err = h.InheritedConstraints(ctx)
+			constraints = cmp.Or(inherited, constraints)
 		} else {
-			constraints, err = readInherited(ctx, state, v.Submission.SessionID)
+			var inherited string
+			inherited, err = readInherited(ctx, state)
+			constraints = cmp.Or(inherited, constraints)
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	b := BindingFrom(&v.Binding)
-	sub := host.Submission{SessionID: v.Submission.SessionID, Goal: v.Submission.Goal, Constraints: constraints, Spec: spec, Binding: b}
+	sub := host.Submission{Goal: v.Submission.Goal, Constraints: constraints, ExplicitConstraints: v.Submission.ExplicitConstraints,
+		Delivery: harness.InputDelivery(v.Submission.Delivery), Fresh: v.Submission.Fresh, Spec: spec, Binding: b}
 	if err := host.Validate(ctx, state, sub); err != nil {
 		return nil, err
 	}
-	if err := validateCredential(ctx, state, spec.Config, b, h); err != nil {
-		return nil, err
+	if sub.Delivery == "" {
+		if err := validateCredential(ctx, state, spec.Config, b, h); err != nil {
+			return nil, err
+		}
 	}
 	l := harness.DefaultPromptLimits()
 	return &Validated{State: state, Spec: SpecOf(spec), Constraints: constraints, GoalLimit: l.Goal, ConstraintsLimit: l.Constraints}, nil
 }
 
-func readInherited(ctx context.Context, state, session string) (string, error) {
+func readInherited(ctx context.Context, state string) (string, error) {
 	path, err := hostrpc.SocketPath(state)
 	if err != nil {
 		return "", err
 	}
 	c := &hostrpc.Client{Path: path}
-	value, err := c.Inherited(ctx, session)
+	value, err := c.Inherited(ctx)
 	if err == nil || !hostrpc.Unavailable(err) {
 		return value, err
 	}
-	return host.ReadInherited(ctx, state, session)
+	return host.ReadInherited(ctx, state)
 }
 
 func validateCredential(ctx context.Context, state string, c host.RunConfig, b host.Binding, h *host.Host) error {

@@ -17,6 +17,8 @@ func TestEventIDsMatchCommittedLiterals(t *testing.T) {
 	}{
 		{core.RequestFrozen{}, "request_frozen", `{}`,
 			"event_656e3ad6e24c67e21e2cfe50fa940ef4e740bc7c61d87e172f5b17b4fab03725"},
+		{core.InputsBound{Count: 2}, "inputs_bound", `{"Count":2}`,
+			"event_1a16c8a533cf8f1bec9203e2900371b3f0ee65f1504d6e849c7698335455def7"},
 		{core.AttemptStarted{Step: 9, Attempt: 2}, "attempt_started", `{"Step":9,"Attempt":2}`,
 			"event_a8ff4b62c8573689b579fd25ce6f60b2f72199430eae2335adef2d3fe64fcd35"},
 		{core.ResponseSaved{Step: 9, Attempt: 2}, "response_saved", `{"Step":9,"Attempt":2}`,

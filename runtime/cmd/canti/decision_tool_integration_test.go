@@ -13,7 +13,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 )
 
-func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
+func TestToolLineRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	f, image := recoveryFixture(t, nil)
 	const identity = "canti-anthropic/4-tool"
 	const protocol = "anthropic-messages/2023-06-01"
@@ -25,7 +25,7 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	answer(1, 2, invalid)
 	answer(1, 3, toolReply(core.Decision{Kind: core.Exec, Payload: "printf 'first\\n' >> effects.txt"}))
 	answer(2, 1, toolReply(core.Decision{Kind: core.Return, Payload: "first-done"}))
-	start := f.cli(nil, "run", "-once", "-session", "tools", "-input", "first", "-goal", "write first",
+	start := f.cli(nil, "run", "-once", "-input", "first", "-goal", "write first",
 		"-image", image, "-decision-format", "tool", "-fallbacks=false", "-max-steps", "0", "-max-attempts", "3", "-wall-time", "2m", "-job-timeout", "10s")
 	if start.code != exitActive || len(f.model.requests()) != 0 {
 		t.Fatalf("freeze before restart: %+v", start)
@@ -57,13 +57,13 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	answer(1, 4, wrongName)
 	answer(1, 5, toolReply(core.Decision{Kind: core.Exec, Payload: "test \"$(cat effects.txt)\" = first && printf 'second\\n' >> effects.txt"}))
 	answer(2, 2, toolReply(core.Decision{Kind: core.Return, Payload: "second-done"}))
-	if r := f.cli(nil, "run", "-once", "-session", "tools", "-input", "second", "-goal", "repair and write second",
+	if r := f.cli(nil, "run", "-once", "-input", "second", "-goal", "repair and write second",
 		"-image", image, "-decision-format", "tool", "-fallbacks=false", "-max-steps", "0", "-max-attempts", "2", "-wall-time", "2m", "-job-timeout", "10s"); r.code != exitActive {
 		t.Fatalf("second admission: %+v", r)
 	}
 	secondID := f.status().Run.ID
-	if secondID == firstID || f.status().Run.SessionSeq != 2 {
-		t.Fatal("second input did not retain session identity")
+	if secondID == firstID || f.status().Run.InputPos == 0 {
+		t.Fatal("second input did not retain line identity")
 	}
 	if r := f.cli(nil, "resume"); r.code != exitOK || strings.TrimSpace(r.stdout) != "second-done" {
 		t.Fatalf("second return: %+v", r)
@@ -75,9 +75,9 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	}
 	_, prompt, err := promptOf(wire[4])
 	if err != nil {
-		t.Fatalf("second run lost prior session answer: %v", err)
+		t.Fatalf("second run lost prior line answer: %v", err)
 	}
-	checkSessionLink(t, f, prompt, secondID, firstID, "repair and write second", 2)
+	checkLineLink(t, f, prompt, secondID, firstID, "repair and write second")
 	if got := archiveText(t, f, "/canti/runs/"+firstID+"/goal"); got != "write first" {
 		t.Fatalf("prior goal: %q", got)
 	}
@@ -116,7 +116,7 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 			t.Fatalf("HTTP body diverged from SQLite request %d", i)
 		}
 	}
-	if r := f.cli(nil, "run", "-session", "tools", "-input", "second", "-goal", "repair and write second", "-decision-format", "text"); r.code != exitOK || len(f.model.requests()) != 7 {
+	if r := f.cli(nil, "run", "-input", "second", "-goal", "repair and write second", "-decision-format", "text"); r.code != exitOK || len(f.model.requests()) != 7 {
 		t.Fatalf("same input resubmitted model work: %+v", r)
 	}
 	checkFile(t, filepath.Join(f.workspace, "effects.txt"), "first\nsecond\n")
@@ -125,7 +125,7 @@ func TestToolSessionRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	checkRecords(t, f, "write first", first)
 	checkRecords(t, f, "repair and write second", second)
 	checkReleased(t, f, append(first, second...))
-	t.Log("TOOL_SESSION runs=2 effects=2 requests=7 frozen_requests=6 transport_retries=1 protocol_rejections=2; real CLI/SQLite/Docker, cross-process resume")
+	t.Log("TOOL_LINE runs=2 effects=2 requests=7 frozen_requests=6 transport_retries=1 protocol_rejections=2; real CLI/SQLite/Docker, cross-process resume")
 }
 
 func TestToolProtocolFailureTerminatesWithoutEffects(t *testing.T) {

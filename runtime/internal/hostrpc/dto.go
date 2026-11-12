@@ -1,7 +1,6 @@
 package hostrpc
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -36,11 +35,23 @@ var (
 	}
 	executionWords = map[core.ExecutionState]string{
 		core.ExecutionExited: "exited", core.ExecutionTimedOut: "timed_out", core.ExecutionCancelled: "cancelled",
-		core.ExecutionFailedToStart: "failed_to_start", core.ExecutionUnknown: "unknown",
+		core.ExecutionFailedToStart: "failed_to_start", core.ExecutionUnknown: "unknown", core.ExecutionSuperseded: "superseded",
 	}
 	itemWords = map[host.ItemKind]string{
 		host.ItemDecided: "decided", host.ItemReturned: "returned", host.ItemRetrying: "retrying", host.ItemCompleted: "completed",
-		host.ItemContextReset: "context_reset", host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested", host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped",
+		host.ItemContextReset: "context_reset", host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested",
+		host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped", host.ItemInput: "input",
+		host.ItemWithdrawn: "withdrawn", host.ItemInputsBound: "inputs_bound", host.ItemRunStarted: "run_started",
+	}
+	authorityWords = map[harness.InputAuthority]string{
+		harness.AuthorityPrincipal: "principal", harness.AuthorityObservation: "observation",
+	}
+	deliveryWords = map[harness.InputDelivery]string{
+		harness.DeliverySteer: "steer", harness.DeliveryFollowUp: "follow_up",
+	}
+	dispositionWords = map[harness.InputDisposition]string{
+		harness.DispositionOpened: "opened", harness.DispositionSteer: "steer",
+		harness.DispositionQueued: "queued", harness.DispositionWithdrawn: "withdrawn",
 	}
 	outcomeWords = map[harness.OutcomeStatus]string{
 		harness.OutcomeDone: "done", harness.OutcomeFailed: "failed",
@@ -88,21 +99,21 @@ func driver(driving bool) string {
 }
 
 // CursorOf is the wire form of c: opaque to a client, which only gives it
-// back.
-func CursorOf(c host.Cursor) string { return c.RunID + ":" + strconv.FormatInt(c.Seq, 10) }
+// back. It names an agent-log position, never a run.
+func CursorOf(c host.Cursor) string { return "pos:" + strconv.FormatInt(int64(c), 10) }
 
 // ParseCursor is the host form of the wire cursor s, or an error wrapping
 // host.ErrCursor when s is no cursor.
 func ParseCursor(s string) (host.Cursor, error) {
-	i := strings.LastIndexByte(s, ':')
-	if i < 1 {
-		return host.Cursor{}, fmt.Errorf("%w: %q is no cursor", host.ErrCursor, s)
+	rest, ok := strings.CutPrefix(s, "pos:")
+	if !ok || rest == "" {
+		return 0, fmt.Errorf("%w: %q is no cursor", host.ErrCursor, s)
 	}
-	seq, err := strconv.ParseInt(s[i+1:], 10, 64)
-	if err != nil || seq < 0 || strconv.FormatInt(seq, 10) != s[i+1:] {
-		return host.Cursor{}, fmt.Errorf("%w: %q is no cursor", host.ErrCursor, s)
+	pos, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || pos < 0 || strconv.FormatInt(pos, 10) != rest {
+		return 0, fmt.Errorf("%w: %q is no cursor", host.ErrCursor, s)
 	}
-	return host.Cursor{RunID: s[:i], Seq: seq}, nil
+	return host.Cursor(pos), nil
 }
 
 // SpecOf is the wire form of s.
@@ -160,10 +171,12 @@ func PairsOf(pairs []host.Pair) []Pair {
 // RunOf is the wire form of v.
 func RunOf(v host.View, driveErr error) Run {
 	s, r, t, b := v.Snapshot.State, v.Run, v.Totals, v.Run.Budget
-	w := Run{RunID: r.ID, SessionID: r.SessionID, SessionSeq: r.SessionSeq, InputID: r.InputID, Goal: r.Goal, Constraints: r.Constraints,
-		Status: status(s.Phase), Phase: word(phaseWords, s.Phase), Step: s.Step, StopReason: word(reasonWords, s.Reason), EffectID: s.EffectID,
+	w := Run{RunID: r.ID, InputID: r.InputID, InputPos: r.InputPos, Fresh: r.Fresh, Goal: r.Goal, Constraints: r.Constraints,
+		Ordinal: v.Ordinal,
+		Status:  status(s.Phase), Phase: word(phaseWords, s.Phase), Step: s.Step, StopReason: word(reasonWords, s.Reason), EffectID: s.EffectID,
 		Cursor: CursorOf(v.Cursor()), ContextVersion: v.Config.ContextVersion, API: v.Config.API, Provider: v.Config.Provider,
 		Driver: driver(v.Driving), Drivable: v.Drivable, Why: v.Why,
+		PendingSteers: v.PendingSteers, Queued: v.Queued, Held: v.Held,
 		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
 		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
 	w.Ephemeral, w.Environment = v.Config.Ephemeral, EnvironmentOf(v.Config)
@@ -176,33 +189,52 @@ func RunOf(v host.View, driveErr error) Run {
 	return w
 }
 
-// State is the snapshot run r reports, as a client shows it: its run,
-// phase, step, stop reason, effect, result, and sequence, from its cursor.
+// StateOf is the state run r reports, as a client shows it: its phase, step,
+// stop reason, effect, and result. The cursor names an agent-log position,
+// which is not the run's transition sequence.
 func StateOf(r Run) (harness.Snapshot, error) {
-	c, err := ParseCursor(r.Cursor)
-	if err != nil {
+	if _, err := ParseCursor(r.Cursor); err != nil {
 		return harness.Snapshot{}, err
 	}
-	if c.RunID != r.RunID {
-		return harness.Snapshot{}, errors.New("hostrpc: a run whose cursor names another run")
-	}
-	return harness.Snapshot{Seq: c.Seq, State: core.State{RunID: r.RunID, Step: r.Step, Phase: value(phaseWords, r.Phase),
+	return harness.Snapshot{State: core.State{RunID: r.RunID, Step: r.Step, Phase: value(phaseWords, r.Phase),
 		Reason: value(reasonWords, r.StopReason), EffectID: r.EffectID, Decision: core.Decision{Payload: r.Result}}}, nil
 }
 
 // PageOf is the wire form of p.
 func PageOf(p host.Page) Page {
-	w := Page{Items: make([]Item, 0, len(p.Items)), Next: CursorOf(p.Next), More: p.More, Halted: p.Halted}
+	w := Page{Items: make([]Item, 0, len(p.Items)), Next: CursorOf(p.Next), More: p.More, Quiescent: p.Quiescent}
 	for _, it := range p.Items {
-		item := Item{Seq: it.Seq, Step: it.Step, Kind: word(itemWords, it.Kind), Command: it.Command, Purpose: it.Purpose,
+		item := Item{Pos: it.Pos, RunID: it.RunID, Seq: it.Seq, Step: it.Step, Kind: word(itemWords, it.Kind), Command: it.Command, Purpose: it.Purpose,
 			Action: word(actionWords, harness.ActionName(it.Action)), Result: it.Result, Local: it.Local, Resolved: it.Resolved,
 			Execution: word(executionWords, it.Execution), ExitCode: it.ExitCode, Preview: it.Preview, Detail: it.Detail, AnchorSeq: it.AnchorSeq,
-			StopReason: word(reasonWords, it.Reason), Failure: it.Failure, Truncated: it.Truncated}
+			StopReason: word(reasonWords, it.Reason), Failure: it.Failure, SupersededBy: it.SupersededBy, Inputs: it.Inputs,
+			Withdrawn: append([]string{}, it.Withdrawn...), Truncated: it.Truncated}
 		if o := it.Outcome; o != nil {
 			item.Outcome = &Outcome{Status: word(outcomeWords, o.Status), Detail: o.Detail, Retrieval: o.Retrieval, RetrievalError: o.RetrievalError,
 				Sources: o.Sources, Entries: o.Entries, Focus: o.Focus, FocusSources: o.FocusSources}
 		}
+		if in := it.Input; in != nil {
+			item.Input = &Input{Pos: it.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),
+				Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text, Truncated: in.Truncated}
+		}
 		w.Items = append(w.Items, item)
+	}
+	return w
+}
+
+// InputOf is the wire form of one admitted input.
+func InputOf(in harness.Input) Input {
+	return Input{Pos: in.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),
+		Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text}
+}
+
+// AckOf is the wire form of a host acknowledgement.
+func AckOf(a host.Ack, v *host.View, driveErr error) Ack {
+	w := Ack{Replayed: a.Replayed, Differs: append([]string{}, a.Differs...), InputID: a.Input.InputID,
+		Disposition: word(dispositionWords, a.Input.Disposition), Pos: a.Input.Pos}
+	if a.Opened() && v != nil {
+		run := RunOf(*v, driveErr)
+		w.Run = &run
 	}
 	return w
 }

@@ -98,6 +98,9 @@ func contextRules(t *testing.T) string {
 		recent.Receipts = []harness.StepReceipt{{Step: 1, Seq: 5, Purpose: "Inspect original", Status: "done"}}
 		recent.Latest = &latest
 		frames = append(frames, recent)
+		instructed := recent
+		instructed.Instructions = []harness.Instruction{{Index: 1, Text: "Apply the latest instruction.", Pos: 10, Seq: 6, Step: 1}}
+		frames = append(frames, instructed)
 		reset := initial
 		reset.Step = 2
 		reset.Attempt = 2
@@ -131,7 +134,7 @@ func contextRules(t *testing.T) string {
 
 func corpusRules(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v18")
+	root := filepath.Join("..", "..", "internal", "harness", "testdata", "frozen-requests-v19")
 	scenarios, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)

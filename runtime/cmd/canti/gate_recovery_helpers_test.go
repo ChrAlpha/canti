@@ -387,7 +387,7 @@ func checkReplay(t *testing.T, runID string, h []entry) {
 }
 
 // archiveText follows the same read surface available to native retrievals,
-// paging exact bytes rather than reintroducing automatic session projection.
+// paging exact bytes rather than reintroducing automatic previous-run projection.
 func archiveText(t *testing.T, f *fixture, path string) string {
 	t.Helper()
 	reader := archive.Reader{History: filepath.Join(f.state, "history"), Artifacts: filepath.Join(f.state, "artifacts")}
@@ -413,34 +413,16 @@ func archiveText(t *testing.T, f *fixture, path string) string {
 	return ""
 }
 
-type archivedSession struct {
-	SessionID     string `json:"session_id"`
-	Sequence      int64  `json:"sequence"`
-	InputID       string `json:"input_id"`
-	PreviousRunID string `json:"previous_run_id"`
-}
-
-func archiveSession(t *testing.T, f *fixture, run string) archivedSession {
+func checkLineLink(t *testing.T, f *fixture, prompt, current, previous, goal string) {
 	t.Helper()
-	var session archivedSession
-	if err := json.Unmarshal([]byte(archiveText(t, f, "/canti/runs/"+run+"/session")), &session); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/") ||
+		!strings.Contains(prompt, "## Previous runs") || !strings.Contains(prompt, "- "+previous+":") ||
+		!strings.Contains(prompt, "/canti/runs/"+previous+"/") {
+		t.Fatalf("missing current task or previous-run navigation: %s", prompt)
 	}
-	return session
-}
-func checkSessionLink(t *testing.T, f *fixture, prompt, current, previous, goal string, sequence int64) {
-	t.Helper()
-	if !strings.Contains(prompt, "## Goal\n"+goal+"\n") || !strings.Contains(prompt, "/canti/runs/"+current+"/session") ||
-		!strings.Contains(prompt, "Previous run: /canti/runs/"+previous+"/.") {
-		t.Fatalf("missing current task/session navigation: %s", prompt)
-	}
-	link := archiveSession(t, f, current)
-	if link.PreviousRunID != previous || link.Sequence != sequence || link.InputID == "" || link.SessionID == "" {
-		t.Fatalf("wrong session link: %+v", link)
-	}
-	prior := archiveSession(t, f, previous)
-	if prior.SessionID != link.SessionID || prior.Sequence != sequence-1 || prior.InputID == "" || prior.InputID == link.InputID {
-		t.Fatalf("session ordering/input identity: current=%+v previous=%+v", link, prior)
+	previousFile, err := os.ReadFile(filepath.Join(f.state, "history", current, "previous"))
+	if err != nil || string(previousFile) != previous {
+		t.Fatalf("previous run record = %q, %v; want %q", previousFile, err, previous)
 	}
 }
 
