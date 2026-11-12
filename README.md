@@ -92,7 +92,7 @@ preparation, attachment, package installation, networking and rebuilds.
 `-ephemeral` selects a fresh `debian:bookworm-slim` container for each command,
 with the workspace at `/workspace`, no network, and the host user's uid.
 It retains read-only artifacts and step-record mounts. Persistent execution uses
-native `canti:retrieve` and `canti:focus` for archive access; `/canti/runs`,
+native `canti:retrieve` for archive access; `/canti/runs`,
 `/canti/artifacts` and `/canti/imports` are logical retrieval addresses there.
 `-image`, `-network`, `-memory`, `-cpus` and `-pids` apply only to `-ephemeral`;
 provision the persistent environment's resources and network externally.
@@ -122,11 +122,14 @@ explicit resolution.
 Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
 Same-version restarts preserve committed facts and exact frozen request bytes.
-Requests use a stable receipt prefix and selected frozen evidence. Confirmed
-provider overflow resets the active context at the same unfinished step, retaining
-the exact goal, constraints and archive navigation. `canti:focus` replaces the
-selected evidence; historical snapshots remain retrievable. `-request-bytes` is
-a resource ceiling, and `-token-budget` uses only reported usage. Status and TUI
+A request keeps every step completed since the current anchor in full; earlier
+history stays in the read-only archive. `canti:handover <text>` closes a phase:
+the steps before it leave later requests, and the handover is carried in later
+requests of the line until the next one. Confirmed provider overflow resets the
+active context at the same unfinished step, retaining the exact goal,
+constraints, carried handover and an index of the steps since it; a minimal
+context stays minimal until the agent hands over. `-request-bytes` is a
+resource ceiling, and `-token-budget` uses only reported usage. Status and TUI
 reports distinguish unknown usage, reported zero and lost attempts.
 An unknown outcome requires explicit inspection or operator resolution and never
 authorizes rerunning the command.

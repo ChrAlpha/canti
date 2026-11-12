@@ -482,15 +482,19 @@ path against every environment mount before creating state. It holds `canti.db` 
 final job records under `jobs/`, output artifacts under `artifacts/`, and the
 read-only step records of every run under `history/<run ID>/`, which ephemeral jobs see
 at `/canti/runs/<run ID>/`; persistent commands use these logical addresses
-through native `canti:retrieve` and `canti:focus`.
-Each run is bound to the workspace it was created in. Confirmed provider overflow
-opens a fresh anchor at the same unfinished step when retry remains possible.
-The goal, constraints and archive navigation survive; old receipts and selected
-focus are removed. A fresh orientation-only overflow stops immediately. No
-summary is required. `canti:focus {"sources":[{"seq":N,"source":I}]}` replaces
-the selected frozen source ranges; an empty array clears them. Exact historical
-snapshots remain readable from step `evidence.json` and `evidence/0000` files.
-Removed handover/window flags and actions are rejected. See [Input](architecture.md#input).
+through native `canti:retrieve`.
+Each run is bound to the workspace it was created in. A request keeps every step
+completed since its current anchor in full, with the steps before it reachable
+through the read-only archive. `canti:handover <text>` closes a phase: the text
+is carried in later requests of the line until the next handover, and the
+earlier-steps index names the steps the note does not cover. Confirmed provider
+overflow opens a new anchor at the same unfinished step when retry remains
+possible; the latest handover and the exact goal, constraints and archive
+navigation survive. A minimal context stays minimal through further resets until
+a successful handover. A minimal or orientation-only overflow stops immediately.
+No summary is required. Exact historical snapshots remain readable from step
+`evidence.json` and `evidence/0000` files. Removed focus/handover flags and
+actions are rejected. See [Input](architecture.md#input).
 History retrieval is always available; `-history-imports` adds a read-only
 archive, a directory named relative to the command's working directory and
 stored canonical. A new run needs it to exist; a retry of an input names its
@@ -498,10 +502,10 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 19. Schema 5 keeps one agent log of
+Each run stores current context version 20. Schema 6 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 1 and
-host protocol 8 form one current contract. Unsupported formats and context
+host protocol 9 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. Same-version frozen bytes, provider bindings,
 accepted identities and results remain immutable.
@@ -554,7 +558,8 @@ The current corpus verifies same-version frozen requests, including cold restart
 and lost acknowledgements. Historical files remain audit evidence; current
 readers do not interpret old semantics or migrate old databases. Rejection tests
 cover unsupported formats. Same-version corruption tests cover accepted identity,
-receipt provenance, focus references and exact immutable request bytes.
+handover and rejection provenance, the resident epoch capture and exact immutable
+request bytes.
 
 When adding dependencies, use Go modules and commit the resulting `go.sum`.
 Record the minimum toolchain or platform change and update CI in the same unit.

@@ -22,7 +22,7 @@ is not.
 | --- | --- | --- |
 | `runtime/core/decode.go` | Decision protocol and decoding | Offline tests |
 | `runtime/core/state.go`, `runtime/core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `runtime/internal/harness/frame.go`, `reader_prompt.go`, `context_state.go` | The request frame, receipt prefix, dynamic evidence and durable context anchor | Offline tests; long-history measurement over SQLite |
+| `runtime/internal/harness/frame.go`, `reader_prompt.go`, `context_state.go`, `handover.go` | The request frame, resident epoch, carried handover, earlier-steps index, degradation floor and durable context anchor | Offline tests; long-history measurement over SQLite |
 | `runtime/internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
 | `runtime/internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `runtime/internal/harness/runner.go` | Transition derivation and atomic commit | Recording-store tests; used by the loop |
@@ -39,7 +39,7 @@ is not.
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 8, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, and opaque agent-log cursors), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 9, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, and handover progress), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
@@ -186,7 +186,7 @@ physical owner for exited/timed-out assertions; it is never an inspected receipt
 
 ## Persistence and recovery
 
-SQLite schema 5 is current-only. A new empty database receives all tables and
+SQLite schema 6 is current-only. A new empty database receives all tables and
 indexes; other schema versions are refused without migration. State, event and
 fact readers are strict, including current semantics. WAL and synchronous=FULL
 retain the existing acknowledged-commit durability assumptions.
@@ -202,11 +202,11 @@ environment binding, daemon, attachment incarnation, effect/specification, owner
 command generation and durable stop-intent identity. A stopped-but-quarantined
 witness does not authorize environment reuse. The witness confirmation time is
 not an actual command exit time; unknown process timestamps remain unset. A local cancellation is
-the only receipt-free Observed. Performed validates a local Outcome and any replacement focus in that same transaction.
-Confirmed rejection commits its response, usage, typed signal and next anchor together.
-The run's context_seq points to its latest successful focus mutation or rejection.
-A consistent Context read compares the expected run snapshot and resolves that pointer
-within one transaction; fabricated focus/anchor provenance is rejected. Totals update atomically.
+the only receipt-free Observed. Performed validates a local Outcome and, for a successful handover, its outcome text and the head it opens in that same transaction.
+Confirmed rejection commits its response, usage, typed signal, the rejected request's shape and the next head together.
+The run's context_seq points to its latest successful handover or rejection; zero materializes the effective initial head, including a handover inherited from the immutable line. The run also records the rejection that opened its current head lineage; a confirmed rejection that opens no head (a terminal minimal or authoritative-orientation rejection, or attempt exhaustion) leaves that pointer and the head's carried rejection and usage unchanged.
+A consistent Context read compares the expected run snapshot and resolves that pointer or derivation
+within one transaction; fabricated handover, rejection or anchor provenance is rejected. Totals update atomically.
 
 Recent and Completion read current-format completed steps in bounded pages/point
 reads. Only operator provenance sets StepRecord.Resolved; inspected settlement
@@ -387,63 +387,78 @@ without HTML escaping, and the client reads no further than that bound.
 
 ## Input
 
-Every request is prepared from committed facts and a durable `ContextState`:
-`AnchorSeq`, `FirstStep`, and an explicit `Focus` selection. The initial anchor is
-sequence 0 and step 1. The core owns the generic `RequestRejected` transition;
-the adapters alone classify provider overflow. A confirmed rejection consumes an
-attempt and, when another attempt is permitted, clears focus, drops the active
-receipts and opens an anchor at the same unfinished step. It accepts no partial
-decision and requests no summary. A request containing only fresh orientation
-is terminal on its first confirmed overflow. Repeated overflow remains bounded
-by the core's step-attempt limit.
+Every request is prepared from committed facts and a materialized `ContextState`:
+`AnchorSeq`, `FirstStep`, the carried `Handover`, `Minimal` and the run's most
+recent `Rejection`. A run ID is at most `MaxRunIDBytes` (200) so the archive
+paths a request and the minimal notice render always fit their bounds. The anchor is the context boundary: sequence 0 and step 1 is
+the effective initial head, and a successful `canti:handover` or a provider
+rejection opens the next one. The initial head of a run that did not start
+`fresh` carries the newest successful handover of its immutable predecessor
+chain; the derivation is independent of the bounded previous-runs page. The core
+owns the generic `RequestRejected` transition; the adapters alone classify
+provider overflow.
 
-The stable prefix contains the exact current goal and constraints, environment,
-run and archive navigation, then compact completed-step receipts after the
-anchor. Each receipt names sequence, step, bounded purpose, status, exit code
-when present, and archive path. It contains no old full command, preview or
-retrieval body. The closed runs of the line render in the stable prefix, newest first, with
-their goal heads, outcomes, and archive paths; `history/<run>/previous` records
-the previous run ID, or nothing for a fresh run, and prior dialogue is retrieved
-explicitly. Bound principal instructions render verbatim at the position where
-they were bound, as `Instruction #k from the principal, received before step S`;
-after an anchor reset every bound instruction renders in order after the goal and
-constraints. The replaceable tail contains selected focus evidence, observations,
-execution position, the latest completed step and any protocol repair. An
-observation names a source and a subject, its latest position, a preview and
-its archive path; historical per-key counts are not rendered, because only the
-current state of a key is evidence under level semantics. An observation is
-never an instruction. A new receipt extends the prefix; focus, latest-result and repair changes
-affect only the tail. The latest result remains present throughout retries and
-protocol repair of that decision step. Reset removes its body while retaining
-navigation to its original record.
+A confirmed rejection consumes an attempt. When another attempt is permitted:
+a request with resident epoch steps or a protocol repair opens a head at the same
+unfinished step with the same handover and `Minimal`; a request with optional
+content but no epoch step opens the degradation floor `Minimal: true`; a
+rejection of authoritative orientation alone, or of a minimal context, is
+terminal. Attempt exhaustion opens no head. Repeated overflow remains bounded by
+the core's step-attempt limit. The rejection record keeps the shape of the
+rejected request and the largest input usage any accepted request before it
+reported; the commit checks the shape against the frozen request capture, so
+later reads never reclassify it.
 
-The system prompt states the decision protocol and the native retrieval and focus
-syntax. The current goal and constraints are authoritative. Retrieved records,
-commands and outputs are evidence; environment restrictions narrow the task unless
-explicitly lifted. Workspace notes remain ordinary files. The active request is
-selective: omitted history remains available through the archive.
+The stable head contains the exact current goal and constraints, the principal
+instructions bound at or before its anchor, environment, run and archive
+navigation, the closed runs of the line, the carried handover, the earlier-steps
+index, and the epoch header. Everything in the head is fixed for the whole
+epoch. The stable epoch renders every completed step since the anchor in full,
+with each instruction bound after the anchor interleaved at its committed
+sequence; it is append-only, so the provider prefix cache keeps working. A
+superseded decision renders as one block naming the instruction that set it
+aside. The latest completion is rendered once: in the epoch when it belongs
+there, otherwise as a one-line tail reference, omitted when the index lists it.
+The replaceable tail contains observations, the execution position with
+provider-reported usage, and any protocol repair.
+
+The handover is the agent's own continuation guidance, rendered quoted with its
+origin run, step and archive path, marked as a previous run's note when it is.
+It is evidence, never an instruction, and never widens the goal, constraints or
+a bound principal instruction. `Minimal` renders no optional body: a fixed
+notice names the archive, the carried handover's record when there is one, and
+the runs and inputs roots. It stays minimal through provider resets and is
+cleared only by a successful handover.
 
 `PromptLimits` bounds bytes, never predicted tokens. Defaults are 32 KiB for the
 goal, 16 KiB for constraints, 2 KiB for environment and command, 512 bytes per
 purpose, 4 KiB per preview, 2 KiB for rejected reply/error, and an 8 MiB total
 resource ceiling. `-request-bytes` can lower that ceiling. Both rendered input and
 serialized provider body must fit. Goal and constraints are never truncated.
-Other bounded fields use explicit truncation markers, valid UTF-8 and fences
-longer than embedded backtick runs. Exceeding the resource ceiling fails visibly.
-There is no token estimation, model-window table, capacity selection or reserve.
+Per-field cuts, the rendered bytes of each step block, and the total request cap
+are accounted separately and captured per step. Resident steps are loaded in
+bounded pages while the running total is checked, so an unbounded epoch is never
+materialized. Exceeding the resource ceiling fails visibly and terminally; it is
+never a provider rejection. There is no token estimation, model-window table,
+capacity selection or reserve.
 
 Native retrieval commits exact observed source bytes with its outcome, including
-original path, range, hash, continuation and errors. The latest retrieval result
-is transient for the next decision step. To retain selected evidence, the agent
-executes `canti:focus {"sources":[{"seq":N,"source":I}]}`. Each entry names an
-older successful retrieval completion and one zero-based source index. Selection
-replaces the prior set; `{"sources":[]}` clears it. At most 32 distinct ranges
-are accepted, sorted by sequence and source. Overlapping or different snapshots
-of one original path remain distinct. Focus resolves journal bytes and checks
-length and SHA-256, including after restart; it never rereads the original.
-Acceptance, successful outcome, replacement ContextState and run progress are
-validated and committed atomically. Failed focus leaves the previous set intact.
-Unknown `canti:` names, including retired handover actions, fail locally.
+original path, range, hash, continuation and errors. The epoch keeps every
+resident retrieval, and the context capture records its operation, continuation
+and every source range. `canti:handover <text>` is a local action of recovery
+class local change: the text is the part of the payload after the action word and
+one separator, verbatim, at most 2,048 bytes, not blank and valid UTF-8. A
+successful handover commits, in one `Performed` transition, its outcome text, run
+progress and the new head; the outcome text must equal the committed payload's
+text on every read. No other action may carry a context change. Unknown
+`canti:` names, including words that only begin with `canti:handover`, fail
+locally.
+
+The system prompt states the decision protocol, the native retrieval syntax and
+the handover contract. The current goal and constraints are authoritative.
+Retrieved records, commands, outputs and handovers are evidence; environment
+restrictions narrow the task unless explicitly lifted. Workspace notes remain
+ordinary files. Omitted history remains available through the archive.
 
 The input archive holds exactly what the agent was shown. A `RequestFrozen`
 transaction records `delivered_pos` on each input it renders for the first time;
