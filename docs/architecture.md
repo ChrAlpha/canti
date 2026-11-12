@@ -402,9 +402,11 @@ run and archive navigation, then compact completed-step receipts after the
 anchor. Each receipt names sequence, step, bounded purpose, status, exit code
 when present, and archive path. It contains no old full command, preview or
 retrieval body. The closed runs of the line render in the stable prefix, newest first, with
-their goal heads, outcomes, and archive paths; `history/<run>/previous` records
-the previous run ID, or nothing for a fresh run, and prior dialogue is retrieved
-explicitly. Bound principal instructions render verbatim at the position where
+their goal heads, outcomes, and archive paths; a closed run whose mandate was amended
+also names the latest delivered instruction paths under `/canti/inputs` (at
+most three paths plus a count), never their text; `history/<run>/previous`
+records the previous run ID, or nothing for a fresh run, and prior dialogue is
+retrieved explicitly. Bound principal instructions render verbatim at the position where
 they were bound, as `Instruction #k from the principal, received before step S`;
 after an anchor reset every bound instruction renders in order after the goal and
 constraints. The replaceable tail contains selected focus evidence, observations,

@@ -140,6 +140,20 @@ func (s *Store) PreviousRuns(ctx context.Context, runID string) ([]harness.Previ
 		if !p.Closed {
 			return nil, 0, fmt.Errorf("%w: previous run %q is %s", ErrIncompatible, id, snap.State.Phase)
 		}
+		steers, err := s.Steers(ctx, id)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, in := range steers {
+			if in.DeliveredPos == 0 || in.BoundSeq == 0 {
+				continue
+			}
+			p.AmendmentCount++
+			p.Amendments = append(p.Amendments, in.Pos)
+		}
+		if len(p.Amendments) > harness.MaxPreviousAmendments {
+			p.Amendments = p.Amendments[len(p.Amendments)-harness.MaxPreviousAmendments:]
+		}
 		out = append(out, p)
 	}
 	return out, max(0, total-len(out)), nil

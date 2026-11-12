@@ -149,3 +149,17 @@ func TestPromptRendersTheMandateOnlyWithBoundInstructions(t *testing.T) {
 		t.Fatalf("single-instruction mandate = %q, want %q", got, wantSingle+"\n")
 	}
 }
+
+func TestPreviousRunLineShowsTheAmendedMandate(t *testing.T) {
+	p := PreviousRun{Run: Run{ID: "run_1", Goal: "Write ORIGINAL.\n"}, State: core.State{Phase: core.PhaseReturned}, Closed: true,
+		Amendments: []int64{2, 5, 9}, AmendmentCount: 7}
+	want := "- run_1: Write ORIGINAL. ; amended by instructions at /canti/inputs/000000000002, /canti/inputs/000000000005, /canti/inputs/000000000009 (+4 more); returned; /canti/runs/run_1/\n"
+	if got := previousLine(p); got != want {
+		t.Fatalf("previous line = %q, want %q", got, want)
+	}
+	p.Amendments, p.AmendmentCount = nil, 0
+	want = "- run_1: Write ORIGINAL. ; returned; /canti/runs/run_1/\n"
+	if got := previousLine(p); got != want {
+		t.Fatalf("unaltered previous line = %q, want %q", got, want)
+	}
+}

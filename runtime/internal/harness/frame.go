@@ -110,6 +110,19 @@ func (f Frame) validateInputs() error {
 	if len(f.Previous) > MaxPreviousRuns || f.PreviousMore < 0 {
 		return errors.New("harness: invalid previous runs")
 	}
+	for _, p := range f.Previous {
+		if len(p.Amendments) > MaxPreviousAmendments || p.AmendmentCount < len(p.Amendments) ||
+			(p.AmendmentCount == 0) != (len(p.Amendments) == 0) {
+			return errors.New("harness: invalid previous-run amendments")
+		}
+		last := int64(0)
+		for _, pos := range p.Amendments {
+			if pos <= last {
+				return errors.New("harness: invalid previous-run amendment order")
+			}
+			last = pos
+		}
+	}
 	return nil
 }
 

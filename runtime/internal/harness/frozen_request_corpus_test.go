@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
@@ -48,6 +49,7 @@ type frozenRun struct {
 	id, goal    string
 	constraints string // instead of the corpus constraints
 	replies     []string
+	steers      []string // principal steers admitted before the first request
 	steps       []string // stepOutcome of every completed step, oldest first
 	budget      harness.Budget
 	resolve     *harness.Observation // operator resolution of an unknown outcome
@@ -81,6 +83,7 @@ func frozenScenarios() []frozenScenario {
 		}, runs: []frozenRun{{id: corpusRun, goal: "Use the latest observation.", replies: []string{corpusDecision(core.Return, "done")}}},
 			marks: map[string][]string{"run1-step01-rev1.json": {"GREEN", "Position 2; archive /canti/inputs/000000000002"}}},
 		{name: "line-navigation", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "  Earlier exact goal.\n", replies: []string{corpusDecision(core.Return, "Earlier answer.")}}, {id: corpusNextRun, goal: "Current goal.", replies: []string{corpusDecision(core.Return, "Current answer.")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"## Previous runs", "- " + corpusRun + ":", "/canti/runs/" + corpusRun + "/"}}},
+		{name: "line-amended", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Write ORIGINAL.", steers: []string{"Changed requirement: write STEERRED."}, replies: []string{corpusDecision(core.Return, "STEERRED written.")}}, {id: corpusNextRun, goal: "Continue the line.", replies: []string{corpusDecision(core.Return, "continued")}}}, marks: map[string][]string{"run2-step01-rev1.json": {"amended by instructions at " + archive.InputsRoot + "/000000000001", "Write ORIGINAL."}}},
 		{name: "legacy-actions-are-local-failures", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Reject retired actions locally.", replies: []string{corpusDecision(core.Exec, "canti:handover next"), corpusDecision(core.Exec, "canti:handover-carry {}"), corpusDecision(core.Return, "Retired actions failed locally.")}, steps: []string{"1 failed", "2 failed"}}}},
 		{name: "tool-transport", tool: true, limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Inspect files.", replies: []string{corpusDecision(core.Exec, "ls"), `{"kind":"exec"}`, corpusDecision(core.Return, "go.mod")}, steps: []string{"1 exited 0 output complete"}}}},
 		{name: "protocol-repair", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Repair a decision.", replies: []string{"not a decision", strings.Repeat("`", 2048), corpusDecision(core.Return, "repaired")}}}},

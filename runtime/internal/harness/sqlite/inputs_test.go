@@ -448,3 +448,27 @@ func TestAbsentInputIDsAreNullAndDistinct(t *testing.T) {
 		t.Fatal("empty input ID unexpectedly named an input")
 	}
 }
+
+func TestPreviousRunsNameDeliveredAmendments(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, tempPath(t))
+	run := admitOpen(t, s, "run-1", "Do the task.", true)
+	for _, text := range []string{"One.", "Two.", "Three.", "Four."} {
+		admitKind(t, s, harness.DeliverySteer, text)
+	}
+	d := newDriver(t, s, latestOf(t, s, run.Run.ID))
+	d.do(core.InputsBound{Count: 4}, harness.Facts{})
+	if _, err := s.db.Exec(`UPDATE inputs SET delivered_pos = pos + 10 WHERE pos > 1`); err != nil {
+		t.Fatal(err)
+	}
+	stopRun(t, s, *run.Run)
+	createRun(t, s, "run-2", limits)
+	previous, more, err := s.PreviousRuns(ctx, "run-2")
+	if err != nil || more != 0 || len(previous) != 1 {
+		t.Fatalf("previous runs = %+v, %d, %v", previous, more, err)
+	}
+	if got := previous[0]; got.AmendmentCount != 4 || len(got.Amendments) != 3 ||
+		got.Amendments[0] != 3 || got.Amendments[1] != 4 || got.Amendments[2] != 5 {
+		t.Fatalf("previous amendments = %+v", got)
+	}
+}

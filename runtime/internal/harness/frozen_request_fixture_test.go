@@ -261,6 +261,11 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		if err := r.store.CreateRun(ctx, record, state); err != nil {
 			t.Fatal(err)
 		}
+		for _, text := range run.steers {
+			if _, err := r.store.Admit(ctx, harness.InputSubmission{Authority: harness.AuthorityPrincipal, Delivery: harness.DeliverySteer, Text: text, Now: corpusCreated}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if i == 0 {
 			for _, observation := range sc.observations {
 				if _, err := r.store.Admit(ctx, observation); err != nil {

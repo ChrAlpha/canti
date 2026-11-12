@@ -169,13 +169,14 @@ const (
 
 // The bounds of an admitted input and of what a request renders.
 const (
-	ObservationTextBytes = 16 << 10
-	InputKeyBytes        = 256
-	MaxObservationKeys   = 16
-	MaxPreviousRuns      = 16
-	PreviousRunsBytes    = 8 << 10
-	PreviousGoalBytes    = 200
-	ObservationPreview   = 512
+	ObservationTextBytes  = 16 << 10
+	InputKeyBytes         = 256
+	MaxObservationKeys    = 16
+	MaxPreviousRuns       = 16
+	MaxPreviousAmendments = 3
+	PreviousRunsBytes     = 8 << 10
+	PreviousGoalBytes     = 200
+	ObservationPreview    = 512
 )
 
 // Input is one admitted agent-log fact: a principal instruction or an
@@ -223,9 +224,11 @@ type ObservationInput struct {
 
 // PreviousRun is one closed run of the current line, as a request names it.
 type PreviousRun struct {
-	Run    Run
-	State  core.State
-	Closed bool
+	Run            Run
+	State          core.State
+	Closed         bool
+	Amendments     []int64 // latest delivered bound instruction positions, ascending
+	AmendmentCount int     // all delivered bound instructions, including those beyond Amendments
 }
 
 // InputSubmission is one input a host asks a store to admit: a principal

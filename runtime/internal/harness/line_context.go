@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
@@ -40,5 +41,16 @@ func previousLine(p PreviousRun) string {
 		outcome = "stopped: " + string(p.State.Reason)
 	}
 	goal, _ := cut(lineBreaks.Replace(p.Run.Goal), PreviousGoalBytes)
-	return fmt.Sprintf("- %s: %s; %s; %s\n", p.Run.ID, goal, outcome, path.Join(archive.RunsRoot, p.Run.ID)+"/")
+	amended := ""
+	if p.AmendmentCount > 0 {
+		paths := make([]string, 0, len(p.Amendments))
+		for _, pos := range p.Amendments {
+			paths = append(paths, path.Join(archive.InputsRoot, archive.InputDir(pos)))
+		}
+		amended = "; amended by instructions at " + strings.Join(paths, ", ")
+		if more := p.AmendmentCount - len(paths); more > 0 {
+			amended += fmt.Sprintf(" (+%d more)", more)
+		}
+	}
+	return fmt.Sprintf("- %s: %s%s; %s; %s\n", p.Run.ID, goal, amended, outcome, path.Join(archive.RunsRoot, p.Run.ID)+"/")
 }
