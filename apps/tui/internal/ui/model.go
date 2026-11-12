@@ -77,6 +77,7 @@ type Model struct {
 	bytes             int
 	omitted           bool
 	final, notice     string
+	shownTerminal     map[string]bool
 	held              int
 	steerPending      *pendingSteer
 	lastSteerID       string
@@ -97,7 +98,7 @@ func New(ctx context.Context, c *chat.Controller) Model {
 	editor.SetWidth(76)
 	editor.Focus()
 	return Model{controller: c, ctx: ctx, editor: editor, viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(12)), width: 80, height: 24,
-		resolvedSteer: map[string]uint64{}}
+		resolvedSteer: map[string]uint64{}, shownTerminal: map[string]bool{}}
 }
 func (m Model) Init() tea.Cmd { return textarea.Blink }
 func next(t *chat.Turn) tea.Cmd {
@@ -510,6 +511,14 @@ func (m Model) fact(f fact) (tea.Model, tea.Cmd) {
 	case e.Diagnostic != "":
 		m.add(e.Diagnostic + "\n")
 	case e.Item != nil:
+		if e.Item.Kind == "returned" || e.Item.Kind == "stopped" {
+			if m.shownTerminal == nil {
+				m.shownTerminal = map[string]bool{}
+			}
+			if e.Item.RunID != "" {
+				m.shownTerminal[e.Item.RunID] = true
+			}
+		}
 		var b strings.Builder
 		present.Item(&b, *e.Item)
 		m.add(b.String())
@@ -523,6 +532,9 @@ func (m Model) fact(f fact) (tea.Model, tea.Cmd) {
 func (m Model) complete(out chat.Result) (tea.Model, tea.Cmd) {
 	m.turn = nil
 	answer, note := present.Result(out)
+	if out.Run.RunID != "" && m.shownTerminal[out.Run.RunID] {
+		answer, note = present.ResultAfterTerminal(out)
+	}
 	m.final = answer + note
 	m.add(m.final)
 	m.held = out.Run.Held

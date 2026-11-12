@@ -465,3 +465,20 @@ func TestLateRetryCannotReplaceNewPendingInput(t *testing.T) {
 		t.Fatal("late retry replaced the newer pending identity")
 	}
 }
+
+func TestTerminalItemsShowEachRunOutcomeOnce(t *testing.T) {
+	m := model()
+	m = update(m, fact{event: chat.Event{Item: &hostrpc.Item{Kind: "returned", RunID: "run_parent", Result: "parent answer"}}})
+	m = update(m, fact{event: chat.Event{Item: &hostrpc.Item{Kind: "returned", RunID: "run_child", Result: "child answer"}}})
+	m = update(m, fact{event: chat.Event{Result: &chat.Result{Code: chat.OK, Run: hostrpc.Run{RunID: "run_child", Status: hostrpc.StatusReturned, Result: "child answer"}}}})
+	transcript := m.transcript()
+	if strings.Count(transcript, "parent answer") != 1 || strings.Count(transcript, "child answer") != 1 {
+		t.Fatalf("terminal outcomes not shown once: %q", transcript)
+	}
+	if strings.Index(transcript, "parent answer") > strings.Index(transcript, "child answer") {
+		t.Fatalf("terminal outcomes are out of order: %q", transcript)
+	}
+	if strings.Contains(m.final, "child answer") {
+		t.Fatalf("completion repeated the latest answer: %q", m.final)
+	}
+}

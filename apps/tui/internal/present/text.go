@@ -78,6 +78,12 @@ func Item(w io.Writer, it hostrpc.Item) {
 		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":
 		fmt.Fprintf(w, "$ %s\n", strings.Join(excerpt(it.Command, false), "\n  "))
+	case it.Kind == "returned":
+		if answer := Clean(it.Result); answer != "" {
+			fmt.Fprintln(w, answer)
+		}
+	case it.Kind == "stopped":
+		fmt.Fprintf(w, "canti: run %s stopped: %s\n", Clean(it.RunID), Clean(it.StopReason))
 	case it.Kind == "completed" && it.Outcome != nil:
 		for _, line := range excerpt(outcomeSummary(*it.Outcome), true) {
 			fmt.Fprintf(w, "│ %s\n", line)

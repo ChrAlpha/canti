@@ -3,8 +3,11 @@
 package acceptance
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // TestChatPTYFollowUpCtrlFQueuesAndContinues requires that Ctrl+F submits the
@@ -21,6 +24,7 @@ func TestChatPTYFollowUpCtrlFQueuesAndContinues(t *testing.T) {
 	p.send(t, "follow up\x06")
 	pos = p.await(t, "follow-up queued", pos)
 	release()
+	pos = p.await(t, "first answer", pos)
 	pos = p.await(t, "follow-up answer", pos)
 	deadline := time.Now().Add(5 * time.Second)
 	for f.status().Phase != "returned" {
@@ -35,6 +39,18 @@ func TestChatPTYFollowUpCtrlFQueuesAndContinues(t *testing.T) {
 	}
 	p.send(t, "\x03")
 	p.finish(t, exitOK)
+	out := p.text()
+	end := strings.LastIndex(out, "\x1b[?1049l")
+	if end < 0 {
+		t.Fatal("chat did not leave the alternate screen")
+	}
+	transcript := strings.ReplaceAll(ansi.Strip(out[end:]), "\r\n", "\n")
+	if strings.Count(transcript, "first answer\n") != 1 || strings.Count(transcript, "follow-up answer\n") != 1 {
+		t.Fatalf("follow-up line did not show each answer once: %q", transcript)
+	}
+	if strings.Index(transcript, "first answer\n") > strings.Index(transcript, "follow-up answer\n") {
+		t.Fatalf("follow-up answers are out of order: %q", transcript)
+	}
 }
 
 // TestChatPTYHeldInputCtrlRRestores requires that a stop with a queued

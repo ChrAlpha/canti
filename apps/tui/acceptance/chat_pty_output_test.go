@@ -28,7 +28,7 @@ func TestChatPTYExitPreservesCompleteTranscript(t *testing.T) {
 		t.Fatal("chat did not leave the alternate screen")
 	}
 	transcript := strings.ReplaceAll(ansi.Strip(out[end:]), "\r\n", "\n")
-	if !strings.Contains(transcript, answer+"\n") {
-		t.Fatalf("complete answer missing after alternate screen exit: transcript bytes=%d, tail=%q", len(transcript), transcript[max(0, len(transcript)-200):])
+	if strings.Count(transcript, answer+"\n") != 1 {
+		t.Fatalf("complete answer is not shown exactly once after alternate screen exit: transcript bytes=%d, tail=%q", len(transcript), transcript[max(0, len(transcript)-200):])
 	}
 }
