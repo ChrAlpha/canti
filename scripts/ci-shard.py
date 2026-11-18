@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Partition go test's discovered top-level tests, keeping each test intact."""
+"""Partition go test's discovered top-level tests, keeping each test intact.
+
+A lane that owns only the tests a build tag adds names that tag in
+CI_SHARD_ADDED_BY; discovery then also lists the build without it.
+"""
 
 import hashlib
 import json
@@ -26,13 +30,46 @@ LONG_SECONDS = {
 
 
 def test_names(events):
+    """The (package, name) of every top-level test, fuzz target and example listed."""
     names = set()
     for line in events.splitlines():
         event = json.loads(line)
         output = event.get("Output", "").strip()
         if event.get("Action") == "output" and re.fullmatch(r"(?:Test|Fuzz|Example)\w*", output):
-            names.add(output)
-    return sorted(names)
+            names.add((event.get("Package", ""), output))
+    return names
+
+
+def added_names(tagged, base):
+    # Compare within each package. -run cannot name a package, so an added
+    # name that a base test elsewhere shares would run that test twice.
+    added = {name for _, name in tagged - base}
+    shared = sorted(added & {name for _, name in base})
+    if shared:
+        sys.exit("rename tests the tag adds that share a name with a default test: " + ", ".join(shared))
+    return sorted(added)
+
+
+def without_tag(args, tag):
+    if "-tags" not in args:
+        sys.exit(f"CI_SHARD_ADDED_BY={tag} needs a -tags argument")
+    at = args.index("-tags")
+    tags = args[at + 1].split(",")
+    if tag not in tags:
+        sys.exit(f"CI_SHARD_ADDED_BY={tag} is not among -tags {args[at + 1]}")
+    # An explicit, possibly empty, -tags overrides any tags GOFLAGS adds.
+    rest = [name for name in tags if name != tag]
+    return args[:at] + ["-tags", ",".join(rest)] + args[at + 2:]
+
+
+def discover(command):
+    # Discovery compiles the same race/tagged packages and cannot silently lose
+    # a package that fails to build.
+    listing = subprocess.run(command + ["-list", "."], text=True, stdout=subprocess.PIPE)
+    if listing.returncode:
+        print(listing.stdout, end="")
+        sys.exit(listing.returncode)
+    return test_names(listing.stdout)
 
 
 def selected(names, args, index, count, balance=False):
@@ -66,19 +103,20 @@ def main():
     count = int(os.environ.get("CI_SHARD_COUNT", "1"))
     index = int(os.environ.get("CI_SHARD_INDEX", "0"))
     balance = os.environ.get("CI_SHARD_BALANCE", "")
+    added = os.environ.get("CI_SHARD_ADDED_BY", "")
     if count < 1 or not 0 <= index < count:
         sys.exit("invalid CI shard index/count")
     if balance not in ("", "long"):
         sys.exit("invalid CI shard balance mode")
-    if count == 1:
+    if count == 1 and not added:
         os.execvp(command[0], command)
-    # command is test-report.sh go test -json ...; discovery compiles the same
-    # race/tagged packages and cannot silently lose a package that fails to build.
-    listing = subprocess.run(command[1:] + ["-list", "."], text=True, stdout=subprocess.PIPE)
-    if listing.returncode:
-        print(listing.stdout, end="")
-        sys.exit(listing.returncode)
-    names = selected(test_names(listing.stdout), command[3:], index, count, balance == "long")
+    # command is test-report.sh go test -json ...
+    tagged = discover(command[1:])
+    if added:
+        names = added_names(tagged, discover(without_tag(command[1:], added)))
+    else:
+        names = sorted({name for _, name in tagged})
+    names = selected(names, command[3:], index, count, balance == "long")
     print(f"shard {index + 1}/{count}: {len(names)} top-level tests", flush=True)
     if not names:
         return

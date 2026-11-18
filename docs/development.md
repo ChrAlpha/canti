@@ -41,8 +41,8 @@ Cloning requires repository access while the repository is private.
 | `make native-deps` | Verify replacement provenance/reconstruction and run both upstream race suites |
 | `make isolation` | Copy runtime and SDK alone, then build and run their default tests without TUI source |
 | `make integration` | `go test -count=1 -race -tags integration ./...`: unit, Docker-backed, long-history and separate-executable acceptance tests |
-| `make ci-unit` | CI's race-enabled unit tests, without the `PTY_TESTS` of the Makefile |
-| `make ci-integration` | CI's `-tags integration` run without the `LONG_TESTS` and `PTY_TESTS` |
+| `make ci-unit` | CI's race-enabled unit tests, without the `LONG_TESTS` and `PTY_TESTS` of the Makefile |
+| `make ci-integration` | The tests that `-tags integration` adds, without the `LONG_TESTS` and `PTY_TESTS`; needs Docker |
 | `make ci-long` | The slow acceptance tests listed in `LONG_TESTS`; needs Docker |
 | `make ci-pty` | Serial native terminal and executable acceptance packages selected by `PTY_TESTS`; needs Docker |
 | `make test-names` | Check the test names of `LONG_TESTS`, `PTY_TESTS`, and the docs; needs Linux, where every test file builds |
@@ -634,7 +634,16 @@ longest first on the least loaded shard, using measured duration estimates in
 Estimates affect placement only; every selected top-level test, fuzz seed, and
 example belongs to exactly one shard, and its subtests stay together. The
 partition supports any positive shard count, including empty shards.
-Without shard variables the targets run their complete original suites.
+Without shard variables the targets run their complete lane selections.
+Each test of the default and integration builds also belongs to exactly one
+lane: `ci-unit` runs the default build without `LONG_TESTS` and `PTY_TESTS`,
+`ci-integration` only the tests that `-tags integration` adds, and `ci-long`
+and `ci-pty` their lists; live tests run only when explicitly requested.
+Default-build files compile identically under the tag, so a second run of a
+default test adds no evidence. `CI_SHARD_ADDED_BY=integration` makes
+integration discovery also list the build without the tag and compare the two
+within each package. Since `-run` cannot name a package, discovery fails on an
+added test that shares its name with a default test.
 Discovery uses the same race and build-tag flags and fails on a compilation
 error. Root-orchestrated executable acceptance uses the same shard runner and
 filters as its unit/integration/long lane; it is partitioned once across that lane,
