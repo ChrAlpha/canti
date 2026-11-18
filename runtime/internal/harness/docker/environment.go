@@ -94,6 +94,12 @@ type preparedContainer struct {
 	}
 }
 
+// ready reports a running container that is neither paused nor restarting,
+// where a new exec can start.
+func (c preparedContainer) ready() bool {
+	return c.State.Running && !c.State.Paused && !c.State.Restarting
+}
+
 // InitEnvironment prepares attachment metadata and a read-only versioned helper.
 // Existing initialized directories are never reset or assigned a new identity.
 func InitEnvironment(directory, helper string) error {
@@ -344,7 +350,7 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	return a, nil
 }
 func checkPrepared(dir, authorityID string, c preparedContainer) error {
-	if c.Config.Labels[authorityLabel] != authorityID || c.Config.Labels[controlLabel] != dir || !c.State.Running || c.State.Paused || c.State.Restarting || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
+	if c.Config.Labels[authorityLabel] != authorityID || c.Config.Labels[controlLabel] != dir || !c.ready() || c.HostConfig.AutoRemove || c.HostConfig.RestartPolicy.Name != "" && c.HostConfig.RestartPolicy.Name != "no" {
 		return errors.New("docker: prepared environment needs matching control label, running state, no auto-remove and no automatic restart")
 	}
 	return checkEnvironmentMounts(dir, mountProjection(c))
@@ -539,7 +545,7 @@ func EnvironmentWorkdir(ctx context.Context, a Attachment, workspace, state, req
 	if len(control.Requests) > 0 {
 		return "", gateError("quarantined")
 	}
-	if !c.State.Running || c.State.Paused || c.State.Restarting {
+	if !c.ready() {
 		return "", errors.New("docker: environment must be running and ready before admission; inspect or start it explicitly")
 	}
 	return cwd, nil

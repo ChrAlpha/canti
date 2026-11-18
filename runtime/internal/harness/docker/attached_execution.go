@@ -59,7 +59,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 	if err != nil {
 		return harness.Job{}, err
 	}
-	if !c.State.Running || c.State.Paused || c.State.Restarting || c.State.StartedAt.Format(time.RFC3339Nano) != r.Epoch {
+	if !c.ready() || c.State.StartedAt.Format(time.RFC3339Nano) != r.Epoch {
 		return harness.Job{}, errors.New("docker: environment start epoch changed before dispatch; cancel this accepted command")
 	}
 	if err = x.mirrorReference(*r); err != nil {

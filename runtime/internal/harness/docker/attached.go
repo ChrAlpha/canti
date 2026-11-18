@@ -285,7 +285,7 @@ func (x *Attached) reserve(ctx context.Context, e harness.Effect, s *environment
 	if err != nil {
 		return attachedRecord{}, err
 	}
-	if !c.State.Running || c.State.Paused || c.State.Restarting {
+	if !c.ready() {
 		return attachedRecord{}, errors.New("docker: prepared environment is stopped; start it explicitly")
 	}
 	s.Generation++

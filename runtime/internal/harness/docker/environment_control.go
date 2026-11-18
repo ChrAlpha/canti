@@ -86,7 +86,7 @@ func (x *Attached) recoverControl(ctx context.Context, s *environmentState) erro
 		switch {
 		case r.Kind == "environment_stop" && !c.State.Running:
 			s.Gate = "stopped"
-		case r.Kind == "environment_start" && c.State.Running && !c.State.Paused && !c.State.Restarting:
+		case r.Kind == "environment_start" && c.ready():
 			s.Gate = "open"
 			s.StartGeneration++
 		default:
