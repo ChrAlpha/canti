@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/ChrAlpha/canti/runtime/core"
 )
 
 func BenchmarkPrompt(b *testing.B) {
@@ -13,7 +15,9 @@ func BenchmarkPrompt(b *testing.B) {
 			f.Step, f.MaxSteps = n+1, 1000
 			f.RetrievalEnabled = true
 			for i := range n {
-				f.Receipts = append(f.Receipts, StepReceipt{Seq: int64((i + 1) * 5), Step: i + 1, Status: "exited", Purpose: strings.Repeat("check ", 180)})
+				code := 0
+				f.Steps = append(f.Steps, StepRecord{Seq: int64((i + 1) * 5), Step: i + 1, Purpose: strings.Repeat("check ", 180),
+					Observation: Observation{Execution: core.ExecutionExited, ExitCode: &code, Preview: strings.Repeat("out ", 64)}})
 			}
 			l := DefaultPromptLimits()
 			l.Total = 256 << 10

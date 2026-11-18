@@ -13,7 +13,7 @@ import (
 
 func boundaryScenarios() []frozenScenario {
 	return []frozenScenario{
-		{name: "maximum-read-and-transient-tail", limits: core.Limits{MaxSteps: 6, MaxAttempts: 3}, imports: map[string]string{"large": strings.Repeat("`", 8192)}, runs: []frozenRun{{id: corpusRun, goal: "Read a maximum fenced source.", replies: []string{corpusRetrieve("read", "/canti/imports/large", `,"limit":8192`, "Read fenced source."), corpusDecision(core.Exec, `canti:focus {"sources":[]}`), corpusDecision(core.Return, "Original bytes archived.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done focus 0 sources"}}}},
+		{name: "maximum-fenced-read", limits: core.Limits{MaxSteps: 6, MaxAttempts: 3}, imports: map[string]string{"large": strings.Repeat("`", 8192)}, runs: []frozenRun{{id: corpusRun, goal: "Read a maximum fenced source.", replies: []string{corpusRetrieve("read", "/canti/imports/large", `,"limit":8192`, "Read fenced source."), corpusDecision(core.Return, "Original bytes archived.")}, steps: []string{"1 done retrieval 1 sources 0 entries"}}}},
 	}
 }
 func corpusPurpose(kind core.Kind, purpose, payload string) string {

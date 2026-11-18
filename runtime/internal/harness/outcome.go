@@ -22,12 +22,12 @@ const (
 // process ran, so it has no execution state, exit code, or output. Detail
 // is a failure or refusal, clipped to actionFailureBytes and a truncation
 // marker; Retrieval is a performed read, also one the archive reports an
-// error for; Focus is an accepted replacement selection.
+// error for. A successful handover is the closed shape {Status: done}: its
+// note lives only in the committed payload and step command.
 type Outcome struct {
 	Status    OutcomeStatus
 	Detail    string             `json:",omitempty"`
 	Retrieval *archive.Retrieval `json:",omitempty"`
-	Focus     *FocusSelection    `json:",omitempty"`
 }
 
 const actionFailure, actionFailureBytes = "Context action failed: ", 2048
@@ -47,11 +47,11 @@ func (o Outcome) Validate() error {
 	}
 	switch o.Status {
 	case OutcomeDone:
-		if o.Detail == "" && (o.Retrieval != nil) != (o.Focus != nil) && (o.Retrieval == nil || o.Retrieval.Error == "") {
+		if o.Detail == "" && (o.Retrieval == nil || o.Retrieval.Error == "") {
 			return nil
 		}
 	case OutcomeFailed:
-		if o.Focus == nil && (o.Detail != "") != (o.Retrieval != nil) && (o.Retrieval == nil || o.Retrieval.Error != "") {
+		if (o.Detail != "") != (o.Retrieval != nil) && (o.Retrieval == nil || o.Retrieval.Error != "") {
 			return nil
 		}
 	}
@@ -77,13 +77,16 @@ func (r StepRecord) presented() Observation {
 	switch {
 	case o.Detail != "":
 		p.Preview = actionFailure + o.Detail
-	case o.Focus != nil:
-		p.Preview = fmt.Sprintf("Focus replaced with %d frozen source ranges.", len(o.Focus.Sources))
 	case o.Retrieval != nil:
 		refs := *o.Retrieval
 		refs.Evidence = nil
 		body, _ := json.Marshal(refs)
 		p.Preview = string(body)
+	case o.Status == OutcomeDone:
+		if _, success := handoverClaim(r.Command, o); success {
+			text, _ := HandoverText(r.Command)
+			p.Preview = fmt.Sprintf("Handover recorded: %d bytes.", len(text))
+		}
 	}
 	return p
 }
@@ -110,13 +113,19 @@ func (r StepRecord) Validate(semantics int, performed bool) error {
 		if err := r.Outcome.Validate(); err != nil {
 			return err
 		}
+		if r.Outcome.Status == OutcomeDone && r.Outcome.Retrieval == nil {
+			text, err := HandoverText(r.Command)
+			if err != nil || ValidateHandoverNote(text) != nil {
+				return errors.New("harness: a done local outcome without a retrieval is not a valid handover")
+			}
+		}
 		return nil
 	}
 	switch {
 	case r.Outcome != nil || r.Observation.Execution == "":
 		return errors.New("harness: an observed or resolved step needs an observation and no outcome or context mutation")
 	case r.Observation.Retrieval != nil:
-		return errors.New("harness: an observation of this version holds no retrieval or focus")
+		return errors.New("harness: an observation of this version holds no retrieval or handover")
 	}
 	return nil
 }

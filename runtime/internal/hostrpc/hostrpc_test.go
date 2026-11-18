@@ -41,13 +41,13 @@ func wireMessages() map[string]any {
 	code := 3
 	spec := Spec{Environment: "/environment", EnvironmentWorkdir: "/workspace/subdir", Ephemeral: true, Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
-		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, OutputBudget: 8, JobTimeout: "10m0s"}
+		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
 	run := Run{Ephemeral: true, Environment: &Environment{Directory: "/environment", ContainerID: "container_1", DaemonID: "daemon_1", Incarnation: 1, Workdir: "/workspace"}, RunID: "run_1",
 		InputID: "in_1", InputPos: 5, Fresh: true, Goal: "g", Constraints: "c", Status: StatusStopped, Phase: "stopped",
 		Step: 4, StopReason: "cancelled", Result: "r", EffectID: "effect_1", Cursor: "pos:9", ContextVersion: 13, API: "anthropic-messages",
 		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", PendingSteers: 2, Queued: 1, Held: 3,
 		Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4, Coverage: UsageCoverage{Attempts: 7, InputReports: 3, OutputReports: 4, Lost: 2}},
-		Budget: Budget{WallTime: "30m0s", Tokens: 5, OutputBytes: 6, JobTimeout: "10m0s"}}
+		Budget: Budget{WallTime: "30m0s", Tokens: 5, ContextTokens: 9, OutputBytes: 6, JobTimeout: "10m0s"}}
 	return map[string]any{
 		"request": Request{Validate: &Validation{State: "/state", Submission: Submission{Goal: "chat"}, Binding: Binding{Provider: "https://p.test"}}, Protocol: Protocol, Op: OpSubmit, RunID: "run_1", Cursor: "pos:5", Once: true, Limit: 6, TimeoutMS: 7, CleanupMS: 8,
 			Submit:   &Submission{InputID: "in_1", Goal: "g", Constraints: "c", ExplicitConstraints: true, Delivery: "steer", Fresh: true, Spec: spec},
@@ -61,11 +61,11 @@ func wireMessages() map[string]any {
 			Run:   &run,
 			Page: &Page{Next: "pos:9", More: true, Quiescent: true, Items: []Item{{Pos: 1, RunID: "run_1", Kind: "input", Input: &Input{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "steer", Text: "t"}},
 				{Pos: 2, RunID: "run_1", Kind: "inputs_bound", Step: 2, Inputs: 1}, {Pos: 3, RunID: "run_1", Seq: 2, Step: 1, Kind: "decided",
-					Command: `canti:focus {"sources":[{"seq":1,"source":0}]}`, Purpose: "p", Action: "focus"}, {Pos: 4, RunID: "run_1", Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
+					Command: "canti:handover phase one", Purpose: "p", Action: "handover"}, {Pos: 4, RunID: "run_1", Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
 					Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
-					Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, Focus: true, FocusSources: 2},
-					AnchorSeq: 5, StopReason: "cancelled", Failure: "f", SupersededBy: 3, Truncated: true}, {Pos: 5, RunID: "run_1", Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"},
-				{Pos: 6, Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, Truncated: true}}},
+					Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, HandoverBytes: 34},
+					AnchorSeq: 5, StopReason: "cancelled", Failure: "f", SupersededBy: 3, Truncated: true}, {Pos: 5, RunID: "run_1", Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"}, {Pos: 6, RunID: "run_1", Seq: 8, Step: 3, Kind: "context_anchored", AnchorSeq: 8},
+				{Pos: 7, Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, Truncated: true}}},
 			Inspection: &Inspection{RunID: "run_1", Cursor: "pos:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{DispatchedAt: "2026-11-07T00:00:00Z", Binding: &EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, Cessation: &Cessation{Binding: EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", StopIntent: "stop_1", Kind: "environment_stopped", RequestedAt: "2026-11-07T00:00:01Z", ConfirmedAt: "2026-11-07T00:00:02Z"}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
 			Wait:       &Wait{Cursor: "pos:9", Quiescent: true, Driver: DriverDriving}, Constraints: new(string),
 			Withdrawn: []Input{{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "withdrawn", Text: "t"}}},

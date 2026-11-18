@@ -66,7 +66,7 @@ func (l *Loop) frame(run Run, s core.State) Frame {
 }
 
 // CheckOrientation checks only the actual authoritative orientation, with no
-// reservation for future work, summaries, or hypothetical failure growth.
+// reservation for future work, handovers, or hypothetical failure growth.
 func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 	cfg, err := normalize(cfg)
 	if err != nil {
@@ -77,6 +77,7 @@ func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 		return err
 	}
 	f := (&Loop{cfg: cfg}).frame(run, state)
+	f.Budget, f.BudgetSource, _ = EffectiveBudget(run.Budget.ContextTokens, InitialContext())
 	limit := cfg.Limits.Total
 	cfg.Limits.Total = MaxRequestBytes
 	p, err := f.Prompt(cfg.Limits)
@@ -99,6 +100,15 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.refuse(ctx, snap, err)
 	}
 	p, err := f.Prompt(l.cfg.Limits)
+	var anchor *ContextState
+	if err == nil {
+		if f, anchor, err = l.budgetFrame(ctx, run, snap, f); err != nil {
+			return l.refuse(ctx, snap, err)
+		}
+		if anchor != nil {
+			p, err = f.Prompt(l.cfg.Limits)
+		}
+	}
 	var request Request
 	if err == nil {
 		request, err = l.model.Freeze(p)
@@ -110,7 +120,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	request.ContextState, request.Context = f.ContextState, f.capture
-	facts := Facts{Request: &request}
+	facts := Facts{Request: &request, ContextState: anchor}
 	if len(f.Delivered) > 0 {
 		delivered := &Delivered{Positions: make([]int64, 0, len(f.Delivered))}
 		for _, in := range f.Delivered {
@@ -168,31 +178,190 @@ func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, 
 	return f, nil
 }
 
-// fillFrame reads the instructions, observations, previous runs, focus,
-// receipts, latest completion, and repair text one request shows.
+// fillFrame reads the instructions, the resident epoch, the earlier-steps
+// index, usage, and the repair text one request shows.
 func (l *Loop) fillFrame(ctx context.Context, run Run, snap Snapshot, current ContextState, f *Frame) error {
-	if err := l.lineContext(ctx, run, f); err != nil {
-		return err
-	}
 	var err error
 	if f.Instructions, err = l.boundInstructions(ctx, run.ID, snap.State.Inputs); err != nil {
 		return err
 	}
-	if f.Observations, err = l.journal.Observations(ctx); err != nil {
-		return err
-	}
-	if f.Focused, err = l.focusedEvidence(ctx, run.ID, current.Focus, nil); err != nil {
-		return err
-	}
-	if f.Receipts, err = l.epochReceipts(ctx, snap, *f); err != nil {
-		return err
-	}
-	if snap.State.Step > 1 {
-		if f.Latest, err = l.completion(ctx, snap); err != nil {
+	if !current.Minimal {
+		if err := l.lineContext(ctx, run, f); err != nil {
+			return err
+		}
+		if f.Observations, err = l.journal.Observations(ctx); err != nil {
 			return err
 		}
 	}
+	if err := l.epochSteps(ctx, snap, f); err != nil {
+		return err
+	}
+	if snap.State.Step > 1 {
+		if len(f.Steps) > 0 {
+			f.Latest = &f.Steps[len(f.Steps)-1]
+		} else if f.Latest, err = l.completion(ctx, snap); err != nil {
+			return err
+		}
+	}
+	if !current.Minimal {
+		if err := l.earlierSteps(ctx, snap, f); err != nil {
+			return err
+		}
+	}
+	if f.PreviousUsage, err = l.previousUsage(ctx, snap); err != nil {
+		return err
+	}
+	f.Budget, f.BudgetSource, _ = EffectiveBudget(run.Budget.ContextTokens, current)
 	return l.repairFrame(ctx, run, snap, current, f)
+}
+
+// budgetFrame records the context budget decision of the request f rendered
+// under its head. When the request is projected over the budget and a
+// resident step can leave, it returns f narrowed to the budget anchor that
+// opens at the request's own sequence, from the same selected inputs, for the
+// caller to render again.
+func (l *Loop) budgetFrame(ctx context.Context, run Run, snap Snapshot, f Frame) (Frame, *ContextState, error) {
+	current := f.contextState()
+	tokens, source, ok := EffectiveBudget(run.Budget.ContextTokens, current)
+	if !ok || f.preparation == "protocol_repair" {
+		return f, nil, nil
+	}
+	usage, found, err := l.journal.ComparableUsage(ctx, run.ID, snap.Seq+1, current.AnchorSeq)
+	if err != nil || !found {
+		return f, nil, err
+	}
+	b := &ContextBudget{Tokens: tokens, Source: source, Input: usage.Input, InputSeq: usage.Seq, InputBytes: usage.Bytes, Bytes: f.capture.Bytes.Total}
+	b.Projected = b.projection()
+	steps := f.capture.Bytes.Steps
+	first := TailStep(steps, tokens)
+	if b.Projected <= tokens || first <= current.FirstStep {
+		f.capture.Budget = b
+		return f, nil, nil
+	}
+	head := ContextState{AnchorSeq: snap.Seq + 1, FirstStep: first, Minimal: current.Minimal, Rejection: current.Rejection}
+	b.Steps, b.Replaced = steps, &current
+	if f, err = l.reanchor(ctx, snap, f, head); err != nil {
+		return f, nil, err
+	}
+	f.capture.Budget = b
+	return f, &head, nil
+}
+
+// reanchor narrows f to head, a budget anchor that keeps the newest resident
+// steps from head.FirstStep: it drops the older steps from the epoch, reads
+// the index before the new first step, and captures the new head. The
+// instructions, observations and previous runs stay as f selected them.
+func (l *Loop) reanchor(ctx context.Context, snap Snapshot, f Frame, head ContextState) (Frame, error) {
+	current := f.contextState()
+	f.ContextState = &head
+	f.Steps = f.Steps[head.FirstStep-current.FirstStep:]
+	f.Index, f.IndexTotal = nil, 0
+	if !head.Minimal {
+		if err := l.earlierSteps(ctx, snap, &f); err != nil {
+			return f, err
+		}
+	}
+	f.captureFrame(head, snap)
+	return f, nil
+}
+
+// epochSteps loads the resident completions in bounded pages, checking the
+// rendered total as it goes, so an unbounded epoch is never materialized.
+func (l *Loop) epochSteps(ctx context.Context, snap Snapshot, f *Frame) error {
+	c := f.contextState()
+	count := snap.State.Step - c.FirstStep
+	if count < 0 {
+		return contextError{errors.New("harness: epoch starts after the execution position")}
+	}
+	if count == 0 {
+		return nil
+	}
+	steps := make([]StepRecord, 0, count)
+	rendered := 0
+	for before := snap.Seq + 1; len(steps) < count; {
+		limit := min(count-len(steps), historyPage)
+		page, err := l.journal.Recent(ctx, snap.State.RunID, before, limit)
+		if err != nil {
+			return err
+		}
+		if len(page) == 0 {
+			return contextError{fmt.Errorf("harness: the epoch lacks the completion before step %d", snap.State.Step-len(steps))}
+		}
+		for i := len(page) - 1; i >= 0 && len(steps) < count; i-- {
+			record := page[i]
+			if record.Step < c.FirstStep || record.Step >= snap.State.Step {
+				break
+			}
+			rendered += len(f.epochStep(record, l.cfg.Limits))
+			if rendered > l.cfg.Limits.Total {
+				return contextError{fmt.Errorf("harness: resident steps exceed the %d-byte request resource cap", l.cfg.Limits.Total)}
+			}
+			steps = append(steps, record)
+		}
+		if len(page) < limit || page[0].Step <= c.FirstStep {
+			break
+		}
+		before = page[0].Seq
+	}
+	if len(steps) != count {
+		return contextError{fmt.Errorf("harness: %d of %d resident steps have no committed completion", count-len(steps), count)}
+	}
+	slices.Reverse(steps)
+	f.Steps = steps
+	return nil
+}
+
+// earlierSteps reads the newest uncovered steps before the epoch and keeps
+// their count; the renderer selects the lines that fit the section.
+func (l *Loop) earlierSteps(ctx context.Context, snap Snapshot, f *Frame) error {
+	c := f.contextState()
+	if c.AnchorSeq == 0 || c.FirstStep <= 1 {
+		return nil
+	}
+	total := c.FirstStep - 1
+	if total <= 0 {
+		return nil
+	}
+	if f.Latest == nil {
+		return contextError{errors.New("harness: the earlier-steps index has no completion to page from")}
+	}
+	before := f.Latest.Seq + 1
+	if f.Latest.Step != c.FirstStep-1 {
+		record, err := l.journal.CompletionAtStep(ctx, snap.State.RunID, c.FirstStep-1)
+		if errors.Is(err, ErrNotFound) {
+			return contextError{fmt.Errorf("harness: the step before the epoch has no completion: %v", err)}
+		}
+		if err != nil {
+			return err
+		}
+		before = record.Seq + 1
+	}
+	page, err := l.journal.Receipts(ctx, snap.State.RunID, before, min(total, IndexSteps))
+	if err != nil {
+		return err
+	}
+	index := make([]StepReceipt, 0, len(page))
+	for _, r := range page {
+		if r.Step < c.FirstStep {
+			index = append(index, r)
+		}
+	}
+	f.Index, f.IndexTotal = index, total
+	return nil
+}
+
+// previousUsage reads the previous frozen request revision's last settled
+// attempt; it never substitutes older usage.
+func (l *Loop) previousUsage(ctx context.Context, snap Snapshot) (*int64, error) {
+	usage, found, err := l.journal.PriorUsage(ctx, snap.State.RunID, snap.Seq+1)
+	if err != nil {
+		return nil, err
+	}
+	if !found || !usage.InputReported {
+		return nil, nil
+	}
+	tokens := usage.InputTokens
+	return &tokens, nil
 }
 
 // repairFrame records why the request is prepared and, for a protocol repair,
@@ -202,7 +371,11 @@ func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current 
 	if snap.State.RequestRev == 0 {
 		return nil
 	}
-	if snap.Seq == current.AnchorSeq {
+	rejected, err := l.retriesRejection(ctx, run, snap, current)
+	if err != nil {
+		return err
+	}
+	if rejected {
 		f.preparation = "request_rejected"
 		return nil
 	}
@@ -220,33 +393,42 @@ func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current 
 	return nil
 }
 
-// captureFrame records the provenance of what the frozen request includes.
+// retriesRejection reports whether the request prepared at snap retries a
+// confirmed overflow: the head was opened by a rejection at this step and no
+// request has been frozen since. Inputs bound after the rejection do not make
+// the retry a protocol repair.
+func (l *Loop) retriesRejection(ctx context.Context, run Run, snap Snapshot, current ContextState) (bool, error) {
+	r := current.Rejection
+	if r == nil || r.Seq != current.AnchorSeq || r.Step != snap.State.Step {
+		return false, nil
+	}
+	prior, err := l.journal.PriorRequest(ctx, run.ID, snap.Seq+1)
+	return prior < current.AnchorSeq, err
+}
+
+// captureFrame records the provenance of what the frozen request includes:
+// the head, the position, and every resident retrieval.
 func (f *Frame) captureFrame(current ContextState, snap Snapshot) {
-	f.capture = &ContextCapture{Anchor: current, Focus: current.Focus, Preparation: f.preparation, PreviousRun: f.previousRun}
+	f.capture = &ContextCapture{Anchor: current, Preparation: f.preparation, PreviousRun: f.previousRun}
 	if f.Latest != nil {
 		f.capture.LatestStep, f.capture.LatestSeq = f.Latest.Step, f.Latest.Seq
 	}
-	for _, selected := range f.Focused {
-		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: selected.Ref.SourceSeq, Step: selected.Ref.Step, Index: selected.Ref.Source,
-			Source: archive.SourceRange{Path: selected.Path, Offset: selected.Offset, Length: selected.Ref.Length, SHA256: selected.Ref.SHA256}, Selected: true})
+	for _, record := range f.Steps {
+		retrieval := record.retrieval()
+		if retrieval == nil {
+			continue
+		}
+		captured := ContextRetrieval{Seq: record.Seq, Step: record.Step, Operation: retrieval.Query.Operation,
+			More: retrieval.More, Incomplete: retrieval.Incomplete, NextOffset: retrieval.NextOffset,
+			NextCursor: clip(retrieval.NextCursor, 512), Error: clip(retrieval.Error, 512)}
+		captured.Operation = captured.OperationName()
+		f.capture.Retrievals = append(f.capture.Retrievals, captured)
+		for i, source := range retrieval.Sources {
+			f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: record.Seq, Step: record.Step, Index: i, Source: source})
+		}
 	}
-	if f.Latest != nil && f.Latest.Seq > current.AnchorSeq {
-		f.captureLatestRetrieval(current)
-	}
-	f.capture.OrientationOnly = len(f.Receipts) == 0 && len(current.Focus) == 0 && f.Rejected == nil && (f.Latest == nil || f.Latest.Seq <= current.AnchorSeq)
-}
-
-func (f *Frame) captureLatestRetrieval(current ContextState) {
-	retrieval := f.Latest.retrieval()
-	if retrieval == nil {
-		return
-	}
-	captured := ContextRetrieval{Seq: f.Latest.Seq, Step: f.Latest.Step, Operation: retrieval.Query.Operation, More: retrieval.More, Incomplete: retrieval.Incomplete, Error: clip(retrieval.Error, 512)}
-	captured.Operation = captured.OperationName()
-	f.capture.Retrievals = append(f.capture.Retrievals, captured)
-	for i, source := range retrieval.Sources {
-		f.capture.Sources = append(f.capture.Sources, ContextSource{Seq: f.Latest.Seq, Step: f.Latest.Step, Index: i, Source: source})
-	}
+	optional := len(f.Index) > 0 || len(f.Previous) > 0 || len(f.Observations) > 0
+	f.capture.OrientationOnly = len(f.Steps) == 0 && f.Rejected == nil && (current.Minimal || !optional)
 }
 
 // boundInstructions returns the first count principal steers of the run, in
@@ -270,39 +452,6 @@ func (l *Loop) boundInstructions(ctx context.Context, runID string, count int) (
 	return out, nil
 }
 
-func (l *Loop) epochReceipts(ctx context.Context, snap Snapshot, f Frame) ([]StepReceipt, error) {
-	count := snap.State.Step - f.contextState().FirstStep
-	var out []StepReceipt
-	used := 0
-	for before := snap.Seq + 1; len(out) < count; {
-		limit := min(historyPage, count-len(out))
-		page, err := l.journal.Receipts(ctx, snap.State.RunID, before, limit)
-		if err != nil {
-			return nil, err
-		}
-		for i := len(page) - 1; i >= 0; i-- {
-			record := page[i]
-			if record.Step < f.contextState().FirstStep {
-				break
-			}
-			if record.Step >= snap.State.Step {
-				return nil, contextError{errors.New("harness: receipt exceeds execution position")}
-			}
-			used += len(f.receipt(record, l.cfg.Limits))
-			if used > l.cfg.Limits.Total {
-				return nil, contextError{fmt.Errorf("harness: receipts exceed %d-byte request resource cap", l.cfg.Limits.Total)}
-			}
-			out = append(out, record)
-		}
-		if len(page) < limit || len(page) == 0 || page[0].Step <= f.contextState().FirstStep {
-			break
-		}
-		before = page[0].Seq
-	}
-	slices.Reverse(out)
-	return out, nil
-}
-
 func (l *Loop) reject(ctx context.Context, snap Snapshot, request Request, response Response, signal *ContextLimitError) (Snapshot, error) {
 	current, err := l.journal.Context(ctx, snap)
 	if err != nil {
@@ -311,9 +460,30 @@ func (l *Loop) reject(ctx context.Context, snap Snapshot, request Request, respo
 	if request.ContextState == nil || !request.ContextState.Equal(current) {
 		return snap, contextError{errors.New("harness: rejected request context differs from current head")}
 	}
-	rejection := &ContextRejection{Previous: current, Signal: *signal}
-	if request.Context != nil && request.Context.OrientationOnly {
-		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Response: &response, Failure: "provider rejected authoritative orientation in fresh context: " + signal.Error(), Rejection: rejection})
+	if request.Context == nil {
+		return snap, contextError{errors.New("harness: rejected request has no context capture")}
+	}
+	maxInput, reported, err := l.journal.MaxAcceptedInput(ctx, snap.State.RunID, snap.Seq)
+	if err != nil {
+		return snap, err
+	}
+	capture := request.Context
+	rejection := &ContextRejection{
+		Previous: current, Signal: *signal,
+		EpochSteps:          len(capture.Bytes.Steps),
+		Repair:              capture.Preparation == "protocol_repair",
+		OptionalContent:     capture.Bytes.Index > 0 || capture.Bytes.Previous > 0 || capture.Bytes.Observations > 0,
+		Minimal:             capture.Anchor.Minimal,
+		MaxAcceptedInput:    maxInput,
+		MaxAcceptedReported: reported,
+	}
+	head, class := rejection.Head(snap.Seq+1, snap.State.Step, current)
+	if class != RejectionOpensHead {
+		failure := "provider rejected authoritative orientation: " + signal.Error()
+		if class == RejectionTerminalMinimal {
+			failure = "provider rejected the minimal context (authoritative orientation plus the omission notice): " + signal.Error()
+		}
+		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Response: &response, Failure: failure, Rejection: rejection})
 	}
 	event := core.RequestRejected{Step: snap.State.Step, Attempt: snap.State.Attempt}
 	next, err := snap.State.Next(event)
@@ -322,7 +492,7 @@ func (l *Loop) reject(ctx context.Context, snap Snapshot, request Request, respo
 	}
 	facts := Facts{Response: &response, Failure: signal.Error(), Rejection: rejection}
 	if next.Phase == core.PhaseIdle {
-		facts.ContextState = &ContextState{AnchorSeq: snap.Seq + 1, FirstStep: snap.State.Step}
+		facts.ContextState = &head
 	}
 	return l.runner.Commit(ctx, snap, event, facts)
 }

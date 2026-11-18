@@ -149,12 +149,13 @@ const (
 	ItemStopRequested   ItemKind = "stop_requested" // a persistent stop was recorded
 	ItemRecovered       ItemKind = "effect_recovered"
 	ItemNeedsResolution ItemKind = "needs_resolution" // an effect's outcome is unknown
-	ItemContextReset    ItemKind = "context_reset"
-	ItemStopped         ItemKind = "stopped"      // the run stopped
-	ItemInput           ItemKind = "input"        // an admitted principal instruction or observation
-	ItemWithdrawn       ItemKind = "withdrawn"    // a withdrawal of held principal inputs
-	ItemInputsBound     ItemKind = "inputs_bound" // principal instructions were bound to a run
-	ItemRunStarted      ItemKind = "run_started"  // a run's first committed transition
+	ItemContextReset    ItemKind = "context_reset"    // a provider rejection opened an empty epoch
+	ItemContextAnchored ItemKind = "context_anchored" // a request opened a budget anchor
+	ItemStopped         ItemKind = "stopped"          // the run stopped
+	ItemInput           ItemKind = "input"            // an admitted principal instruction or observation
+	ItemWithdrawn       ItemKind = "withdrawn"        // a withdrawal of held principal inputs
+	ItemInputsBound     ItemKind = "inputs_bound"     // principal instructions were bound to a run
+	ItemRunStarted      ItemKind = "run_started"      // a run's first committed transition
 )
 
 // InputItem is one admitted input as progress reports it, with bounded text.
@@ -207,7 +208,9 @@ type Item struct {
 }
 
 // Outcome is the result of a local action as progress reports it: its
-// status and detail, and what a read found, without the evidence.
+// status and detail, what a read found without the evidence, and the byte
+// count derived from a successful handover's committed payload. A done local
+// outcome with no detail and no retrieval is the handover shape.
 type Outcome struct {
 	Status         harness.OutcomeStatus
 	Detail         string
@@ -215,8 +218,7 @@ type Outcome struct {
 	RetrievalError string
 	Sources        int
 	Entries        int
-	Focus          bool
-	FocusSources   int
+	HandoverBytes  int
 }
 
 // Cursor is an opaque agent-log position. It names no run: the log spans
@@ -379,12 +381,17 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 			it.Kind = ItemContextReset
 		}
 		shown |= sqlite.ProgressFailure
+	case "request_frozen":
+		if r.AnchorSeq == 0 {
+			return it, false
+		}
+		it.Kind, it.AnchorSeq = ItemContextAnchored, r.AnchorSeq
 	case "inputs_bound":
 		it.Kind, it.Inputs = ItemInputsBound, r.Inputs
 	case "performed":
 		it.Kind, it.Local, it.AnchorSeq, it.Command = ItemCompleted, true, r.AnchorSeq, r.Decision.Payload
 		it.Outcome = &Outcome{Status: harness.OutcomeStatus(r.Outcome), Detail: r.OutcomeDetail, Retrieval: r.Retrieval,
-			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, Focus: r.Focus, FocusSources: r.FocusSources}
+			RetrievalError: r.RetrievalError, Sources: r.Sources, Entries: r.Entries, HandoverBytes: r.HandoverBytes}
 		shown |= sqlite.ProgressPayload | sqlite.ProgressOutcomeDetail | sqlite.ProgressRetrievalError
 	case "observed", "resolved":
 		it.Kind, it.Resolved, it.Command = ItemCompleted, r.ResolutionSource == harness.ResolutionOperator, r.Decision.Payload

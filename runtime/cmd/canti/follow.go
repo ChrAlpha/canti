@@ -112,6 +112,8 @@ func render(w io.Writer, it hostrpc.Item) {
 		fmt.Fprintf(w, "↳ %d instruction(s) bound before step %d\n", it.Inputs, it.Step)
 	case it.Kind == "context_reset":
 		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
+	case it.Kind == "context_anchored":
+		fmt.Fprintf(w, "↳ context anchored at sequence %d within the context budget; step %d continues with the most recent steps\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":
 		fmt.Fprintf(w, "$ %s\n", strings.Join(excerpt(it.Command, false), "\n  "))
 	case it.Kind == "completed" && it.Outcome != nil:
@@ -163,8 +165,8 @@ func outcomeSummary(o hostrpc.Outcome) string {
 		return "retrieval error: " + o.RetrievalError
 	case o.Retrieval:
 		return fmt.Sprintf("retrieved %d sources and %d directory entries", o.Sources, o.Entries)
-	case o.Focus:
-		return fmt.Sprintf("focus replaced with %d frozen sources", o.FocusSources)
+	case o.Status == "done" && o.Detail == "" && !o.Retrieval:
+		return fmt.Sprintf("handover recorded: %d bytes", o.HandoverBytes)
 	}
 	return ""
 }

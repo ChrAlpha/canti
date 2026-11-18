@@ -138,6 +138,8 @@ func TestActionMatchesItsPayloadByStableRules(t *testing.T) {
 		{Action{Name: ActionCommand, Recovery: RecoveryExternal}, "canti:retrieve {}", false},
 		{Action{Name: ActionCommand, Recovery: RecoveryExternal}, " canti:x", false},
 		{NormalizeAction("canti:x", true), "make", false},
+		{NormalizeAction("canti:handover text", true), "canti:handover text", true},
+		{NormalizeAction("canti:handover text", true), "canti:handover", false},
 		{Action{Name: ActionUnknown, Recovery: RecoveryLocal, Args: len("canti:handover-carry "), Invalid: codeUnknownAction}, "canti:handover-carry text", true},
 		{Action{Name: ActionUnknown, Recovery: RecoveryLocal, Args: len(RetrievePrefix), Invalid: codeUnknownAction}, "canti:retrieve {}", true},
 		{Action{Name: ActionRetrieve, Recovery: RecoveryRead, Args: 99}, "canti:retrieve {}", false},
@@ -153,7 +155,7 @@ func TestActionMatchesItsPayloadByStableRules(t *testing.T) {
 // recorded action.
 
 func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
-	for _, payload := range []string{"go test ./...", "echo canti:focus", "CANTI:focus {}", "# canti:discovery\nfind /canti/runs", "canti:focus {\"sources\":[]}", " canti:retrieve {}", "canti:handover next", "canti:handover-carry {}", "canti:unknown", "canti:retrieve{}"} {
+	for _, payload := range []string{"go test ./...", "echo canti:focus", "CANTI:focus {}", "# canti:discovery\nfind /canti/runs", "canti:focus {\"sources\":[]}", " canti:retrieve {}", "canti:handover next", "canti:handover\nnext", "canti:handover-carry {}", "canti:unknown", "canti:retrieve{}"} {
 		a := NormalizeAction(payload, true)
 		if err := a.Validate(); err != nil {
 			t.Fatal(err)
@@ -165,12 +167,15 @@ func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 		if reserved == (a.Recovery == RecoveryExternal) {
 			t.Fatalf("namespace escaped: %q %+v", payload, a)
 		}
-		if strings.Contains(payload, "handover") && (a.Name != ActionUnknown || a.Invalid != codeUnknownAction) {
-			t.Fatalf("legacy action active: %+v", a)
+		if strings.Contains(payload, "canti:handover") && a.Name != ActionHandover && (a.Name != ActionUnknown || a.Invalid != codeUnknownAction) {
+			t.Fatalf("retired handover word active: %+v", a)
 		}
 	}
-	a := NormalizeAction("canti:focus {}", false)
-	if a.Name != ActionFocus || a.Recovery != RecoveryLocal {
+	a := NormalizeAction("canti:handover next", false)
+	if a.Name != ActionHandover || a.Recovery != RecoveryLocal {
+		t.Fatalf("handover=%+v", a)
+	}
+	if a := NormalizeAction("canti:focus {}", false); a.Name != ActionUnknown || a.Invalid != codeUnknownAction {
 		t.Fatalf("focus=%+v", a)
 	}
 	if a := NormalizeAction("canti:retrieve {}", false); a.Invalid != codeRetrievalDisabled {
@@ -178,14 +183,14 @@ func TestNormalizeActionReadsTheReservedNamespace(t *testing.T) {
 	}
 }
 func TestActionValidateAcceptsOnlyNormalizedReadings(t *testing.T) {
-	for _, a := range []Action{{}, {Name: ActionCommand, Recovery: RecoveryLocal}, {Name: ActionFocus, Recovery: RecoveryExternal, Args: 12}, {Name: ActionRetrieve, Recovery: RecoveryRead}, {Name: ActionUnknown, Recovery: RecoveryLocal, Args: 6}, {Name: ActionUnknown, Recovery: RecoveryLocal, Args: -1, Invalid: codeUnknownAction}} {
+	for _, a := range []Action{{}, {Name: ActionCommand, Recovery: RecoveryLocal}, {Name: ActionHandover, Recovery: RecoveryExternal, Args: 12}, {Name: ActionRetrieve, Recovery: RecoveryRead}, {Name: ActionUnknown, Recovery: RecoveryLocal, Args: 6}, {Name: ActionUnknown, Recovery: RecoveryLocal, Args: -1, Invalid: codeUnknownAction}} {
 		if a.Validate() == nil {
 			t.Fatalf("invalid action accepted: %+v", a)
 		}
 	}
 }
 func TestActionEncodingIsBounded(t *testing.T) {
-	for _, name := range []string{"make", "canti:retrieve {}", "canti:focus {}", "canti:unknown"} {
+	for _, name := range []string{"make", "canti:retrieve {}", "canti:handover text", "canti:unknown"} {
 		a := NormalizeAction(name, true)
 		if a.Args > 0 {
 			a.Args = math.MaxInt
@@ -197,18 +202,32 @@ func TestActionEncodingIsBounded(t *testing.T) {
 	}
 }
 func TestCheckEffectProvesEachCompletionFromItsAcceptance(t *testing.T) {
-	for _, payload := range []string{"canti:retrieve {}", "canti:focus {}", "canti:unknown", "make"} {
+	for _, payload := range []string{"canti:retrieve {}", "canti:handover text", "canti:unknown", "make"} {
 		action := NormalizeAction(payload, true)
 		accepted := Accepted{Semantics: core.SemanticsVersion, Action: action}
 		if action.Recovery == RecoveryExternal {
 			accepted.Execution = &ExecutionIdentity{Spec: ConfigDigest([]byte("spec")), ConfigDigest: ConfigDigest(nil)}
 		}
-		for _, o := range []Outcome{{Status: OutcomeDone, Retrieval: &archive.Retrieval{}}, {Status: OutcomeDone, Focus: &FocusSelection{}}, {Status: OutcomeFailed, Detail: unknownAction}} {
+		for _, o := range []Outcome{
+			{Status: OutcomeDone, Retrieval: &archive.Retrieval{}},
+			{Status: OutcomeDone},
+			{Status: OutcomeFailed, Detail: unknownAction},
+			{Status: OutcomeFailed, Retrieval: &archive.Retrieval{Error: "unreadable"}},
+		} {
 			tr := Transition{From: core.State{RunID: "r", Step: 2, Phase: core.PhaseEffectSaved, EffectID: "effect", Decision: core.Decision{Kind: core.Exec, Payload: payload}}, Event: core.Performed{EffectID: "effect"}, Facts: Facts{Outcome: &o}}
-			if o.Focus != nil {
-				tr.Facts.ContextState = &ContextState{FirstStep: 1}
+			_, handoverOutcome := handoverClaim(payload, &o)
+			if handoverOutcome {
+				tr.Facts.ContextState = &ContextState{AnchorSeq: 3, FirstStep: 3}
 			}
-			ok := action.Name == ActionRetrieve && o.Focus == nil || action.Name == ActionFocus && o.Retrieval == nil || action.Name == ActionUnknown && o.Status == OutcomeFailed
+			ok := false
+			switch {
+			case action.Invalid != "":
+				ok = o.Status == OutcomeFailed && o.Detail == problemText(action.Invalid) && o.Retrieval == nil
+			case action.Name == ActionRetrieve:
+				ok = (o.Status == OutcomeFailed || o.Retrieval != nil) && tr.Facts.ContextState == nil
+			case action.Name == ActionHandover:
+				ok = handoverOutcome || o.Status == OutcomeFailed && o.Detail != "" && o.Retrieval == nil && tr.Facts.ContextState == nil
+			}
 			if err := CheckEffect(tr, accepted, nil); (err == nil) != ok {
 				t.Fatalf("%s outcome=%+v error=%v", payload, o, err)
 			}

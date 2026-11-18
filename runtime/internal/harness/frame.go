@@ -18,18 +18,24 @@ type Frame struct {
 	RunID                                          string
 	Rejected                                       *Rejection
 	ContextState                                   *ContextState
-	Receipts                                       []StepReceipt
+	Steps                                          []StepRecord
+	Instructions                                   []Instruction
+	Index                                          []StepReceipt
+	IndexTotal                                     int
 	Latest                                         *StepRecord
 	DecisionTool, RetrievalEnabled, ImportsEnabled bool
-	Instructions                                   []Instruction
 	Observations                                   []ObservationInput
 	Delivered                                      []Input
 	Previous                                       []PreviousRun
 	PreviousMore                                   int
-	Focused                                        []FocusedEvidence
-	capture                                        *ContextCapture
-	previousRun                                    string
-	preparation                                    string
+	PreviousUsage                                  *int64
+	// Budget is the context budget of the request and BudgetSource where it
+	// comes from; zero when there is none.
+	Budget       int64
+	BudgetSource string
+	capture      *ContextCapture
+	previousRun  string
+	preparation  string
 }
 
 // Instruction is one principal instruction bound to the run, with the
@@ -48,8 +54,22 @@ type Instruction struct {
 type Rejection struct{ Error, Response string }
 
 // Validate checks the minimum information needed to construct a model input
-// and that receipts account for every completed step since the anchor.
+// and that the resident steps account for every completed step since the
+// anchor.
 func (f Frame) Validate() error {
+	if err := f.validatePosition(); err != nil {
+		return err
+	}
+	if err := f.validateResident(); err != nil {
+		return err
+	}
+	if err := f.validateIndex(); err != nil {
+		return err
+	}
+	return f.validateInputs()
+}
+
+func (f Frame) validatePosition() error {
 	if strings.TrimSpace(f.Goal) == "" || strings.TrimSpace(f.Environment) == "" || strings.TrimSpace(f.RunID) == "" {
 		return errors.New("harness: frame goal, environment and run ID are required")
 	}
@@ -62,6 +82,10 @@ func (f Frame) Validate() error {
 	if f.Rejected != nil && f.Attempt < 2 {
 		return errors.New("harness: repair requires a prior attempt")
 	}
+	return nil
+}
+
+func (f Frame) validateResident() error {
 	if f.ContextState == nil {
 		return errors.New("harness: frame context state is required")
 	}
@@ -69,19 +93,39 @@ func (f Frame) Validate() error {
 	if c.FirstStep < 1 || c.FirstStep > f.Step {
 		return errors.New("harness: invalid frame anchor")
 	}
-	if len(f.Receipts) != f.Step-c.FirstStep {
-		return fmt.Errorf("harness: missing receipts between anchor step %d and step %d", c.FirstStep, f.Step)
+	if len(f.Steps) != f.Step-c.FirstStep {
+		return fmt.Errorf("harness: missing resident steps between anchor step %d and step %d", c.FirstStep, f.Step)
 	}
-	for i, r := range f.Receipts {
-		if r.Step != c.FirstStep+i || r.Seq <= c.AnchorSeq {
-			return errors.New("harness: invalid receipt identity or anchor boundary")
+	for i, r := range f.Steps {
+		if r.Step != c.FirstStep+i {
+			return errors.New("harness: invalid resident step identity")
 		}
 	}
 	if f.Latest != nil && f.Latest.Step != f.Step-1 {
 		return errors.New("harness: latest result is not the previous completed step")
 	}
-	if err := f.validateInputs(); err != nil {
-		return err
+	return nil
+}
+
+func (f Frame) validateIndex() error {
+	c := f.contextState()
+	if c.AnchorSeq == 0 && (len(f.Index) > 0 || f.IndexTotal != 0) {
+		return errors.New("harness: the initial head holds no index")
+	}
+	if c.Minimal && len(f.Index) > 0 {
+		return errors.New("harness: a minimal head reads no index")
+	}
+	last := 0
+	for _, r := range f.Index {
+		// The completion at the anchor sequence is the handover step itself;
+		// every other indexed completion precedes the anchor.
+		if r.Step <= last || r.Step >= c.FirstStep || r.Seq > c.AnchorSeq || r.Step < 1 {
+			return errors.New("harness: invalid earlier-step entry")
+		}
+		last = r.Step
+	}
+	if f.IndexTotal < len(f.Index) || f.IndexTotal > 0 && len(f.Index) == 0 {
+		return fmt.Errorf("harness: invalid earlier-step total %d for %d entries", f.IndexTotal, len(f.Index))
 	}
 	return nil
 }

@@ -1601,7 +1601,7 @@ func TestStopAndInspectedResolutionReuseTheAcceptedExecutionConfiguration(t *tes
 	}
 }
 
-func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t *testing.T) {
+func TestProgressPublishesHandoverAndProviderResetWithoutAdvancingTheRejectedStep(t *testing.T) {
 	h := testHost(t, Options{})
 	var mu sync.Mutex
 	var id string
@@ -1621,7 +1621,7 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 		case 1:
 			decision = core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/runs/%s/goal","reason":"retain original task"}`, id)}
 		case 2:
-			decision = core.Decision{Kind: core.Exec, Payload: `canti:focus {"sources":[{"seq":5,"source":0}]}`}
+			decision = core.Decision{Kind: core.Exec, Payload: "canti:handover phase one done"}
 		}
 		text, _ := json.Marshal(decision)
 		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
@@ -1639,17 +1639,17 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 	if err != nil || snap.State.Phase != core.PhaseReturned || snap.State.Step != 3 {
 		t.Fatalf("drive=%+v %v", snap, err)
 	}
-	focus, reset := 0, 0
+	handover, reset := 0, 0
 	for after := Cursor(0); ; {
 		page, err := h.Progress(context.Background(), after, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, item := range page.Items {
-			if item.Outcome != nil && item.Outcome.Focus {
-				focus++
-				if item.Step != 2 || item.Outcome.FocusSources != 1 {
-					t.Fatalf("focus=%+v", item)
+			if item.Outcome != nil && item.Outcome.HandoverBytes > 0 {
+				handover++
+				if item.Step != 2 || item.Outcome.HandoverBytes != len("phase one done") {
+					t.Fatalf("handover=%+v", item)
 				}
 			}
 			if item.Kind == ItemContextReset {
@@ -1665,8 +1665,67 @@ func TestProgressPublishesFocusAndProviderResetWithoutAdvancingTheRejectedStep(t
 		}
 	}
 	view, err := h.View(context.Background(), id)
-	if err != nil || focus != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
-		t.Fatalf("projection lost reset/focus/unknown usage: focus=%d reset=%d view=%+v error=%v", focus, reset, view, err)
+	if err != nil || handover != 1 || reset != 1 || view.Totals.Steps != 2 || view.Totals.Coverage != (harness.UsageCoverage{Attempts: 4, InputReports: 3, OutputReports: 3}) {
+		t.Fatalf("projection lost reset/handover/unknown usage: handover=%d reset=%d view=%+v error=%v", handover, reset, view, err)
+	}
+}
+
+func TestProgressPublishesABudgetAnchorAndTheRunKeepsItsBudget(t *testing.T) {
+	h := testHost(t, Options{})
+	var mu sync.Mutex
+	var id string
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		decision, input := core.Decision{Kind: core.Return, Payload: "done"}, 10
+		if calls < 6 {
+			decision = core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/runs/%s/goal","reason":"read %d"}`, id, calls)}
+		}
+		if calls == 4 {
+			input = 1000
+		}
+		text, _ := json.Marshal(decision)
+		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": input, "output_tokens": 1}})
+	}))
+	defer server.Close()
+	spec := testSpec(h)
+	spec.Budget.ContextTokens = 1000
+	ack := submit(t, h, Submission{Binding: binding(server.URL), Spec: spec})
+	mu.Lock()
+	id = ack.Run.ID
+	mu.Unlock()
+	drive, err := h.Drive(context.Background(), id, binding(server.URL), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap, err := drive.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("drive=%+v %v", snap, err)
+	}
+	var anchored []Item
+	for after := Cursor(0); ; {
+		page, err := h.Progress(context.Background(), after, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.Kind == ItemContextAnchored {
+				anchored = append(anchored, item)
+			}
+		}
+		after = page.Next
+		if !page.More {
+			break
+		}
+	}
+	if len(anchored) != 1 || anchored[0].Step != 5 || anchored[0].AnchorSeq != anchored[0].Seq {
+		t.Fatalf("budget anchors in progress = %+v", anchored)
+	}
+	view, err := h.View(context.Background(), id)
+	if err != nil || view.Run.Budget.ContextTokens != 1000 {
+		t.Fatalf("the run lost its context budget: %+v %v", view.Run.Budget, err)
 	}
 }
 
@@ -1684,6 +1743,20 @@ func persistentSpec(h *Host) Spec {
 		Helper: "/canti/bin/" + hash + "/canti-job", HelperDigest: hash, User: "1000:1000", Home: "/home/developer", Path: "/usr/local/bin:/usr/bin:/bin", AdmissionEpoch: "epoch-1",
 		Mounts: []docker.EnvironmentMount{{Type: "bind", Source: c.Workspace, Target: "/workspace", Writable: true}, {Type: "bind", Source: filepath.Join(c.Environment, "public"), Target: "/canti"}, {Type: "bind", Source: filepath.Join(c.Environment, "spool"), Target: "/var/lib/canti/jobs", Writable: true}}}
 	return s
+}
+
+func TestNewRunRefusesANegativeContextBudget(t *testing.T) {
+	h := testHost(t, Options{})
+	spec := testSpec(h)
+	spec.Budget.ContextTokens = -1
+	if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil {
+		t.Fatal("a negative context budget was accepted")
+	}
+	spec.Budget.ContextTokens = 6100
+	run, _, err := NewRun("goal", "", spec, time.Now())
+	if err != nil || run.Budget.ContextTokens != 6100 {
+		t.Fatalf("context budget %d, %v", run.Budget.ContextTokens, err)
+	}
 }
 
 func TestPersistentReplayUsesStoredAttachmentWithoutEnvironmentAccess(t *testing.T) {

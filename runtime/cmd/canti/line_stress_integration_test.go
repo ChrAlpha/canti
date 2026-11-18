@@ -29,14 +29,19 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 	}
 	started := time.Now()
 	metrics := struct {
-		Runs, Completed, Steps, Anchors, FocusChanges, Requests, Retries, Crashes int
-		Effects, Duplicates, Containers, NavigationBoundaries                     int
-		BusinessEntries                                                           int
-		Failed                                                                    bool
-		MaxPromptBytes                                                            int
-		DBBytes, RuntimeMS                                                        int64
+		Runs, Completed, Steps, Anchors, Handovers, Requests, Retries, Crashes int
+		Effects, Duplicates, Containers, NavigationBoundaries                  int
+		BusinessEntries                                                        int
+		Failed                                                                 bool
+		MaxPromptBytes                                                         int
+		DBBytes, RuntimeMS                                                     int64
 	}{Runs: runs}
 	f, image := recoveryFixture(t, nil)
+	// Its provider reports no usage: the rejections it injects regardless of
+	// size must not teach a context budget.
+	f.model.mu.Lock()
+	f.model.unreported = true
+	f.model.mu.Unlock()
 	f.model.decideWith(func(step int, prompt string) (core.Decision, error) {
 		d, err := lineStressDecision(step, prompt)
 		if err != nil {
@@ -161,7 +166,7 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 		metrics.Retries++
 		history := f.history("-run", admitted.Run.ID)
 		anchors := map[int64]bool{}
-		focusChanges, resets, frozen := 0, 0, 0
+		handovers, resets, budgeted, frozen := 0, 0, 0, 0
 		for _, e := range history {
 			if !strings.HasPrefix(e.State.Decision.Payload, "canti:") {
 				executed = append(executed, e)
@@ -175,8 +180,8 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 				if o.Status != harness.OutcomeDone {
 					t.Fatalf("round %d local action failed: %+v", round, o)
 				}
-				if o.Focus != nil {
-					focusChanges++
+				if o.Status == harness.OutcomeDone && o.Retrieval == nil && o.Detail == "" {
+					handovers++
 				}
 			}
 			if e.Facts.Rejection != nil {
@@ -184,6 +189,12 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 			}
 			if req := e.Facts.Request; req != nil {
 				frozen++
+				if e.Facts.ContextState != nil {
+					budgeted++
+					if req.Context == nil || req.Context.Budget == nil || req.ContextState.AnchorSeq != e.Seq {
+						t.Fatalf("round %d request %d opened a head that is no budget anchor", round, e.Seq)
+					}
+				}
 				if req.ContextState == nil || req.Context == nil {
 					t.Fatal("frozen request lost anchor or capture")
 				}
@@ -214,12 +225,12 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 				}
 			}
 		}
-		if focusChanges != 3 || resets != 2 || len(anchors) != 3 || frozen+1 != len(requests) {
-			t.Fatalf("round %d continuity: anchors=%v focus=%d frozen=%d calls=%d", round, anchors, focusChanges, frozen, len(requests))
+		if handovers != 2 || resets != 2 || len(anchors) != 5+budgeted || frozen+1 != len(requests) {
+			t.Fatalf("round %d continuity: anchors=%v handovers=%d budget anchors=%d frozen=%d calls=%d", round, anchors, handovers, budgeted, frozen, len(requests))
 		}
 		metrics.Steps += final.Totals.Steps
 		metrics.Anchors += len(anchors)
-		metrics.FocusChanges += focusChanges
+		metrics.Handovers += handovers
 		metrics.Containers = len(effectContainers(t, f.state))
 		if metrics.Containers != 0 {
 			t.Fatalf("round %d left %d containers", round, metrics.Containers)
@@ -228,7 +239,7 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 		t.Logf("LINE_ROUND round=%d run=%s steps=%d anchors=%d prompt_max=%d elapsed_ms=%d", round, admitted.Run.ID, final.Totals.Steps, len(anchors), metrics.MaxPromptBytes, time.Since(started).Milliseconds())
 	}
 	checkReleased(t, f, executed)
-	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.FocusChanges != runs*3 ||
+	if metrics.Completed != runs || metrics.Retries != runs || metrics.Crashes != 1 || metrics.Handovers != runs*2 ||
 		runs >= 10 && metrics.NavigationBoundaries != 2 {
 		t.Fatalf("incomplete stress coverage: %+v", metrics)
 	}

@@ -26,7 +26,9 @@ func capturedRequest(t *testing.T, f *fixture, step, rev int) harness.Request {
 func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	t.Helper()
 	c := req.Context.Bytes
-	total := c.System + c.Goal + c.Constraints + c.Environment + c.Anchor + c.ReceiptHeader + c.Focus + c.Progress + c.Latest + c.Repair
+	total := c.System + c.Goal + c.Constraints + c.HeadInstructions + c.Environment + c.Anchor +
+		c.Previous + c.Index + c.Notice + c.EpochHeader + c.EpochInstructions +
+		c.Observations + c.Progress + c.Latest + c.Repair
 	for i, step := range c.Steps {
 		total += step.Bytes
 		if step.Bytes != len(p.Blocks[i+1]) {
@@ -36,8 +38,12 @@ func checkCapturedBytes(t *testing.T, req harness.Request, p harness.Prompt) {
 	if c.Total != len(p.System)+len(p.User()) || total != c.Total || c.Total > c.Limit || c.System != len(p.System) {
 		t.Fatalf("capture = %+v, total parts=%d, actual=%d", c, total, len(p.System)+len(p.User()))
 	}
-	if c.Goal+c.Constraints+c.Environment+c.Anchor+c.ReceiptHeader != len(p.Blocks[0]) || c.Focus+c.Progress+c.Latest+c.Repair != len(p.Blocks[len(p.Blocks)-1]) {
+	head := c.Goal + c.Constraints + c.HeadInstructions + c.Environment + c.Anchor + c.Previous + c.Index + c.Notice + c.EpochHeader
+	if head != len(p.Blocks[0]) || c.Observations+c.Progress+c.Latest+c.Repair != len(p.Blocks[len(p.Blocks)-1]) {
 		t.Fatalf("head or tail does not match blocks: %+v", c)
+	}
+	if c.Instructions != c.HeadInstructions+c.EpochInstructions {
+		t.Fatalf("instruction accounting = %+v", c)
 	}
 	if !bytes.Equal(req.Body, []byte(p.System+"\n\n"+p.User())) {
 		t.Fatal("metadata changed the model's frozen body")

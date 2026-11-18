@@ -92,7 +92,7 @@ preparation, attachment, package installation, networking and rebuilds.
 `-ephemeral` selects a fresh `debian:bookworm-slim` container for each command,
 with the workspace at `/workspace`, no network, and the host user's uid.
 It retains read-only artifacts and step-record mounts. Persistent execution uses
-native `canti:retrieve` and `canti:focus` for archive access; `/canti/runs`,
+native `canti:retrieve` for archive access; `/canti/runs`,
 `/canti/artifacts` and `/canti/imports` are logical retrieval addresses there.
 `-image`, `-network`, `-memory`, `-cpus` and `-pids` apply only to `-ephemeral`;
 provision the persistent environment's resources and network externally.
@@ -122,12 +122,23 @@ explicit resolution.
 Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
 Same-version restarts preserve committed facts and exact frozen request bytes.
-Requests use a stable receipt prefix and selected frozen evidence. Confirmed
-provider overflow resets the active context at the same unfinished step, retaining
-the exact goal, constraints and archive navigation. `canti:focus` replaces the
-selected evidence; historical snapshots remain retrievable. `-request-bytes` is
-a resource ceiling, and `-token-budget` uses only reported usage. Status and TUI
-reports distinguish unknown usage, reported zero and lost attempts.
+A request keeps every step completed since the current anchor in full; earlier
+history stays in the read-only archive, and an earlier-steps index names it for
+retrieval. No boundary carries a summary. `-context-tokens` names the provider
+input each request should stay within: when the input the previous request
+reported, plus the bytes this one adds, would exceed it, earlier steps can
+leave and the request is no protocol repair, canti opens a new anchor that keeps the most recent steps, always
+including the latest result, in full. The largest input an accepted request
+reported before the run's latest confirmed provider overflow is a budget too;
+the smaller one applies. A confirmed overflow
+resets the active context at the same unfinished step, retaining the exact goal,
+constraints and the index; a minimal context stays minimal until the agent hands
+over. `canti:handover`, optionally followed by a note, closes a phase early; the
+note is archived with its step and never rendered automatically. As Bub's handoff
+does, a handover moves only the read boundary: it generates no summary and
+deletes no history. `-request-bytes` is a resource ceiling, and
+`-token-budget` uses only reported usage. Status and TUI reports distinguish
+unknown usage, reported zero and lost attempts.
 An unknown outcome requires explicit inspection or operator resolution and never
 authorizes rerunning the command.
 

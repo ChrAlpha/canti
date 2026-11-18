@@ -40,7 +40,7 @@ func TestLineDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 	decision(1, 2, core.Decision{Kind: core.Exec, Payload: "printf async > mode.txt"})
 	handover := func(step, first int) {
 		f.model.answer(step, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
-		decision(step, 2, core.Decision{Kind: core.Exec, Payload: harness.FocusPrefix + `{"sources":[]}`})
+		decision(step, 2, core.Decision{Kind: core.Exec, Payload: harness.HandoverPrefix + "verified sync; Switch the mode from async to sync."})
 	}
 	handover(2, 1)
 	f.model.answer(3, 1, reply{status: 503, body: "temporary transport failure"})
@@ -92,7 +92,7 @@ func TestLineDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 			t.Fatalf("step %d lost the corrected goal, constraints, historical pair, or prompt budget (%d bytes)", step, len(envelope.System)+len(prompt))
 		}
 		if step == 3 {
-			if !strings.Contains(prompt, "first step 2") || strings.Contains(prompt, "### Step 1 (sequence ") {
+			if !strings.Contains(prompt, "first step 3") || strings.Contains(prompt, "### Step 1\n") {
 				t.Fatalf("fresh window copied earlier steps: %s", prompt)
 			}
 			retry = append(retry, body)
@@ -130,7 +130,8 @@ func TestLineDialogueSurvivesHandoverRetryAndRestart(t *testing.T) {
 			third = append(third, prompt)
 		}
 	}
-	if len(third) != 2 || !strings.Contains(third[0], "/canti/runs/"+runID+"/") || !strings.Contains(third[1], `canti:focus {"sources":[]}`) || !strings.Contains(third[1], "Switch the mode from async to sync.") {
+	if len(third) != 2 || !strings.Contains(third[0], "/canti/runs/"+runID+"/") || strings.Contains(third[0], "## Handover") ||
+		strings.Contains(third[0], "Switch the mode from async to sync.") || !strings.Contains(third[1], "Switch the mode from async to sync.") {
 		t.Fatalf("native prior records not recovered: %q", third)
 	}
 	report := f.cli(nil, "context", "-text", "-step", "1", "-revision", "1")

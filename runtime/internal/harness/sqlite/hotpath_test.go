@@ -185,6 +185,13 @@ var hotPlans = map[string]string{
 	"steerOrdinalSQL":       "4|0|50|SEARCH inputs USING INDEX inputs_disposition (disposition=? AND pos<?)\n",
 	"markWithdrawnSQL":      "4|0|33|SEARCH inputs USING INTEGER PRIMARY KEY (rowid=?)\n",
 	"withdrawnPositionSQL":  "2|0|33|SEARCH inputs USING INTEGER PRIMARY KEY (rowid=?)\n",
+	"priorRequestSQL":       "4|0|50|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq<?)\n",
+	"priorUsageSQL":         "5|0|49|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq>? AND seq<?)\n",
+	"acceptedInputSQL":      "4|0|50|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq<?)\n",
+	"comparableUsageSQL":    "5|0|46|SEARCH r USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq=?)\n10|0|0|SCALAR SUBQUERY 2\n16|10|50|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq<?)\n39|0|46|SEARCH a USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq=?)\n43|0|0|CORRELATED SCALAR SUBQUERY 1\n49|43|49|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq>? AND seq<?)\n",
+	"headBetweenSQL":        "1|0|0|SCAN CONSTANT ROW\n4|0|0|SCALAR SUBQUERY 1\n9|4|49|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq>? AND seq<?)\n",
+	"rejectionSeqSQL":       "3|0|39|SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)\n",
+	"transitionBySeqSQL":    "3|0|39|SEARCH transitions USING INDEX sqlite_autoindex_transitions_1 (run_id=? AND seq=?)\n",
 }
 
 func hotQueries() []hotQuery {
@@ -222,6 +229,13 @@ func hotQueries() []hotQuery {
 		{name: "runOrdinalSQL", sql: runOrdinalSQL, args: []any{"run-1"}},
 		{name: "runPosSQL", sql: runPosSQL, args: []any{"run-1"}},
 		{name: "withdrawnPositionSQL", sql: withdrawnPositionSQL, args: []any{int64(1)}},
+		{name: "priorRequestSQL", sql: priorRequestSQL, args: []any{"run-1", int64(300)}},
+		{name: "priorUsageSQL", sql: priorUsageSQL, args: []any{"run-1", int64(0), int64(300)}},
+		{name: "acceptedInputSQL", sql: acceptedInputSQL, args: []any{"run-1", int64(300)}},
+		{name: "comparableUsageSQL", sql: comparableUsageSQL, args: []any{"run-1", int64(300), int64(0)}},
+		{name: "headBetweenSQL", sql: headBetweenSQL, args: []any{"run-1", int64(2), int64(300)}},
+		{name: "rejectionSeqSQL", sql: rejectionSeqSQL, args: []any{"run-1"}},
+		{name: "transitionBySeqSQL", sql: transitionBySeqSQL, args: []any{"run-1", int64(1)}},
 	}
 }
 
@@ -247,7 +261,6 @@ var hotPathExemptions = map[string]hotPathExemption{
 	"responseSQL":    {responseSQL, "response recovery read"},
 	"recentSQL":      {recentSQL, "step history read"},
 	"stepsSQL":       {stepsSQL, "step projection read"},
-	"completionSQL":  {completionSQL, "completion recovery read"},
 	"savedSQL":       {savedSQL, "response recovery lookup"},
 	"acceptedSQL":    {acceptedSQL, "acceptance recovery read"},
 	"contextSeqSQL":  {contextSeqSQL, "context recovery read"},

@@ -37,10 +37,9 @@ func TestListCursorOnlyPassesEntriesShownInPrompt(t *testing.T) {
 			}
 			f := testFrame()
 			f.Step = 2
-			f.Receipts = []StepReceipt{{Step: 1, Seq: 5, Status: "done"}}
-			f.Latest = &StepRecord{Seq: 5, Step: 1, Command: "canti:retrieve", Observation: Observation{
+			f.Steps = []StepRecord{{Seq: 5, Step: 1, Command: "canti:retrieve", Observation: Observation{
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &result,
-			}}
+			}}}
 			prompt := mustPrompt(t, f, DefaultPromptLimits())
 			_, after, ok := strings.Cut(prompt.User(), "Entries: ")
 			if !ok {

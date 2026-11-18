@@ -12,16 +12,17 @@ import (
 // ActionNamespace begins every harness action: an exec payload whose first
 // word, after leading ActionSpace, begins with it is never a command.
 // ActionSpace holds the bytes that may precede that word and the one byte
-// that may follow an action's name. RetrievePrefix and FocusPrefix are the forms the prompt teaches. DiscoveryMarker begins a shell
-// command that searches the step records; discovery skips its steps and
-// those of every harness action.
+// that may follow an action's name. RetrievePrefix and HandoverPrefix are the
+// forms the prompt teaches. DiscoveryMarker begins a shell command that
+// searches the step records; discovery skips its steps and those of every
+// harness action.
 const (
 	ActionNamespace = "canti:"
 	ActionSpace     = " \t\n\r"
 	retrieveName    = ActionNamespace + "retrieve"
-	focusName       = ActionNamespace + "focus"
+	handoverName    = ActionNamespace + "handover"
 	RetrievePrefix  = retrieveName + " "
-	FocusPrefix     = focusName + " "
+	HandoverPrefix  = handoverName + " "
 	DiscoveryMarker = "# canti:discovery"
 )
 
@@ -30,7 +31,7 @@ type ActionName string
 const (
 	ActionCommand  ActionName = "command"
 	ActionRetrieve ActionName = "retrieve"
-	ActionFocus    ActionName = "focus"
+	ActionHandover ActionName = "handover"
 	ActionUnknown  ActionName = "unknown"
 )
 
@@ -61,7 +62,7 @@ const (
 	codeRetrievalDisabled = "retrieval_disabled"
 	codeUnknownAction     = "unknown_action"
 	retrievalDisabled     = "retrieval is disabled for this run"
-	unknownAction         = "unknown harness action; the actions are " + retrieveName + " and " + focusName
+	unknownAction         = "unknown harness action; the actions are " + retrieveName + " and " + handoverName
 )
 
 func problemText(code string) string {
@@ -85,8 +86,8 @@ type Action struct {
 	Invalid  string `json:",omitempty"`
 }
 
-// NormalizeAction reads payload, accepted under a request that requires a
-// focus, by a loop that has a reader when reader is set.
+// NormalizeAction reads payload, accepted under a request, by a loop that has
+// a reader when reader is set.
 // The loop commits its result once, with the acceptance. Afterwards only
 // CheckEffect, which compares the two at the commit, and Matches, which ties
 // a read action to its payload by rules no version changes, look at the
@@ -101,8 +102,8 @@ func NormalizeAction(payload string, reader bool) Action {
 			if !reader {
 				a.Invalid = codeRetrievalDisabled
 			}
-		case focusName:
-			a.Name, a.Recovery = ActionFocus, RecoveryLocal
+		case handoverName:
+			a.Name, a.Recovery = ActionHandover, RecoveryLocal
 		default:
 			a.Name, a.Recovery, a.Invalid = ActionUnknown, RecoveryLocal, codeUnknownAction
 		}
@@ -126,7 +127,7 @@ func actionWord(payload string) (word string, args int, reserved bool) {
 // Matches reports whether a, a valid action, is a reading of payload by
 // rules that no later version changes: a command exactly for a payload
 // outside ActionNamespace, the offset of the arguments after its word, and
-// the word of a retrieval or focus. An unknown action matches any word
+// the word of a retrieval or handover. An unknown action matches any word
 // of the namespace, so that a version that learns its word does not
 // reinterpret it.
 func (a Action) Matches(payload string) error {
@@ -136,7 +137,7 @@ func (a Action) Matches(payload string) error {
 		return fmt.Errorf("harness: a %s action records a payload %s the reserved namespace", a.Name, map[bool]string{true: "in", false: "outside"}[reserved])
 	case a.Name != ActionCommand && a.Args != args:
 		return fmt.Errorf("harness: the %s action records arguments at %d, not at %d", a.Name, a.Args, args)
-	case a.Name == ActionFocus && word != focusName, a.Name == ActionRetrieve && word != retrieveName:
+	case a.Name == ActionHandover && word != handoverName, a.Name == ActionRetrieve && word != retrieveName:
 		return fmt.Errorf("harness: the %s action records the word %q", a.Name, word)
 	}
 	return nil
@@ -145,7 +146,7 @@ func (a Action) Matches(payload string) error {
 // Validate checks that a recorded action is one that normalization yields
 // for some payload.
 func (a Action) Validate() error {
-	recovery, ok := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionFocus: RecoveryLocal, ActionUnknown: RecoveryLocal}[a.Name]
+	recovery, ok := map[ActionName]Recovery{ActionCommand: RecoveryExternal, ActionRetrieve: RecoveryRead, ActionHandover: RecoveryLocal, ActionUnknown: RecoveryLocal}[a.Name]
 	if !ok || a.Recovery != recovery {
 		return fmt.Errorf("harness: invalid action recovery")
 	}

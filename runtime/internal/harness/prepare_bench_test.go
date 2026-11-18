@@ -14,6 +14,10 @@ import (
 )
 
 func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop) {
+	return prepareFixtureTotal(t, completed, window, 1<<20)
+}
+
+func prepareFixtureTotal(t testing.TB, completed, window, total int) (*probe, *harness.Loop) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -47,14 +51,19 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 		}
 	}
 	freeze := func() {
-		commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{"seed":"` + strings.Repeat("x", 32<<10) + `"}`), ContextState: &current}})
+		capture := &harness.ContextCapture{Anchor: current}
+		if n := snap.State.Step - current.FirstStep; n > 0 {
+			capture.Bytes.Steps = make([]harness.ContextStepBytes, n)
+		}
+		commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{Body: []byte(`{"seed":"` + strings.Repeat("x", 32<<10) + `"}`), ContextState: &current, Context: capture}})
 	}
 	for step := 1; step <= completed; step++ {
 		if first := completed - window + 1; first > 1 && step == first {
 			freeze()
 			commit(core.AttemptStarted{Step: step, Attempt: 1}, harness.Facts{})
-			next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: step}
-			commit(core.RequestRejected{Step: step, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}}, ContextState: &next})
+			next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: step, Minimal: current.Minimal,
+				Rejection: &harness.RejectionRef{Seq: snap.Seq + 1, Step: step}}
+			commit(core.RequestRejected{Step: step, Attempt: 1}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: &harness.ContextRejection{Previous: current, Signal: harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}, EpochSteps: step - current.FirstStep, Minimal: current.Minimal}, ContextState: &next})
 			current = next
 		}
 		freeze()
@@ -72,7 +81,7 @@ func prepareFixture(t testing.TB, completed, window int) (*probe, *harness.Loop)
 	}
 	p := &probe{Store: s}
 	limits := harness.DefaultPromptLimits()
-	limits.Total = 1 << 20
+	limits.Total = total
 	l, err := harness.NewLoop(p, exec, m, harness.LoopConfig{
 		Environment: "/workspace", History: filepath.Join(dir, "history"),
 		Limits: limits,
@@ -110,26 +119,47 @@ func TestPrepareReadsOnlyActiveWindow(t *testing.T) {
 			p, l := prepareFixture(t, tc.completed, tc.window)
 			snap, err := l.Step(context.Background(), runID)
 			if err != nil || snap.State.Phase != core.PhaseRequestFrozen || p.frozen == nil {
-				t.Fatalf("prepare: %+v, %v", snap.State, err)
+				t.Fatalf("prepare: %+v, %v; failure %q", snap.State, err, p.failure)
 			}
-			// After the first step, preparation also reads the previous
-			// step's completion, which selects the window, in one record.
-			completion := min(tc.completed, 1)
-			if p.records != tc.window+completion || p.pages != (tc.window+historyPage-1)/historyPage+completion {
-				t.Fatalf("read %d records in %d pages for a %d-step window", p.records, p.pages, tc.window)
+			// The resident epoch is read in pages, and the newest index
+			// entries before it in one receipt page.
+			indexed := 0
+			if tc.completed > tc.window && tc.window > 0 {
+				indexed = min(tc.completed-tc.window, harness.IndexSteps)
+			}
+			pages := (tc.window + historyPage - 1) / historyPage
+			if indexed > 0 {
+				pages++
+			}
+			if p.records != tc.window+indexed || p.pages != pages {
+				t.Fatalf("read %d records in %d pages for a %d-step epoch and %d index entries", p.records, p.pages, tc.window, indexed)
 			}
 			body := string(p.frozen.Body)
 			if got := len(p.frozen.Context.Bytes.Steps); got != tc.window {
 				t.Fatalf("request has %d steps, want %d", got, tc.window)
 			}
 			previous := -1
+			if missing := strings.Count(body, "### Step "); missing != tc.window {
+				t.Fatalf("body has %d step headings, want %d:\n%.400s", missing, tc.window, body)
+			}
 			for step := tc.completed - tc.window + 1; step <= tc.completed; step++ {
-				at := strings.Index(body, fmt.Sprintf("### Step %d (sequence ", step))
+				at := strings.Index(body, fmt.Sprintf("### Step %d", step))
 				if at <= previous {
-					t.Fatalf("step %d is missing or out of order", step)
+					t.Fatalf("step %d is missing or out of order (at %d, previous %d)", step, at, previous)
 				}
 				previous = at
 			}
 		})
+	}
+}
+
+func TestEpochLoadingStopsAtTheResourceCap(t *testing.T) {
+	p, l := prepareFixtureTotal(t, 128, 80, 5000)
+	snap, err := l.Step(context.Background(), runID)
+	if err != nil || snap.State.Phase != core.PhaseStopped || snap.State.Reason != core.StopUnrecoverable {
+		t.Fatalf("cap stop = %+v, %v", snap.State, err)
+	}
+	if p.frozen != nil || !strings.Contains(p.failure, "resource cap") || p.pages != 1 {
+		t.Fatalf("the epoch was materialized past the cap: frozen=%v failure=%q pages=%d records=%d", p.frozen != nil, p.failure, p.pages, p.records)
 	}
 }

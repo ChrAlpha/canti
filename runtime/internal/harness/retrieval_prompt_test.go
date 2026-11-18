@@ -57,10 +57,10 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			query, _ := json.Marshal(r.Query)
 			f := testFrame()
 			f.Step = 2
-			f.Receipts = []StepReceipt{{Step: 1, Seq: 5, Status: "done"}}
-			f.Latest = &StepRecord{Seq: 5, Step: 1, Command: RetrievePrefix + string(query), Observation: Observation{
+			step := StepRecord{Seq: 5, Step: 1, Command: RetrievePrefix + string(query), Observation: Observation{
 				Execution: core.ExecutionExited, Preview: string(body), Retrieval: &r,
 			}}
+			f.Steps = []StepRecord{step}
 			if operation != "list" {
 				r.Evidence = []string{"Use 47 seconds.\n```\nExact tail."}
 			}
@@ -77,10 +77,10 @@ func TestRetrievalPromptShowsEvidenceAndContinuationOnce(t *testing.T) {
 			if operation != "list" && (!strings.Contains(p, want) || strings.Count(p, strings.Repeat("a", 64)) != 1) {
 				t.Fatalf("original evidence was changed or repeated: %s", p)
 			}
-			if f.Latest.Observation.Preview != string(body) {
+			if step.Observation.Preview != string(body) {
 				t.Fatal("rendering changed the persisted preview")
 			}
-			t.Logf("operation=%s rendered_step_bytes=%d persisted_preview_bytes=%d", operation, len(f.step(*f.Latest, DefaultPromptLimits())), len(body))
+			t.Logf("operation=%s rendered_step_bytes=%d persisted_preview_bytes=%d", operation, len(f.step(step, DefaultPromptLimits())), len(body))
 		})
 	}
 }
@@ -149,7 +149,7 @@ func TestPersistentRetrievalUsesLogicalAddressesWithoutShellFallback(t *testing.
 	if len(section) > 2048 {
 		t.Fatalf("native retrieval section is %d bytes, over 2048", len(section))
 	}
-	for _, want := range []string{"logical addresses", "canti:retrieve", "canti:focus", "report an incomplete scan", "evidence/", "/canti/imports"} {
+	for _, want := range []string{"logical addresses", "canti:retrieve", "canti:handover", "report an incomplete scan", "evidence/", "/canti/imports"} {
 		if !strings.Contains(prompt.System, want) {
 			t.Errorf("persistent instructions lack %q", want)
 		}
@@ -160,5 +160,24 @@ func TestPersistentRetrievalUsesLogicalAddressesWithoutShellFallback(t *testing.
 	f.NativeArchive = false
 	if !strings.Contains(mustPrompt(t, f, DefaultPromptLimits()).System, "bounded shell command") {
 		t.Fatal("ephemeral shell archive fallback lost")
+	}
+}
+
+func TestResidentRetrievalKeepsProvenanceWithoutSelectionHandles(t *testing.T) {
+	r := archive.Retrieval{Query: archive.RetrievalQuery{Operation: "read", Path: "/canti/imports/notes", Reason: "verify"},
+		Sources: []archive.SourceRange{{Path: "/canti/imports/notes", Offset: 3, Length: 4, SHA256: strings.Repeat("a", 64)}}, Evidence: []string{"note"}}
+	f := testFrame()
+	f.Step = 2
+	f.Steps = []StepRecord{{Seq: 5, Step: 1, Command: RetrievePrefix + `{"operation":"read"}`, Outcome: &Outcome{Status: OutcomeDone, Retrieval: &r}}}
+	p := mustPrompt(t, f, DefaultPromptLimits()).User()
+	for _, absent := range []string{"select a source", `"seq":`, "Frozen retrieval sequence"} {
+		if strings.Contains(p, absent) {
+			t.Fatalf("a retrieval still teaches the removed selection handle %q: %s", absent, p)
+		}
+	}
+	for _, want := range []string{"Path /canti/imports/notes:", "Source 0: bytes [3,7), sha256 " + strings.Repeat("a", 64) + ":", "note"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("retrieval provenance lacks %q: %s", want, p)
+		}
 	}
 }

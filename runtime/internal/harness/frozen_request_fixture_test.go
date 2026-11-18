@@ -257,7 +257,7 @@ func (r *corpusRig) drive(t *testing.T, sc frozenScenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: cmp.Or(run.constraints, "Do not modify files outside /workspace."), Budget: run.budget, Created: corpusCreated, Fresh: i == 0}
+		record := harness.Run{ID: run.id, Goal: run.goal, Constraints: cmp.Or(run.constraints, "Do not modify files outside /workspace."), Budget: run.budget, Created: corpusCreated, Fresh: i == 0 || run.fresh}
 		if err := r.store.CreateRun(ctx, record, state); err != nil {
 			t.Fatal(err)
 		}

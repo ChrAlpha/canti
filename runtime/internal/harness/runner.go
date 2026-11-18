@@ -120,7 +120,7 @@ func (f Facts) requestFrozen() (Facts, error) {
 	if f.Request == nil || len(f.Request.Body) == 0 || f.Request.ContextState == nil {
 		return Facts{}, fmt.Errorf("%w: frozen request bytes and context state are required", ErrFacts)
 	}
-	return Facts{Request: f.Request, Delivered: f.Delivered}, nil
+	return Facts{Request: f.Request, Delivered: f.Delivered, ContextState: f.ContextState}, nil
 }
 
 func (f Facts) responseSaved() (Facts, error) {
@@ -210,9 +210,6 @@ func (f Facts) checkPerformed() error {
 	if err := f.Outcome.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrFacts, err)
 	}
-	if (f.ContextState != nil) != (f.Outcome.Focus != nil) {
-		return fmt.Errorf("%w: focus outcome and context commit together", ErrFacts)
-	}
 	return nil
 }
 
@@ -224,7 +221,7 @@ func (f Facts) checkObservation(execution core.ExecutionState) error {
 		return fmt.Errorf("%w: observation %q does not match event %q", ErrFacts, f.Observation.Execution, execution)
 	}
 	if f.Observation.Retrieval != nil {
-		return fmt.Errorf("%w: an observation holds no retrieval or focus; a performed outcome does", ErrFacts)
+		return fmt.Errorf("%w: an observation holds no retrieval or handover; a performed outcome does", ErrFacts)
 	}
 	return nil
 }
@@ -242,10 +239,15 @@ func ValidateTransition(t Transition) error {
 	if err := t.Facts.check(t.Event, t.To); err != nil {
 		return err
 	}
+	if _, performed := t.Event.(core.Performed); performed {
+		if err := checkPerformedHead(t); err != nil {
+			return err
+		}
+	}
 
 	if r := t.Facts.Request; r != nil {
-		if r.ContextState.AnchorSeq >= t.Seq {
-			return fmt.Errorf("%w: frozen anchor must precede its request", ErrFacts)
+		if err := checkRequestBudget(t); err != nil {
+			return err
 		}
 		if err := r.ContextState.Validate(t.To.Step, t.Seq); err != nil {
 			return fmt.Errorf("%w: %v", ErrFacts, err)

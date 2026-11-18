@@ -51,12 +51,12 @@ func TestTenMaximumReadsStayOnOnePage(t *testing.T) {
 	last := f.model.prompts[10].User()
 	for i := range 10 {
 		marker := fmt.Sprintf("EVIDENCE_%02d", i)
-		if strings.Contains(last, marker) != (i == 9) {
-			t.Fatalf("retrieval %d has the wrong transient lifetime", i)
+		if !strings.Contains(last, marker) {
+			t.Fatalf("resident retrieval %d left the epoch", i)
 		}
 	}
-	if strings.Contains(last, "Handover required") {
-		t.Fatal("256 KiB page handed over before ten legal reads")
+	if strings.Contains(last, "earlier steps are before this anchor") {
+		t.Fatal("256 KiB epoch lost resident steps")
 	}
 }
 
@@ -96,8 +96,8 @@ func TestRemovedEvidenceStaysFrozenAcrossSQLiteReopen(t *testing.T) {
 		t.Fatalf("prompts = %d, want 3", len(f.model.prompts))
 	}
 	evidence := "sha256 " + fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Repeat("x", archive.MaxBytes)))) + ":\n" + strings.Repeat("x", archive.MaxBytes) + "\n"
-	if last := f.model.prompts[2].User(); strings.Count(last, evidence) != 1 || strings.Contains(last, "Evidence unavailable") {
-		t.Fatalf("the request after removing the source does not show its frozen latest result:\n%s", last)
+	if last := f.model.prompts[2].User(); strings.Count(last, evidence) != 2 || strings.Contains(last, "Evidence unavailable") {
+		t.Fatalf("the request after removing the source does not show every frozen resident retrieval:\n%s", last)
 	}
 }
 

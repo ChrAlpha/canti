@@ -38,7 +38,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	query, _ := json.Marshal(archive.RetrievalQuery{Operation: "read", Path: "/canti/runs/" + runID + "/steps/00000001/preview", Reason: "verify original evidence"})
 	answer(2, 2, core.Exec, "canti:retrieve "+string(query))
 	f.model.answer(3, 1, reply{text: "invalid decision"})
-	answer(3, 2, core.Exec, harness.FocusPrefix+`{"sources":[{"seq":12,"source":0}]}`)
+	answer(3, 2, core.Exec, harness.HandoverPrefix+"phase one done")
 	f.model.answer(4, 1, reply{status: 400, body: `{"error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`})
 	answer(4, 2, core.Exec, "test \"$(cat proof.txt)\" = evidence && printf verified > done.txt")
 	answer(5, 1, core.Return, "Verified evidence and created done.txt.")
@@ -77,7 +77,7 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 			t.Fatalf("identity: %+v", report)
 		}
 		capture := report.Request.Capture
-		if capture.PreviousRun != priorID {
+		if !report.Request.Anchor.Minimal && capture.PreviousRun != priorID {
 			t.Fatalf("previous-run provenance: %+v", capture.PreviousRun)
 		}
 		raw := f.cli(nil, "context", append(args, "-raw")...)
@@ -107,8 +107,24 @@ func TestContextDiagnosticAcrossExecutionRetrievalHandoverAndRestart(t *testing.
 	if len(requested.Sources) != 1 || len(requested.Retrievals) != 1 || requested.Retrievals[0].Step != 2 {
 		t.Fatalf("retrieval provenance=%+v", requested)
 	}
-	if reports[3].Request.Capture.Preparation != "protocol_repair" || len(reports[4].Request.Capture.Focus) != 1 || reports[5].Request.Anchor.FirstStep != 4 || reports[5].Delta.AnchorChanged == nil || !*reports[5].Delta.AnchorChanged || len(reports[5].Request.Capture.Sources) != 0 {
-		t.Fatal("focus/repair/reset misrepresented")
+	repaired, handed, floored := 0, 0, 0
+	for _, report := range reports {
+		if report.Request.Capture.Preparation == "protocol_repair" {
+			repaired++
+		}
+		if report.Request.Anchor != nil && report.Request.Anchor.AnchorSeq != 0 && !report.Request.Anchor.Minimal && report.Request.Capture.Bytes.Index > 0 {
+			handed++
+		}
+		if report.Request.Anchor != nil && report.Request.Anchor.Minimal {
+			floored++
+			if report.Request.Anchor.AnchorSeq == 0 || report.Request.Anchor.FirstStep != 4 || report.Request.Capture.Bytes.Notice == 0 ||
+				report.Request.Capture.Bytes.Index != 0 || report.Request.Capture.Bytes.Previous != 0 || report.Request.Capture.Bytes.Observations != 0 {
+				t.Fatalf("minimal reset misrepresented: %+v", report.Request)
+			}
+		}
+	}
+	if repaired != 1 || handed != 1 || floored < 1 {
+		t.Fatalf("repair/handover/minimal reports = %d/%d/%d", repaired, handed, floored)
 	}
 	if after := f.history(); !reflect.DeepEqual(before, after) || len(f.model.requests()) != calls {
 		t.Fatal("inspection changed execution")

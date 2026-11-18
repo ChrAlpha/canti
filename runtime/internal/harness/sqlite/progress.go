@@ -57,8 +57,7 @@ type ProgressRow struct {
 	RetrievalError string
 	Sources        int
 	Entries        int
-	Focus          bool
-	FocusSources   int
+	HandoverBytes  int
 	Retrieval      bool
 	AnchorSeq      int64
 
@@ -103,6 +102,21 @@ func clipped(expr string, limit int) string {
 	return fmt.Sprintf("substr(CAST(%s AS BLOB), 1, %d)", expr, limit+1)
 }
 
+// handoverNoteBytesSQL derives a handover note's byte count from the complete
+// committed payload, before any display clipping. A valid handover payload is
+// action space, the 14-byte action word, one optional separator and the note.
+// The expression returns only the scalar count.
+const handoverActionSpace = `' ' || char(9) || char(10) || char(13)`
+const handoverActionWord = `'canti:handover'`
+
+var handoverNoteBytesSQL = `CASE WHEN kind = 'performed'
+	AND json_extract(facts, '$.Outcome.Status') = 'done'
+	AND json_type(facts, '$.Outcome.Retrieval') IS NULL
+	AND substr(ltrim(json_extract(from_state, '$.Decision.payload'), ` + handoverActionSpace + `), 1, 14) = ` + handoverActionWord + `
+	THEN length(CAST(ltrim(json_extract(from_state, '$.Decision.payload'), ` + handoverActionSpace + `) AS BLOB)) - 14
+	  - (CASE WHEN substr(ltrim(json_extract(from_state, '$.Decision.payload'), ` + handoverActionSpace + `), 15, 1) IN (' ', char(9), char(10), char(13)) THEN 1 ELSE 0 END)
+	END`
+
 var progressColumns = `pos, run_id, seq, kind, semantics, ` + strings.Join([]string{
 	clipped(`json_extract(to_state, '$.Phase')`, ProgressNameBytes),
 	`json_extract(from_state, '$.Step')`,
@@ -129,8 +143,7 @@ var progressColumns = `pos, run_id, seq, kind, semantics, ` + strings.Join([]str
 	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Retrieval.sources') END`,
 	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Retrieval.entries') END`,
 	`CASE WHEN kind = 'performed' THEN json_type(facts, '$.Outcome.Retrieval') END`,
-	`CASE WHEN kind = 'performed' THEN json_type(facts, '$.Outcome.Focus') END`,
-	`CASE WHEN kind = 'performed' THEN json_array_length(facts, '$.Outcome.Focus.Sources') END`,
+	handoverNoteBytesSQL,
 	`json_extract(facts, '$.ContextState.AnchorSeq')`,
 }, ",\n\t")
 
@@ -344,11 +357,11 @@ func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	var r ProgressRow
 	var phase, reason, effect, resolution, decision, payload, purpose, command, failure, action, supersede, supersedeBy, inputs, execution, preview, detail []byte
 	var outcome, outcomeDetail, retrievalError []byte
-	var retrieval, focus, receipt sql.NullString
-	var step, exitCode, sources, entries, focusSources, anchor sql.NullInt64
+	var retrieval, receipt sql.NullString
+	var step, exitCode, sources, entries, handoverBytes, anchor sql.NullInt64
 	err := rows.Scan(&r.Pos, &r.RunID, &r.Seq, &r.Kind, &r.Semantics, &phase, &step, &reason, &effect, &receipt, &resolution, &decision, &payload, &purpose, &command,
 		&failure, &action, &supersedeBy, &supersede, &inputs, &execution, &exitCode, &preview, &detail, &outcome, &outcomeDetail, &retrievalError, &sources, &entries,
-		&retrieval, &focus, &focusSources, &anchor)
+		&retrieval, &handoverBytes, &anchor)
 	if err != nil {
 		return r, err
 	}
@@ -384,9 +397,9 @@ func scanProgress(rows *sql.Rows) (ProgressRow, error) {
 	r.Outcome = name(outcome)
 	r.OutcomeDetail = text(outcomeDetail, ProgressTextBytes, cut, ProgressOutcomeDetail)
 	r.RetrievalError = text(retrievalError, ProgressTextBytes, cut, ProgressRetrievalError)
-	r.Sources, r.Entries, r.FocusSources = int(sources.Int64), int(entries.Int64), int(focusSources.Int64)
+	r.Sources, r.Entries, r.HandoverBytes = int(sources.Int64), int(entries.Int64), int(handoverBytes.Int64)
 	r.AnchorSeq = anchor.Int64
-	r.Retrieval, r.Focus = retrieval.String == "object", focus.String == "object"
+	r.Retrieval = retrieval.String == "object"
 	r.External, r.ResolutionSource = receipt.String == "object", name(resolution)
 	return r, nil
 }

@@ -96,7 +96,7 @@ func TestLoopRunsExecObserveExecObserveReturn(t *testing.T) {
 	}
 }
 
-func TestLoopReadsTheCompleteActivePage(t *testing.T) {
+func TestLoopReadsTheCompleteEpoch(t *testing.T) {
 	const n = 128
 	var replies []reply
 	for i := 1; i <= n; i++ {
@@ -115,41 +115,34 @@ func TestLoopReadsTheCompleteActivePage(t *testing.T) {
 	if err != nil || len(all) != n {
 		t.Fatalf("Recent() = %d records, %v; want %d", len(all), err, n)
 	}
-	// Preparation reads the previous step's completion, one record in one
-	// page, and then the window in pages of historyPage records.
-	for _, tc := range []struct{ total, pages int }{{1 << 20, 2}} {
-		f.cfg.Limits = harness.DefaultPromptLimits()
-		f.cfg.Limits.Total = tc.total
-		p := &probe{Store: f.store}
-		if snap, err := f.loopOn(p).Step(f.bounded(), runID); err != nil || p.frozen == nil {
-			t.Fatalf("Total %d: Step() = %+v, %v; want a frozen request", tc.total, snap.State, err)
-		}
-		whole := harness.Frame{
-			Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
-			Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1, Latest: &all[len(all)-1],
-			RunID: runID, ContextState: &harness.ContextState{FirstStep: 1},
-		}
-		whole.Receipts, err = f.store.Receipts(ctx, runID, 0, n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want, err := whole.Prompt(f.cfg.Limits)
-		got := f.model.prompts[len(f.model.prompts)-1]
-		if err != nil || !reflect.DeepEqual(got, want) {
-			t.Fatalf("Total %d: prompt differs from the one of the whole history (%v):\n%s", tc.total, err, got.User())
-		}
-		shown := got.Stable - 1
-		earlier := fmt.Sprintf("\n%d earlier steps are not shown.\n", n-shown)
-		if shown != n || strings.Contains(got.User(), earlier) != (shown < n) || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d (sequence ", n-shown+1)) {
-			t.Fatalf("Total %d: %d steps shown, want more than 8 ending at step %d with the rest counted as earlier:\n%s", tc.total, shown, n, got.User())
-		}
-		if p.pages != tc.pages+1 || p.records != min(n, tc.pages*historyPage)+1 {
-			t.Fatalf("Total %d: read %d records in %d pages, want %d pages", tc.total, p.records, p.pages, tc.pages)
-		}
+	f.cfg.Limits = harness.DefaultPromptLimits()
+	f.cfg.Limits.Total = 1 << 20
+	p := &probe{Store: f.store}
+	if snap, err := f.loopOn(p).Step(f.bounded(), runID); err != nil || p.frozen == nil {
+		t.Fatalf("Step() = %+v, %v; want a frozen request", snap.State, err)
+	}
+	previous := int64(usage.InputTokens)
+	whole := harness.Frame{
+		Goal: run.Goal, Constraints: run.Constraints, Environment: f.cfg.Environment,
+		Step: n + 1, MaxSteps: n + 1, Attempt: 1, MaxAttempts: 1,
+		RunID: runID, ContextState: &harness.ContextState{FirstStep: 1},
+		Steps: all, PreviousUsage: &previous,
+	}
+	want, err := whole.Prompt(f.cfg.Limits)
+	got := f.model.prompts[len(f.model.prompts)-1]
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompt differs from the whole epoch (%v):\n%s", err, got.User())
+	}
+	shown := got.Stable - 1
+	if shown != n || !strings.Contains(got.User(), fmt.Sprintf("\n### Step %d\n", n)) || strings.Contains(got.User(), "earlier steps are before this anchor") {
+		t.Fatalf("%d steps shown, want all %d with no count:\n%s", shown, n, got.User())
+	}
+	if p.pages != 2 || p.records != n {
+		t.Fatalf("read %d records in %d pages, want 2 pages of %d", p.records, p.pages, n)
 	}
 
 	prompts, _ := f.model.calls()
-	if _, err := f.loopOn(&failingReceiptPage{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
+	if _, err := f.loopOn(&failingRecent{Store: f.store}).Step(f.bounded(), runID); !errors.Is(err, errRecent) {
 		t.Fatalf("Step() with a failing second page = %v, want %v", err, errRecent)
 	}
 	if after, _ := f.model.calls(); after != prompts || len(f.transitions()) != 5*n {
@@ -170,18 +163,6 @@ func (j *failingRecent) Recent(ctx context.Context, id string, before int64, lim
 		return nil, errRecent
 	}
 	return j.Store.Recent(ctx, id, before, limit)
-}
-
-type failingReceiptPage struct {
-	*sqlite.Store
-	reads int
-}
-
-func (j *failingReceiptPage) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
-	if j.reads++; j.reads > 1 {
-		return nil, errRecent
-	}
-	return j.Store.Receipts(ctx, id, before, limit)
 }
 
 func TestLoopLogsEveryCommitWithoutBodies(t *testing.T) {

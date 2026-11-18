@@ -360,6 +360,7 @@ type probe struct {
 	*sqlite.Store
 	reads, pages, records, recordBytes int
 	frozen                             *harness.Request
+	failure                            string
 }
 
 func (p *probe) Run(ctx context.Context, runID string) (harness.Run, error) {
@@ -415,6 +416,7 @@ func (p *probe) Receipts(ctx context.Context, runID string, before int64, limit 
 
 func (p *probe) Commit(_ context.Context, t harness.Transition) error {
 	p.frozen = t.Facts.Request
+	p.failure = t.Facts.Failure
 	return nil
 }
 
