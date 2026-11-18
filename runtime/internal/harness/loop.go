@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,13 +49,16 @@ type Loop struct {
 	cfg      LoopConfig
 	// cancels carries a principal's request to cancel the accepted effect to
 	// the effect watch of the drive that owns it.
-	cancels  chan effectCancel
-	watching atomic.Bool
+	cancels    chan effectCancel
+	cancelMu   sync.Mutex
+	cancelTime map[string]time.Time
+	watching   atomic.Bool
 }
 
 type effectCancel struct {
 	done     chan error
 	effectID string
+	at       time.Time
 }
 
 // errCancelStale reports a cancellation whose inspected effect is no longer
@@ -82,7 +86,7 @@ func NewLoop(j Journal, x Executor, m Model, cfg LoopConfig) (*Loop, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg, cancels: make(chan effectCancel, 1)}
+	l := &Loop{journal: j, executor: x, model: m, runner: r, cfg: cfg, cancels: make(chan effectCancel, 1), cancelTime: map[string]time.Time{}}
 	if cfg.Reader != nil {
 		cfg.Reader.RepairInput = l.repairInput
 	}
@@ -191,6 +195,21 @@ func (l *Loop) Step(ctx context.Context, runID string) (Snapshot, error) {
 	return snap, nil
 }
 
+// recordCancel is the single owner of an effect's admission time. Every
+// receiver of a cancellation request calls it, and it keeps the earliest time.
+func (l *Loop) recordCancel(effectID string, at time.Time) time.Time {
+	l.cancelMu.Lock()
+	defer l.cancelMu.Unlock()
+	if current, ok := l.cancelTime[effectID]; ok && !current.IsZero() && (at.IsZero() || current.Before(at)) {
+		return current
+	}
+	if at.IsZero() {
+		return l.cancelTime[effectID]
+	}
+	l.cancelTime[effectID] = at
+	return at
+}
+
 // RequestCancelEffect asks the effect watch that owns the accepted effect of
 // runID to cancel it once and record its result, without stopping the run.
 // The watch continues the run to its next step. It returns after that
@@ -204,7 +223,8 @@ func (l *Loop) RequestCancelEffect(ctx context.Context, runID string) (Snapshot,
 	if snap.State.Phase != core.PhaseEffectSaved {
 		return snap, fmt.Errorf("run %s in phase %q has no accepted effect to cancel", runID, snap.State.Phase)
 	}
-	req := effectCancel{done: make(chan error, 1), effectID: snap.State.EffectID}
+	at := l.recordCancel(snap.State.EffectID, l.cfg.Now())
+	req := effectCancel{done: make(chan error, 1), effectID: snap.State.EffectID, at: at}
 	select {
 	case l.cancels <- req:
 	case <-ctx.Done():
@@ -241,7 +261,7 @@ func (l *Loop) CancelEffect(ctx context.Context, runID string) (Snapshot, error)
 	if err != nil {
 		return snap, err
 	}
-	w := &effectWatch{Loop: l, run: run, snap: snap, effect: effect, userCancel: true, cancelIssued: true}
+	w := &effectWatch{Loop: l, run: run, snap: snap, effect: effect, userCancel: true, cancelIssued: true, cancelRequestedAt: l.recordCancel(effect.ID, l.cfg.Now())}
 	next, done, err := w.cancelAndComplete(ctx)
 	if done {
 		return next, err
@@ -289,6 +309,7 @@ func (l *Loop) drainStepCancels(effectID string) {
 		select {
 		case req := <-l.cancels:
 			if cancelMatches(req, effectID) {
+				l.recordCancel(effectID, req.at)
 				replyCancel(req, false)
 			}
 		default:
@@ -606,17 +627,18 @@ var errCancelUnobserved = errors.New("harness: the run left effect_saved before 
 
 type effectWatch struct {
 	*Loop
-	run              Run
-	snap             Snapshot
-	effect           Effect
-	stopping         bool
-	failures         int
-	timeoutRequested bool
-	early            bool
-	userCancel       bool
-	cancelIssued     bool
-	observed         bool
-	cancelRequests   []effectCancel
+	run               Run
+	snap              Snapshot
+	effect            Effect
+	stopping          bool
+	failures          int
+	timeoutRequested  bool
+	early             bool
+	userCancel        bool
+	cancelIssued      bool
+	observed          bool
+	cancelRequests    []effectCancel
+	cancelRequestedAt time.Time
 }
 
 func (w *effectWatch) step(ctx context.Context) (Snapshot, bool, error) {
@@ -698,6 +720,7 @@ func (w *effectWatch) takeCancel() bool {
 				continue
 			}
 			w.cancelRequests = append(w.cancelRequests, req)
+			w.cancelRequestedAt = w.recordCancel(w.effect.ID, req.at)
 			taken = true
 		default:
 			if w.observed && taken {
@@ -715,6 +738,7 @@ func (w *effectWatch) drainCancels(observed bool) {
 		select {
 		case req := <-w.cancels:
 			if cancelMatches(req, w.effect.ID) {
+				w.recordCancel(w.effect.ID, req.at)
 				replyCancel(req, observed)
 			}
 		default:
@@ -752,6 +776,10 @@ func (w *effectWatch) cancelResultFor(err error) error {
 // effect was completed.
 func (w *effectWatch) cancelAndComplete(ctx context.Context) (Snapshot, bool, error) {
 	w.cancelIssued, w.userCancel = true, true
+	if w.cancelRequestedAt.IsZero() {
+		w.cancelRequestedAt = w.recordCancel(w.effect.ID, w.cfg.Now())
+	}
+	w.effect.CancelRequestedAt = w.cancelRequestedAt
 	job, err := w.executor.Cancel(ctx, w.effect)
 	if err != nil {
 		return w.snap, true, err
@@ -853,6 +881,7 @@ func (w *effectWatch) await(ctx context.Context, job Job) error {
 				continue
 			}
 			w.cancelRequests = append(w.cancelRequests, req)
+			w.cancelRequestedAt = w.recordCancel(w.effect.ID, req.at)
 			w.userCancel = true
 			w.cancelIssued = false
 			cancel()
@@ -897,11 +926,7 @@ func observationOf(job Job, execution core.ExecutionState) Observation {
 }
 
 func (w *effectWatch) complete(ctx context.Context, job Job) (Snapshot, error) {
-	timeout := w.run.Budget.JobTimeout
-	if w.userCancel {
-		timeout = 0
-	}
-	execution := resultExecution(job, timeout, w.snap.State.Phase == core.PhaseCancelling)
+	execution := resultExecution(job, w.run.Budget.JobTimeout, w.snap.State.Phase == core.PhaseCancelling)
 	if execution == core.ExecutionUnknown {
 		return w.unknown(ctx, w.snap, "executor reports unknown after cancellation", &job)
 	}

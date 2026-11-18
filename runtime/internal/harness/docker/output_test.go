@@ -173,7 +173,7 @@ func TestCancelledPreviewEvidenceKeepsStdoutAndRespectsLimits(t *testing.T) {
 }
 
 func TestCancelledProjectionUsesRecordedCaptureFacts(t *testing.T) {
-	rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_seq", Spec: strings.Repeat("a", 64), Generation: 1,
+	rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_seq", Spec: strings.Repeat("a", 64), Epoch: "epoch", Generation: 1,
 		Command: "seq 3000", Workdir: "/", Artifact: "/canti/artifacts/e/output", OutputLimit: 100, PreviewLimit: 50 << 10})
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestCancelledProjectionLongestPathKeepsACompleteArtifact(t *testing.T) {
 		return string(out)
 	}
 	for _, limit := range []int{4096, 50 << 10} {
-		rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_longest", Spec: strings.Repeat("a", 64), Generation: 1,
+		rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_longest", Spec: strings.Repeat("a", 64), Epoch: "epoch", Generation: 1,
 			Command: "printf 'HEAD!'; head -c 60000 /dev/zero | tr '\\0' x; printf 'TAIL-FINAL-XYZ'", Workdir: "/", Artifact: path,
 			OutputLimit: int64(len(data)), PreviewLimit: limit})
 		if err != nil {
@@ -269,7 +269,7 @@ func TestCancelledProjectionLongestPathKeepsACompleteArtifact(t *testing.T) {
 func TestCancelledProjectionKeepsAJobRunnerRunFixture(t *testing.T) {
 	path := "/" + strings.Repeat("a", 901)
 	dir := t.TempDir()
-	rec, err := jobrunner.Run(jobrunner.Config{Directory: dir, EffectID: "effect_fixture", Spec: strings.Repeat("a", 64), Generation: 1,
+	rec, err := jobrunner.Run(jobrunner.Config{Directory: dir, EffectID: "effect_fixture", Spec: strings.Repeat("a", 64), Epoch: "epoch", Generation: 1,
 		Command: "head -c 60000 /dev/zero | tr '\\0' x", Workdir: "/", Artifact: path, OutputLimit: 100, PreviewLimit: 4096})
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestCancelledProjectionRejectsAFullRecordWithoutReservedHeadroom(t *testing
 }
 
 func TestCancelledProjectionFullArtifactHasNoCompletionClaim(t *testing.T) {
-	rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_full_seq", Spec: strings.Repeat("a", 64), Generation: 1,
+	rec, err := jobrunner.Run(jobrunner.Config{Directory: t.TempDir(), EffectID: "effect_full_seq", Spec: strings.Repeat("a", 64), Epoch: "epoch", Generation: 1,
 		Command: "seq 3000", Workdir: "/", Artifact: "/canti/artifacts/e/output", OutputLimit: 13893, PreviewLimit: 50 << 10})
 	if err != nil {
 		t.Fatal(err)

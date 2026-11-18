@@ -75,7 +75,8 @@ through `core.State.Next` from the fresh state and require every recorded
 state in an unbroken sequence. Each gate case logs an `evidence` line with its
 injected failure, observed result, and measurements. Attached environments have
 a different lifecycle: successful commands retain the environment and its
-services, and explicit environment-wide cancellation stops it; they do not
+services, and cancellation or timeout terminates only the job's own process
+group; explicit `environment stop` remains environment-wide. They do not
 inherit ephemeral network, capability or cleanup defaults.
 
 The original acceptance runs used Linux (WSL2) with Docker Engine 29.7.
@@ -157,15 +158,30 @@ is validation on a trusted local filesystem, not a reservation against later
 same-user filesystem replacement or a hostile Docker administrator.
 
 A completed command leaves the prepared environment and background services
-running. Stop or timeout is environment-wide: it can end unrelated services
-in that environment. A witnessed stop reports physical cessation separately
-from the original command's nullable exit result; PID 1 exiting with zero is
-not evidence that the command succeeded. The host keeps an in-flight Stop
-observable through drive interruption and cleanup, and reports its actual
-failure or bounded interruption. An uncertain mutating request quarantines
-the incarnation; a stopped sample or elapsed time does not clear that fence.
-An acknowledged stop permits explicit same-ID start, retaining files and tools
-but ending earlier processes. Unresolved old requests require verified absence
+running. Cancellation and timeout send a control exec to the live helper of the
+exact effect, spec, generation and epoch. The helper owns its child group, keeps
+the leader unreaped while it sends TERM and then KILL after the grace, and scans
+every task after the KILL before declaring the group gone. Its exit status 255 is the durable
+proof; a natural command exit 255 is remapped to 254 and still reported as 255,
+while a natural 254 is remapped to 253 and is reported as unverified because the
+daemon status cannot distinguish 253 from 254; a job terminated by canti reports
+its exact command exit as unavailable and any completion exit as explicitly
+unverified. Cancelled versus timed_out is decided by the durable cancellation
+request time, never by a later proof-confirmation time. A natural exit before the control enters termination is the natural
+succeeded/failed result; an exit during the TERM grace is a
+`job_processes_terminated` cancellation with the observed exit marked unverified;
+an ambiguous 253/254 fenced recovery is unknown and never stops the environment. A
+verified job termination yields a `job_processes_terminated` cessation; missing
+capture evidence marks its output unavailable and never stops the environment;
+preview text is withheld unless the retained output passes its digest check.
+When termination cannot be proven the pre-existing environment stop runs instead, and its cessation is
+reported separately from the original command's nullable exit result. PID 1
+exiting with zero is not evidence that the command succeeded. The host keeps an
+in-flight Stop observable through drive interruption and cleanup, and reports
+its actual failure or bounded interruption. An uncertain mutating request
+quarantines the incarnation; a stopped sample or elapsed time does not clear that
+fence. An acknowledged stop permits explicit same-ID start, retaining files and
+tools but ending earlier processes. Unresolved old requests require verified absence
 of the exact old container ID and explicit retirement before a new incarnation;
 retirement does not settle the old command's unknown result. Invalid terminal
 evidence neither frees its slot nor authorizes disruptive cleanup.
@@ -194,6 +210,8 @@ All public providers in this section were local scripted HTTP servers.
 | Offline/fake HTTP plus real SQLite; `391dd9555581966c299134583a9d9aa0633ff7b4` | The focused command recorded below passed in 2.320 s: 13 parents and 3 subtests. Exact selector and unchanged long TMPDIR are in `public-391dd95/focused-long-manifest.json` | Canonical prospective State, alias-safe TUI startup, pre-creation rejection, pure replay/reconstruction, stop ownership and socket-fixture portability. The focused daemon fixtures are not real Docker evidence |
 | Actual controller processes with fake HTTP; `f152bb348683cd2fd41e1b2091945d3449ffed57`, corrected at `bc4f9d30abbc60ea0b312110a742ab3ea6cc9e6e` | `controller-f152bb3.md` records 26 passing offline parent tests, including controller-process SIGKILL with delayed launch/stop. `controller-bc4f9d3/check-manifest.json` records the exact selected uncached race command: 12 parents and 11 subtests passed in 4.875 s | Launch ambiguity, durable fencing, invalid terminal refusal, canonical mounts and origin checks; fake delayed launch is distinct from a real delayed Engine ExecStart |
 | Real Docker attached integration; `bc4f9d30abbc60ea0b312110a742ab3ea6cc9e6e` | From `runtime`: `go test -json -count=1 -race -tags integration -timeout=3m -run '^TestAttachedDocker' ./internal/harness/docker` passed in 5.727 s, 2 parents and 2 subtests; independent formerly failing edge groups 7/7 and support probes 5/5 passed | Tools/HOME/background service retention, frozen output, cancel/start, canonical bind rejection and named-volume compatibility; original f152 failures remain recorded, not counted as passes |
+| Real Docker job-scoped cancellation; branch `feat/job-cancel` at delivery | `go test -json -count=1 -race -tags integration -timeout=15m ./runtime/internal/harness/docker` passed; the focused cancellation, timeout, ignored-TERM, helper-death fallback, forged-spool, zombie-thread, artifact-loss, racing-control, controller-death, fork-group, crash-before-proof recovery, late-CancelEffect classification (attached and ephemeral), crash-during-grace admission, queued-request admission, immutable terminal receipts, natural-exit-at-stop-fallback, ambiguous-exit explicit-stop, partial/empty cancellation preview, and termination-destination-retry cases passed in the same run | The `setsid` service and container epoch survive cancellation and timeout; the job group, including worker threads behind a zombie leader and children forked during termination, is gone; a missing output after a proof is a job-terminated cessation with output unavailable; a missing completion after a proof is a `job_processes_terminated` cessation and the environment keeps running; helper death before proof falls back to the environment stop; manual controls with and without the optional NSpid PID cross-check converge; a cancellation requested after the job deadline is timed_out through both live CancelEffect and recovery; before the deadline it is cancelled; a natural 253 and an ordinary exit 0 race the failed-control fallback without stopping the environment; a fenced ambiguous exit stays unknown until an explicit stop reconciles the slot and a same-ID start succeeds; a recovery preview is rendered from the host-published verified artifact rather than the mutable spool or a stale completion; a large cancelled output carries the partial marker and Complete=false, while verified empty output has an empty preview; a destination rename failure during the 32/64 MiB fast-path copy is retryable and writes no terminal receipt; a queued pre-deadline request and a crash during grace keep cancellation classification, and a later Cancel of a terminal job returns the stored receipt byte for byte |
+| Offline helper and control termination; branch `feat/job-cancel` at delivery | `go test -count=1 -race ./runtime/internal/jobrunner ./runtime/internal/harness/docker` passed | Natural completion is not delayed; TERM/KILL, fork-during-grace, zombie-as-gone, unreaped leader, another-group refusal, duplicate/wrong-generation helper selection, ptrace refusal in the hardened window, the 255-to-254 remap and the unverified natural 254 case, a malformed or multi-byte /proc state is uncertainty rather than death, copy-on-write authority and slot errors, and cached stop proof are covered |
 | Actual controller + private Engine29.9.3/API1.47 faults; `bc4f9d30abbc60ea0b312110a742ab3ea6cc9e6e` | `controller-bc4f9d3.md` and its manifests record 12/12 assertions: SIGKILL of a Cancel controller while a proxy holds a real stop; stopped same-ID stays fenced; exact old-ID removal and retirement permit new-ID work; released old stop returns 404 without killing replacement work; ordinary acknowledged cancel/start works; captured output stays complete | Physical stop-witness nonce/intent digest checked after Pending clears. Does not establish real delayed ExecStart, power-loss durability or recovery of active work across daemon restart |
 | Read-only live admission; `00eadd6ff0a3d75cbf178b5fdc604de95441f008` | `readiness-00eadd6.md`: 8 parents and 15 subtests passed uncached race in 4.424 s, with unchanged authority bytes and no State creation or Docker mutation | Refuses stopped/paused/restarting/quarantined or unsettled environments; recovery mapping remains available for stopped/quarantined cancellation |
 | Public CLI + real Docker + scripted HTTP; `e86798fe0ad89825bb1c02208cc47a733c5932df`, `a2363636106bfb6d5f9e5bade9054d42279b87af`, final `391dd9555581966c299134583a9d9aa0633ff7b4` | `public-e86798f/checkpoint.md`: 8 scenario groups passed but auto-host owner exit failed; `public-a236363/checkpoint.md`: all 9 passed after stop ownership correction. Final `public-runs/p8/manifest.json`: all 9 passed, owner and `canti stop -host auto` both exit 3 | Installs jq, writes private HOME config, reuses both in later runs/sessions, retains services and frozen outputs, retrieves/focuses native evidence, handles provider-confirmed overflow/reset, blocks another State's command, observes cessation and explicitly restarts the same ID. p8 uses the existing auto host after restart; earlier fixture mistakes and failed exits are retained separately |
@@ -463,7 +481,8 @@ repository, and cost is not measured.
   navigation fixed both, and round 3 showed both answers once in agent-log
   order with a correct assessment. Round 1 also produced an invented
   cancellation claim, and cancelling an attached effect stopped the whole
-  environment and required operator recovery. Limits: one model through a
+  environment and required operator recovery; that environment-wide attached
+  cancellation was replaced by the job-process termination path above. Limits: one model through a
   relay, not the original platform; cache reads are relay reports, not
   billing; small samples; no cost measurement.
 

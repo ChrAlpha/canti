@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -26,29 +27,32 @@ import (
 )
 
 type attachedFake struct {
-	t                                   *testing.T
-	mu                                  sync.Mutex
-	dir, workspace, endpoint, container string
-	running, exists                     bool
-	paused, restarting                  bool
-	epoch                               time.Time
-	next, starts, stops                 int
-	execs                               map[string]execMetadata
-	requests                            map[string]execRequest
-	stopEntered, stopRelease            chan struct{}
-	stopOnce                            sync.Once
-	dropStop                            bool
-	engine                              *engine
-	address                             string
-	startEntered, startRelease          chan struct{}
-	startOnce                           sync.Once
-	labelIdentity, extraMount           string
-	extraTarget, extraType              string
-	user, probeFailure                  string
-	probes                              int
-	daemonChecks                        int
-	daemonID                            string
-	changeEpochOnCreate                 bool
+	t                                             *testing.T
+	mu                                            sync.Mutex
+	dir, workspace, endpoint, container           string
+	running, exists                               bool
+	paused, restarting                            bool
+	epoch                                         time.Time
+	next, starts, stops                           int
+	execs                                         map[string]execMetadata
+	requests                                      map[string]execRequest
+	stopEntered, stopRelease                      chan struct{}
+	stopOnce                                      sync.Once
+	dropStop                                      bool
+	engine                                        *engine
+	address                                       string
+	startEntered, startRelease                    chan struct{}
+	startOnce                                     sync.Once
+	labelIdentity, extraMount                     string
+	extraTarget, extraType                        string
+	user, probeFailure                            string
+	probes                                        int
+	daemonChecks                                  int
+	terminationUnproven, terminationControlNoPID  bool
+	terminationProofOnly, terminationNoCompletion bool
+	terminationCalls                              int
+	daemonID                                      string
+	changeEpochOnCreate                           bool
 }
 
 func newAttachedFake(t *testing.T) *attachedFake {
@@ -62,7 +66,7 @@ func newAttachedFake(t *testing.T) *attachedFake {
 
 func newUnattachedFake(t *testing.T) *attachedFake {
 	t.Helper()
-	f := &attachedFake{t: t, dir: t.TempDir(), workspace: t.TempDir(), running: true, exists: true, epoch: time.Now().UTC(), container: strings.Repeat("c", 64), execs: map[string]execMetadata{}, requests: map[string]execRequest{}}
+	f := &attachedFake{t: t, dir: t.TempDir(), workspace: t.TempDir(), running: true, exists: true, epoch: time.Now().UTC(), container: strings.Repeat("c", 64), terminationUnproven: true, execs: map[string]execMetadata{}, requests: map[string]execRequest{}}
 	f.user = fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	f.daemonID = "daemon"
 	f.endpoint = "unix://" + filepath.Join(f.dir, "engine.sock")
@@ -250,6 +254,25 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
+			if isTerminateCommand(req.Cmd) {
+				f.terminationCalls++
+				code := 0
+				if f.terminationUnproven {
+					code = 1
+				} else if !f.terminationControlNoPID {
+					m.Pid = 77
+					if !f.terminationProofOnly {
+						f.finishTermination(req)
+					}
+					if f.terminationNoCompletion {
+						f.finishTerminationWithoutCompletion(req)
+					}
+				}
+				m.Running, m.ExitCode = false, &code
+				f.execs[id] = m
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			f.starts++
 			if f.startEntered != nil {
 				f.startOnce.Do(func() { close(f.startEntered) })
@@ -280,6 +303,80 @@ func (f *attachedFake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(404)
 }
+func commandArgument(cmd []string, name string) string {
+	for i := 0; i+1 < len(cmd); i++ {
+		if cmd[i] == name {
+			return cmd[i+1]
+		}
+	}
+	return ""
+}
+
+func isTerminateCommand(cmd []string) bool {
+	for _, arg := range cmd {
+		if arg == "-terminate" {
+			return true
+		}
+	}
+	return false
+}
+
+func generationArgument(cmd []string) uint64 {
+	value := commandArgument(cmd, "-generation")
+	var generation uint64
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		generation = generation*10 + uint64(r-'0')
+	}
+	return generation
+}
+
+func (f *attachedFake) finishTermination(req execRequest) {
+	effect := commandArgument(req.Cmd, "-effect")
+	generation := generationArgument(req.Cmd)
+	for id, request := range f.requests {
+		if isTerminateCommand(request.Cmd) || commandArgument(request.Cmd, "-effect") != effect || generationArgument(request.Cmd) != generation {
+			continue
+		}
+		m := f.execs[id]
+		code := jobrunner.TerminationStatus
+		m.Running, m.ExitCode = false, &code
+		f.execs[id] = m
+		dir := filepath.Join(f.dir, "spool", effect)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			f.t.Error(err)
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, "output"), nil, 0600); err != nil {
+			f.t.Error(err)
+		}
+		shellExit := 143
+		rec := jobrunner.Record{Protocol: jobrunner.Protocol, EffectID: effect, Spec: commandArgument(request.Cmd, "-spec"), Generation: generation, StartedAt: time.Now().UTC(), ExitCode: &shellExit, Digest: harness.ConfigDigest(nil), Terminated: true}
+		rec.FinishedAt = rec.StartedAt
+		completion, _ := json.Marshal(rec)
+		if err := os.WriteFile(filepath.Join(dir, "completion.json"), completion, 0600); err != nil {
+			f.t.Error(err)
+		}
+		return
+	}
+}
+
+func (f *attachedFake) finishTerminationWithoutCompletion(req execRequest) {
+	effect := commandArgument(req.Cmd, "-effect")
+	for id, request := range f.requests {
+		if isTerminateCommand(request.Cmd) || commandArgument(request.Cmd, "-effect") != effect {
+			continue
+		}
+		m := f.execs[id]
+		code := jobrunner.TerminationStatus
+		m.Running, m.ExitCode = false, &code
+		f.execs[id] = m
+		return
+	}
+}
+
 func (f *attachedFake) executor(t *testing.T) *Attached {
 	t.Helper()
 	a, err := ReadAttachment(f.dir)
@@ -376,11 +473,765 @@ func TestAttachedCancellationConfirmsCessationWithoutPID1Exit(t *testing.T) {
 	}
 }
 
+func TestAttachedCancellationTerminatesOnlyTheJobAndRetainsTheEnvironment(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	x := f.executor(t)
+	e := effectFor(x, "effect_terminate", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.ExitCode != nil || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || !strings.Contains(j.Output.Detail, "environment") {
+		t.Fatalf("cancel=%+v: %v", j, err)
+	}
+	if f.stops != 0 || f.terminationCalls == 0 {
+		t.Fatalf("stops=%d termination=%d", f.stops, f.terminationCalls)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found || r.Termination == nil || r.Termination.OwnerID != r.ExecID {
+		t.Fatalf("proof=%+v: %v", r.Termination, err)
+	}
+	status, err := ControlEnvironment(t.Context(), f.dir, "inspect")
+	if err != nil || !status.Running || status.Gate != "open" || status.Epoch != f.epoch.Format(time.RFC3339Nano) {
+		t.Fatalf("environment=%+v: %v", status, err)
+	}
+	next := effectFor(x, "effect_next", "true")
+	if _, err = x.Drive(t.Context(), next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttachedCancellationFallbackToEnvironmentStopWithoutProof(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_unproven", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.ExitCode != nil {
+		t.Fatalf("cancel=%+v: %v", j, err)
+	}
+	if f.stops != 1 || f.terminationCalls == 0 {
+		t.Fatalf("stops=%d termination=%d", f.stops, f.terminationCalls)
+	}
+}
+
+func TestAttachedFencedNaturalExitIsNotACancellation(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_fenced", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "natural")
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobSucceeded || j.ExitCode == nil || *j.ExitCode != 0 || j.Cessation != nil {
+		t.Fatalf("fenced natural exit = %+v: %v", j, err)
+	}
+	j, err = x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobSucceeded || f.stops != 0 || f.terminationCalls != 0 {
+		t.Fatalf("natural cancel = %+v stops=%d termination=%d: %v", j, f.stops, f.terminationCalls, err)
+	}
+}
+
+func TestAttachedCancellationResumesAfterControllerDeathBeforeProof(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	x := f.executor(t)
+	e := effectFor(x, "effect_restart", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || f.stops != 0 || f.terminationCalls != 1 {
+		t.Fatalf("restart cancellation=%+v stops=%d termination=%d: %v", j, f.stops, f.terminationCalls, err)
+	}
+}
+
+func TestAttachedCancellationRejectsAControlExecWithoutStartedEvidence(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	f.terminationControlNoPID = true
+	x := f.executor(t)
+	e := effectFor(x, "effect_no_pid", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || f.stops != 1 {
+		t.Fatalf("zero-PID control = %+v stops=%d: %v", j, f.stops, err)
+	}
+	r, _, err := x.readJob(e)
+	if err != nil || r.Termination != nil {
+		t.Fatalf("accepted zero-PID control proof=%+v: %v", r.Termination, err)
+	}
+}
+
+func TestAttachedSlotReleaseFailureIsDistinctFromATerminalWrite(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_slot_release", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "done")
+	parent := filepath.Dir(x.cachePath(e.ID))
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(parent, 0700)
+	if _, err := x.Inspect(t.Context(), e); !errors.Is(err, errSlotRelease) {
+		t.Fatalf("slot release error = %v, want errSlotRelease", err)
+	}
+	if _, err := x.Inspect(t.Context(), e); !errors.Is(err, errSlotRelease) {
+		t.Fatalf("loaded slot release error = %v, want errSlotRelease", err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found || record.Terminal == nil {
+		t.Fatalf("terminal write was not durable: %+v: %v", record.Terminal, err)
+	}
+}
+
+func TestAttachedControlExitAloneDoesNotProveCancellation(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	f.terminationProofOnly = true
+	x := f.executor(t)
+	x.cfg.StopGrace = 10 * time.Millisecond
+	e := effectFor(x, "effect_control_only", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.Cessation.Kind != harness.CessationStopped || f.stops != 1 {
+		t.Fatalf("control-only proof = %+v stops=%d: %v", j, f.stops, err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found || record.Termination != nil {
+		t.Fatalf("control exit alone was recorded as proof: %+v: %v", record.Termination, err)
+	}
+}
+
+func TestAttachedAuthorityWriteFailureDoesNotReleaseTheSlot(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	f.terminationProofOnly = true
+	x := f.executor(t)
+	e := effectFor(x, "effect_authority_write", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		job harness.Job
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		job, err := x.Cancel(t.Context(), e)
+		done <- result{job, err}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.mu.Lock()
+		calls := f.terminationCalls
+		f.mu.Unlock()
+		if calls > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control exec was not started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	dir := x.jobDir(e.ID)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0700)
+	f.mu.Lock()
+	f.finishTerminationWithoutCompletion(execRequest{Cmd: []string{"helper", "-effect", e.ID, "-generation", "1"}})
+	f.mu.Unlock()
+	got := <-done
+	if got.err == nil || !errors.Is(got.err, errTerminalWrite) {
+		t.Fatalf("authority failure was acknowledged or mistyped: %+v: %v", got.job, got.err)
+	}
+	_, state, err := readEnvironment(f.dir)
+	if err != nil || state.Active != e.ID {
+		t.Fatalf("slot released after failed authority write: %+v: %v", state, err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found || record.Terminal != nil {
+		t.Fatalf("terminal was published before the authoritative write: %+v: %v", record.Terminal, err)
+	}
+	if _, err := os.Stat(x.cachePath(e.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mirrored uncommitted terminal: %v", err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || f.stops != 0 {
+		t.Fatalf("retry after authority recovery = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedDurableProofDoesNotStopTheEnvironmentWithALateCompletion(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_post_proof_fallback", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	record.Fenced, record.CancelAt = true, time.Now().UTC()
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: record.CancelAt}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	job, err := x.Cancel(t.Context(), e)
+	if err != nil || job.Status != harness.JobCancelled || job.Cessation == nil || job.Cessation.Kind != harness.CessationJobTerminated || f.stops != 0 {
+		t.Fatalf("durable proof = %+v stops=%d: %v", job, f.stops, err)
+	}
+	f.complete(t, x, e, 143, "late")
+	late, err := x.Inspect(t.Context(), e)
+	if err != nil || late.Cessation == nil || late.Cessation.Kind != harness.CessationJobTerminated || strings.Contains(late.Output.Detail, "environment stopped") {
+		t.Fatalf("late completion rewrote the receipt = %+v: %v", late, err)
+	}
+}
+
+func TestAttachedMissingCompletionAfterProofUsesAJobTerminationCessation(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	f.terminationProofOnly = true
+	f.terminationNoCompletion = true
+	x := f.executor(t)
+	x.cfg.StopGrace = 10 * time.Millisecond
+	e := effectFor(x, "effect_no_completion", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || f.stops != 0 {
+		t.Fatalf("missing completion after proof = %+v stops=%d: %v", j, f.stops, err)
+	}
+	if strings.Contains(j.Output.Detail, "remain running") == false {
+		t.Fatalf("job termination receipt lost its environment detail: %q", j.Output.Detail)
+	}
+}
+
+func TestAttachedMissingOutputAfterProofKeepsTheCancelledReceipt(t *testing.T) {
+	f := newAttachedFake(t)
+	f.terminationUnproven = false
+	f.terminationProofOnly = true
+	f.terminationNoCompletion = true
+	x := f.executor(t)
+	e := effectFor(x, "effect_no_output", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || j.ExitCode != nil || j.Output.Available || f.stops != 0 {
+		t.Fatalf("missing output after proof = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedFencedUndispatchedRecoveryCancelsWithoutAProcessProof(t *testing.T) {
+	f := newAttachedFake(t)
+	f.changeEpochOnCreate = true
+	x := f.executor(t)
+	e := effectFor(x, "effect_fenced_unconsumed", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err == nil {
+		t.Fatal("launched into a changed epoch")
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation != nil || f.stops != 0 || f.terminationCalls != 0 {
+		t.Fatalf("fenced undispatched recovery = %+v stops=%d termination=%d: %v", j, f.stops, f.terminationCalls, err)
+	}
+	_, state, err := readEnvironment(f.dir)
+	if err != nil || state.Active != "" {
+		t.Fatalf("slot was not released: %+v: %v", state, err)
+	}
+}
+
+func TestAttachedRecoveredProofKeepsItsConfirmationTime(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_proof_time", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	confirmed := time.Now().UTC()
+	record.Fenced = true
+	record.CancelAt = confirmed.Add(-time.Second)
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: confirmed}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.finishTerminationWithoutCompletion(execRequest{Cmd: []string{"helper", "-effect", e.ID, "-generation", "1"}})
+	f.mu.Unlock()
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Cancel(t.Context(), e)
+	if err != nil || j.Cessation == nil || !j.Cessation.ConfirmedAt.Equal(confirmed) {
+		t.Fatalf("recovered proof time = %+v: %v", j.Cessation, err)
+	}
+}
+
+func TestAttachedRecoveredProofSurvivesMissingExecMetadata(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_missing_exec_proof", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	confirmed := time.Now().UTC()
+	record.Fenced, record.CancelAt = true, confirmed.Add(-time.Second)
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: confirmed}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	delete(f.execs, record.ExecID)
+	f.mu.Unlock()
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || !j.Cessation.ConfirmedAt.Equal(confirmed) || f.stops != 0 {
+		t.Fatalf("proof without exec metadata = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedJobTerminatedCessationRequiresItsProof(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_cessation_proof", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	at := time.Now().UTC()
+	record.Fenced, record.CancelAt = true, at.Add(-time.Second)
+	j := x.baseJob(record)
+	j.Status = harness.JobCancelled
+	j.Cessation = &harness.Cessation{AuthorityID: x.cfg.Attachment.AuthorityID, BackendID: x.cfg.Attachment.DaemonID, EnvironmentID: x.cfg.Attachment.ContainerID, StartEpoch: record.Epoch, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, StopIntent: harness.ConfigDigest([]byte("job-terminated")), Incarnation: x.cfg.Attachment.Incarnation, Generation: record.Generation, Kind: harness.CessationJobTerminated, RequestedAt: at.Add(-time.Second), ConfirmedAt: at}
+	record.Terminal = &j
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), record, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("accepted a job-terminated cessation without its proof")
+	}
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: at}
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), record, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err != nil {
+		t.Fatalf("rejected a matching job-terminated proof: %v", err)
+	}
+}
+
+func TestAttachedAmbiguousNaturalExit253IsUnverified(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_ambiguous_exit", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 253, "")
+	path := filepath.Join(f.dir, "spool", e.ID, "completion.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec jobrunner.Record
+	if err = json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	code := 254
+	rec.ExitCode = &code
+	data, _ = json.Marshal(rec)
+	if err = os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobUnknown || j.ExitCode != nil {
+		t.Fatalf("ambiguous exit = %+v: %v", j, err)
+	}
+}
+
+func TestAttachedFencedAmbiguousExitDoesNotStopTheEnvironment(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_ambiguous_fenced", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 253, "")
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	record.Fenced, record.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobUnknown || j.ExitCode != nil || j.Cessation != nil || f.stops != 0 {
+		t.Fatalf("fenced ambiguous exit = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedRecoveredProofKeepsVerifiedCaptureWithoutExecMetadata(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_capture_without_exec", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "captured")
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	confirmed := time.Now().UTC()
+	record.Fenced, record.CancelAt = true, confirmed.Add(-time.Second)
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: confirmed}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	delete(f.execs, record.ExecID)
+	f.mu.Unlock()
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || !strings.Contains(j.Preview, "captured") || !strings.Contains(j.Preview, "command was cancelled") || j.Output.Complete || !j.Output.Available || f.stops != 0 {
+		t.Fatalf("recovered capture = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedRecoveredProofRendersPreviewFromVerifiedBytes(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_verified_preview", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "captured")
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	path := filepath.Join(f.dir, "spool", e.ID, "completion.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec jobrunner.Record
+	if err = json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Preview = "stale diagnostic"
+	data, err = json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := time.Now().UTC()
+	record.Fenced, record.CancelAt = true, confirmed.Add(-time.Second)
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: confirmed}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	delete(f.execs, record.ExecID)
+	f.mu.Unlock()
+	rebuilt, err := NewAttached(x.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := rebuilt.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobCancelled || !strings.Contains(j.Preview, "captured") || !strings.Contains(j.Preview, "command was cancelled") || j.Output.Complete || !j.Output.Available || f.stops != 0 {
+		t.Fatalf("verified preview = %+v stops=%d: %v", j, f.stops, err)
+	}
+}
+
+func TestAttachedVerifiedPreviewDoesNotRereadSpool(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_preview_race", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "verified data")
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	rec, have := x.completionEvidence(record)
+	if !have {
+		t.Fatal("missing completion")
+	}
+	job := x.baseJob(record)
+	job.Status = harness.JobCancelled
+	if _, err := x.collectAttached(record, job, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, "spool", e.ID, "output"), []byte("updated spool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := x.verifiedPreview(record, true)
+	if err != nil || !strings.Contains(preview, "verified data") || strings.Contains(preview, "updated spool") {
+		t.Fatalf("preview after spool replacement = %q: %v", preview, err)
+	}
+}
+
+func TestAttachedTerminalReceiptIgnoresLaterAdmissionTime(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_terminal_retry", "true")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "done")
+	before, err := x.Inspect(t.Context(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.CancelRequestedAt = time.Now().UTC().Add(time.Minute)
+	after, err := x.Cancel(t.Context(), e)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("terminal retry = %+v, %v; want %+v", after, err, before)
+	}
+}
+
+func TestAttachedUnverifiedOutputWithholdsPreview(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_unverified_preview", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "diagnostic")
+	record, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", record, err)
+	}
+	confirmed := time.Now().UTC()
+	record.Fenced, record.CancelAt = true, confirmed.Add(-time.Second)
+	record.Termination = &terminationProof{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, OwnerID: record.ExecID, Generation: record.Generation, ConfirmedAt: confirmed}
+	if err = x.saveJob(record); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(f.dir, "spool", e.ID, "output")); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Preview != "" || j.Output.Available || j.Cessation == nil {
+		t.Fatalf("unverified output preview = %+v: %v", j, err)
+	}
+}
+
+func TestAttachedRejectsAnEarlierCommandRecordRevision(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_old_format", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Format = 1
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), r, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("accepted an earlier command record revision")
+	}
+}
+
+func TestAttachedRejectsCancelledWithExitWithoutTerminationProof(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_forged_cancel", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	code := 143
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	j := x.baseJob(r)
+	j.Status, j.ExitCode, j.Fenced = harness.JobCancelled, &code, true
+	j.StartedAt, j.FinishedAt = time.Now().UTC(), time.Now().UTC()
+	r.Terminal = &j
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), r, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("accepted a cancelled-with-exit receipt without proof")
+	}
+}
+
+func TestAttachedStopIntentAloneDoesNotProveCancellation(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_stop_proof", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	code := 143
+	r.Fenced, r.CancelAt, r.CancelIntent = true, time.Now().UTC(), "intent-only"
+	j := x.baseJob(r)
+	j.Status, j.ExitCode, j.Fenced = harness.JobCancelled, &code, true
+	j.StartedAt, j.FinishedAt = time.Now().UTC(), time.Now().UTC()
+	r.Terminal = &j
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), r, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err == nil {
+		t.Fatal("accepted an unacknowledged stop intent")
+	}
+	r.StopProof = harness.ConfigDigest([]byte("acknowledged-stop"))
+	if err = saveJSON(filepath.Join(x.jobDir(e.ID), "command.json"), r, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = x.Inspect(t.Context(), e); err != nil {
+		t.Fatalf("rejected an acknowledged stop proof: %v", err)
+	}
+}
+
+func TestAttachedStoppedEnvironmentKeepsTheGenuineExit(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_stopped_exit", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 42, "stopped")
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.running = false
+	f.mu.Unlock()
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobFailed || j.ExitCode == nil || *j.ExitCode != 42 || j.Cessation != nil {
+		t.Fatalf("stopped natural exit = %+v: %v", j, err)
+	}
+	r, _, err = x.readJob(e)
+	if err != nil || !r.StoppedAtExit {
+		t.Fatalf("stopped exit was not recorded: %+v: %v", r, err)
+	}
+}
+
+func TestAttachedNaturalExitAfterFenceWinsWithoutEnvironmentStop(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_natural_after_fence", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 42, "natural")
+	r, found, err := x.readJob(e)
+	if err != nil || !found {
+		t.Fatalf("command=%+v: %v", r, err)
+	}
+	r.Fenced, r.CancelAt = true, time.Now().UTC()
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Cancel(t.Context(), e)
+	if err != nil || j.Status != harness.JobFailed || j.ExitCode == nil || *j.ExitCode != 42 || j.Cessation != nil || f.stops != 0 {
+		t.Fatalf("natural exit after fence = %+v stops=%d: %v", j, f.stops, err)
+	}
+	r, _, err = x.readJob(e)
+	if err != nil || !r.NaturalExit {
+		t.Fatalf("natural exit was not recorded: %+v: %v", r, err)
+	}
+}
+
 func TestAttachedActiveCommandSurvivesWorkspaceRemoval(t *testing.T) {
 	for _, mutation := range []string{"delete", "move"} {
 		for _, operation := range []string{"drive", "inspect", "cancel", "stop"} {
 			t.Run(mutation+"/"+operation, func(t *testing.T) {
 				f := newAttachedFake(t)
+				if operation == "cancel" {
+					f.terminationUnproven = false
+				}
 				// Bind the parent so the mutable project subtree can disappear
 				// while the prepared container's mount remains unchanged.
 				project := filepath.Join(f.workspace, "project")
@@ -429,12 +1280,19 @@ func TestAttachedActiveCommandSurvivesWorkspaceRemoval(t *testing.T) {
 						t.Fatalf("completion after removal: %+v: %v", j, err)
 					}
 				} else {
-					if f.stops != 1 {
-						t.Fatalf("Docker stop requests=%d, want 1", f.stops)
+					wantStops := 1
+					if operation == "cancel" {
+						wantStops = 0
+					}
+					if f.stops != wantStops {
+						t.Fatalf("Docker stop requests=%d, want %d", f.stops, wantStops)
 					}
 					j, err = x.Inspect(t.Context(), e)
 					if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil {
 						t.Fatalf("cessation after removal: %+v: %v", j, err)
+					}
+					if operation == "cancel" && j.Cessation.Kind != harness.CessationJobTerminated {
+						t.Fatalf("cancel used environment cessation: %+v", j.Cessation)
 					}
 				}
 				_, s, err := readEnvironment(f.dir)
@@ -626,7 +1484,7 @@ func TestAttachedInvalidActiveRecordStopsReconciliationBeforeTheDaemon(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Format = 2
+	r.Format = 3
 	if err = x.saveJob(r); err != nil {
 		t.Fatal(err)
 	}

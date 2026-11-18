@@ -1,5 +1,6 @@
-// Package jobrunner captures one foreground shell independently of its controller.
-// It knows no journal, Docker API, model, or run transitions.
+// Package jobrunner captures one foreground shell and, on request, terminates
+// the process group it recorded for that command. It knows no journal, Docker
+// API, model, or run transitions.
 package jobrunner
 
 import (
@@ -15,12 +16,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
-const Protocol = 3
+const Protocol = 4
 const MetadataLimit = 16 << 10
 
 // lingerGrace bounds how long capture waits, once the foreground shell has
@@ -31,8 +33,10 @@ const lingerGrace = 100 * time.Millisecond
 // Workdir is entered by the command's shell, so it need not exist at launch.
 type Config struct {
 	Directory, EffectID, Spec, Command, Workdir, Init string
-	Artifact                                          string
+	Artifact, Epoch                                   string
 	Generation                                        uint64
+	Grace                                             time.Duration
+	RemapExit                                         bool
 	OutputLimit                                       int64
 	PreviewLimit                                      int
 }
@@ -54,6 +58,7 @@ type Record struct {
 	PreviewMarkerLength           int
 	PreviewCancelledMarker        string
 	Incomplete                    bool
+	Terminated                    bool
 }
 
 func (c Config) validate() error {
@@ -67,7 +72,36 @@ func (c Config) validate() error {
 	if c.Init != "" && !filepath.IsAbs(c.Init) {
 		return errors.New("job runner: init must be absolute")
 	}
+	if c.Epoch == "" || len(c.Epoch) > 128 {
+		return errors.New("job runner: invalid environment epoch")
+	}
+	if c.Grace < 0 {
+		return errors.New("job runner: grace must not be negative")
+	}
 	return nil
+}
+
+// ExitStatus is the top-level canti-job status for a completed record. A proven
+// termination is its own status; a command that naturally exited 255 is
+// remapped so the termination status cannot be forged by an exit code.
+func ExitStatus(rec Record, remap bool) int {
+	if rec.Terminated {
+		return TerminationStatus
+	}
+	if rec.ExitCode == nil {
+		return 125
+	}
+	if !remap {
+		return *rec.ExitCode
+	}
+	switch *rec.ExitCode {
+	case TerminationStatus:
+		return RemappedCommandExit
+	case RemappedCommandExit:
+		return RemappedCommandExit254
+	default:
+		return *rec.ExitCode
+	}
 }
 
 // Run launches a fresh shell, bounds retained output, and publishes a synced
@@ -108,17 +142,46 @@ func Run(c Config) (Record, error) {
 	}
 	cmd := exec.Command("/bin/sh", "-c", script+c.Command, "canti-job", c.Init, c.Workdir)
 	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = "/", nil, writer, writer
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 	rec := Record{Protocol: Protocol, EffectID: c.EffectID, Spec: c.Spec, Generation: c.Generation}
+	if err = HardenProcess(); err != nil {
+		return rec, fmt.Errorf("job runner: harden helper: %w", err)
+	}
+	termination := make(chan os.Signal, 1)
+	signal.Notify(termination, syscall.SIGUSR1)
+	defer signal.Stop(termination)
 	if err := cmd.Start(); err != nil {
 		return rec, err
 	}
 	rec.StartedAt = time.Now().UTC() // The helper's observation, not a Docker PID1 timestamp.
-	stopSignals := forwardSignals(cmd.Process.Pid)
+	pgid, pgidErr := syscall.Getpgid(cmd.Process.Pid)
+	if pgidErr != nil || pgid != cmd.Process.Pid || pgid <= 1 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return rec, errors.New("job runner: the shell did not establish its own process group")
+	}
+	stopSignals := sync.OnceFunc(forwardSignals(cmd.Process.Pid, pgid))
 	defer stopSignals()
 	writer.Close()
 	captured := make(chan capture, 1)
 	go func() { captured <- collect(reader, out, c.OutputLimit, c.PreviewLimit) }()
+	exited := make(chan error, 1)
+	go func() { exited <- waitNoReap(cmd.Process.Pid) }()
+	select {
+	case err = <-exited:
+		if err != nil {
+			return rec, err
+		}
+	case <-termination:
+		if err = terminateChild(cmd.Process.Pid, pgid, c.grace()); err != nil {
+			return rec, err
+		}
+		rec.Terminated = true
+		if err = <-exited; err != nil {
+			return rec, err
+		}
+	}
+	stopSignals()
 	waitErr := cmd.Wait()
 	code, statusErr := exitCode(waitErr)
 	if statusErr != nil {
@@ -236,6 +299,13 @@ func pageEndFromReaderAt(r io.ReaderAt, size, start, max int64, previewLimit int
 	return start + int64(pageEndForRaw(raw, previewLimit)), nil
 }
 
+func (c Config) grace() time.Duration {
+	if c.Grace > 0 {
+		return c.Grace
+	}
+	return 5 * time.Second
+}
+
 func exitCode(err error) (int, error) {
 	if err == nil {
 		return 0, nil
@@ -253,23 +323,28 @@ func exitCode(err error) (int, error) {
 	return 0, fmt.Errorf("job runner: wait did not establish child status: %w", err)
 }
 
-func forwardSignals(pid int) func() {
+func forwardSignals(pid, pgid int) func() {
 	signals := make(chan os.Signal, 4)
-	done := make(chan struct{})
+	done, finished := make(chan struct{}), make(chan struct{})
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	go func() {
+		defer close(finished)
 		for {
 			select {
 			case <-done:
 				return
 			case s := <-signals:
-				if sig, ok := s.(syscall.Signal); ok {
-					_ = syscall.Kill(-pid, sig)
+				if sig, ok := s.(syscall.Signal); ok && targetValid(pid, pgid) {
+					_ = syscall.Kill(-pgid, sig)
 				}
 			}
 		}
 	}()
-	return func() { signal.Stop(signals); close(done) }
+	return func() {
+		signal.Stop(signals)
+		close(done)
+		<-finished
+	}
 }
 
 func publishPreview(root *os.Root, preview string) error {

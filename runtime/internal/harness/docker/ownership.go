@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
@@ -20,10 +21,17 @@ const recordFormat = 2
 type ownership struct {
 	Format                          int
 	EffectID, Spec, CommandHash, ID string
+	CancelAt                        time.Time `json:",omitzero"`
 }
 
 func ownerOf(effect harness.Effect, id string) ownership {
-	return ownership{recordFormat, effect.ID, effect.Spec, harness.ConfigDigest([]byte(effect.Command)), id}
+	return ownership{Format: recordFormat, EffectID: effect.ID, Spec: effect.Spec, CommandHash: harness.ConfigDigest([]byte(effect.Command)), ID: id}
+}
+
+// sameOwnership compares only durable identity. CancelAt is admission
+// metadata carried by a cancellation witness, not part of identity.
+func sameOwnership(a, b ownership) bool {
+	return a.Format == b.Format && a.EffectID == b.EffectID && a.Spec == b.Spec && a.CommandHash == b.CommandHash && a.ID == b.ID
 }
 
 func readJSON(path string, value any) (bool, error) {
@@ -50,7 +58,7 @@ func (x *Executor) ownership(effect harness.Effect, name string) (ownership, boo
 	found, err := readJSON(filepath.Join(x.dir(effect.ID), name), &saved)
 	if err == nil && found {
 		want := ownerOf(effect, saved.ID)
-		if saved != want || (name == "binding.json" || name == "stop") && saved.ID == "" || name == "cancel" && saved.ID != "" {
+		if !sameOwnership(saved, want) || (name == "binding.json" || name == "stop") && saved.ID == "" || name == "cancel" && saved.ID != "" {
 			err = errors.New("unsupported or mismatched identity; use fresh state")
 		}
 	}
@@ -87,15 +95,17 @@ func (x *Executor) binding(effect harness.Effect, c container) error {
 	return x.saveOwnership("binding.json", ownerOf(effect, c.ID))
 }
 
-func (x *Executor) fence(effect harness.Effect) error {
-	_, found, err := x.ownership(effect, "cancel")
+func (x *Executor) fence(effect harness.Effect) (ownership, error) {
+	saved, found, err := x.ownership(effect, "cancel")
 	if err != nil {
-		return err
+		return ownership{}, err
 	}
 	if found {
-		return x.syncWitnesses(effect.ID)
+		return saved, x.syncWitnesses(effect.ID)
 	}
-	return x.saveOwnership("cancel", ownerOf(effect, ""))
+	saved = ownerOf(effect, "")
+	saved.CancelAt = effect.CancelRequestedAt
+	return saved, x.saveOwnership("cancel", saved)
 }
 
 // A preceding publication may have failed after making its name visible.
@@ -124,6 +134,7 @@ func (x *Executor) stopRequested(effect harness.Effect, id string) error {
 type witnesses struct {
 	owner                   ownership
 	bound, fenced, stopping bool
+	cancelAt                time.Time
 	latch                   string
 }
 
@@ -132,9 +143,11 @@ func (x *Executor) readWitnesses(effect harness.Effect) (w witnesses, err error)
 	if w.owner, w.bound, err = x.ownership(effect, "binding.json"); err != nil {
 		return w, err
 	}
-	if _, w.fenced, err = x.ownership(effect, "cancel"); err != nil {
+	var cancel ownership
+	if cancel, w.fenced, err = x.ownership(effect, "cancel"); err != nil {
 		return w, err
 	}
+	w.cancelAt = cancel.CancelAt
 	stopped, found, err := x.ownership(effect, "stop")
 	if err != nil {
 		return w, err

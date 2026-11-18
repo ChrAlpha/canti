@@ -17,7 +17,7 @@ import (
 
 func config(t *testing.T, command string) Config {
 	t.Helper()
-	return Config{Directory: t.TempDir(), EffectID: "effect_test", Spec: strings.Repeat("a", 64), Artifact: "/canti/artifacts/effect_test/output", Generation: 1, Workdir: t.TempDir(), Command: command, OutputLimit: 1024, PreviewLimit: 4096}
+	return Config{Directory: t.TempDir(), EffectID: "effect_test", Spec: strings.Repeat("a", 64), Artifact: "/canti/artifacts/effect_test/output", Epoch: "epoch", RemapExit: true, Generation: 1, Grace: time.Second, Workdir: t.TempDir(), Command: command, OutputLimit: 1024, PreviewLimit: 4096}
 }
 func TestCompletionKeepsCommandExitAndImmutableCapture(t *testing.T) {
 	c := config(t, "printf hello; printf error >&2; exit 7")
@@ -451,8 +451,8 @@ func TestRunPublishesCompletionWhenPreviewCannotBePublished(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "preview"), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := Run(Config{Directory: dir, EffectID: "e", Spec: strings.Repeat("a", 64), Generation: 1,
-		Command: "printf hello", Workdir: "/", Artifact: "/tmp/out", OutputLimit: 1024, PreviewLimit: MinPreviewBytes})
+	rec, err := Run(Config{Directory: dir, EffectID: "e", Spec: strings.Repeat("a", 64), Artifact: "/tmp/out", Epoch: "epoch", RemapExit: true, Generation: 1,
+		Command: "printf hello", Workdir: "/", OutputLimit: 1024, PreviewLimit: MinPreviewBytes})
 	if err != nil {
 		t.Fatal(err)
 	}

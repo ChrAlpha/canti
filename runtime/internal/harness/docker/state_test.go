@@ -72,7 +72,7 @@ func TestMarkKeepsFirstRequest(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.x.fence(f.effect()); err != nil {
+	if _, err := f.x.fence(f.effect()); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(filepath.Join(dir, "cancel"))
@@ -80,11 +80,30 @@ func TestMarkKeepsFirstRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
-	if err := f.x.fence(f.effect()); err != nil {
+	if _, err := f.x.fence(f.effect()); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := os.ReadFile(filepath.Join(dir, "cancel")); err != nil || string(again) != string(first) {
 		t.Fatalf("marker = %q, %v; want %q", again, err, first)
+	}
+}
+
+func TestCancelFenceKeepsFirstAdmissionTime(t *testing.T) {
+	f := newFake(t)
+	first := time.Date(2026, 11, 20, 1, 2, 3, 4, time.UTC)
+	if err := os.MkdirAll(f.x.dir("e"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := f.effect()
+	e.CancelRequestedAt = first
+	owner, err := f.x.fence(e)
+	if err != nil || !owner.CancelAt.Equal(first) {
+		t.Fatalf("first fence = %+v, %v", owner, err)
+	}
+	e.CancelRequestedAt = first.Add(time.Second)
+	owner, err = f.x.fence(e)
+	if err != nil || !owner.CancelAt.Equal(first) {
+		t.Fatalf("later fence overwrote admission time: %+v, %v", owner, err)
 	}
 }
 

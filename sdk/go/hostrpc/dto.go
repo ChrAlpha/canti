@@ -18,10 +18,12 @@ import "log/slog"
 // follow-up, observation, withdrawal and cancellation, and makes cursors
 // opaque agent-log positions; version 9 replaces focus with handover_bytes on
 // a local action's outcome; version 10 adds a run's context_tokens budget and
-// the context_anchored item; version 12 adds recorded line membership and a
-// bounded history page ending before a server-issued cursor. Records live
-// with the runtime server contract tests.
-const Protocol = 12
+// the context_anchored item; version 11 adds the project context bound at run
+// creation; version 12 adds recorded line membership and a bounded history page
+// ending before a server-issued cursor; version 13 adds the
+// job_processes_terminated cessation kind. Records live with the runtime server
+// contract tests.
+const Protocol = 13
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {

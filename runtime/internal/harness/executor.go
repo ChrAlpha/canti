@@ -36,7 +36,13 @@ type Waiter interface {
 }
 
 // Effect is reconstructed only from a committed external acceptance.
-type Effect struct{ ID, Command, Spec string }
+type Effect struct {
+	ID, Command, Spec string
+	// CancelRequestedAt is an in-memory admission fact for an executor whose
+	// receipt has no Cessation. It is never part of the effect's persisted
+	// identity or specification.
+	CancelRequestedAt time.Time `json:"-"`
+}
 
 // ExecutionIdentity is committed with acceptance before executor I/O. Spec
 // comes from the trusted adapter's pure Specification; ConfigDigest binds it
@@ -99,6 +105,9 @@ const (
 	CessationStopped     = "environment_stopped"
 	CessationEpochEnded  = "start_epoch_ended"
 	CessationQuarantined = "stopped_environment_quarantined"
+	// CessationJobTerminated proves the job's own process group is gone without
+	// stopping the environment, when its capture evidence is unavailable.
+	CessationJobTerminated = "job_processes_terminated"
 )
 
 // Job is a receipt for the accepted effect and specification. ID names a real
@@ -120,9 +129,12 @@ type Job struct {
 	Output     ArtifactRef
 	// Dispatch time starts an attached command's runtime budget, independently
 	// of whether its actual process start/exit timestamps are available.
-	DispatchedAt time.Time           `json:",omitzero"`
-	Binding      *EnvironmentBinding `json:",omitempty"`
-	Cessation    *Cessation          `json:",omitempty"`
+	DispatchedAt time.Time `json:",omitzero"`
+	// CancelRequestedAt is the durable admission time of a manual cancellation
+	// for executors whose receipt has no Cessation (the ephemeral executor).
+	CancelRequestedAt time.Time           `json:",omitzero"`
+	Binding           *EnvironmentBinding `json:",omitempty"`
+	Cessation         *Cessation          `json:",omitempty"`
 }
 
 // Validate checks identity and evidence shape; the adapter additionally checks
@@ -205,7 +217,7 @@ func (j Job) environmentShape() error {
 		return errors.New("harness: incomplete environment command binding")
 	}
 	if w := j.Cessation; w != nil {
-		if j.Status != JobCancelled || !j.Fenced || j.ExitCode != nil || !j.FinishedAt.IsZero() || w.AuthorityID != b.AuthorityID || w.BackendID != b.BackendID || w.Incarnation != b.Incarnation || w.EffectID != j.EffectID || w.Spec != j.Spec || w.OwnerID != j.ID || !digest(w.StopIntent) || w.EnvironmentID != b.EnvironmentID || w.StartEpoch != b.StartEpoch || w.Generation != b.Generation || w.RequestedAt.IsZero() || w.ConfirmedAt.Before(w.RequestedAt) || w.Kind != CessationStopped && w.Kind != CessationEpochEnded && w.Kind != CessationQuarantined {
+		if j.Status != JobCancelled || !j.Fenced || j.ExitCode != nil || !j.FinishedAt.IsZero() || w.AuthorityID != b.AuthorityID || w.BackendID != b.BackendID || w.Incarnation != b.Incarnation || w.EffectID != j.EffectID || w.Spec != j.Spec || w.OwnerID != j.ID || !digest(w.StopIntent) || w.EnvironmentID != b.EnvironmentID || w.StartEpoch != b.StartEpoch || w.Generation != b.Generation || w.RequestedAt.IsZero() || w.ConfirmedAt.Before(w.RequestedAt) || w.Kind != CessationStopped && w.Kind != CessationEpochEnded && w.Kind != CessationQuarantined && w.Kind != CessationJobTerminated {
 			return errors.New("harness: cessation does not establish this command's termination")
 		}
 	}
@@ -220,7 +232,12 @@ func (j Job) budgetOrigin() time.Time {
 }
 func (j Job) budgetEnd() time.Time {
 	if j.Cessation != nil {
-		return j.Cessation.ConfirmedAt
+		// The durable cancellation request, not its later proof, decides
+		// whether a cancellation or the job deadline came first.
+		return j.Cessation.RequestedAt
+	}
+	if !j.CancelRequestedAt.IsZero() {
+		return j.CancelRequestedAt
 	}
 	return j.FinishedAt
 }

@@ -59,7 +59,7 @@ func compareCreated(t *testing.T) {
 	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		args = append(args, "--env", key+"=", "--env", strings.ToLower(key)+"=")
 	}
-	args = append(args, "--entrypoint", "/canti-job", x.cfg.Image, "-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot+"/"+id+"/output", "-effect", id, "-spec", e.Spec, "-generation", "1", "-workdir", WorkDir, "-output-limit", "8388608", "-preview-limit", "51200", "--", "echo hi")
+	args = append(args, "--entrypoint", "/canti-job", x.cfg.Image, "-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot+"/"+id+"/output", "-effect", id, "-spec", e.Spec, "-epoch", "ephemeral", "-generation", "1", "-workdir", WorkDir, "-output-limit", "8388608", "-preview-limit", "51200", "--", "echo hi")
 	cmd := exec.Command("docker", args...)
 	for _, v := range os.Environ() {
 		if !strings.HasPrefix(v, "DOCKER_DEFAULT_PLATFORM=") {

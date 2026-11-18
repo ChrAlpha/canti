@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -628,5 +629,36 @@ func TestEphemeralCaptureDirectoryIsWritableByTheContainerUser(t *testing.T) {
 				t.Fatalf("container user %s capture = %+v", user, job)
 			}
 		})
+	}
+}
+
+func TestEphemeralNaturalExitsKeepTheirStatus(t *testing.T) {
+	for _, code := range []int{253, 254, 255} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			ctx := testContext(t, 2*time.Minute)
+			cfg, name := setup(t, docker.Config{})
+			x := open(t, cfg)
+			e := accepted(x, harness.Effect{ID: name("exit"), Command: fmt.Sprintf("exit %d", code)})
+			if _, err := x.Drive(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+			job := await(ctx, t, x, e, finished)
+			if job.Status != harness.JobFailed || job.ExitCode == nil || *job.ExitCode != code {
+				t.Fatalf("natural exit %d = %+v", code, job)
+			}
+		})
+	}
+}
+
+func TestEphemeralTerminalReceiptIsImmutable(t *testing.T) {
+	ctx := testContext(t, 2*time.Minute)
+	cfg, name := setup(t, docker.Config{})
+	x := open(t, cfg)
+	e := accepted(x, harness.Effect{ID: name("terminal"), Command: "true"})
+	first := run(ctx, t, x, e)
+	e.CancelRequestedAt = time.Now().UTC().Add(time.Minute)
+	again, err := x.Cancel(ctx, e)
+	if err != nil || !reflect.DeepEqual(first, again) {
+		t.Fatalf("terminal cancel = %+v, %v; want %+v", again, err, first)
 	}
 }

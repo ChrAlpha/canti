@@ -1,4 +1,5 @@
-// canti-job is the one-shot capture helper used by prepared environments.
+// canti-job is the one-shot capture helper, termination control, and project
+// reader used by prepared environments.
 package main
 
 import (
@@ -33,6 +34,11 @@ func run(args []string, exitOnDeadline bool) int {
 	fs.IntVar(&c.PreviewLimit, "preview-limit", jobrunner.MaxPreviewBytes, "preview bytes")
 	fs.StringVar(&c.Workdir, "workdir", "", "directory the command shell enters")
 	fs.StringVar(&c.Init, "init", "", "optional shell initialization file")
+	fs.StringVar(&c.Epoch, "epoch", "", "environment start epoch")
+	fs.BoolVar(&c.RemapExit, "remap-exit", false, "reserve 255 for proven group termination")
+	grace := fs.Duration("grace", 0, "grace between TERM and KILL")
+	helperPID := fs.Int("helper-pid", 0, "optional container PID cross-check for the live helper")
+	terminate := fs.Bool("terminate", false, "terminate the live helper of this effect and generation")
 	if err := fs.Parse(args); err != nil {
 		return 125
 	}
@@ -47,6 +53,22 @@ func run(args []string, exitOnDeadline bool) int {
 		}
 		return runProjectRead(*root, c.Workdir, *mounts, *deadline, exitOnDeadline)
 	}
+	c.Grace = *grace
+	if *terminate {
+		if fs.NArg() != 0 || *grace <= 0 {
+			fmt.Fprintln(os.Stderr, "canti-job: -terminate takes no command and requires a positive -grace")
+			return 125
+		}
+		if err := jobrunner.HardenProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, "canti-job: harden control:", err)
+			return 125
+		}
+		if err := jobrunner.TerminateControl(c.EffectID, c.Spec, c.Generation, c.Epoch, *helperPID, *grace); err != nil {
+			fmt.Fprintln(os.Stderr, "canti-job:", err)
+			return 1
+		}
+		return 0
+	}
 
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "canti-job: exactly one command is required")
@@ -54,11 +76,17 @@ func run(args []string, exitOnDeadline bool) int {
 	}
 	c.Command = fs.Arg(0)
 	rec, err := jobrunner.Run(c)
+	if rec.Terminated {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "canti-job:", err)
+		}
+		return jobrunner.TerminationStatus
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "canti-job:", err)
 		return 125
 	}
-	return *rec.ExitCode
+	return jobrunner.ExitStatus(rec, c.RemapExit)
 }
 
 func runProjectRead(root, workdir, mounts string, deadline time.Duration, exitOnDeadline bool) int {

@@ -271,7 +271,11 @@ func (x *fakeExec) Cancel(ctx context.Context, e harness.Effect) (harness.Job, e
 		x.finish(j, harness.JobCancelled)
 		j.Fenced = true
 	}
-	return x.sample(e)
+	job, err := x.sample(e)
+	if job.CancelRequestedAt.IsZero() {
+		job.CancelRequestedAt = e.CancelRequestedAt
+	}
+	return job, err
 }
 
 func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {

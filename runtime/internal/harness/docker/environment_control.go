@@ -262,7 +262,7 @@ func (x *Attached) stopEnvironment(ctx context.Context, s *environmentState, ope
 		if err != nil {
 			return err
 		}
-		if _, err = owner.cancel(ctx, s, &r); err != nil {
+		if _, err = owner.cancelForEnvironmentStop(ctx, s, &r); err != nil {
 			return err
 		}
 	}

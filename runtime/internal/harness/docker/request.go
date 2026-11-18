@@ -48,7 +48,7 @@ type createRequest struct {
 func (x *Executor) request(effect harness.Effect, spec string) (createRequest, error) {
 	c := x.cfg
 	args := []string{"-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot + "/" + effect.ID + "/output",
-		"-effect", effect.ID, "-spec", spec, "-generation", "1", "-workdir", WorkDir,
+		"-effect", effect.ID, "-spec", spec, "-epoch", "ephemeral", "-generation", "1", "-workdir", WorkDir,
 		"-output-limit", strconv.FormatInt(c.OutputLimit, 10), "-preview-limit", strconv.Itoa(c.PreviewLimit), "--", effect.Command}
 	r := createRequest{User: c.User, AttachStdout: true, AttachStderr: true, Image: c.Image, WorkingDir: "/", Entrypoint: []string{"/canti-job"}, Cmd: args,
 		Env: []string{}, Labels: map[string]string{"canti.effect": effect.ID, "canti.state": c.State, "canti.spec": spec}}

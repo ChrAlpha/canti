@@ -40,7 +40,7 @@ is not.
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 12, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, the project context bound at run creation, and bounded newest-first history pages for reopening a line, with line tokens, follow watermarks, run summaries, held inputs, and bounded withdrawal names), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 13, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, the project context bound at run creation, bounded newest-first history pages for reopening a line with line tokens, follow watermarks, run summaries, held inputs and bounded withdrawal names, and the job_processes_terminated cessation), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
@@ -802,12 +802,18 @@ the environment is retired or its spool is explicitly cleared.
 Raw start/stop requests are single-send and keep durable exact-request references.
 Only their specific successful acknowledgements, or positive exact-exec start
 evidence for a launch, settle those references. A stopped sample cannot reopen
-an ambiguous environment. Ordinary acknowledged cancellation stops the whole
-environment, including services, and explicit start retains its filesystem. A
-quarantined environment needs explicit old-ID removal, retirement, and attachment
-to a genuinely new ID. Retirement preserves old facts; it never invents a command
-exit. This protocol assumes Docker lifecycle changes use the controller; the
-same-user host authority and Docker daemon remain trusted.
+an ambiguous environment. A cancellation or timeout sends a control exec to the
+live helper of the exact effect, spec, generation and epoch; the helper owns its
+child group and keeps its leader unreaped while it sends TERM, then KILL, and
+scans every task before declaring the group gone. Its exit status 255 is the
+durable proof; a natural command exit 255 is remapped at the helper boundary and
+keeps its real exit in completion evidence. A missing capture after a proof is a
+job-terminated cessation, not an environment stop. Without a proof the
+pre-existing environment stop runs unchanged, and explicit start retains its
+filesystem. A quarantined environment needs explicit old-ID removal, retirement,
+and attachment to a genuinely new ID. Retirement preserves old facts; it never
+invents a command exit. This protocol assumes Docker lifecycle changes
+use the controller; the same-user host authority and Docker daemon remain trusted.
 
 Docker calls have their own deadlines; pre-latch calls obey the caller's earlier
 deadline, while post-latch launch completion is synchronous and bounded. Inspect

@@ -191,20 +191,63 @@ variables alone do not survive the next command.
 
 A return or context reset leaves packages and services intact.
 `environment stop` ends foreground work and services; `environment start` retains
-the same filesystem with a new start epoch. Cancellation and job timeout also stop
-the whole environment, so explicitly start it before another command. Inspect the
-environment gate before start: an unacknowledged mutation stays quarantined and
-requires the retirement/replacement procedure above. Ordinary acknowledged
-cancellation does not require a rebuild. For a deliberate rebuild, including `up
---build` after a configuration change, stop and detach before replacing the old
-container with Compose or Dev Containers, then explicitly attach the new ID;
-compare `ps -q dev` with the `container_id` that `environment attach` printed.
+the same filesystem with a new start epoch. `canti cancel`, TUI Ctrl+X, stop
+cleanup and a job timeout terminate only the command's own process group: the
+shell and the processes left in its group receive TERM, then KILL after the
+configured grace. The environment and its other services keep running. A
+process that deliberately leaves the group or session, for example with
+`setsid`, is a service and survives the step that started it:
+
+```sh
+setsid my-server --foreground </dev/null >/tmp/my-server.log 2>&1 &
+```
+
+Redirect a service's streams so the command's own output can finish. Without a
+termination request the helper reaps the shell as soon as it observes the exit,
+so ordinary completion is not delayed; background group members after a natural
+exit keep the previous behavior. A helper that proves the group gone exits with
+status 255. A natural command exit 255 is remapped to 254 and still reported as
+255; a natural 254 is remapped to 253 and, because daemon status 253 cannot
+distinguish 253 from 254, its receipt and observation are unverified rather than
+an exact exit. A natural exit before control enters termination is succeeded or
+failed; an exit during the TERM grace is `job_processes_terminated` with the
+observed exit marked unverified; an ambiguous 253/254 fenced recovery is unknown
+and never stops the environment. Cancelled versus timed_out uses the durable
+cancellation request time, not a later proof-confirmation or stop-grace
+completion time; this also applies to ephemeral receipts. The first admitted
+request time is written into the cancellation fence before any external stop,
+and recovery reads that witness rather than taking a new time. A queued request
+keeps its admission time. A proven cancellation
+renders its preview from the verified artifact with the partial marker, marks
+the artifact incomplete, and distinguishes verified empty output from
+unavailable output. A job terminated by canti reports its exact command exit
+as unavailable while
+recording any observed completion exit explicitly as unverified. The host never uses completion evidence to decide between a natural
+result and a cancellation proof.
+If canti cannot verify that the job's process group is gone (helper or control
+exec unavailable, the container is restarting, or a daemon call fails), it falls
+back to stopping the whole environment, with the same fencing, quarantine and
+unknown-result rules as before. Inspect the environment gate before start: an unacknowledged
+mutation stays quarantined and requires the retirement/replacement procedure
+above. Ordinary acknowledged cancellation does not require a rebuild. For a
+deliberate rebuild, including `up --build` after a configuration change, stop
+and detach before replacing the old container with Compose or Dev Containers,
+then explicitly attach the new ID; compare `ps -q dev` with the
+`container_id` that `environment attach` printed.
 Once the attached container is gone, `environment inspect` fails with Docker's
 missing-container error instead of a status. Detach needs the old container, so if
 it was replaced first, run `environment retire`, which confirms the old ID is
 gone, and then attach the new ID. The workspace bind survives; manually installed
 system packages and private HOME in the container layer are replaced. Add private
 volumes deliberately when those files should survive rebuilds.
+
+The job-process fast path assumes the environment exposes neither a Docker
+socket nor the host PID namespace, and that jobs have no CAP_SYS_PTRACE. The
+helper and the control exec set PR_SET_DUMPABLE to 0 so the same user cannot
+ptrace them. If an environment grants Docker control or equivalent privileged
+access, a job can create its own PPid 0 process with matching arguments and the
+cancellation proof is outside canti's trust boundary; the original-exec exit
+cross-check can still reject a receipt, but no guarantee is claimed.
 
 For canti development that needs a private Docker daemon, the optional
 `examples/persistent-environment-dind/.devcontainer/devcontainer.json` uses the
@@ -324,8 +367,9 @@ observations carry at most 16 KiB and name a source and subject of at most 256
 bytes. A new principal input is refused with `held` while a stopped run holds
 inputs; `canti withdraw` returns those texts, and they must be resubmitted.
 `canti observe -source S -subject K` admits evidence without touching a run;
-`canti cancel` cancels the latest or named run's current effect and leaves the
-run to continue.
+`canti cancel` terminates the latest or named run's current effect's own process
+group and leaves the run to continue; in a persistent environment, unrelated
+services remain.
 
 `canti-tui` takes the flags of `run` except `-goal`, `-input`, and `-once`. Its
 inputs and runs form the state directory's one line; `-fresh` applies to the
@@ -338,7 +382,8 @@ mode. Enter submits, Alt+Enter inserts a newline, and PgUp/PgDn scroll the
 retained display, including while submitting, running or stopping. Text and paste always edit the
 in-memory draft. Enter sends a new input when the agent is ready and submits the
 draft as a steer while a run is active; Ctrl+F submits it as a follow-up.
-Ctrl+X cancels the current effect and leaves the run continuing. Alt+Enter
+Ctrl+X terminates the current effect's own process group and leaves the run
+continuing; in a persistent environment, unrelated services remain. Alt+Enter
 continues to insert newlines. A submitted snapshot is separate from newer
 edits: a rejected input can be restored with Ctrl+R into an empty draft. If
 acknowledgement remains unknown, Ctrl+R reconciles the same InputID while
@@ -603,10 +648,11 @@ among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read, apart from the instruction files
 and skills index bound at run creation.
 
-Each run stores current context version 24. Schema 9 keeps one agent log of
+Each run stores current context version 25. Schema 9 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
-instructions, ephemeral executor record format 2, attached executor format 1,
-host protocol 12 and capture helper protocol 3 form one current contract. Unsupported formats and context
+instructions, ephemeral executor record format 2, attached executor format 2,
+host protocol 13 and capture helper protocol 4 form one current contract.
+Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. A run created under an earlier context version is
 refused; within the current version, resuming and driving a run use its stored

@@ -75,7 +75,7 @@ func wireMessages() map[string]any {
 					Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, HandoverBytes: 34},
 					AnchorSeq: 5, StopReason: "cancelled", Failure: "f", SupersededBy: 3, Truncated: true}, {Pos: 5, RunID: "run_1", Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"}, {Pos: 6, RunID: "run_1", Seq: 8, Step: 3, Kind: "context_anchored", AnchorSeq: 8},
 				{Pos: 7, Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, WithdrawnTotal: 70, Truncated: true}}},
-			Inspection: &Inspection{RunID: "run_1", Cursor: "pos:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{DispatchedAt: "2026-11-07T00:00:00Z", Binding: &EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, Cessation: &Cessation{Binding: EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", StopIntent: "stop_1", Kind: "environment_stopped", RequestedAt: "2026-11-07T00:00:01Z", ConfirmedAt: "2026-11-07T00:00:02Z"}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
+			Inspection: &Inspection{RunID: "run_1", Cursor: "pos:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{DispatchedAt: "2026-11-07T00:00:00Z", Binding: &EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, Cessation: &Cessation{Binding: EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", StopIntent: "stop_1", Kind: "job_processes_terminated", RequestedAt: "2026-11-07T00:00:01Z", ConfirmedAt: "2026-11-07T00:00:02Z"}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
 			Wait:       &Wait{Cursor: "pos:9", Quiescent: true, Driver: DriverDriving}, Constraints: new(string),
 			History:   &HistoryPage{Latest: &historyRun, Runs: []HistoryRun{historyRun}, Line: "line:0123456789abcdef0123456789abcdef", LineStart: 1, Cursor: "pos:9", Older: `{"pos":4,"seq":{"run_1":2},"session":"0123456789abcdef0123456789abcdef"}`, Omitted: true, Items: []Item{{Pos: 1, RunID: "run_1", Kind: "input", Input: &Input{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "steer", Text: "t", Seen: true}}}},
 			Withdrawn: []Input{{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "withdrawn", Text: "t"}}},
@@ -683,5 +683,19 @@ func TestAttachedInspectionKeepsCessationSeparateFromUnknownProcessTimes(t *test
 	}
 	if r.Binding == nil || r.Binding.Generation != 7 || r.Cessation == nil || r.Cessation.StopIntent != "stop" || r.Cessation.Binding != *r.Binding || r.Cessation.ConfirmedAt != now.Add(2*time.Second).Format(time.RFC3339Nano) {
 		t.Fatalf("lost cessation identity: %+v", r)
+	}
+}
+
+func TestInspectionCarriesAJobTerminatedCessationUnderTheCurrentProtocol(t *testing.T) {
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	j := harness.Job{EffectID: "effect", Spec: strings.Repeat("b", 64), ID: "exec", Status: harness.JobCancelled, Fenced: true,
+		DispatchedAt: now, Binding: &harness.EnvironmentBinding{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", AuthorityID: "authority", Incarnation: 1, Generation: 2},
+		Cessation: &harness.Cessation{BackendID: "daemon", EnvironmentID: "container", StartEpoch: "epoch", AuthorityID: "authority", Incarnation: 1, Generation: 2, EffectID: "effect", Spec: strings.Repeat("b", 64), OwnerID: "exec", StopIntent: strings.Repeat("a", 64), Kind: harness.CessationJobTerminated, RequestedAt: now.Add(time.Second), ConfirmedAt: now.Add(2 * time.Second)}}
+	if err := j.Validate(harness.Effect{ID: "effect", Spec: strings.Repeat("b", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	sample := InspectionOf(host.Inspection{RunID: "run", Pos: 4, SampledAt: now.Add(3 * time.Second), Receipt: &j})
+	if sample.Receipt == nil || sample.Receipt.Cessation == nil || sample.Receipt.Cessation.Kind != harness.CessationJobTerminated {
+		t.Fatalf("job-terminated cessation did not survive the wire projection: %+v", sample.Receipt)
 	}
 }

@@ -14,8 +14,9 @@ import (
 // next step with a cancelled observation. When the host drives the run, the
 // request goes to the drive's effect watch; otherwise a loop without a model
 // performs the same cancellation. It refuses a run that holds no accepted
-// effect. An acknowledged cancellation of an attached environment stops the
-// environment, as a timeout does, and its receipt reports that.
+// effect. A cancellation or timeout of attached work terminates the job's own
+// process group; when that cannot be proven it stops the environment, as
+// before, and the receipt reports that cessation.
 func (h *Host) CancelEffect(ctx context.Context, id string) (harness.Snapshot, error) {
 	ctx, leave, err := h.Enter(ctx)
 	if err != nil {

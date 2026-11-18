@@ -124,10 +124,15 @@ the end of the instruction chain.
 Every canti command takes `-workspace` (default the current directory). Keep the
 journal's `-state` outside the workspace, environment authority and every
 container mount. Resume, inspection and stop use the accepted stored execution
-configuration. Cancellation and command timeout stop a persistent environment,
-including services; explicit `environment start` preserves its files. A run's
-completion leaves it running. Unknown outcomes remain subject to inspection or
-explicit resolution.
+configuration. Cancellation, stop cleanup and command timeout terminate only the
+job's shell and process group; a service started with `setsid` keeps running,
+and `environment stop` remains the explicit way to end all services. If canti
+cannot verify that termination, it stops the environment instead. The helper
+reserves exit status 255 for a proven group termination; a natural exit 255 is
+remapped at the helper boundary and still reports 255, while a natural 254 is
+reported as unverified, and a terminated job records any observed completion exit
+as explicitly unverified. A run's completion leaves it running. Unknown outcomes remain
+subject to inspection or explicit resolution.
 
 | Command | Effect |
 | --- | --- |
@@ -214,8 +219,9 @@ an Anthropic Messages-compatible gateway; the last two reported cache reads for
 most input tokens, not checked against their billing. SIGKILL tests do not
 establish durability across power loss or OS crashes. Docker daemon restarts
 are not tested. Of two host reboots met live, a job killed by one was recorded
-with Docker's exit code 255; canti now reports a job killed before its shell
-records an exit status unknown rather than exited, tested with `docker kill`,
+with Docker's exit code 255 (before the job helper reserved 255 for proven group
+termination); canti now reports a job killed before its shell records an exit
+status unknown rather than exited, tested with `docker kill`,
 while a signal the job observes, as from a graceful daemon shutdown, is
 reported as its exit status. In ephemeral mode, the container of an unknown job is kept
 and its helper evidence remains under `<state>/jobs/<effect ID>/capture/`; remove the container by hand. Several hosts are

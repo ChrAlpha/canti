@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
@@ -70,10 +71,24 @@ func (x *Executor) finalize(ctx context.Context, effect harness.Effect, o observ
 	}
 	job := derive(o.latch, o.c, o.marked, recorded)
 	job.EffectID, job.Spec, job.Fenced = effect.ID, effect.Spec, o.fenced
+	if job.CancelRequestedAt.IsZero() {
+		job.CancelRequestedAt = x.admissionTime(effect)
+	}
 	if terminal(job.Status) {
 		return x.finish(ctx, effect, job)
 	}
 	return job, job.Validate(effect)
+}
+
+// admissionTime reads the first durable cancellation admission. The effect
+// value is used when it carries the request; otherwise the fence is the
+// durable owner after a restart.
+func (x *Executor) admissionTime(effect harness.Effect) time.Time {
+	w, err := x.readWitnesses(effect)
+	if err == nil && w.fenced && !w.cancelAt.IsZero() {
+		return w.cancelAt
+	}
+	return effect.CancelRequestedAt
 }
 
 func (x *Executor) captureComplete(id string) bool {
@@ -85,6 +100,7 @@ func (x *Executor) absent(ctx context.Context, effect harness.Effect, fenced boo
 	job := harness.Job{EffectID: effect.ID, Spec: effect.Spec, Status: harness.JobAbsent, Fenced: fenced}
 	if fenced {
 		job.Status = harness.JobCancelled
+		job.CancelRequestedAt = x.admissionTime(effect)
 		return x.finish(ctx, effect, job)
 	}
 	return job, nil
@@ -210,8 +226,12 @@ func (x *Executor) Cancel(ctx context.Context, effect harness.Effect) (harness.J
 	if _, _, err := x.ownership(effect, "binding.json"); err != nil {
 		return harness.Job{}, err
 	}
-	if err := x.fence(effect); err != nil {
+	witness, err := x.fence(effect)
+	if err != nil {
 		return harness.Job{}, err
+	}
+	if !witness.CancelAt.IsZero() {
+		effect.CancelRequestedAt = witness.CancelAt
 	}
 	o, found, err := x.observe(ctx, effect)
 	if err != nil {

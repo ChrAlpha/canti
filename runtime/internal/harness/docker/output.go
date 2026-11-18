@@ -27,7 +27,10 @@ type record struct {
 	harness.Job
 }
 
-var errCaptureEvidence = errors.New("docker: command capture evidence unavailable")
+var (
+	errCaptureEvidence    = errors.New("docker: command capture evidence unavailable")
+	errCaptureDestination = errors.New("docker: command capture destination failed")
+)
 
 // tap keeps the first limit bytes of a stream in w, counts every byte, and
 // feeds the shared preview buffer. It never fails a write, so the stream is
@@ -272,27 +275,40 @@ func (x *Executor) readCapture(root *os.Root, id string, job harness.Job) (jobru
 func (x *Executor) publishCapture(root *os.Root, id string, rec jobrunner.Record) error {
 	path := filepath.Join(x.artifacts(), id, "output")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+		return errors.Join(errCaptureDestination, err)
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
-		return err
+		return errors.Join(errCaptureDestination, err)
 	}
-	if err = f.Chmod(0644); err == nil {
-		h := sha256.New()
-		var n int64
-		n, err = jobrunner.CopyEvidence(root, "output", x.cfg.OutputLimit, f, h)
-		if err == nil && (n != rec.Stored || hex.EncodeToString(h.Sum(nil)) != rec.Digest) {
-			err = errors.Join(errCaptureEvidence, errors.New("docker: command output differs from its completion record"))
+	discard := func(cause error) error {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		if errors.Is(cause, jobrunner.ErrEvidenceDestination) {
+			return errors.Join(errCaptureDestination, cause)
 		}
-		if err != nil && (errors.Is(err, jobrunner.ErrEvidenceSource) || errors.Is(err, errCaptureEvidence)) {
-			err = errors.Join(errCaptureEvidence, err)
-		}
+		return errors.Join(errCaptureEvidence, cause)
 	}
-	if err := install(f, path, false, err); err != nil {
-		return err
+	if err = f.Chmod(0644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return errors.Join(errCaptureDestination, err)
 	}
-	return syncDir(filepath.Dir(filepath.Dir(path)))
+	h := sha256.New()
+	n, err := jobrunner.CopyEvidence(root, "output", x.cfg.OutputLimit, f, h)
+	if err != nil {
+		return discard(err)
+	}
+	if n != rec.Stored || hex.EncodeToString(h.Sum(nil)) != rec.Digest {
+		return discard(errors.New("docker: command output differs from its completion record"))
+	}
+	if err := install(f, path, false, nil); err != nil {
+		return errors.Join(errCaptureDestination, err)
+	}
+	if err := syncDir(filepath.Dir(filepath.Dir(path))); err != nil {
+		return errors.Join(errCaptureDestination, err)
+	}
+	return nil
 }
 
 func (x *Executor) capturePreview(root *os.Root, id string, rec jobrunner.Record, job harness.Job) string {
@@ -338,23 +354,36 @@ func (x *Executor) publishOutput(root *os.Root, id string, limit int64) (int64, 
 
 func publishOutputEvidence(root *os.Root, path string, limit int64) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return 0, err
+		return 0, errors.Join(errCaptureDestination, err)
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(errCaptureDestination, err)
 	}
-	if err = f.Chmod(0644); err == nil {
-		var n int64
-		n, err = jobrunner.CopyEvidence(root, "output", limit, f, nil)
-		if err == nil {
-			if err = install(f, path, false, nil); err == nil {
-				err = syncDir(filepath.Dir(filepath.Dir(path)))
-			}
-			return n, err
+	discard := func(cause error) (int64, error) {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		if errors.Is(cause, jobrunner.ErrEvidenceDestination) {
+			return 0, errors.Join(errCaptureDestination, cause)
 		}
+		return 0, errors.Join(errCaptureEvidence, cause)
 	}
-	return 0, install(f, path, false, err)
+	if err = f.Chmod(0644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return 0, errors.Join(errCaptureDestination, err)
+	}
+	n, err := jobrunner.CopyEvidence(root, "output", limit, f, nil)
+	if err != nil {
+		return discard(err)
+	}
+	if err := install(f, path, false, nil); err != nil {
+		return 0, errors.Join(errCaptureDestination, err)
+	}
+	if err := syncDir(filepath.Dir(filepath.Dir(path))); err != nil {
+		return 0, errors.Join(errCaptureDestination, err)
+	}
+	return n, nil
 }
 
 func (x *Executor) cancelledCapture(root *os.Root, id string, job harness.Job) (harness.Job, error) {

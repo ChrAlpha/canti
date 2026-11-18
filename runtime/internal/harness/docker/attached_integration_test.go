@@ -10,11 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
@@ -276,6 +279,66 @@ func TestAttachedDockerMissingWorkdirCompletesAndReleasesEnvironment(t *testing.
 	}
 }
 
+func TestAttachedDockerNaturalExit255Reports255(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := harness.Effect{ID: "exit_255", Command: "exit 255"}
+	e.Spec = x.Specification(e.Command)
+	j := waitAttachedDockerJob(t, ctx, x, e)
+	if j.Status != harness.JobFailed || j.ExitCode == nil || *j.ExitCode != 255 || j.Cessation != nil {
+		t.Fatalf("natural exit 255 = %+v", j)
+	}
+	status, err := docker.ControlEnvironment(ctx, control, "inspect")
+	if err != nil || !status.Running || status.Active != "" {
+		t.Fatalf("environment after exit tests = %+v: %v", status, err)
+	}
+}
+
+func TestAttachedDockerAmbiguousNaturalExitIsUnverified(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := harness.Effect{ID: "exit_254", Command: "exit 254"}
+	e.Spec = x.Specification(e.Command)
+	var job harness.Job
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		job, err = x.Drive(ctx, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Status != harness.JobRunning && job.Status != harness.JobPending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ambiguous exit did not settle")
+		}
+	}
+	if job.Status != harness.JobUnknown || job.ExitCode != nil || !strings.Contains(job.Output.Detail, "unverified") {
+		t.Fatalf("ambiguous natural exit = %+v", job)
+	}
+}
+
 func TestAttachedDockerStopsAfterCommandRemovesWorkspace(t *testing.T) {
 	for _, operation := range []string{"cancel", "stop"} {
 		t.Run(operation, func(t *testing.T) {
@@ -324,17 +387,31 @@ func TestAttachedDockerStopsAfterCommandRemovesWorkspace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantRunning, wantGate := "true", "open"
+			if operation == "stop" {
+				wantRunning, wantGate = "false", "stopped"
+			}
 			out, err := exec.CommandContext(ctx, "docker", "--host", endpoint, "inspect", "--format", "{{.State.Running}}", id).CombinedOutput()
-			if err != nil || strings.TrimSpace(string(out)) != "false" {
-				t.Fatalf("Docker container was not stopped: %q: %v", out, err)
+			if err != nil || strings.TrimSpace(string(out)) != wantRunning {
+				t.Fatalf("Docker container running = %q, want %q: %v", out, wantRunning, err)
 			}
 			j, err := x.Inspect(ctx, e)
 			if err != nil || j.Status != harness.JobCancelled {
 				t.Fatalf("cancel receipt after removal: %+v: %v", j, err)
 			}
+			if j.Cessation == nil {
+				t.Fatalf("cessation after %s = %+v", operation, j.Cessation)
+			}
+			wantKind := harness.CessationJobTerminated
+			if operation == "stop" {
+				wantKind = harness.CessationStopped
+			}
+			if j.Cessation.Kind != wantKind {
+				t.Fatalf("%s cessation kind = %q, want %q", operation, j.Cessation.Kind, wantKind)
+			}
 			status, err := docker.ControlEnvironment(ctx, control, "inspect")
-			if err != nil || status.Active != "" || status.Unsettled != 0 || status.Gate != "stopped" {
-				t.Fatalf("stop retained slot/fence: %+v: %v", status, err)
+			if err != nil || status.Active != "" || status.Unsettled != 0 || status.Gate != wantGate {
+				t.Fatalf("operation retained slot/fence: %+v: %v", status, err)
 			}
 		})
 	}
@@ -586,3 +663,240 @@ func TestPersistentProjectBindingBoundsLongPathPages(t *testing.T) {
 		t.Fatalf("encoded snapshot = %d, %v", len(data), err)
 	}
 }
+
+const attachedServicePid = "/tmp/canti-service.pid"
+
+func startAttachedService(t *testing.T, ctx context.Context, x *docker.Attached) {
+	t.Helper()
+	e := harness.Effect{ID: "service", Command: `setsid sh -c 'echo $$ > ` + attachedServicePid + `; exec sleep 600' </dev/null >/tmp/canti-service.log 2>&1 & printf started`}
+	e.Spec = x.Specification(e.Command)
+	if j := waitAttachedDockerJob(t, ctx, x, e); j.Status != harness.JobSucceeded {
+		t.Fatalf("service launch = %+v", j)
+	}
+}
+
+func attachedDockerExec(ctx context.Context, endpoint, id, command string) (string, error) {
+	out, err := exec.CommandContext(ctx, "docker", "--host", endpoint, "exec", id, "/bin/sh", "-c", command).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func awaitAttachedPids(t *testing.T, ctx context.Context, endpoint, id, path string, count int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, err := attachedDockerExec(ctx, endpoint, id, "wc -l < "+path)
+		if err == nil {
+			var lines int
+			if _, scanErr := fmt.Sscan(out, &lines); scanErr == nil && lines >= count {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job pid file %s has fewer than %d entries: %q: %v", path, count, out, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func assertAttachedJobGoneAndServiceAlive(t *testing.T, ctx context.Context, endpoint, id, pids, service string) {
+	t.Helper()
+	command := `for p in $(cat ` + pids + `); do if kill -0 "$p" 2>/dev/null; then echo "job process $p is alive"; exit 1; fi; done; kill -0 "$(cat ` + service + `)"`
+	if out, err := attachedDockerExec(ctx, endpoint, id, command); err != nil {
+		t.Fatalf("job cleanup/service retention failed: %q: %v", out, err)
+	}
+}
+
+func attachedEpoch(t *testing.T, ctx context.Context, control string) string {
+	t.Helper()
+	status, err := docker.ControlEnvironment(ctx, control, "inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status.Epoch
+}
+
+// prepareAttachedDocker runs with --init, so tini reaps reparented children.
+// The non-reaping PID 1 case, where a zombie of the job group remains, is
+// covered by jobrunner.TestTerminationCountsZombiesAsGone.
+func TestAttachedDockerCancellationKeepsServicesAndKillsTheJobGroup(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttachedService(t, ctx, x)
+	epoch := attachedEpoch(t, ctx, control)
+	e := harness.Effect{ID: "long_job", Command: "echo $$ >/tmp/canti-job.pids; sleep 300 & echo $! >>/tmp/canti-job.pids; sleep 300 & echo $! >>/tmp/canti-job.pids; wait"}
+	e.Spec = x.Specification(e.Command)
+	if _, err = x.Drive(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	awaitAttachedPids(t, ctx, endpoint, id, "/tmp/canti-job.pids", 3)
+	j, err := x.Cancel(ctx, e)
+	if err != nil || j.Status != harness.JobCancelled || j.ExitCode != nil || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated || !strings.Contains(j.Output.Detail, "environment") {
+		t.Fatalf("cancel = %+v: %v", j, err)
+	}
+	if got := attachedEpoch(t, ctx, control); got != epoch {
+		t.Fatalf("environment epoch changed from %s to %s", epoch, got)
+	}
+	status, err := docker.ControlEnvironment(ctx, control, "inspect")
+	if err != nil || !status.Running || status.Gate != "open" || status.Active != "" {
+		t.Fatalf("environment after cancellation = %+v: %v", status, err)
+	}
+	assertAttachedJobGoneAndServiceAlive(t, ctx, endpoint, id, "/tmp/canti-job.pids", attachedServicePid)
+}
+
+func TestAttachedDockerJobTimeoutKeepsServicesAndKillsTheJobGroup(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttachedService(t, ctx, x)
+	epoch := attachedEpoch(t, ctx, control)
+	journal, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "canti.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	run := harness.Run{ID: "run_attached_timeout", Goal: "run one command", Budget: harness.Budget{JobTimeout: 2 * time.Second}, Created: time.Now().UTC(), Config: []byte(`{"scripted":true}`)}
+	initial, err := core.NewState(run.ID, core.Limits{MaxSteps: 5, MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = journal.CreateRun(ctx, run, initial); err != nil {
+		t.Fatal(err)
+	}
+	model := &attachedScriptedModel{exec: "echo $$ >/tmp/canti-job.pids; sleep 300 & echo $! >>/tmp/canti-job.pids; sleep 300 & echo $! >>/tmp/canti-job.pids; wait"}
+	loop, err := harness.NewLoop(journal, x, model, harness.LoopConfig{Environment: "attached", History: t.TempDir(), Inputs: t.TempDir(), Poll: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loop.Run(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := journal.Recent(ctx, run.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Step != 1 || steps[0].Observation.Execution != core.ExecutionTimedOut || steps[0].Observation.ExitCode != nil {
+		t.Fatalf("timeout observation = %+v", steps)
+	}
+	if got := attachedEpoch(t, ctx, control); got != epoch {
+		t.Fatalf("environment epoch changed from %s to %s", epoch, got)
+	}
+	status, err := docker.ControlEnvironment(ctx, control, "inspect")
+	if err != nil || !status.Running || status.Gate != "open" || status.Active != "" {
+		t.Fatalf("environment after timeout = %+v: %v", status, err)
+	}
+	assertAttachedJobGoneAndServiceAlive(t, ctx, endpoint, id, "/tmp/canti-job.pids", attachedServicePid)
+}
+
+func TestAttachedDockerCancellationEscalatesAfterIgnoredTERM(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := attachedEpoch(t, ctx, control)
+	e := harness.Effect{ID: "ignored_term", Command: "trap '' TERM; echo $$ >/tmp/canti-job.pids; while :; do sleep 1; done"}
+	e.Spec = x.Specification(e.Command)
+	if _, err = x.Drive(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	awaitAttachedPids(t, ctx, endpoint, id, "/tmp/canti-job.pids", 1)
+	j, err := x.Cancel(ctx, e)
+	if err != nil || j.Status != harness.JobCancelled || j.ExitCode != nil || j.Cessation == nil || j.Cessation.Kind != harness.CessationJobTerminated {
+		t.Fatalf("ignored-TERM cancel = %+v: %v", j, err)
+	}
+	if got := attachedEpoch(t, ctx, control); got != epoch {
+		t.Fatalf("environment epoch changed from %s to %s", epoch, got)
+	}
+	if out, err := attachedDockerExec(ctx, endpoint, id, `for p in $(cat /tmp/canti-job.pids); do if kill -0 "$p" 2>/dev/null; then echo "job process $p is alive"; exit 1; fi; done`); err != nil {
+		t.Fatalf("ignored-TERM job survived: %q: %v", out, err)
+	}
+}
+
+func TestAttachedDockerCancellationFallsBackWhenTheHelperIsKilled(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDocker(t, "0:0")
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: 200 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttachedService(t, ctx, x)
+	e := harness.Effect{ID: "helper_killed", Command: `printf '%s\n%s\n' "$PPID" "$$" >/tmp/canti-helper; sleep 300 & wait`}
+	e.Spec = x.Specification(e.Command)
+	if _, err = x.Drive(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	awaitAttachedPids(t, ctx, endpoint, id, "/tmp/canti-helper", 2)
+	if out, err := attachedDockerExec(ctx, endpoint, id, `kill -KILL "$(head -1 /tmp/canti-helper)" && kill -0 "$(tail -1 /tmp/canti-helper)"`); err != nil {
+		t.Fatalf("kill capture helper: %q: %v", out, err)
+	}
+	j, err := x.Cancel(ctx, e)
+	if err != nil || j.Status != harness.JobCancelled || j.Cessation == nil || j.ExitCode != nil {
+		t.Fatalf("helper-killed fallback = %+v: %v", j, err)
+	}
+	if out, err := exec.CommandContext(ctx, "docker", "--host", endpoint, "inspect", "--format", "{{.State.Running}}", id).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "false" {
+		t.Fatalf("fallback did not stop the environment: %q: %v", out, err)
+	}
+	status, err := docker.ControlEnvironment(ctx, control, "inspect")
+	if err != nil || status.Running || status.Gate != "stopped" {
+		t.Fatalf("environment after helper death = %+v: %v", status, err)
+	}
+}
+
+type attachedScriptedModel struct {
+	calls atomic.Int32
+	exec  string
+}
+
+func (m *attachedScriptedModel) Freeze(harness.Prompt) (harness.Request, error) {
+	return harness.Request{Body: []byte("scripted"), Model: "scripted", Protocol: "scripted/v1", Adapter: "scripted"}, nil
+}
+
+func (m *attachedScriptedModel) Complete(context.Context, harness.Request) (harness.Response, error) {
+	decision := core.Decision{Kind: core.Return, Payload: "done"}
+	if m.calls.Add(1) == 1 {
+		decision = core.Decision{Kind: core.Exec, Payload: m.exec}
+	}
+	body, err := json.Marshal(decision)
+	if err != nil {
+		return harness.Response{}, err
+	}
+	return harness.Response{Body: body, Complete: true, Model: "scripted", Protocol: "scripted/v1", Adapter: "scripted"}, nil
+}
+
+func (m *attachedScriptedModel) Decision(response harness.Response) []byte { return response.Body }

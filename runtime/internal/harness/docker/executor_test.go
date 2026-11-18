@@ -356,7 +356,7 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 	}
 	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": spec}
 	if r.User != "1234:5678" || r.Image != "alpine:3.23" || r.WorkingDir != "/" || !r.AttachStdout || !r.AttachStderr ||
-		!slices.Equal(r.Entrypoint, []string{"/canti-job"}) || !slices.Equal(r.Cmd, []string{"-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot + "/effect_1/output", "-effect", "effect_1", "-spec", spec, "-generation", "1", "-workdir", WorkDir, "-output-limit", "8388608", "-preview-limit", "51200", "--", "echo hi"}) ||
+		!slices.Equal(r.Entrypoint, []string{"/canti-job"}) || !slices.Equal(r.Cmd, []string{"-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot + "/effect_1/output", "-effect", "effect_1", "-spec", spec, "-epoch", "ephemeral", "-generation", "1", "-workdir", WorkDir, "-output-limit", "8388608", "-preview-limit", "51200", "--", "echo hi"}) ||
 		!slices.Equal(r.Env, env) || !maps.Equal(r.Labels, labels) {
 		t.Errorf("create request = %+v", r)
 	}

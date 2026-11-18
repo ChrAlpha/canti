@@ -88,6 +88,18 @@ func (x *Attached) cachePath(id string) string {
 	return filepath.Join(x.cfg.State, "jobs", id, "attached-terminal.json")
 }
 
+const attachedRecordFormat = 2
+
+// terminationProof is host authority evidence that the job's process group is
+// gone. It never comes from the job-writable spool.
+type terminationProof struct {
+	Protocol       int
+	EffectID, Spec string
+	OwnerID        string
+	Generation     uint64
+	ConfirmedAt    time.Time
+}
+
 type attachedRecord struct {
 	Format                int
 	Config                AttachedConfig
@@ -98,6 +110,11 @@ type attachedRecord struct {
 	Fenced                bool
 	CancelIntent          string
 	CancelAt              time.Time
+	Termination           *terminationProof `json:",omitempty"`
+	StopProof             string            `json:",omitempty"`
+	StoppedAtExit         bool              `json:",omitempty"`
+	NaturalExit           bool              `json:",omitempty"`
+	exitUnverified        bool              `json:"-"`
 	Terminal              *harness.Job
 }
 
@@ -117,11 +134,22 @@ func (x *Attached) checkJob(e harness.Effect, r attachedRecord) error {
 	if err != nil {
 		return err
 	}
-	if r.Format != 1 || r.Effect != e || attachedSpecification(validated, e.Command) != e.Spec || r.Config.Attachment.Directory != x.cfg.Attachment.Directory || r.Generation == 0 {
+	if r.Format != attachedRecordFormat || !sameEffect(r.Effect, e) || attachedSpecification(validated, e.Command) != e.Spec || r.Config.Attachment.Directory != x.cfg.Attachment.Directory || r.Generation == 0 {
 		return errors.New("docker: command authority contradicts accepted effect or origin")
 	}
 	if r.ExecID != "" && !canonicalDigest(r.ExecID) {
 		return errors.New("docker: invalid attached exec identity")
+	}
+	if r.StopProof != "" && !canonicalDigest(r.StopProof) {
+		return errors.New("docker: invalid cancellation stop proof")
+	}
+	if (r.StoppedAtExit || r.NaturalExit) && !r.Fenced {
+		return errors.New("docker: cancellation evidence without a fence")
+	}
+	if r.Termination != nil {
+		if err := validateAttachedTermination(r); err != nil {
+			return err
+		}
 	}
 	if r.Terminal != nil {
 		if err := validateAttachedTerminal(r); err != nil {
@@ -139,20 +167,27 @@ func (x *Attached) checkJob(e harness.Effect, r attachedRecord) error {
 func (x *Attached) saveJob(r attachedRecord) error {
 	dir := x.jobDir(r.Effect.ID)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+		return errors.Join(errTerminalWrite, err)
 	}
 	if err := saveJSON(filepath.Join(dir, "command.json"), r, false); err != nil {
-		return err
+		return errors.Join(errTerminalWrite, err)
 	}
-	return syncDir(filepath.Dir(dir))
+	if err := syncDir(filepath.Dir(dir)); err != nil {
+		return errors.Join(errTerminalWrite, err)
+	}
+	return nil
 }
+func sameEffect(a, b harness.Effect) bool {
+	return a.ID == b.ID && a.Command == b.Command && a.Spec == b.Spec
+}
+
 func (x *Attached) cached(e harness.Effect) (harness.Job, bool, error) {
 	var r attachedRecord
 	found, err := readJSON(x.cachePath(e.ID), &r)
 	if err != nil || !found {
 		return harness.Job{}, found, err
 	}
-	if r.Format != 1 || r.Effect != e || r.Terminal == nil || !terminal(r.Terminal.Status) || r.Config.State != x.cfg.State || r.Config.Attachment.ContainerID != x.cfg.Attachment.ContainerID || r.Config.Attachment.Incarnation != x.cfg.Attachment.Incarnation {
+	if r.Format != attachedRecordFormat || !sameEffect(r.Effect, e) || r.Terminal == nil || !terminal(r.Terminal.Status) || r.Config.State != x.cfg.State || r.Config.Attachment.ContainerID != x.cfg.Attachment.ContainerID || r.Config.Attachment.Incarnation != x.cfg.Attachment.Incarnation {
 		return harness.Job{}, false, errors.New("docker: retained attached receipt contradicts its acceptance")
 	}
 	if err := validateAttachedTerminal(r); err != nil {
@@ -216,6 +251,11 @@ func (x *Attached) Inspect(ctx context.Context, e harness.Effect) (harness.Job, 
 	return x.operate(ctx, e, "inspect")
 }
 func (x *Attached) Cancel(ctx context.Context, e harness.Effect) (harness.Job, error) {
+	// The harness supplies the admitted request time. A direct executor call
+	// outside that loop is itself the admission and gets one fallback time.
+	if e.CancelRequestedAt.IsZero() {
+		e.CancelRequestedAt = time.Now().UTC()
+	}
 	return x.operate(ctx, e, "cancel")
 }
 
@@ -234,6 +274,9 @@ func (x *Attached) operate(ctx context.Context, e harness.Effect, op string) (ha
 	r, found, err := x.readJob(e)
 	if err != nil {
 		return harness.Job{}, err
+	}
+	if op == "cancel" && r.CancelAt.IsZero() && !e.CancelRequestedAt.IsZero() {
+		r.CancelAt = e.CancelRequestedAt
 	}
 	if job, done, loadedErr := x.loaded(e, r, found, &s, op); loadedErr != nil || done {
 		return job, loadedErr
@@ -262,7 +305,10 @@ func (x *Attached) operate(ctx context.Context, e harness.Effect, op string) (ha
 			return harness.Job{}, err
 		}
 	}
-	if op == "cancel" {
+	if r.Fenced && r.DispatchedAt.IsZero() {
+		return x.cancel(ctx, &s, &r)
+	}
+	if op == "cancel" || op == "drive" && r.Fenced {
 		return x.cancel(ctx, &s, &r)
 	}
 	if op == "drive" && r.DispatchedAt.IsZero() && !r.Fenced {
@@ -275,7 +321,7 @@ func gateError(gate string) error {
 }
 func (x *Attached) cancelAbsent(e harness.Effect) (harness.Job, error) {
 	j := harness.Job{EffectID: e.ID, Spec: e.Spec, Status: harness.JobCancelled, Fenced: true}
-	r := attachedRecord{Format: 1, Config: x.cfg, Effect: e, Fenced: true, Generation: 1, Terminal: &j}
+	r := attachedRecord{Format: attachedRecordFormat, Config: x.cfg, Effect: e, Fenced: true, Generation: 1, Terminal: &j}
 	if err := x.saveJob(r); err != nil {
 		return harness.Job{}, err
 	}
@@ -296,7 +342,7 @@ func (x *Attached) reserve(ctx context.Context, e harness.Effect, s *environment
 	if err = saveEnvironmentState(x.cfg.Attachment.Directory, *s); err != nil {
 		return attachedRecord{}, err
 	}
-	r := attachedRecord{Format: 1, Config: x.cfg, Effect: e, Generation: s.Generation, Epoch: c.State.StartedAt.Format(time.RFC3339Nano)}
+	r := attachedRecord{Format: attachedRecordFormat, Config: x.cfg, Effect: e, Generation: s.Generation, Epoch: c.State.StartedAt.Format(time.RFC3339Nano)}
 	if err = x.saveJob(r); err != nil {
 		return r, err
 	}
@@ -344,7 +390,12 @@ func (x *Attached) reconcileActive(ctx context.Context, s *environmentState, c p
 	_, err = previous.sample(ctx, s, &r)
 	return err
 }
-func (x *Attached) releaseSlot(s *environmentState, r attachedRecord) error {
+func (x *Attached) releaseSlot(s *environmentState, r attachedRecord) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(errSlotRelease, err)
+		}
+	}()
 	if r.Terminal == nil {
 		return errors.New("docker: cannot release a command without its durable terminal receipt")
 	}
@@ -373,10 +424,46 @@ func (x *Attached) unbound(ctx context.Context, e harness.Effect, op string, s *
 	return r, harness.Job{}, false, err
 }
 
+// validateAttachedTermination checks the shape of the durable proof that a
+// cancellation worker terminated the job's own process group. The live
+// identity check and exact process comparison happen when the proof is
+// accepted; this only keeps a corrupt record from being trusted after restart.
+func validateAttachedTermination(r attachedRecord) error {
+	t := r.Termination
+	if t == nil {
+		return nil
+	}
+	if !r.Fenced || r.ExecID == "" || r.DispatchedAt.IsZero() || t.Protocol != jobrunner.Protocol || t.EffectID != r.Effect.ID || t.Spec != r.Effect.Spec || t.OwnerID != r.ExecID || t.Generation != r.Generation || t.ConfirmedAt.IsZero() || t.ConfirmedAt.Before(r.DispatchedAt.Add(-time.Second)) || t.ConfirmedAt.After(time.Now().Add(time.Second)) {
+		return errors.New("docker: cancellation termination proof contradicts command authority")
+	}
+	return nil
+}
 func validateAttachedTerminal(r attachedRecord) error {
+	if r.StopProof != "" && !canonicalDigest(r.StopProof) {
+		return errors.New("docker: invalid cancellation stop proof")
+	}
+	if (r.StoppedAtExit || r.NaturalExit) && !r.Fenced {
+		return errors.New("docker: cancellation evidence without a fence")
+	}
 	j := r.Terminal
 	if j == nil || !terminal(j.Status) || j.ID != r.ExecID || j.Fenced != r.Fenced || !j.DispatchedAt.Equal(r.DispatchedAt) {
 		return errors.New("docker: terminal receipt contradicts command authority")
+	}
+	if r.Termination != nil {
+		if err := validateAttachedTermination(r); err != nil {
+			return err
+		}
+		if j.Status != harness.JobCancelled {
+			return errors.New("docker: termination proof belongs to a non-cancelled receipt")
+		}
+	}
+	if j.Status == harness.JobCancelled && j.ID != "" && j.Cessation == nil && r.Termination == nil && r.StopProof == "" && !r.DispatchedAt.IsZero() {
+		return errors.New("docker: cancelled command lacks durable termination, stop or exit evidence")
+	}
+	if j.Cessation != nil && j.Cessation.Kind == harness.CessationJobTerminated {
+		if r.Termination == nil || !j.Cessation.ConfirmedAt.Equal(r.Termination.ConfirmedAt) {
+			return errors.New("docker: job-terminated cessation lacks its matching host proof")
+		}
 	}
 	if j.ID != "" {
 		a := r.Config.Attachment

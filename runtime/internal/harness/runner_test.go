@@ -494,7 +494,7 @@ func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T)
 
 func TestCessationUsesDispatchBudgetWithoutProcessTimestamps(t *testing.T) {
 	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
-	job := Job{Status: JobCancelled, DispatchedAt: at, Cessation: &Cessation{ConfirmedAt: at.Add(11 * time.Second)}}
+	job := Job{Status: JobCancelled, DispatchedAt: at, Cessation: &Cessation{RequestedAt: at.Add(11 * time.Second), ConfirmedAt: at.Add(20 * time.Second)}}
 	if got := resultExecution(job, 10*time.Second, false); got != core.ExecutionTimedOut {
 		t.Fatalf("execution=%s", got)
 	}
@@ -503,5 +503,18 @@ func TestCessationUsesDispatchBudgetWithoutProcessTimestamps(t *testing.T) {
 	}
 	if !job.StartedAt.IsZero() || !job.FinishedAt.IsZero() {
 		t.Fatal("budget classification invented process timestamps")
+	}
+}
+
+func TestResultExecutionUsesTheDurableCancellationRequestTime(t *testing.T) {
+	origin := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	job := Job{Status: JobCancelled, Fenced: true, DispatchedAt: origin, Cessation: &Cessation{RequestedAt: origin.Add(5 * time.Second), ConfirmedAt: origin.Add(30 * time.Second)}}
+	if got := resultExecution(job, 10*time.Second, false); got != core.ExecutionCancelled {
+		t.Fatalf("cancel requested before the deadline = %s, want cancelled", got)
+	}
+	job.Cessation.RequestedAt = origin.Add(15 * time.Second)
+	job.Cessation.ConfirmedAt = origin.Add(16 * time.Second)
+	if got := resultExecution(job, 10*time.Second, false); got != core.ExecutionTimedOut {
+		t.Fatalf("cancel requested after the deadline = %s, want timed_out", got)
 	}
 }
