@@ -20,7 +20,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
-var updateRequests = flag.Bool("update-requests", false, "rewrite testdata/frozen-requests from the records the scenarios commit")
+var updateRequests = flag.Bool("update-requests", false, "rewrite the current testdata/frozen-requests-v<version> from the records the scenarios commit")
 
 const (
 	corpusRun      = "run_7f3a9c2e5b8d4f1a6c0e9b2d7a4f8c31"
@@ -160,7 +160,7 @@ func frozenScenarios() []frozenScenario {
 
 // TestLoopScenariosKeepTheirCommittedRecords compares the exact body of each
 // model request every scenario freezes and the event IDs and facts of its
-// transitions with testdata/frozen-requests/<scenario>.
+// transitions with testdata/frozen-requests-v<version>/<scenario>.
 // Rewrite them with -update-requests only for an intended prompt, adapter, or
 // record change.
 func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {

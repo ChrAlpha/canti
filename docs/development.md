@@ -562,7 +562,8 @@ left running. Live model checks must be explicit opt-ins with finite budgets;
 do not make paid provider calls part of default tests.
 
 `TestLoopScenariosKeepTheirCommittedRecords` compares what its scenarios commit
-with `runtime/internal/harness/testdata/frozen-requests/<scenario>`: the exact body of
+with `runtime/internal/harness/testdata/frozen-requests-v<version>/<scenario>` of the
+current context version: the exact body of
 every frozen model request and, in `journal.txt`, the event ID and facts of
 every transition. It also fails on a directory
 that no scenario records. Only for an intended prompt, adapter, or record
@@ -574,6 +575,9 @@ into the rules of the current context version, which
 goldens of a scenario, or adding one, which may observe a changed rule,
 requires a new context version, recorded with
 `go test ./runtime/cmd/canti -run TestContextVersionPinsItsRules -record-context`.
+The previous version's directory then keeps only the scenarios that the new
+version renders anew; `TestEarlierVersionsKeepTheirCorpus` names the ones whose
+bytes the new version holds and that must be removed.
 Review changes to current request bytes separately from journal identity changes.
 The current corpus verifies same-version frozen requests, including cold restart
 and lost acknowledgements. Historical files remain audit evidence; current
