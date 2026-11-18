@@ -295,7 +295,8 @@ type Budget struct {
 	OutputBytes int64
 	JobTimeout  time.Duration
 	// ContextTokens is the provider input each request should stay within;
-	// zero leaves context anchors to provider rejection.
+	// the host requires a positive value for a new run, and a stored zero
+	// leaves context anchors to provider rejection.
 	ContextTokens int64 `json:",omitempty"`
 }
 

@@ -76,9 +76,10 @@ func newScriptedModel(t *testing.T, key string, script map[int]decision) *script
 	return m
 }
 
-// fixtureModel names the model API and model of a fixture's run and chat,
-// which a test can override with later flags; canti has neither default.
-var fixtureModel = []string{"-ephemeral", "-api", "anthropic-messages", "-model", "fixture-model"}
+// fixtureModel names the model API, model, and input window of a fixture's
+// run and chat, which a test can override with later flags; canti has no
+// default for any of them.
+var fixtureModel = []string{"-ephemeral", "-api", "anthropic-messages", "-model", "fixture-model", "-context-tokens", "200000"}
 
 var progressLine = regexp.MustCompile(`(?m)^Step (\d+)(?: of at most \d+| \(unlimited steps\)), attempt \d+ of \d+\.$`)
 
@@ -404,10 +405,11 @@ type status struct {
 		Constraints string    `json:"constraints"`
 		Created     time.Time `json:"created"`
 		Budget      struct {
-			WallTime    string `json:"wall_time"`
-			Tokens      int64  `json:"tokens"`
-			OutputBytes int64  `json:"output_bytes"`
-			JobTimeout  string `json:"job_timeout"`
+			WallTime      string `json:"wall_time"`
+			Tokens        int64  `json:"tokens"`
+			ContextTokens int64  `json:"context_tokens"`
+			OutputBytes   int64  `json:"output_bytes"`
+			JobTimeout    string `json:"job_timeout"`
 		} `json:"budget"`
 	} `json:"run"`
 	Seq        int64           `json:"seq"`

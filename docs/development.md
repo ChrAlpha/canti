@@ -151,9 +151,11 @@ container=$(docker compose --env-file /dev/null \
 bin/canti environment attach -environment "$CANTI_ENVIRONMENT" -container "$container"
 bin/canti run -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
   -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL \
+  -context-tokens 200000 \
   -goal 'Install jq with sudo apt-get, create a private HOME config, then use jq'
 bin/canti-tui -workspace "$CANTI_WORKSPACE" -state "$HOME/canti-demo/state" \
-  -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL
+  -environment "$CANTI_ENVIRONMENT" -api openai-responses -model MODEL \
+  -context-tokens 200000
 ```
 
 The Compose file names its project `canti-dev`, which the Dev Containers CLI
@@ -274,15 +276,16 @@ prompt, and budget flags of
 `debian:bookworm-slim`, network `none`, memory `2g`, no CPU limit, 512
 processes, 8 MiB retained output per job, 16,000 output tokens per
 response, no effort, structured output on, fallbacks off, 8 MiB per rendered
-request and serialized provider body (`-request-bytes`), 20 steps, 3 attempts per
-step, 30 min wall time, no token budget, no context budget, 256 MiB of output per
-run, and 10 min per job. `-token-budget` stops after the threshold of reported
-input plus output usage is reached. `-context-tokens` names the provider input
-each request should stay within; set it to the model's context window, or lower,
-so that context anchors usually open before the provider rejects a request; a
-request whose only resident step is its latest, or a protocol repair, is sent
-as rendered, and a provider rejection remains the fallback. Unknown usage is
-retained as unknown; no counts are estimated.
+request and serialized provider body (`-request-bytes`), 500 steps, 3 attempts per
+step, 4 h wall time, no token budget, a context budget that every new run must
+name, 256 MiB of output per run, and 10 min per job. `-token-budget` stops after
+the threshold of reported input plus output usage is reached. `-context-tokens`
+names the provider input each request should stay within; a new run must give a
+positive value, set to the model's input window or lower, so that context
+anchors usually open before the provider rejects a request; a request whose
+only resident step is its latest, or a protocol repair, is sent as rendered, and
+a provider rejection remains the fallback. Unknown usage is retained as unknown;
+no counts are estimated.
 Status and TUI reports show coverage and lost attempts alongside reported totals.
 
 `run -input ID` names the input: a later `run` with the same input ID names
@@ -497,8 +500,8 @@ request reported, plus the bytes this request adds, would exceed the context
 budget and earlier steps can leave, the request opens a budget anchor that keeps
 the latest result and the newest steps that fit a quarter of the budget; follow and the TUI show it as a
 context anchor. The largest input an accepted request reported before the run's
-latest confirmed overflow is a budget too, and the smaller one applies; without
-`-context-tokens` it is the only one. A request whose previous request's last
+latest confirmed overflow is a budget too, and the smaller one applies. A
+request whose previous request's last
 settled attempt reported no input usage opens no budget anchor, so a provider
 that reports none leaves anchors to rejection.
 `canti:handover`, optionally followed by a note, closes a phase early: the steps
@@ -523,13 +526,15 @@ admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read.
 
-Each run stores current context version 21. Schema 7 keeps one agent log of
+Each run stores current context version 22. Schema 7 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 1 and
 host protocol 10 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
-settlement path is supported. Same-version frozen bytes, provider bindings,
-accepted identities and results remain immutable.
+settlement path is supported. A run created under an earlier context version is
+refused; within the current version, resuming and driving a run use its stored
+configuration and never re-read `-context-tokens`. Same-version frozen bytes,
+provider bindings, accepted identities and results remain immutable.
 
 `canti status` and progress pages read only the journal. `canti inspect` performs
 one bounded non-starting physical inspection and reports its sample timestamp

@@ -397,9 +397,11 @@ successful `canti:handover`, a budget anchor or a provider rejection opens the
 next one. The core owns the generic `RequestRejected` transition; the adapters
 alone classify provider overflow.
 
-The context budget is the run's `ContextTokens` (`-context-tokens`), or, when
-smaller or the only one, the largest input an accepted request reported before
-the head's rejection. A request with completed steps resident, other than a
+The context budget is the run's `ContextTokens` (`-context-tokens`), which a
+new run must set positive, or, when smaller, the largest input an accepted
+request reported before the head's rejection. A run created before that rule
+stores an earlier context version, which this version refuses. A request with
+completed steps resident, other than a
 protocol repair, is projected from the previous request when it was frozen under
 the same head and its last settled attempt reported input: that input plus the
 rendered bytes this request adds. When the projection exceeds the budget, the request opens a budget anchor
@@ -698,9 +700,10 @@ Step and attempt budgets are `core.Limits` and are enforced by `Next`:
 `MaxSteps` bounds decision positions per run and `MaxAttempts` bounds
 authorized sends per step, shared by lost sends, transport retries, and
 protocol repairs. Neither a new revision, a restart, nor a stop-and-resume
-grants new budget within a run. Wall-time, token, output-byte, and job-time
-budgets are a `harness.Budget` stored with the run and measured by the loop;
-zero means unlimited. A spent wall-time, token, or output-byte budget is
+grants new budget within a run. Wall-time, token, output-byte, job-time, and
+context budgets are a `harness.Budget` stored with the run and measured by the
+loop; zero means unlimited except the context budget, which a new run must set
+positive. A spent wall-time, token, or output-byte budget is
 reported as `StopRequested` with a reason. Stop on return, cancellation,
 exhausted budgets, protocol failure, or abandonment; the state preserves the
 reason.

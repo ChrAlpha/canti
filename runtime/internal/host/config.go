@@ -50,7 +50,7 @@ type RunConfig struct {
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 21
+const ContextVersion = 22
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -63,6 +63,13 @@ type Spec struct {
 // NewRun checks s and returns the run of goal and constraints created at now,
 // with its initial state.
 func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.State, error) {
+	return newRun(goal, constraints, s, now, true)
+}
+
+// newRun is NewRun with the context window required only when requireWindow.
+// A steer of a working run creates no run, so validation of its prospective
+// spec need not name one; every actual run creation requires it.
+func newRun(goal, constraints string, s Spec, now time.Time, requireWindow bool) (harness.Run, core.State, error) {
 	c, b := s.Config, s.Budget
 	if err := CheckExecutionMode(c); err != nil {
 		return harness.Run{}, core.State{}, err
@@ -79,11 +86,14 @@ func NewRun(goal, constraints string, s Spec, now time.Time) (harness.Run, core.
 		return harness.Run{}, core.State{}, errors.New("-decision-format must be text or tool")
 	case c.Ephemeral && (c.Image == "" || c.Network == ""):
 		return harness.Run{}, core.State{}, errors.New("-image and -network must not be empty")
-	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout), b.ContextTokens) < 0:
+	case min(int64(c.Pids), b.Tokens, b.OutputBytes, int64(b.WallTime), int64(b.JobTimeout)) < 0:
 		return harness.Run{}, core.State{}, errors.New("limits and budgets must not be negative")
 	}
 	if err := CheckModel(c); err != nil {
 		return harness.Run{}, core.State{}, err
+	}
+	if b.ContextTokens <= 0 && requireWindow {
+		return harness.Run{}, core.State{}, errors.New("-context-tokens is required and must be positive; set it to the model's input window or lower")
 	}
 	if c.HistoryImports != "" {
 		var err error

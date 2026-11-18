@@ -189,7 +189,7 @@ func TestUsageAndVersion(t *testing.T) {
 		{[]string{"run", "-ephemeral", "-goal", "g"}, exitUsage, "", "-api must be anthropic-messages or openai-responses"},
 		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "openai-completions", "-model", "m"}, exitUsage, "", "-api openai-completions is not supported"},
 		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "anthropic-messages"}, exitUsage, "", "-model is required"},
-		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-request-bytes", "1"}, exitUsage, "", "canti run: -request-bytes: authoritative orientation needs at least "},
+		{[]string{"run", "-ephemeral", "-goal", "g", "-api", "anthropic-messages", "-model", "m", "-context-tokens", "200000", "-request-bytes", "1"}, exitUsage, "", "canti run: -request-bytes: authoritative orientation needs at least "},
 		{[]string{"run", "-ephemeral", "-goal", "g", "-max-tokens", "0"}, exitUsage, "", "-max-tokens"},
 		{[]string{"run", "-ephemeral", "-goal", "g", "-network", ""}, exitUsage, "", "-network"},
 		{[]string{"stop", "-cleanup", "0s"}, exitUsage, "", "-cleanup"},
@@ -552,13 +552,13 @@ func TestRunReturnsWithoutExecuting(t *testing.T) {
 	}
 	h := f.history()
 	want := []string{"request_frozen", "attempt_started", "response_saved", "response_loaded"}
-	if !slices.Equal(kinds(h), want) || h[3].To != core.PhaseReturned || h[0].From != core.PhaseIdle || h[0].Facts.Request == nil {
+	if !slices.Equal(kinds(h), want) || h[3].To != core.PhaseReturned || h[0].From != core.PhaseIdle || h[0].Facts.Request == nil || h[0].State.Limits.MaxSteps != 500 {
 		t.Fatalf("history = %q\n%+v", kinds(h), h)
 	}
 	s := f.status()
 	if s.Run.Goal != "say hi" || s.Run.Constraints != "be brief" || s.Phase != core.PhaseReturned || s.Intent != core.IntentHalt ||
 		s.Seq != 4 || s.Decision == nil || s.Decision.Payload != "nothing to do" || s.Totals.InputTokens != 100 ||
-		s.Run.Budget.WallTime != "30m0s" || s.Run.Budget.OutputBytes != 256<<20 || s.Run.Budget.ContextTokens != 6100 || !strings.HasPrefix(s.Run.ID, "run_") {
+		s.Run.Budget.WallTime != "4h0m0s" || s.Run.Budget.OutputBytes != 256<<20 || s.Run.Budget.ContextTokens != 6100 || !strings.HasPrefix(s.Run.ID, "run_") {
 		t.Errorf("status = %+v", s)
 	}
 	if !strings.Contains(r.stderr, s.Run.ID) {
@@ -1032,8 +1032,8 @@ func parseSpec(t *testing.T, args ...string) host.Spec {
 	return s
 }
 
-// runSpec is parseSpec with the model API and model of a fixture, which
-// every run names.
+// runSpec is parseSpec with the model API, model, and input window of a
+// fixture, which every run names.
 func runSpec(t *testing.T, args ...string) host.Spec {
 	t.Helper()
 	s := parseSpec(t, append(slices.Clone(fixtureModel), args...)...)
@@ -1046,11 +1046,17 @@ func TestRunFlagsDefaults(t *testing.T) {
 	want := host.Spec{
 		Config: host.RunConfig{Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
 			MaxTokens: 16000, Structured: true, RequestBytes: 8 << 20, ContextVersion: host.ContextVersion},
-		Budget: harness.Budget{WallTime: 30 * time.Minute, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
-		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
+		Budget: harness.Budget{WallTime: 4 * time.Hour, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
+		Limits: core.Limits{MaxSteps: 500, MaxAttempts: 3},
 	}
 	if s != want {
 		t.Errorf("defaults = %+v\nwant %+v", s, want)
+	}
+	var fs flag.FlagSet
+	var registered host.Spec
+	registerSpec(&fs, &registered)
+	if help := fs.Lookup("context-tokens").Usage; !strings.Contains(help, "required") || !strings.Contains(help, "model's input window or lower") {
+		t.Errorf("context-tokens help = %q", help)
 	}
 	l := harness.DefaultPromptLimits()
 	l.Total = 8 << 20
@@ -1059,10 +1065,44 @@ func TestRunFlagsDefaults(t *testing.T) {
 	}
 }
 
+func TestRunRequiresAContextWindow(t *testing.T) {
+	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "done"}})
+	base := []string{"run", "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL,
+		"-ephemeral", "-api", "anthropic-messages", "-model", "fixture-model", "-goal", "g"}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing", nil},
+		{"zero", []string{"-context-tokens", "0"}},
+		{"negative", []string{"-context-tokens", "-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append(slices.Clone(base), tc.args...)...)
+			if r.code != exitUsage || !strings.Contains(r.stderr, "-context-tokens is required") || !strings.Contains(r.stderr, "model's input window or lower") {
+				t.Fatalf("run without a context window = %+v", r)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(f.state, "canti.db")); !os.IsNotExist(err) {
+		t.Fatalf("a refused run created state: %v", err)
+	}
+	if len(f.model.requests()) != 0 {
+		t.Fatal("a refused run called the model")
+	}
+	r := runCLI(t, []string{"ANTHROPIC_API_KEY=" + f.key}, append(slices.Clone(base), "-context-tokens", "6100")...)
+	if r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("run with a context window = %+v", r)
+	}
+	if s := f.status(); s.Run.Budget.ContextTokens != 6100 || s.Run.Budget.WallTime != "4h0m0s" {
+		t.Fatalf("stored budget = %+v", s.Run.Budget)
+	}
+}
+
 func TestRunFlagsPersistInTheRun(t *testing.T) {
 	s := parseSpec(t, "-ephemeral", "-image", "alpine:3.23", "-network", "bridge", "-memory", "512m", "-cpus", "1.5", "-pids", "64",
 		"-output-limit", "4096", "-api", "anthropic-messages", "-model", "claude-test", "-max-tokens", "900", "-effort", "medium", "-structured=false", "-fallbacks=false",
-		"-request-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000",
+		"-request-bytes", "98304", "-max-steps", "7", "-max-attempts", "2", "-wall-time", "1h", "-token-budget", "5000", "-context-tokens", "6100",
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.Config.Workspace = "/work"
 	s.Config.Provider = "http://127.0.0.1:1"
@@ -1077,7 +1117,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	if want, _ := core.NewState(run.ID, core.Limits{MaxSteps: 7, MaxAttempts: 2}); initial != want {
 		t.Errorf("initial state = %+v", initial)
 	}
-	budget := harness.Budget{WallTime: time.Hour, Tokens: 5000, OutputBytes: 1000000, JobTimeout: 90 * time.Second}
+	budget := harness.Budget{WallTime: time.Hour, Tokens: 5000, ContextTokens: 6100, OutputBytes: 1000000, JobTimeout: 90 * time.Second}
 	if run.Goal != "goal" || run.Constraints != "constraints" || run.Budget != budget || !run.Created.Equal(now) {
 		t.Errorf("run = %+v", run)
 	}

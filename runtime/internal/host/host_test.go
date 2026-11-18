@@ -48,6 +48,7 @@ func testSpec(h *Host) Spec {
 	return Spec{
 		Config: RunConfig{Ephemeral: true, Workspace: h.opts.Workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
 			API: APIMessages, Model: "test-model", MaxTokens: 1000, Structured: true, RequestBytes: 256 << 10, ContextVersion: ContextVersion},
+		Budget: harness.Budget{ContextTokens: 200_000},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 2},
 	}
 }
@@ -1745,16 +1746,29 @@ func persistentSpec(h *Host) Spec {
 	return s
 }
 
-func TestNewRunRefusesANegativeContextBudget(t *testing.T) {
+func TestNewRunRequiresAContextWindow(t *testing.T) {
 	h := testHost(t, Options{})
-	spec := testSpec(h)
-	spec.Budget.ContextTokens = -1
-	if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil {
-		t.Fatal("a negative context budget was accepted")
+	for _, tc := range []struct {
+		name   string
+		tokens int64
+	}{
+		{"missing or zero", 0},
+		{"negative", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec(h)
+			spec.Budget.ContextTokens = tc.tokens
+			if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil || !strings.Contains(err.Error(), "model's input window or lower") {
+				t.Fatalf("context budget %d = %v, want the model window hint", tc.tokens, err)
+			}
+			if _, err := h.Submit(context.Background(), Submission{Goal: "g", Spec: spec, Binding: binding("http://127.0.0.1:1")}); !errors.As(err, new(SpecError)) || !strings.Contains(err.Error(), "model's input window or lower") {
+				t.Fatalf("submission with context budget %d = %v, want a SpecError naming the window", tc.tokens, err)
+			}
+		})
 	}
-	spec.Budget.ContextTokens = 6100
+	spec := testSpec(h)
 	run, _, err := NewRun("goal", "", spec, time.Now())
-	if err != nil || run.Budget.ContextTokens != 6100 {
+	if err != nil || run.Budget.ContextTokens != 200_000 {
 		t.Fatalf("context budget %d, %v", run.Budget.ContextTokens, err)
 	}
 }

@@ -76,9 +76,10 @@ export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY with -api anthropic-messages
 # Prepare and attach the ordinary Docker environment in the development guide.
 bin/canti run -workspace ~/canti-demo/workspace \
   -environment ~/canti-demo/environment -api openai-responses -model MODEL \
-  -goal "Install a tool, write hello.txt, then return"
+  -context-tokens 200000 -goal "Install a tool, write hello.txt, then return"
 bin/canti-tui -workspace ~/canti-demo/workspace \
-  -environment ~/canti-demo/environment -api openai-responses -model MODEL
+  -environment ~/canti-demo/environment -api openai-responses -model MODEL \
+  -context-tokens 200000
 ```
 
 New runs and chat select `-environment DIRECTORY` or `-ephemeral`. The normal
@@ -107,11 +108,11 @@ explicit resolution.
 
 | Command | Effect |
 | --- | --- |
-| `canti run -environment DIR -goal TEXT` | Start a run and drive it until it returns or stops; `-delivery steer` or `follow_up` reaches a working agent, and `-fresh` starts a new line |
+| `canti run -environment DIR -context-tokens N -goal TEXT` | Start a run and drive it until it returns or stops; `-delivery steer` or `follow_up` reaches a working agent, and `-fresh` starts a new line |
 | `canti observe -source S -subject K` | Admit evidence about a subject; it never starts or wakes a run |
 | `canti withdraw [-input ID]` | Take back held inputs and print them as JSON Lines |
 | `canti cancel` | Cancel the current effect; the run continues with a cancelled observation |
-| `canti-tui -environment DIR [-fresh]` | Talk with the agent: all inputs and runs form one line, and a run follows the previous run of that line |
+| `canti-tui -environment DIR -context-tokens N [-fresh]` | Talk with the agent: all inputs and runs form one line, and a run follows the previous run of that line |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
@@ -121,11 +122,14 @@ explicit resolution.
 
 Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
+A run created under an earlier context version is refused with the fresh-state
+remedy.
 Same-version restarts preserve committed facts and exact frozen request bytes.
 A request keeps every step completed since the current anchor in full; earlier
 history stays in the read-only archive, and an earlier-steps index names it for
 retrieval. No boundary carries a summary. `-context-tokens` names the provider
-input each request should stay within: when the input the previous request
+input each request should stay within; a new run must set it to the model's
+input window or lower. When the input the previous request
 reported, plus the bytes this one adds, would exceed it, earlier steps can
 leave and the request is no protocol repair, canti opens a new anchor that keeps the most recent steps, always
 including the latest result, in full. The largest input an accepted request

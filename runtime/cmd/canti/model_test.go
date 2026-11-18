@@ -39,7 +39,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 		{"-api", "openai-responses", "-model", "m", "-effort", "none", "-decision-format", "tool"},
 		{"-api", "openai-responses", "-model", "m"},
 	} {
-		s := parseSpec(t, append([]string{"-ephemeral"}, args...)...)
+		s := parseSpec(t, append([]string{"-ephemeral", "-context-tokens", "200000"}, args...)...)
 		s.Config.Workspace = "/work"
 		s.Config.Provider = "http://127.0.0.1:1"
 		run, _, err := host.NewRun("goal", "", s, time.Time{})

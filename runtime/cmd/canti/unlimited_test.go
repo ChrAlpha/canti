@@ -15,14 +15,14 @@ func TestRunUnlimitedSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if initial.Limits.MaxSteps != 0 || run.Budget.WallTime != 30*time.Minute || initial.Limits.MaxAttempts != 3 {
+	if initial.Limits.MaxSteps != 0 || run.Budget.WallTime != 4*time.Hour || initial.Limits.MaxAttempts != 3 {
 		t.Fatalf("step limit changed other budgets: %+v %+v", initial, run.Budget)
 	}
 	if err := initial.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if s := runSpec(t); s.Limits.MaxSteps != 20 {
-		t.Fatalf("default steps = %d, want 20", s.Limits.MaxSteps)
+	if s := runSpec(t); s.Limits.MaxSteps != 500 {
+		t.Fatalf("default steps = %d, want 500", s.Limits.MaxSteps)
 	}
 }
 

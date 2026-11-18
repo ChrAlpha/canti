@@ -37,7 +37,7 @@ func testPreflightValidation(t *testing.T) hostrpc.Validation {
 			Spec: hostrpc.Spec{Ephemeral: true,
 				Workspace: workspace, Image: "debian:bookworm-slim", Network: "none", Memory: "2g",
 				Pids: 512, OutputLimit: 8 << 20, API: "openai-responses", Model: "qa-model",
-				MaxTokens: 16000, Structured: true, RequestBytes: 256 << 10,
+				MaxTokens: 16000, Structured: true, RequestBytes: 256 << 10, ContextTokens: 200_000,
 				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m",
 				OutputBudget: 256 << 20, JobTimeout: "10m",
 			},
@@ -75,6 +75,33 @@ func assertNoState(t *testing.T, state string) {
 	t.Helper()
 	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preflight created state %s: %v", state, err)
+	}
+}
+
+func TestPreflightRequiresAContextWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tokens int64
+		valid  bool
+	}{
+		{"missing or zero", 0, false},
+		{"negative", -1, false},
+		{"positive", 200_000, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			validation := testPreflightValidation(t)
+			validation.Submission.Spec.ContextTokens = tc.tokens
+			response := callPreflight(t, preflightRequest(t, validation))
+			if tc.valid {
+				if response.Error != nil || response.Validated == nil || response.Validated.Spec.ContextTokens != tc.tokens {
+					t.Fatalf("valid preflight = %+v", response)
+				}
+			} else if response.Error == nil || response.Error.Code != hostrpc.CodeSpec || response.Validated != nil ||
+				!strings.Contains(response.Error.Message, "model's input window or lower") {
+				t.Fatalf("preflight without a context window = %+v", response.Error)
+			}
+			assertNoState(t, validation.State)
+		})
 	}
 }
 

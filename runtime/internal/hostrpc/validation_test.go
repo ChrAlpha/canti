@@ -9,9 +9,38 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	wire "github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
+
+func TestValidationOfASteerNeedsNoNewRunWindow(t *testing.T) {
+	h, _, client, _ := servingWith(t, slog.New(slog.DiscardHandler))
+	state := filepath.Dir(client.Path)
+	spec := host.Spec{
+		Config: host.RunConfig{Ephemeral: true, Workspace: h.Workspace(), Image: "debian:bookworm-slim", Network: "none", Memory: "2g", Pids: 512, OutputLimit: 8 << 20,
+			API: host.APIMessages, Model: "m", MaxTokens: 1000, Structured: true, RequestBytes: 256 << 10, ContextVersion: host.ContextVersion},
+		Budget: harness.Budget{ContextTokens: 200_000},
+		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 2},
+	}
+	opened, err := h.Submit(context.Background(), host.Submission{Goal: "working", Spec: spec,
+		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-key"}}})
+	if err != nil || !opened.Opened() || opened.Run.Budget.ContextTokens != 200_000 {
+		t.Fatalf("opening run = %+v, %v", opened, err)
+	}
+	steer := SpecOf(spec)
+	steer.ContextTokens = 0
+	validation := wire.Validation{State: state, Submission: wire.Submission{Goal: "steer", Delivery: "steer", Spec: steer},
+		Binding: wire.Binding{Provider: "http://127.0.0.1:1", AnthropicKey: "test-key"}}
+	if v, err := client.Validate(context.Background(), validation); err != nil || v.State != state {
+		t.Fatalf("steer validation = %+v, %v", v, err)
+	}
+	ack, err := client.Submit(context.Background(), validation.Submission, validation.Binding, false)
+	if err != nil || ack.Disposition != "steer" || ack.Run != nil {
+		t.Fatalf("steer submission = %+v, %v", ack, err)
+	}
+}
 
 func TestServingHostValidateRejectsWrongLocationFirst(t *testing.T) {
 	h, _, client, _ := servingWith(t, slog.New(slog.DiscardHandler))
@@ -22,7 +51,7 @@ func TestServingHostValidateRejectsWrongLocationFirst(t *testing.T) {
 			Goal: "input",
 			Spec: wire.Spec{Ephemeral: true, Workspace: h.Workspace(), Image: "debian:bookworm-slim", Network: "none",
 				API: "anthropic-messages", Model: "m", MaxTokens: 1000, OutputLimit: 8 << 20, RequestBytes: 262144,
-				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m", JobTimeout: "10m", OutputBudget: 8 << 20},
+				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m", JobTimeout: "10m", OutputBudget: 8 << 20, ContextTokens: 200_000},
 		},
 		Binding: wire.Binding{AnthropicKey: "test-key"},
 	}

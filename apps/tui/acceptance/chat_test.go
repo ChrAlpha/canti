@@ -6,11 +6,45 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestChatRequiresAContextWindow(t *testing.T) {
+	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "done"}})
+	base := []string{tuiCommand, "-workspace", f.workspace, "-state", f.state, "-model-url", f.model.URL,
+		"-ephemeral", "-api", "anthropic-messages", "-model", "fixture-model"}
+	for _, tc := range []struct {
+		name   string
+		tokens []string
+	}{
+		{"missing", nil},
+		{"zero", []string{"-context-tokens", "0"}},
+		{"negative", []string{"-context-tokens", "-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, wait := startCLIWith(t, strings.NewReader("never\n"), nil, []string{"ANTHROPIC_API_KEY=" + f.key}, append(slices.Clone(base), tc.tokens...)...)
+			r := wait()
+			if r.code != exitUsage || !strings.Contains(r.stderr, "model's input window or lower") {
+				t.Fatalf("chat without a context window = %+v", r)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(f.state, "canti.db")); !os.IsNotExist(err) {
+		t.Fatalf("a refused chat created state: %v", err)
+	}
+	_, wait := startCLIWith(t, strings.NewReader("go\n"), nil, []string{"ANTHROPIC_API_KEY=" + f.key}, append(slices.Clone(base), "-context-tokens", "200000")...)
+	r := wait()
+	if r.code != exitOK || r.stdout != "done\n" {
+		t.Fatalf("chat with a context window = %+v", r)
+	}
+	if s := f.status(); s.Run.Budget.ContextTokens != 200000 || s.Run.Budget.WallTime != "4h0m0s" {
+		t.Fatalf("stored budget = %+v", s.Run.Budget)
+	}
+}
 
 func TestChatContinuesOneLineAcrossInputs(t *testing.T) {
 	f := newFixture(t, map[int]decision{1: {Kind: "return", Payload: "first answer"}})

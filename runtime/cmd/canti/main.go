@@ -68,9 +68,10 @@ Usage:
                                                     manage a prepared development environment
   canti version                                     print the version
 
-Run "canti COMMAND -h" for the flags of a command. A run names its model API
-(-api anthropic-messages or openai-responses) and model (-model); canti has no
-default for either. run and resume read the credential of the run's API:
+Run "canti COMMAND -h" for the flags of a command. A new run names its model
+API (-api anthropic-messages or openai-responses), model (-model), and the
+model's input window (-context-tokens); canti has no default for any of them.
+run and resume read the credential of the run's API:
 ANTHROPIC_API_KEY or else ANTHROPIC_AUTH_TOKEN for anthropic-messages,
 OPENAI_API_KEY for openai-responses. No process canti starts inherits any of
 them.
