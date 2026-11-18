@@ -37,6 +37,11 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 		DBBytes, RuntimeMS                                                     int64
 	}{Runs: runs}
 	f, image := recoveryFixture(t, nil)
+	// Its provider reports no usage: the rejections it injects regardless of
+	// size must not teach a context budget.
+	f.model.mu.Lock()
+	f.model.unreported = true
+	f.model.mu.Unlock()
 	f.model.decideWith(func(step int, prompt string) (core.Decision, error) {
 		d, err := lineStressDecision(step, prompt)
 		if err != nil {
@@ -161,7 +166,7 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 		metrics.Retries++
 		history := f.history("-run", admitted.Run.ID)
 		anchors := map[int64]bool{}
-		handovers, resets, frozen := 0, 0, 0
+		handovers, resets, budgeted, frozen := 0, 0, 0, 0
 		for _, e := range history {
 			if !strings.HasPrefix(e.State.Decision.Payload, "canti:") {
 				executed = append(executed, e)
@@ -184,6 +189,12 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 			}
 			if req := e.Facts.Request; req != nil {
 				frozen++
+				if e.Facts.ContextState != nil {
+					budgeted++
+					if req.Context == nil || req.Context.Budget == nil || req.ContextState.AnchorSeq != e.Seq {
+						t.Fatalf("round %d request %d opened a head that is no budget anchor", round, e.Seq)
+					}
+				}
 				if req.ContextState == nil || req.Context == nil {
 					t.Fatal("frozen request lost anchor or capture")
 				}
@@ -214,8 +225,8 @@ func TestLineMultiRunWindowStress(t *testing.T) {
 				}
 			}
 		}
-		if handovers != 2 || resets != 2 || len(anchors) != 5 || frozen+1 != len(requests) {
-			t.Fatalf("round %d continuity: anchors=%v handovers=%d frozen=%d calls=%d", round, anchors, handovers, frozen, len(requests))
+		if handovers != 2 || resets != 2 || len(anchors) != 5+budgeted || frozen+1 != len(requests) {
+			t.Fatalf("round %d continuity: anchors=%v handovers=%d budget anchors=%d frozen=%d calls=%d", round, anchors, handovers, budgeted, frozen, len(requests))
 		}
 		metrics.Steps += final.Totals.Steps
 		metrics.Anchors += len(anchors)

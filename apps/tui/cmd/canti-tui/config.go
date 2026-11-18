@@ -37,6 +37,7 @@ func registerSpec(fs *flag.FlagSet, s *hostrpc.Spec) {
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.StringVar(&b.WallTime, "wall-time", "30m0s", "run `time` budget; 0 is unlimited")
 	fs.Int64Var(&b.TokenBudget, "token-budget", 0, "retrospective stop threshold on reported model `tokens`; last call may overshoot and missing usage remains unknown; 0 disables")
+	fs.Int64Var(&b.ContextTokens, "context-tokens", 0, "provider input `tokens` each request should stay within; a request projected over them opens a context anchor when earlier steps can leave; 0 relies on provider rejection")
 	fs.Int64Var(&b.OutputBudget, "output-budget", 256<<20, "job output `bytes` per run; 0 is unlimited")
 	fs.StringVar(&b.JobTimeout, "job-timeout", "10m0s", "run `time` of one job; 0 is unlimited")
 }

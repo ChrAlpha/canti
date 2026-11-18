@@ -29,9 +29,13 @@ type Frame struct {
 	Previous                                       []PreviousRun
 	PreviousMore                                   int
 	PreviousUsage                                  *int64
-	capture                                        *ContextCapture
-	previousRun                                    string
-	preparation                                    string
+	// Budget is the context budget of the request and BudgetSource where it
+	// comes from; zero when there is none.
+	Budget       int64
+	BudgetSource string
+	capture      *ContextCapture
+	previousRun  string
+	preparation  string
 }
 
 // Instruction is one principal instruction bound to the run, with the
@@ -93,8 +97,8 @@ func (f Frame) validateResident() error {
 		return fmt.Errorf("harness: missing resident steps between anchor step %d and step %d", c.FirstStep, f.Step)
 	}
 	for i, r := range f.Steps {
-		if r.Step != c.FirstStep+i || r.Seq <= c.AnchorSeq {
-			return errors.New("harness: invalid resident step identity or anchor boundary")
+		if r.Step != c.FirstStep+i {
+			return errors.New("harness: invalid resident step identity")
 		}
 	}
 	if f.Latest != nil && f.Latest.Step != f.Step-1 {

@@ -3,6 +3,7 @@ package harness_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -955,5 +957,453 @@ func TestIndexLeadsBackToEvidenceAfterANoteLessHandover(t *testing.T) {
 	last := string(f.frozen(4, 1))
 	if !strings.Contains(last, "### Step 3") || !strings.Contains(last, evidence) {
 		t.Fatalf("the retrieved result did not stay resident for the epoch:\n%s", last)
+	}
+}
+
+// reported returns r reporting input tokens.
+func reported(r reply, input int64) reply {
+	r.usage = harness.Usage{InputTokens: input, InputReported: true, OutputTokens: 10, OutputReported: true}
+	return r
+}
+
+// budgetRequests returns the frozen requests of f in commit order with the
+// transitions that froze them.
+func budgetRequests(f *fixture) []harness.Transition {
+	var out []harness.Transition
+	for _, tr := range f.transitions() {
+		if tr.Facts.Request != nil {
+			out = append(out, tr)
+		}
+	}
+	return out
+}
+
+func TestBudgetAnchorKeepsTheLatestResultAndTheRecentSteps(t *testing.T) {
+	imported := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imported, "evidence"), []byte("LATEST_VALUE_7f3a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const budget = 1000
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{ContextTokens: budget},
+		reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+		reported(execReply(`canti:retrieve {"operation":"read","path":"/canti/imports/evidence","reason":"inspect"}`), budget),
+		reported(execReply("true"), 300), reported(returnReply("done"), 300))
+	f.cfg.Reader = &archive.Reader{Imports: imported}
+	f.run(f.loop())
+
+	var anchor, next harness.Transition
+	for _, tr := range budgetRequests(f) {
+		switch {
+		case tr.Facts.ContextState != nil:
+			if anchor.Seq != 0 {
+				t.Fatalf("a second budget anchor at step %d", tr.From.Step)
+			}
+			anchor = tr
+		case anchor.Seq != 0 && next.Seq == 0:
+			next = tr
+		}
+	}
+	if anchor.Seq == 0 || anchor.From.Step != 5 {
+		t.Fatalf("no budget anchor at step 5: %+v", anchor)
+	}
+	head, b := *anchor.Facts.ContextState, anchor.Facts.Request.Context.Budget
+	if head.AnchorSeq != anchor.Seq || !anchor.Facts.Request.ContextState.Equal(head) || b == nil || b.Replaced == nil || b.Replaced.FirstStep != 1 ||
+		b.Tokens != budget || b.Source != harness.BudgetConfigured || b.Input != budget || b.Projected <= budget {
+		t.Fatalf("anchor head=%+v budget=%+v", head, b)
+	}
+	if head.FirstStep != harness.TailStep(b.Steps, budget) || head.FirstStep <= 1 || head.FirstStep > 4 {
+		t.Fatalf("tail starts at %d over %+v", head.FirstStep, b.Steps)
+	}
+	body := string(anchor.Facts.Request.Body)
+	if !strings.Contains(body, "LATEST_VALUE_7f3a") || !strings.Contains(body, "### Step 4") || strings.Contains(body, "### Step 1\\n") ||
+		!strings.Contains(body, "- Step 1:") || strings.Contains(body, "Latest completed step") || !strings.Contains(body, "Context budget: 1000 input tokens (configured).") {
+		t.Fatalf("the anchoring request lost the latest result, kept an old step, or lacks the index or budget: %s", body)
+	}
+	if nb := next.Facts.Request.Context.Budget; next.Seq == 0 || next.Facts.ContextState != nil || nb == nil || nb.InputSeq != anchor.Seq || nb.Input != 300 {
+		t.Fatalf("the request after the anchor is not budgeted from the anchoring request: %+v", nb)
+	}
+	if got := f.transitions()[len(f.transitions())-1]; got.To.Phase != core.PhaseReturned {
+		t.Fatalf("run ended in %s", got.To.Phase)
+	}
+}
+
+func TestBudgetAnchorOpensOnlyWhenUsageIsComparableAndAStepCanLeave(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replies []reply
+		record  bool
+	}{
+		{
+			name:    "no reported usage",
+			replies: []reply{{body: execReply("true").body}, {body: execReply("true").body}, {body: execReply("true").body}, returnReply("done")},
+		},
+		{
+			name:    "one resident step",
+			replies: []reply{reported(execReply("true"), 5000), reported(returnReply("done"), 10)},
+			record:  true,
+		},
+		{
+			name: "a final attempt without usage",
+			replies: []reply{reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+				{body: execReply("true").body, usage: harness.Usage{InputTokens: 5000, InputReported: true}, err: errors.New("transport interrupted")},
+				{body: execReply("true").body}, reported(returnReply("done"), 10)},
+			record: true,
+		},
+		{
+			name: "protocol repair",
+			replies: []reply{reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+				reported(reply{body: `{"wrong":"shape"}`}, 5000), reported(returnReply("done"), 10)},
+			record: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{ContextTokens: 1000}, tc.replies...)
+			f.run(f.loop())
+			recorded := false
+			for _, tr := range budgetRequests(f) {
+				if tr.Facts.ContextState != nil {
+					t.Fatalf("budget anchor at step %d: %+v", tr.From.Step, tr.Facts.Request.Context.Budget)
+				}
+				recorded = recorded || tr.Facts.Request.Context.Budget != nil
+			}
+			if recorded != tc.record {
+				t.Fatalf("budget recorded = %v, want %v", recorded, tc.record)
+			}
+			if tc.name == "a final attempt without usage" {
+				for _, tr := range budgetRequests(f) {
+					if tr.From.Step == 5 && tr.Facts.Request.Context.Budget != nil {
+						t.Fatalf("step 5 was budgeted from an attempt before the last: %+v", tr.Facts.Request.Context.Budget)
+					}
+				}
+			}
+			if tc.name != "protocol repair" {
+				return
+			}
+			for _, tr := range budgetRequests(f) {
+				if tr.From.Step != 4 {
+					continue
+				}
+				if b := tr.Facts.Request.Context.Budget; (b != nil) != (tr.To.RequestRev == 1) {
+					t.Fatalf("revision %d of step 4 records %+v; only the first request is budget-checked", tr.To.RequestRev, b)
+				}
+			}
+		})
+	}
+}
+
+func TestLearnedBudgetAnchorsBeforeTheWindowAfterARejection(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{},
+		reported(execReply("true"), 500), reported(execReply("true"), 900),
+		reply{body: "{}", err: signal},
+		reported(execReply("true"), 300), reported(execReply("true"), 300), reported(execReply("true"), 880),
+		reported(execReply("true"), 300), reported(returnReply("done"), 300))
+	f.run(f.loop())
+	var anchors []*harness.ContextBudget
+	for _, tr := range budgetRequests(f) {
+		if tr.Facts.ContextState != nil {
+			anchors = append(anchors, tr.Facts.Request.Context.Budget)
+		}
+	}
+	if len(anchors) != 1 || anchors[0].Source != harness.BudgetRejection || anchors[0].Tokens != 900 || anchors[0].Input != 880 {
+		t.Fatalf("learned-budget anchors = %+v", anchors)
+	}
+	if !strings.Contains(string(f.frozen(6, 1)), "Context budget: 900 input tokens (learned from the rejection at step 3).") {
+		t.Fatalf("the learned budget is not shown: %s", f.frozen(6, 1))
+	}
+}
+
+func TestASteerBoundAfterARejectionKeepsTheRetryARejectionRetry(t *testing.T) {
+	signal := &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	rejected := reply{body: "{}", err: signal}
+	f := newFixture(t, core.Limits{MaxSteps: 6, MaxAttempts: 3}, harness.Budget{},
+		reported(execReply("true"), 100), rejected, reported(execReply("true"), 100), returnReply("done"))
+	f.model.replies[1].hook = func() {
+		if _, err := f.store.Admit(context.Background(), harness.InputSubmission{InputID: "steer-after-overflow", Authority: harness.AuthorityPrincipal,
+			Delivery: harness.DeliverySteer, Text: "prefer the sync API", Now: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.steps(f.loop(), 7)
+	f.run(f.fresh())
+	var prepare []string
+	for _, tr := range budgetRequests(f) {
+		if tr.To.Step == 2 {
+			prepare = append(prepare, tr.Facts.Request.Context.Preparation)
+		}
+	}
+	if len(prepare) < 2 || prepare[1] != "request_rejected" {
+		t.Fatalf("preparation reasons at step 2 = %v", prepare)
+	}
+	if body := string(f.frozen(2, 2)); strings.Contains(body, "## Protocol repair") || !strings.Contains(body, "prefer the sync API") {
+		t.Fatalf("the retry after the rejection is a repair or lost the steer: %s", body)
+	}
+}
+
+// anchoredRun drives a run whose fifth request opens a budget anchor and
+// returns the fixture with the anchor's sequence and head.
+func anchoredRun(t *testing.T) (*fixture, int64, harness.ContextState) {
+	t.Helper()
+	const budget = 1000
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{ContextTokens: budget},
+		reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+		reported(execReply("printf four"), budget), reported(execReply("true"), 300), reported(returnReply("done"), 300))
+	f.run(f.loop())
+	for _, tr := range budgetRequests(f) {
+		if tr.Facts.ContextState != nil {
+			return f, tr.Seq, *tr.Facts.ContextState
+		}
+	}
+	t.Fatal("the run opened no budget anchor")
+	return nil, 0, harness.ContextState{}
+}
+
+func TestRecoveryReadsABudgetAnchorAndRefusesADamagedOne(t *testing.T) {
+	ctx := context.Background()
+	f, _, head := anchoredRun(t)
+	s := f.open()
+	snap, err := s.Latest(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Context(ctx, snap); err != nil || !got.Equal(head) {
+		t.Fatalf("recovered head = %+v, %v; want %+v", got, err, head)
+	}
+	for _, tc := range []struct{ name, facts string }{
+		{"tokens", `json_set(facts,'$.Request.Context.Budget.Tokens',999)`},
+		{"input", `json_set(facts,'$.Request.Context.Budget.Input',1001,'$.Request.Context.Budget.Projected',json_extract(facts,'$.Request.Context.Budget.Projected')+1)`},
+		{"input request", `json_set(facts,'$.Request.Context.Budget.InputSeq',1)`},
+		{"replaced step bytes", `json_set(facts,'$.Request.Context.Budget.Steps[0].Bytes',json_extract(facts,'$.Request.Context.Budget.Steps[0].Bytes')+1)`},
+		{"replaced head", `json_set(facts,'$.Request.Context.Budget.Replaced.FirstStep',2)`},
+		{"source", `json_set(facts,'$.Request.Context.Budget.Source','rejection')`},
+		{"no head", `json_remove(facts,'$.ContextState')`},
+		{"capture without retained steps", `json_remove(facts,'$.Request.Context.Bytes.Steps')`},
+		{"capture of another head", `json_set(facts,'$.Request.Context.Anchor.FirstStep',1)`},
+		{"no record", `json_remove(facts,'$.Request.Context.Budget')`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, seq, _ := anchoredRun(t)
+			db, err := sql.Open("sqlite", f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec(`UPDATE transitions SET facts=`+tc.facts+` WHERE run_id=? AND seq=?`, runID, seq); err != nil {
+				t.Fatal(err)
+			}
+			s := f.open()
+			snap, err := s.Latest(ctx, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.Context(ctx, snap); err == nil {
+				t.Fatalf("damaged budget anchor recovered as %+v", got)
+			}
+		})
+	}
+}
+
+// windowModel is a provider whose window holds window input tokens, counting
+// one token per request byte, and that reports that count for every request it
+// answers. It reads filler until the request shows the secret, retrieves the
+// secret once, and returns the secret only while a request shows it.
+type windowModel struct {
+	mu       sync.Mutex
+	window   int
+	fillers  int
+	calls    int
+	rejected int
+	secret   string
+}
+
+func (m *windowModel) Freeze(p harness.Prompt) (harness.Request, error) {
+	return harness.Request{Body: []byte(p.System + "\n\n" + p.User()), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, nil
+}
+
+func (m *windowModel) Complete(_ context.Context, req harness.Request) (harness.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(req.Body) > m.window {
+		m.rejected++
+		return harness.Response{Body: []byte("{}"), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, &harness.ContextLimitError{Status: 400, Code: "context_length_exceeded"}
+	}
+	m.calls++
+	read := func(name string) core.Decision {
+		return core.Decision{Kind: core.Exec, Purpose: fmt.Sprintf("read %s %d", name, m.calls),
+			Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/imports/%s","reason":"read %d"}`, name, m.calls)}
+	}
+	d := core.Decision{Kind: core.Return, Payload: "lost the secret"}
+	switch {
+	case bytes.Contains(req.Body, []byte(m.secret)):
+		d = core.Decision{Kind: core.Return, Payload: m.secret}
+	case m.calls <= m.fillers:
+		d = read("filler")
+	case m.calls == m.fillers+1:
+		d = read("secret")
+	}
+	body, _ := json.Marshal(d)
+	return harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake",
+		Usage: harness.Usage{InputTokens: int64(len(req.Body)), InputReported: true, OutputTokens: 1, OutputReported: true}}, nil
+}
+
+func (m *windowModel) Decision(r harness.Response) []byte { return r.Body }
+
+func TestAWindowedRunDeliversTheAnswerOnlyItsLatestReadHolds(t *testing.T) {
+	const window = 20000
+	for _, tc := range []struct {
+		name      string
+		budget    int64
+		rejection int
+	}{{"configured budget", window, 0}, {"learned budget", 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			imported := t.TempDir()
+			if err := os.WriteFile(filepath.Join(imported, "filler"), bytes.Repeat([]byte("filler line of an earlier result\n"), 45), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(imported, "secret"), []byte("SECRET_VALUE_9c41"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f := newFixture(t, core.Limits{MaxSteps: 40, MaxAttempts: 3}, harness.Budget{ContextTokens: tc.budget})
+			f.cfg.Reader = &archive.Reader{Imports: imported}
+			m := &windowModel{window: window, fillers: 16, secret: "SECRET_VALUE_9c41"}
+			l, err := harness.NewLoop(f.store, f.exec, m, f.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := f.run(l)
+			anchors := 0
+			for _, tr := range budgetRequests(f) {
+				if tr.Facts.ContextState != nil {
+					anchors++
+				}
+			}
+			if final.State.Phase != core.PhaseReturned || final.State.Decision.Payload != m.secret || m.rejected != tc.rejection || anchors == 0 {
+				t.Fatalf("returned %q in %s after %d rejections and %d budget anchors", final.State.Decision.Payload, final.State.Phase, m.rejected, anchors)
+			}
+		})
+	}
+}
+
+var errIntercepted = errors.New("commit intercepted")
+
+// interceptedCommit keeps, instead of committing, the first frozen request of
+// step.
+type interceptedCommit struct {
+	*sqlite.Store
+	step int
+	kept *harness.Transition
+}
+
+func (j *interceptedCommit) Commit(ctx context.Context, t harness.Transition) error {
+	if j.kept == nil && t.Facts.Request != nil && t.From.Step == j.step {
+		j.kept = &t
+		return errIntercepted
+	}
+	return j.Store.Commit(ctx, t)
+}
+
+func TestCommitRefusesARequestThatSkipsItsBudgetAnchor(t *testing.T) {
+	const budget = 1000
+	f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{ContextTokens: budget},
+		reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+		reported(execReply("printf four"), budget), reported(returnReply("done"), 10))
+	j := &interceptedCommit{Store: f.open(), step: 5}
+	l := f.loopOn(j)
+	for j.kept == nil {
+		snap, err := l.Step(f.bounded(), runID)
+		if err != nil && !errors.Is(err, errIntercepted) {
+			t.Fatal(err)
+		}
+		if snap.State.Intent() == core.IntentHalt {
+			t.Fatalf("the run halted before its fifth request: %+v", snap.State)
+		}
+	}
+	anchor := *j.kept
+	b := anchor.Facts.Request.Context.Budget
+	if anchor.Facts.ContextState == nil || b == nil || b.Replaced == nil {
+		t.Fatalf("the fixture's fifth request opens no budget anchor: %+v", anchor.Facts)
+	}
+	// unanchored is the anchoring request committed as if no anchor opened.
+	unanchored := func() harness.Transition {
+		tr := anchor
+		request, capture, record := *tr.Facts.Request, *tr.Facts.Request.Context, *b
+		replaced := *b.Replaced
+		record.Steps, record.Replaced = nil, nil
+		capture.Anchor, capture.Bytes.Steps, capture.Bytes.Total, capture.Budget = replaced, b.Steps, b.Bytes, &record
+		// The initial head shows no index; the tail absorbs the rest so the
+		// sections still sum to the total.
+		c := &capture.Bytes
+		c.Index, c.Progress = 0, 0
+		rest := c.System + c.Goal + c.Constraints + c.HeadInstructions + c.Environment + c.Anchor + c.Previous + c.Notice +
+			c.EpochHeader + c.EpochInstructions + c.Observations + c.Latest + c.Repair
+		for _, step := range c.Steps {
+			rest += step.Bytes
+		}
+		c.Progress = c.Total - rest
+		request.ContextState, request.Context = &replaced, &capture
+		tr.Facts.Request, tr.Facts.ContextState = &request, nil
+		return tr
+	}
+	for _, tc := range []struct {
+		name, reason string
+		damage       func(*harness.Transition)
+	}{
+		{"steps that could leave", "could leave", func(*harness.Transition) {}},
+		{"no capture", "records its capture", func(tr *harness.Transition) { tr.Facts.Request.Context = nil }},
+		{"a first request labelled a repair", `preparation "protocol_repair"`, func(tr *harness.Transition) {
+			tr.Facts.Request.Context.Preparation, tr.Facts.Request.Context.Budget = "protocol_repair", nil
+		}},
+		{"no resident steps captured", "does not render the resident epoch", func(tr *harness.Transition) {
+			c := tr.Facts.Request.Context
+			for _, step := range c.Bytes.Steps {
+				c.Bytes.Progress += step.Bytes
+			}
+			c.Bytes.Steps = nil
+		}},
+		{"an understated total", "sum to", func(tr *harness.Transition) {
+			c := tr.Facts.Request.Context
+			c.Bytes.Total, c.Budget.Bytes, c.Budget.Projected = c.Budget.InputBytes, c.Budget.InputBytes, c.Budget.Input
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := unanchored()
+			tc.damage(&tr)
+			if err := f.store.Commit(context.Background(), tr); err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("a request that skipped its budget anchor: %v, want %q", err, tc.reason)
+			}
+		})
+	}
+	if err := f.store.Commit(context.Background(), anchor); err != nil {
+		t.Fatalf("the genuine budget anchor was refused: %v", err)
+	}
+}
+
+func TestPreflightCountsTheContextBudgetLine(t *testing.T) {
+	run := harness.Run{ID: runID, Goal: "Count the Go files.", Constraints: "Do not modify files.", Created: created}
+	budgeted := run
+	budgeted.Budget.ContextTokens = 6100
+	check := func(r harness.Run, total int) error {
+		cfg := harness.LoopConfig{Environment: "Alpine Linux container", Limits: harness.DefaultPromptLimits()}
+		cfg.Limits.Total = total
+		return harness.CheckOrientation(cfg, r, core.Limits{MaxSteps: 4, MaxAttempts: 3})
+	}
+	need := func(r harness.Run) int {
+		var n int
+		if err := check(r, 1); err == nil {
+			t.Fatal("a one-byte cap admitted orientation")
+		} else if _, scan := fmt.Sscanf(err.Error(), "authoritative orientation needs at least %d bytes", &n); scan != nil {
+			t.Fatalf("unexpected preflight error: %v", err)
+		}
+		return n
+	}
+	plain, withBudget := need(run), need(budgeted)
+	if withBudget <= plain {
+		t.Fatalf("orientation with a budget needs %d bytes, without %d", withBudget, plain)
+	}
+	if err := check(run, plain); err != nil {
+		t.Fatalf("orientation that fits refused: %v", err)
+	}
+	if err := check(budgeted, plain); err == nil {
+		t.Fatal("preflight admitted a budgeted run whose first request exceeds the cap")
 	}
 }

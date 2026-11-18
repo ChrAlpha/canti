@@ -120,7 +120,7 @@ func (f Facts) requestFrozen() (Facts, error) {
 	if f.Request == nil || len(f.Request.Body) == 0 || f.Request.ContextState == nil {
 		return Facts{}, fmt.Errorf("%w: frozen request bytes and context state are required", ErrFacts)
 	}
-	return Facts{Request: f.Request, Delivered: f.Delivered}, nil
+	return Facts{Request: f.Request, Delivered: f.Delivered, ContextState: f.ContextState}, nil
 }
 
 func (f Facts) responseSaved() (Facts, error) {
@@ -246,8 +246,8 @@ func ValidateTransition(t Transition) error {
 	}
 
 	if r := t.Facts.Request; r != nil {
-		if r.ContextState.AnchorSeq >= t.Seq {
-			return fmt.Errorf("%w: frozen anchor must precede its request", ErrFacts)
+		if err := checkRequestBudget(t); err != nil {
+			return err
 		}
 		if err := r.ContextState.Validate(t.To.Step, t.Seq); err != nil {
 			return fmt.Errorf("%w: %v", ErrFacts, err)

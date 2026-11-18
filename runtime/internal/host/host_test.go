@@ -1670,6 +1670,65 @@ func TestProgressPublishesHandoverAndProviderResetWithoutAdvancingTheRejectedSte
 	}
 }
 
+func TestProgressPublishesABudgetAnchorAndTheRunKeepsItsBudget(t *testing.T) {
+	h := testHost(t, Options{})
+	var mu sync.Mutex
+	var id string
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		decision, input := core.Decision{Kind: core.Return, Payload: "done"}, 10
+		if calls < 6 {
+			decision = core.Decision{Kind: core.Exec, Payload: fmt.Sprintf(`canti:retrieve {"operation":"read","path":"/canti/runs/%s/goal","reason":"read %d"}`, id, calls)}
+		}
+		if calls == 4 {
+			input = 1000
+		}
+		text, _ := json.Marshal(decision)
+		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": input, "output_tokens": 1}})
+	}))
+	defer server.Close()
+	spec := testSpec(h)
+	spec.Budget.ContextTokens = 1000
+	ack := submit(t, h, Submission{Binding: binding(server.URL), Spec: spec})
+	mu.Lock()
+	id = ack.Run.ID
+	mu.Unlock()
+	drive, err := h.Drive(context.Background(), id, binding(server.URL), DriveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap, err := drive.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
+		t.Fatalf("drive=%+v %v", snap, err)
+	}
+	var anchored []Item
+	for after := Cursor(0); ; {
+		page, err := h.Progress(context.Background(), after, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.Kind == ItemContextAnchored {
+				anchored = append(anchored, item)
+			}
+		}
+		after = page.Next
+		if !page.More {
+			break
+		}
+	}
+	if len(anchored) != 1 || anchored[0].Step != 5 || anchored[0].AnchorSeq != anchored[0].Seq {
+		t.Fatalf("budget anchors in progress = %+v", anchored)
+	}
+	view, err := h.View(context.Background(), id)
+	if err != nil || view.Run.Budget.ContextTokens != 1000 {
+		t.Fatalf("the run lost its context budget: %+v %v", view.Run.Budget, err)
+	}
+}
+
 // persistentSpec supplies committed wiring without a live attachment directory.
 // Rebuilding and replaying this run must remain entirely offline.
 func persistentSpec(h *Host) Spec {
@@ -1684,6 +1743,20 @@ func persistentSpec(h *Host) Spec {
 		Helper: "/canti/bin/" + hash + "/canti-job", HelperDigest: hash, User: "1000:1000", Home: "/home/developer", Path: "/usr/local/bin:/usr/bin:/bin", AdmissionEpoch: "epoch-1",
 		Mounts: []docker.EnvironmentMount{{Type: "bind", Source: c.Workspace, Target: "/workspace", Writable: true}, {Type: "bind", Source: filepath.Join(c.Environment, "public"), Target: "/canti"}, {Type: "bind", Source: filepath.Join(c.Environment, "spool"), Target: "/var/lib/canti/jobs", Writable: true}}}
 	return s
+}
+
+func TestNewRunRefusesANegativeContextBudget(t *testing.T) {
+	h := testHost(t, Options{})
+	spec := testSpec(h)
+	spec.Budget.ContextTokens = -1
+	if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil {
+		t.Fatal("a negative context budget was accepted")
+	}
+	spec.Budget.ContextTokens = 6100
+	run, _, err := NewRun("goal", "", spec, time.Now())
+	if err != nil || run.Budget.ContextTokens != 6100 {
+		t.Fatalf("context budget %d, %v", run.Budget.ContextTokens, err)
+	}
 }
 
 func TestPersistentReplayUsesStoredAttachmentWithoutEnvironmentAccess(t *testing.T) {

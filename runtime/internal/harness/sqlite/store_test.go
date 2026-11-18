@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -102,7 +103,7 @@ func TestOpenConfiguresDurableJournal(t *testing.T) {
 		"foreign_keys": "1",
 		"busy_timeout": "5000",
 		"fullfsync":    "1",
-		"user_version": "6",
+		"user_version": fmt.Sprint(schemaVersion),
 	}
 	for pragma, value := range want {
 		var got string
@@ -122,7 +123,7 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("PRAGMA user_version = 7"); err != nil {
+	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

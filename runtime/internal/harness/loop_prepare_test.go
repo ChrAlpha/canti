@@ -85,6 +85,20 @@ func (j *tampered) Context(ctx context.Context, snap harness.Snapshot) (harness.
 	return tamper(j, "Context", snap.State.RunID, v, err)
 }
 
+func (j *tampered) ComparableUsage(ctx context.Context, runID string, before, anchor int64) (harness.ComparableUsage, bool, error) {
+	v, found, err := j.Store.ComparableUsage(ctx, runID, before, anchor)
+	if j.done || err != nil || j.method != "ComparableUsage" || j.run != "" && runID != j.run {
+		return v, found, err
+	}
+	j.done = true
+	return v, found, errTransient
+}
+
+func (j *tampered) CompletionAtStep(ctx context.Context, runID string, step int) (harness.StepRecord, error) {
+	v, err := j.Store.CompletionAtStep(ctx, runID, step)
+	return tamper(j, "CompletionAtStep", runID, v, err)
+}
+
 func (j *tampered) Receipts(ctx context.Context, id string, before int64, limit int) ([]harness.StepReceipt, error) {
 	v, err := j.Store.Receipts(ctx, id, before, limit)
 	return tamper(j, "Receipts", id, v, err)
@@ -196,6 +210,42 @@ func TestPrepareStopsOnAnInconsistentContext(t *testing.T) {
 			snap, err := f.loopOn(j).Step(f.bounded(), lineRun)
 			if err != nil || snap.State.Reason != core.StopUnrecoverable || !j.done {
 				t.Fatalf("corrupt context=%+v %v", snap, err)
+			}
+		})
+	}
+}
+
+func TestPrepareRetriesABudgetReadThatFailed(t *testing.T) {
+	for _, method := range []string{"ComparableUsage", "CompletionAtStep", "Receipts"} {
+		t.Run(method, func(t *testing.T) {
+			f := newFixture(t, core.Limits{MaxSteps: 8, MaxAttempts: 3}, harness.Budget{ContextTokens: 1000},
+				reported(execReply("true"), 10), reported(execReply("true"), 10), reported(execReply("true"), 10),
+				reported(execReply("printf four"), 1000), reported(returnReply("done"), 10))
+			l := f.loop()
+			for {
+				snap, err := l.Step(f.bounded(), runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if snap.State.Step == 5 && snap.State.Phase == core.PhaseIdle {
+					break
+				}
+				if snap.State.Intent() == core.IntentHalt {
+					t.Fatalf("the run halted before its fifth request: %+v", snap.State)
+				}
+			}
+			before := f.transitions()
+			j := &tampered{Store: f.open(), method: method, alter: func(v any) (any, error) { return v, errTransient }}
+			snap, err := f.loopOn(j).Step(f.bounded(), runID)
+			if !errors.Is(err, errTransient) || !j.done || snap.Seq != before[len(before)-1].Seq || len(f.transitions()) != len(before) {
+				t.Fatalf("a failed budget read committed or stopped: %+v %v", snap, err)
+			}
+			snap, err = f.loopOn(j).Step(f.bounded(), runID)
+			if err != nil || snap.State.Phase != core.PhaseRequestFrozen {
+				t.Fatalf("recovery=%+v %v", snap, err)
+			}
+			if last := f.transitions()[len(f.transitions())-1]; last.Facts.ContextState == nil || last.Facts.Request.Context.Budget == nil {
+				t.Fatalf("the retried request did not open its budget anchor: %+v", last.Facts.Request.Context.Budget)
 			}
 		})
 	}

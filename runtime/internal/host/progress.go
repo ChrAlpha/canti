@@ -149,12 +149,13 @@ const (
 	ItemStopRequested   ItemKind = "stop_requested" // a persistent stop was recorded
 	ItemRecovered       ItemKind = "effect_recovered"
 	ItemNeedsResolution ItemKind = "needs_resolution" // an effect's outcome is unknown
-	ItemContextReset    ItemKind = "context_reset"
-	ItemStopped         ItemKind = "stopped"      // the run stopped
-	ItemInput           ItemKind = "input"        // an admitted principal instruction or observation
-	ItemWithdrawn       ItemKind = "withdrawn"    // a withdrawal of held principal inputs
-	ItemInputsBound     ItemKind = "inputs_bound" // principal instructions were bound to a run
-	ItemRunStarted      ItemKind = "run_started"  // a run's first committed transition
+	ItemContextReset    ItemKind = "context_reset"    // a provider rejection opened an empty epoch
+	ItemContextAnchored ItemKind = "context_anchored" // a request opened a budget anchor
+	ItemStopped         ItemKind = "stopped"          // the run stopped
+	ItemInput           ItemKind = "input"            // an admitted principal instruction or observation
+	ItemWithdrawn       ItemKind = "withdrawn"        // a withdrawal of held principal inputs
+	ItemInputsBound     ItemKind = "inputs_bound"     // principal instructions were bound to a run
+	ItemRunStarted      ItemKind = "run_started"      // a run's first committed transition
 )
 
 // InputItem is one admitted input as progress reports it, with bounded text.
@@ -380,6 +381,11 @@ func project(r sqlite.ProgressRow) (Item, bool) {
 			it.Kind = ItemContextReset
 		}
 		shown |= sqlite.ProgressFailure
+	case "request_frozen":
+		if r.AnchorSeq == 0 {
+			return it, false
+		}
+		it.Kind, it.AnchorSeq = ItemContextAnchored, r.AnchorSeq
 	case "inputs_bound":
 		it.Kind, it.Inputs = ItemInputsBound, r.Inputs
 	case "performed":

@@ -546,7 +546,7 @@ func TestWritersRefuseALockedWorkspace(t *testing.T) {
 
 func TestRunReturnsWithoutExecuting(t *testing.T) {
 	f := newFixture(t, map[int]core.Decision{1: {Kind: core.Return, Payload: "nothing to do"}})
-	r := f.cli([]string{"ANTHROPIC_BASE_URL=" + f.model.URL}, "run", "-goal", "say hi", "-constraints", "be brief", "-model-url", "")
+	r := f.cli([]string{"ANTHROPIC_BASE_URL=" + f.model.URL}, "run", "-goal", "say hi", "-constraints", "be brief", "-model-url", "", "-context-tokens", "6100")
 	if r.code != exitOK || r.stdout != "nothing to do\n" {
 		t.Fatalf("run = %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
 	}
@@ -558,7 +558,7 @@ func TestRunReturnsWithoutExecuting(t *testing.T) {
 	s := f.status()
 	if s.Run.Goal != "say hi" || s.Run.Constraints != "be brief" || s.Phase != core.PhaseReturned || s.Intent != core.IntentHalt ||
 		s.Seq != 4 || s.Decision == nil || s.Decision.Payload != "nothing to do" || s.Totals.InputTokens != 100 ||
-		s.Run.Budget.WallTime != "30m0s" || s.Run.Budget.OutputBytes != 256<<20 || !strings.HasPrefix(s.Run.ID, "run_") {
+		s.Run.Budget.WallTime != "30m0s" || s.Run.Budget.OutputBytes != 256<<20 || s.Run.Budget.ContextTokens != 6100 || !strings.HasPrefix(s.Run.ID, "run_") {
 		t.Errorf("status = %+v", s)
 	}
 	if !strings.Contains(r.stderr, s.Run.ID) {

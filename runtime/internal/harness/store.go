@@ -123,6 +123,20 @@ type Journal interface {
 	// MaxAcceptedInput returns the largest reported input usage among the run's
 	// complete, accepted responses before seq, and whether any reported it.
 	MaxAcceptedInput(ctx context.Context, runID string, before int64) (int64, bool, error)
+	// ComparableUsage returns the latest attempt of runID before seq that
+	// reported input usage and answered a request frozen at or after anchor.
+	ComparableUsage(ctx context.Context, runID string, before, anchor int64) (ComparableUsage, bool, error)
+	// PriorRequest returns the sequence of the latest request of runID frozen
+	// before seq, zero when there is none.
+	PriorRequest(ctx context.Context, runID string, before int64) (int64, error)
+}
+
+// ComparableUsage is a request's provider-reported input tokens with the
+// request's sequence and rendered total.
+type ComparableUsage struct {
+	Seq   int64
+	Bytes int
+	Input int64
 }
 
 // MaxRunIDBytes bounds a run ID, so the archive paths a request and the
@@ -280,6 +294,9 @@ type Budget struct {
 	Tokens      int64
 	OutputBytes int64
 	JobTimeout  time.Duration
+	// ContextTokens is the provider input each request should stay within;
+	// zero leaves context anchors to provider rejection.
+	ContextTokens int64 `json:",omitempty"`
 }
 
 // StepRecord is one completed step as the input builder sees it. Seq is the

@@ -39,7 +39,7 @@ var (
 	}
 	itemWords = map[host.ItemKind]string{
 		host.ItemDecided: "decided", host.ItemReturned: "returned", host.ItemRetrying: "retrying", host.ItemCompleted: "completed",
-		host.ItemContextReset: "context_reset", host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested",
+		host.ItemContextReset: "context_reset", host.ItemContextAnchored: "context_anchored", host.ItemRecovered: "effect_recovered", host.ItemStopRequested: "stop_requested",
 		host.ItemNeedsResolution: "needs_resolution", host.ItemStopped: "stopped", host.ItemInput: "input",
 		host.ItemWithdrawn: "withdrawn", host.ItemInputsBound: "inputs_bound", host.ItemRunStarted: "run_started",
 	}
@@ -123,7 +123,7 @@ func SpecOf(s host.Spec) Spec {
 		API: c.API, Model: c.Model, MaxTokens: c.MaxTokens, Effort: c.Effort, Structured: c.Structured, DecisionFormat: c.DecisionFormat,
 		Fallbacks: c.Fallbacks, RequestBytes: c.RequestBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports,
 		MaxSteps: l.MaxSteps, MaxAttempts: l.MaxAttempts,
-		WallTime: b.WallTime.String(), TokenBudget: b.Tokens, OutputBudget: b.OutputBytes, JobTimeout: b.JobTimeout.String()}
+		WallTime: b.WallTime.String(), TokenBudget: b.Tokens, ContextTokens: b.ContextTokens, OutputBudget: b.OutputBytes, JobTimeout: b.JobTimeout.String()}
 }
 
 // spec is the host form of s.
@@ -141,7 +141,7 @@ func SpecFrom(s Spec) (host.Spec, error) {
 			API: s.API, Model: s.Model, MaxTokens: s.MaxTokens, Effort: s.Effort, Structured: s.Structured, DecisionFormat: s.DecisionFormat,
 			Fallbacks: s.Fallbacks, RequestBytes: s.RequestBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports,
 		},
-		Budget: harness.Budget{WallTime: wall, Tokens: s.TokenBudget, OutputBytes: s.OutputBudget, JobTimeout: job},
+		Budget: harness.Budget{WallTime: wall, Tokens: s.TokenBudget, ContextTokens: s.ContextTokens, OutputBytes: s.OutputBudget, JobTimeout: job},
 		Limits: core.Limits{MaxSteps: s.MaxSteps, MaxAttempts: s.MaxAttempts},
 	}, nil
 }
@@ -178,7 +178,7 @@ func RunOf(v host.View, driveErr error) Run {
 		Driver: driver(v.Driving), Drivable: v.Drivable, Why: v.Why,
 		PendingSteers: v.PendingSteers, Queued: v.Queued, Held: v.Held,
 		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
-		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
+		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, ContextTokens: b.ContextTokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
 	w.Ephemeral, w.Environment = v.Config.Ephemeral, EnvironmentOf(v.Config)
 	if s.Phase == core.PhaseReturned {
 		w.Result = s.Decision.Payload

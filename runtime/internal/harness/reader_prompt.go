@@ -331,7 +331,7 @@ func (f Frame) readerTail(capture *ContextBytes, l PromptLimits) string {
 	}
 	capture.Progress = section(&b, "Execution position", position)
 	c := f.contextState()
-	if latest := f.Latest; latest != nil && latest.Seq < c.AnchorSeq && !f.indexed(latest.Step) {
+	if latest := f.Latest; latest != nil && latest.Step < c.FirstStep && latest.Seq < c.AnchorSeq && !f.indexed(latest.Step) {
 		reference := fmt.Sprintf("Latest completed step %d, sequence %d; inspect %s.\n", latest.Step, latest.Seq, path.Join(archive.RunsRoot, f.RunID, archive.StepsDir, archive.StepDir(latest.Step), archive.MetaFile)) +
 			"Its result predates this anchor; retrieve original evidence when needed.\n"
 		capture.Latest = section(&b, "Latest completion", reference)

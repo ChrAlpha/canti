@@ -28,7 +28,7 @@ const (
 	corpusThirdRun = "run_5d1e8c3a7b2f4e9d6a0c8b5f3e1d9a72"
 	corpusSteps    = "/canti/runs/" + corpusRun + "/steps"
 	corpusListing  = `printf 'alpha\nbeta\ngamma\n'`
-	corpusVersion  = 20
+	corpusVersion  = 21
 )
 
 type frozenScenario struct {
@@ -82,6 +82,8 @@ func frozenScenarios() []frozenScenario {
 			marks: map[string][]string{"run1-step05-rev1.json": {"### Step 1\n", "### Step 4\n", "Command:\n```\n" + corpusListing + "\n```", "Path " + corpusSteps + "/00000001/preview:"}}},
 		{name: "mid-epoch", limits: limits, outputs: map[string]string{"ls": "alpha\n", "cat alpha": "alpha\n"}, runs: []frozenRun{{id: corpusRun, goal: "Keep the epoch resident.", replies: []string{corpusDecision(core.Exec, "ls"), corpusDecision(core.Exec, "cat alpha"), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read alpha."), corpusDecision(core.Return, "done")}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 done retrieval 1 sources 0 entries"}}},
 			marks: map[string][]string{"run1-step04-rev1.json": {"### Step 1\n", "### Step 2\n", "### Step 3\n", "## Steps since the anchor"}}},
+		{name: "budget-anchor", limits: limits, outputs: map[string]string{"ls": "alpha\n", "cat alpha": "alpha\n", "wc -l alpha": "1 alpha\n"}, runs: []frozenRun{{id: corpusRun, goal: "Anchor within the context budget.", budget: harness.Budget{ContextTokens: 1000}, replies: []string{corpusDecision(core.Exec, "ls"), corpusDecision(core.Exec, "cat alpha"), corpusDecision(core.Exec, "wc -l alpha"), corpusDecision(core.Return, "done")}, steps: []string{"1 exited 0 output complete", "2 exited 0 output complete", "3 exited 0 output complete"}}},
+			marks: map[string][]string{"run1-step04-rev1.json": {"Context budget: 1000 input tokens (configured).", "## Earlier steps", "- Step 1:", "### Step 3"}}},
 		{name: "after-agent-handover", limits: limits, outputs: map[string]string{"ls": "go.mod\n"}, runs: []frozenRun{{id: corpusRun, goal: "Close a phase.", replies: []string{handover("gathered: go.mod exists; next list the tests"), corpusDecision(core.Exec, "ls"), corpusDecision(core.Return, "done")}, steps: []string{"1 done handover 44 bytes", "2 exited 0 output complete"}}},
 			marks: map[string][]string{"run1-step02-rev1.json": {"## Earlier steps", "- Step 1:", "## Steps since the anchor"}, "run1-step03-rev1.json": {"## Earlier steps", "- Step 1:", "### Step 2\n"}},
 			edge: func(t *testing.T, requests map[string]harness.Request) {

@@ -99,7 +99,7 @@ func TestUnlimitedStepsAcrossCrashHandoverAndRestart(t *testing.T) {
 						t.Fatalf("attempt started out of order: %+v", e.State)
 					}
 				}
-				if (e.Kind == "request_rejected" || e.Kind == "performed") && e.Facts.ContextState != nil {
+				if e.Facts.ContextState != nil {
 					currentContext = *e.Facts.ContextState
 				}
 				if req := e.Facts.Request; req != nil {

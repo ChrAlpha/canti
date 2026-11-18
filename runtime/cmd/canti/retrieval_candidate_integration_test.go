@@ -19,6 +19,11 @@ import (
 
 func TestDiscoveryCandidatesSurviveNoiseAndBinaryAcrossWindows(t *testing.T) {
 	f, image := recoveryFixture(t, nil)
+	// Its provider reports no usage: the rejections it injects regardless of
+	// size must not teach a context budget.
+	f.model.mu.Lock()
+	f.model.unreported = true
+	f.model.mu.Unlock()
 	draft := "Orchid draft: wait 30 seconds and retry 3 times."
 	correction := "Release authorization replaces earlier guidance: wait 47 seconds and retry 5 times."
 	inputs := map[string]string{

@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/core"
@@ -173,4 +174,122 @@ func TestContextStateValidationCoversTheInitialHeadAndRejection(t *testing.T) {
 			t.Fatalf("invalid head accepted: %+v", bad)
 		}
 	}
+}
+
+func TestTailStepKeepsTheLatestStepAndAQuarterOfTheBudget(t *testing.T) {
+	steps := []ContextStepBytes{{1, 200}, {2, 200}, {3, 150}, {4, 5000}}
+	for _, tc := range []struct {
+		tokens int64
+		want   int
+	}{{1000, 3}, {599, 4}, {600, 3}, {2199, 2}, {2200, 1}, {1, 4}} {
+		if got := TailStep(steps, tc.tokens); got != tc.want {
+			t.Errorf("TailStep(%d) = %d, want %d", tc.tokens, got, tc.want)
+		}
+	}
+}
+
+// budgetAnchor returns a valid budget anchor frozen at step 5 over current,
+// and the record it holds.
+func budgetAnchor(t *testing.T, current ContextState) (Transition, *ContextBudget) {
+	t.Helper()
+	from := core.State{RunID: "run-1", Step: 5, Attempt: 1, Phase: core.PhaseIdle, Limits: core.Limits{MaxSteps: 10, MaxAttempts: 3}}
+	to, err := from.Next(core.RequestFrozen{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &ContextBudget{Tokens: 1000, Source: BudgetConfigured, Input: 1000, InputSeq: 15, InputBytes: 5000, Bytes: 5400, Projected: 1400,
+		Steps: []ContextStepBytes{{1, 200}, {2, 200}, {3, 150}, {4, 300}}, Replaced: &current}
+	head := ContextState{AnchorSeq: 20, FirstStep: 3, Minimal: current.Minimal, Rejection: current.Rejection}
+	frozen := head
+	request := &Request{Body: []byte("bytes"), ContextState: &frozen, Context: &ContextCapture{Anchor: head, Preparation: "first_request",
+		Bytes: ContextBytes{Total: 3000, Steps: []ContextStepBytes{{3, 150}, {4, 300}}}, Budget: b}}
+	return Transition{Seq: 20, From: from, To: to, Event: core.RequestFrozen{}, Facts: Facts{Request: request, ContextState: &head}}, b
+}
+
+func checkBudgetTransition(t Transition, current ContextState) error {
+	if err := ValidateTransition(t); err != nil {
+		return err
+	}
+	return CheckContextMutation(t, current)
+}
+
+func TestBudgetAnchorIsExactlyWhatItsRecordPrescribes(t *testing.T) {
+	current := InitialContext()
+	valid, _ := budgetAnchor(t, current)
+	if err := checkBudgetTransition(valid, current); err != nil {
+		t.Fatalf("valid budget anchor refused: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		damage func(*Transition, *ContextBudget)
+	}{
+		{"another first step", func(tr *Transition, _ *ContextBudget) {
+			tr.Facts.ContextState.FirstStep, tr.Facts.Request.ContextState.FirstStep = 2, 2
+		}},
+		{"an anchor before its request", func(tr *Transition, _ *ContextBudget) {
+			tr.Facts.ContextState.AnchorSeq, tr.Facts.Request.ContextState.AnchorSeq = 19, 19
+		}},
+		{"frozen under another head", func(tr *Transition, _ *ContextBudget) {
+			tr.Facts.Request.ContextState = &ContextState{AnchorSeq: 20, FirstStep: 4}
+		}},
+		{"a projection within the budget", func(_ *Transition, b *ContextBudget) { b.Input, b.Projected = 500, 900 }},
+		{"a projection the record does not add up to", func(_ *Transition, b *ContextBudget) { b.Projected = 1500 }},
+		{"a gap in the replaced steps", func(_ *Transition, b *ContextBudget) { b.Steps = []ContextStepBytes{{1, 200}, {3, 150}, {4, 300}} }},
+		{"replaced steps that stop before the latest", func(_ *Transition, b *ContextBudget) { b.Steps = b.Steps[:3] }},
+		{"a learned source without a rejection", func(_ *Transition, b *ContextBudget) { b.Source = BudgetRejection }},
+		{"usage from before the replaced head", func(_ *Transition, b *ContextBudget) {
+			b.Replaced = &ContextState{AnchorSeq: 16, FirstStep: 1, Rejection: &RejectionRef{Seq: 16, Step: 1}}
+		}},
+		{"a protocol repair", func(tr *Transition, _ *ContextBudget) { tr.Facts.Request.Context.Preparation = "protocol_repair" }},
+		{"no record", func(tr *Transition, _ *ContextBudget) { tr.Facts.Request.Context.Budget = nil }},
+		{"a capture without its retained steps", func(tr *Transition, _ *ContextBudget) { tr.Facts.Request.Context.Bytes.Steps = nil }},
+		{"a capture of other retained bytes", func(tr *Transition, _ *ContextBudget) {
+			tr.Facts.Request.Context.Bytes.Steps = []ContextStepBytes{{3, 151}, {4, 300}}
+		}},
+		{"a capture of another head", func(tr *Transition, _ *ContextBudget) { tr.Facts.Request.Context.Anchor = InitialContext() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, b := budgetAnchor(t, current)
+			tc.damage(&tr, b)
+			if err := checkBudgetTransition(tr, current); err == nil {
+				t.Fatal("damaged budget anchor accepted")
+			}
+		})
+	}
+	t.Run("another current head", func(t *testing.T) {
+		tr, _ := budgetAnchor(t, current)
+		if err := CheckContextMutation(tr, ContextState{AnchorSeq: 9, FirstStep: 2}); err == nil {
+			t.Fatal("a budget anchor replaced a head that is not current")
+		}
+	})
+	unanchored := func(t *testing.T) (Transition, *ContextBudget) {
+		tr, b := budgetAnchor(t, current)
+		tr.Facts.ContextState, tr.Facts.Request.ContextState, tr.Facts.Request.Context.Anchor = nil, &current, current
+		tr.Facts.Request.Context.Bytes.Steps = b.Steps
+		b.Steps, b.Replaced, b.Bytes, b.Projected = nil, nil, 3000, 1000
+		return tr, b
+	}
+	t.Run("a request without an anchor records its own rendering", func(t *testing.T) {
+		tr, b := unanchored(t)
+		if err := checkBudgetTransition(tr, current); err != nil {
+			t.Fatalf("a recorded decision without an anchor refused: %v", err)
+		}
+		b.Replaced = &current
+		if err := checkBudgetTransition(tr, current); err == nil {
+			t.Fatal("a request without an anchor named a replaced head")
+		}
+	})
+	t.Run("a request over its budget cannot keep steps that could leave", func(t *testing.T) {
+		tr, b := unanchored(t)
+		b.InputBytes, b.Projected = 2999, 1001
+		if err := checkBudgetTransition(tr, current); err == nil || !strings.Contains(err.Error(), "could leave") {
+			t.Fatalf("a request skipped the anchor its tail required: %v", err)
+		}
+		latest := ContextState{AnchorSeq: 7, FirstStep: 4}
+		tr.Facts.Request.ContextState, tr.Facts.Request.Context.Anchor = &latest, latest
+		tr.Facts.Request.Context.Bytes.Steps = []ContextStepBytes{{4, 300}}
+		if err := checkBudgetTransition(tr, latest); err != nil {
+			t.Fatalf("a request with only its latest step resident refused: %v", err)
+		}
+	})
 }

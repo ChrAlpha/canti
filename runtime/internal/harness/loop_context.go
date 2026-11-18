@@ -77,6 +77,7 @@ func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 		return err
 	}
 	f := (&Loop{cfg: cfg}).frame(run, state)
+	f.Budget, f.BudgetSource, _ = EffectiveBudget(run.Budget.ContextTokens, InitialContext())
 	limit := cfg.Limits.Total
 	cfg.Limits.Total = MaxRequestBytes
 	p, err := f.Prompt(cfg.Limits)
@@ -99,6 +100,15 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.refuse(ctx, snap, err)
 	}
 	p, err := f.Prompt(l.cfg.Limits)
+	var anchor *ContextState
+	if err == nil {
+		if f, anchor, err = l.budgetFrame(ctx, run, snap, f); err != nil {
+			return l.refuse(ctx, snap, err)
+		}
+		if anchor != nil {
+			p, err = f.Prompt(l.cfg.Limits)
+		}
+	}
 	var request Request
 	if err == nil {
 		request, err = l.model.Freeze(p)
@@ -110,7 +120,7 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 		return l.runner.Commit(ctx, snap, core.StopRequested{Reason: core.StopUnrecoverable}, Facts{Failure: err.Error()})
 	}
 	request.ContextState, request.Context = f.ContextState, f.capture
-	facts := Facts{Request: &request}
+	facts := Facts{Request: &request, ContextState: anchor}
 	if len(f.Delivered) > 0 {
 		delivered := &Delivered{Positions: make([]int64, 0, len(f.Delivered))}
 		for _, in := range f.Delivered {
@@ -201,7 +211,58 @@ func (l *Loop) fillFrame(ctx context.Context, run Run, snap Snapshot, current Co
 	if f.PreviousUsage, err = l.previousUsage(ctx, snap); err != nil {
 		return err
 	}
+	f.Budget, f.BudgetSource, _ = EffectiveBudget(run.Budget.ContextTokens, current)
 	return l.repairFrame(ctx, run, snap, current, f)
+}
+
+// budgetFrame records the context budget decision of the request f rendered
+// under its head. When the request is projected over the budget and a
+// resident step can leave, it returns f narrowed to the budget anchor that
+// opens at the request's own sequence, from the same selected inputs, for the
+// caller to render again.
+func (l *Loop) budgetFrame(ctx context.Context, run Run, snap Snapshot, f Frame) (Frame, *ContextState, error) {
+	current := f.contextState()
+	tokens, source, ok := EffectiveBudget(run.Budget.ContextTokens, current)
+	if !ok || f.preparation == "protocol_repair" {
+		return f, nil, nil
+	}
+	usage, found, err := l.journal.ComparableUsage(ctx, run.ID, snap.Seq+1, current.AnchorSeq)
+	if err != nil || !found {
+		return f, nil, err
+	}
+	b := &ContextBudget{Tokens: tokens, Source: source, Input: usage.Input, InputSeq: usage.Seq, InputBytes: usage.Bytes, Bytes: f.capture.Bytes.Total}
+	b.Projected = b.projection()
+	steps := f.capture.Bytes.Steps
+	first := TailStep(steps, tokens)
+	if b.Projected <= tokens || first <= current.FirstStep {
+		f.capture.Budget = b
+		return f, nil, nil
+	}
+	head := ContextState{AnchorSeq: snap.Seq + 1, FirstStep: first, Minimal: current.Minimal, Rejection: current.Rejection}
+	b.Steps, b.Replaced = steps, &current
+	if f, err = l.reanchor(ctx, snap, f, head); err != nil {
+		return f, nil, err
+	}
+	f.capture.Budget = b
+	return f, &head, nil
+}
+
+// reanchor narrows f to head, a budget anchor that keeps the newest resident
+// steps from head.FirstStep: it drops the older steps from the epoch, reads
+// the index before the new first step, and captures the new head. The
+// instructions, observations and previous runs stay as f selected them.
+func (l *Loop) reanchor(ctx context.Context, snap Snapshot, f Frame, head ContextState) (Frame, error) {
+	current := f.contextState()
+	f.ContextState = &head
+	f.Steps = f.Steps[head.FirstStep-current.FirstStep:]
+	f.Index, f.IndexTotal = nil, 0
+	if !head.Minimal {
+		if err := l.earlierSteps(ctx, snap, &f); err != nil {
+			return f, err
+		}
+	}
+	f.captureFrame(head, snap)
+	return f, nil
 }
 
 // epochSteps loads the resident completions in bounded pages, checking the
@@ -267,8 +328,11 @@ func (l *Loop) earlierSteps(ctx context.Context, snap Snapshot, f *Frame) error 
 	before := f.Latest.Seq + 1
 	if f.Latest.Step != c.FirstStep-1 {
 		record, err := l.journal.CompletionAtStep(ctx, snap.State.RunID, c.FirstStep-1)
-		if err != nil {
+		if errors.Is(err, ErrNotFound) {
 			return contextError{fmt.Errorf("harness: the step before the epoch has no completion: %v", err)}
+		}
+		if err != nil {
+			return err
 		}
 		before = record.Seq + 1
 	}
@@ -307,7 +371,11 @@ func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current 
 	if snap.State.RequestRev == 0 {
 		return nil
 	}
-	if snap.Seq == current.AnchorSeq {
+	rejected, err := l.retriesRejection(ctx, run, snap, current)
+	if err != nil {
+		return err
+	}
+	if rejected {
 		f.preparation = "request_rejected"
 		return nil
 	}
@@ -323,6 +391,19 @@ func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current 
 		f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
 	}
 	return nil
+}
+
+// retriesRejection reports whether the request prepared at snap retries a
+// confirmed overflow: the head was opened by a rejection at this step and no
+// request has been frozen since. Inputs bound after the rejection do not make
+// the retry a protocol repair.
+func (l *Loop) retriesRejection(ctx context.Context, run Run, snap Snapshot, current ContextState) (bool, error) {
+	r := current.Rejection
+	if r == nil || r.Seq != current.AnchorSeq || r.Step != snap.State.Step {
+		return false, nil
+	}
+	prior, err := l.journal.PriorRequest(ctx, run.ID, snap.Seq+1)
+	return prior < current.AnchorSeq, err
 }
 
 // captureFrame records the provenance of what the frozen request includes:

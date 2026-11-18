@@ -17,9 +17,10 @@ import "log/slog"
 // initial progress requests; version 8 makes input typed, adds steer,
 // follow-up, observation, withdrawal and cancellation, and makes cursors
 // opaque agent-log positions; version 9 replaces focus with handover_bytes on
-// a local action's outcome. Records live with the runtime server contract
+// a local action's outcome; version 10 adds a run's context_tokens budget and
+// the context_anchored item. Records live with the runtime server contract
 // tests.
-const Protocol = 9
+const Protocol = 10
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -135,6 +136,7 @@ type Spec struct {
 	MaxAttempts        int    `json:"max_attempts"`
 	WallTime           string `json:"wall_time"`
 	TokenBudget        int64  `json:"token_budget"`
+	ContextTokens      int64  `json:"context_tokens,omitempty"`
 	OutputBudget       int64  `json:"output_budget"`
 	JobTimeout         string `json:"job_timeout"`
 }
@@ -273,10 +275,11 @@ type UsageCoverage struct {
 
 // Budget is a run's budget; durations are Go duration strings.
 type Budget struct {
-	WallTime    string `json:"wall_time"`
-	Tokens      int64  `json:"tokens"`
-	OutputBytes int64  `json:"output_bytes"`
-	JobTimeout  string `json:"job_timeout"`
+	WallTime      string `json:"wall_time"`
+	Tokens        int64  `json:"tokens"`
+	ContextTokens int64  `json:"context_tokens,omitempty"`
+	OutputBytes   int64  `json:"output_bytes"`
+	JobTimeout    string `json:"job_timeout"`
 }
 
 // Page is one page of a run's progress: Next is the cursor of the page that

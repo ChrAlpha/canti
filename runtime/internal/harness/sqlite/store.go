@@ -32,7 +32,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const (
 	journalModeSQL        = `PRAGMA journal_mode`
@@ -192,6 +192,22 @@ const (
 	acceptedInputSQL = `SELECT COALESCE(max(CASE WHEN json_extract(facts,'$.Response.Usage.InputReported') THEN CAST(json_extract(facts,'$.Response.Usage.InputTokens') AS INTEGER) END), 0),
 		COALESCE(max(CASE WHEN json_extract(facts,'$.Response.Usage.InputReported') THEN 1 ELSE 0 END), 0)
 		FROM transitions WHERE run_id = ?1 AND kind = 'response_saved' AND seq < ?2`
+	// comparableUsageSQL reads the previous request before ?2, when it was
+	// frozen at or after the anchor ?3 and its last settled attempt reported
+	// input, as priorUsageSQL settles attempts; it never substitutes an older
+	// attempt.
+	comparableUsageSQL = `SELECT r.seq, CAST(json_extract(r.facts,'$.Request.Context.Bytes.Total') AS INTEGER),
+		CAST(json_extract(a.facts,'$.Response.Usage.InputTokens') AS INTEGER)
+		FROM transitions r JOIN transitions a ON a.run_id = r.run_id
+		AND a.seq = (SELECT seq FROM transitions WHERE run_id = ?1 AND seq > r.seq AND seq < ?2
+			AND kind IN ('response_saved','response_incomplete','request_rejected') ORDER BY seq DESC LIMIT 1)
+		WHERE r.run_id = ?1 AND r.seq >= ?3
+		AND r.seq = (SELECT seq FROM transitions WHERE run_id = ?1 AND kind = 'request_frozen' AND seq < ?2 ORDER BY seq DESC LIMIT 1)
+		AND json_extract(a.facts,'$.Response.Usage.InputReported')`
+	// headBetweenSQL reports whether a transition after ?2 and before ?3
+	// opened a context head.
+	headBetweenSQL = `SELECT EXISTS (SELECT 1 FROM transitions WHERE run_id = ?1 AND seq > ?2 AND seq < ?3
+		AND json_type(facts,'$.ContextState') IS NOT NULL)`
 )
 
 var queries = []string{
@@ -201,7 +217,7 @@ var queries = []string{
 	contextSeqSQL, contextHeadSQL, rejectionSeqSQL, receiptSQL, agentPosSQL, bumpPosSQL,
 	lastPosSQL, steerCountSQL, steersSQL, boundsSQL, observationsSQL,
 	previousIDsSQL, previousCountSQL, queuedSQL, queuedCountSQL,
-	priorRequestSQL, priorUsageSQL, acceptedInputSQL, transitionBySeqSQL,
+	priorRequestSQL, priorUsageSQL, acceptedInputSQL, comparableUsageSQL, headBetweenSQL, transitionBySeqSQL,
 	inputByClientSQL, inputByPositionSQL, inputAtSQL, inputsAtSQL, deliveredSQL, observationKeySQL, steerBytesSQL, insertInputSQL, latestRunsSQL,
 }
 

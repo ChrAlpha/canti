@@ -129,6 +129,10 @@ func (s *Store) readContextState(ctx context.Context, tx *sql.Tx, expected harne
 		if err := s.checkHandoverHead(ctx, tx, pointer, before, after, state, facts.Outcome); err != nil {
 			return state, err
 		}
+	case "request_frozen":
+		if err := s.checkBudgetHead(ctx, tx, expected.State.RunID, pointer, state); err != nil {
+			return state, err
+		}
 	default:
 		return state, fmt.Errorf("%w: invalid context provenance", ErrIncompatible)
 	}
@@ -301,10 +305,134 @@ func (s *Store) checkContext(ctx context.Context, tx *sql.Tx, t harness.Transiti
 	if err := harness.CheckContextMutation(t, current); err != nil {
 		return err
 	}
+	if t.Facts.Request != nil {
+		if err := s.checkBudget(ctx, tx, t, current); err != nil {
+			return err
+		}
+	}
 	if rejection := t.Facts.Rejection; rejection != nil {
 		if err := s.checkRejectionCapture(ctx, tx, t.From, rejection); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// checkBudgetHead proves that a materialized request head is the budget anchor
+// its frozen request records: the transition holds, the head is the one its
+// budget record prescribes over the head it replaced, and the record agrees
+// with the run and the comparable request.
+func (s *Store) checkBudgetHead(ctx context.Context, tx *sql.Tx, runID string, pointer int64, state harness.ContextState) error {
+	before, after, facts, err := s.readTransition(ctx, tx, runID, pointer)
+	if err != nil {
+		return err
+	}
+	t := harness.Transition{Seq: pointer, From: before, To: after, Event: core.RequestFrozen{}, Facts: facts}
+	if err := harness.ValidateTransition(t); err != nil {
+		return fmt.Errorf("%w: budget anchor: %v", ErrIncompatible, err)
+	}
+	r := facts.Request
+	if facts.ContextState == nil || !facts.ContextState.Equal(state) || r.Context == nil || r.Context.Budget == nil || r.Context.Budget.Replaced == nil {
+		return fmt.Errorf("%w: context head is not a budget anchor", ErrIncompatible)
+	}
+	b := r.Context.Budget
+	if err := b.Replaced.Validate(before.Step, pointer-1); err != nil {
+		return fmt.Errorf("%w: invalid replaced context", ErrIncompatible)
+	}
+	if err := harness.CheckContextMutation(t, *b.Replaced); err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
+	return s.checkBudget(ctx, tx, t, *b.Replaced)
+}
+
+// checkBudget proves the budget decision of the request frozen at seq with
+// capture, under the head it was frozen under or replaced; a request without a
+// capture records none. A record is due
+// exactly when a budget is in force, the request is no protocol repair, and the
+// previous request, frozen under that head, reported input. The record states
+// that budget and that request, no head opened since it, and the step bytes it
+// names are those the previous request and this one rendered.
+func (s *Store) checkBudget(ctx context.Context, tx *sql.Tx, t harness.Transition, under harness.ContextState) error {
+	runID, seq, capture := t.From.RunID, t.Seq, t.Facts.Request.Context
+	run, err := s.run(s.stmt(ctx, tx, runSQL).QueryRowContext(ctx, runID))
+	if err != nil {
+		return err
+	}
+	tokens, source, ok := harness.EffectiveBudget(run.Budget.ContextTokens, under)
+	if ok {
+		if err := s.checkBudgetedCapture(ctx, tx, t, under); err != nil {
+			return err
+		}
+	}
+	var b *harness.ContextBudget
+	preparation := ""
+	if capture != nil {
+		b, preparation = capture.Budget, capture.Preparation
+	}
+	var usage harness.ComparableUsage
+	found := false
+	if ok && preparation != "protocol_repair" {
+		if usage, found, err = scanComparable(s.stmt(ctx, tx, comparableUsageSQL).QueryRowContext(ctx, runID, seq, under.AnchorSeq)); err != nil {
+			return err
+		}
+	}
+	switch {
+	case (b != nil) != found:
+		return fmt.Errorf("%w: a budget decision is recorded exactly when one is due", ErrIncompatible)
+	case b == nil:
+		return nil
+	case b.Tokens != tokens || b.Source != source:
+		return fmt.Errorf("%w: context budget differs from the run's budget in force", ErrIncompatible)
+	case b.InputSeq != usage.Seq || b.InputBytes != usage.Bytes || b.Input != usage.Input:
+		return fmt.Errorf("%w: budget usage differs from the previous request", ErrIncompatible)
+	}
+	var between bool
+	if err := s.stmt(ctx, tx, headBetweenSQL).QueryRowContext(ctx, runID, b.InputSeq, seq).Scan(&between); err != nil {
+		return err
+	}
+	_, _, facts, err := s.readTransition(ctx, tx, runID, b.InputSeq)
+	if err != nil {
+		return err
+	}
+	compared := facts.Request
+	if between || compared == nil || compared.ContextState == nil || compared.Context == nil || !compared.ContextState.Equal(under) {
+		return fmt.Errorf("%w: budget usage names no request frozen under the replaced head", ErrIncompatible)
+	}
+	if !sameStepBytes(compared.Context.Bytes.Steps, b.Steps) || !sameStepBytes(compared.Context.Bytes.Steps, capture.Bytes.Steps) {
+		return fmt.Errorf("%w: budget step bytes differ from the rendered steps", ErrIncompatible)
+	}
+	return nil
+}
+
+// checkBudgetedCapture checks the capture of a request frozen under head
+// while a budget is in force, with whether the request retries a rejection:
+// the head was opened by a rejection at this step and no request was frozen
+// since.
+func (s *Store) checkBudgetedCapture(ctx context.Context, tx *sql.Tx, t harness.Transition, head harness.ContextState) error {
+	retried := false
+	if r := head.Rejection; r != nil && r.Seq == head.AnchorSeq && r.Step == t.From.Step {
+		var prior int64
+		if err := s.stmt(ctx, tx, priorRequestSQL).QueryRowContext(ctx, t.From.RunID, t.Seq).Scan(&prior); err != nil {
+			return err
+		}
+		retried = prior < head.AnchorSeq
+	}
+	if err := harness.CheckBudgetedCapture(t, retried); err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
+	return nil
+}
+
+// sameStepBytes reports whether every step both lists hold has the same bytes.
+func sameStepBytes(a, b []harness.ContextStepBytes) bool {
+	bytes := make(map[int]int, len(a))
+	for _, s := range a {
+		bytes[s.Step] = s.Bytes
+	}
+	for _, s := range b {
+		if n, ok := bytes[s.Step]; ok && n != s.Bytes {
+			return false
+		}
+	}
+	return true
 }

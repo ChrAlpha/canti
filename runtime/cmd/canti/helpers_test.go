@@ -43,6 +43,9 @@ type scriptedModel struct {
 	bodies  [][]byte
 	sent    map[int]int
 	replies map[[2]int]reply
+	// unreported omits usage, as a provider that reports none would, so a
+	// rejection the script injects regardless of size teaches no budget.
+	unreported bool
 }
 
 // reply replaces the answer to one request. A non-zero status sends body
@@ -127,7 +130,7 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	m.mu.Lock()
 	m.bodies = append(m.bodies, body)
-	hold, decide := m.hold, m.decide
+	hold, decide, unreported := m.hold, m.decide, m.unreported
 	m.mu.Unlock()
 	if hold != nil {
 		select {
@@ -180,6 +183,9 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"id": "msg_test", "type": "message", "role": "assistant", "model": "claude-test", "stop_reason": cmp.Or(re.stopReason, "end_turn"),
 		"content": []map[string]string{{"type": "text", "text": text}},
 		"usage":   map[string]int{"input_tokens": 100, "output_tokens": 10},
+	}
+	if unreported {
+		delete(msg, "usage")
 	}
 	if responses {
 		msg = responsesReply(text, re.stopReason)
@@ -424,10 +430,11 @@ type status struct {
 		Constraints string    `json:"constraints"`
 		Created     time.Time `json:"created"`
 		Budget      struct {
-			WallTime    string `json:"wall_time"`
-			Tokens      int64  `json:"tokens"`
-			OutputBytes int64  `json:"output_bytes"`
-			JobTimeout  string `json:"job_timeout"`
+			WallTime      string `json:"wall_time"`
+			Tokens        int64  `json:"tokens"`
+			ContextTokens int64  `json:"context_tokens"`
+			OutputBytes   int64  `json:"output_bytes"`
+			JobTimeout    string `json:"job_timeout"`
 		} `json:"budget"`
 	} `json:"run"`
 	Seq        int64           `json:"seq"`

@@ -213,6 +213,9 @@ func TestLoopLongStability(t *testing.T) {
 			if err != nil || next != tr.To {
 				t.Fatalf("non-core transition: %+v %v", tr, err)
 			}
+			if tr.Facts.ContextState != nil {
+				current = *tr.Facts.ContextState
+			}
 			if tr.Facts.Request != nil {
 				if tr.Facts.Request.ContextState == nil || !tr.Facts.Request.ContextState.Equal(current) {
 					t.Fatal("frozen context differs from committed selection")
@@ -229,9 +232,6 @@ func TestLoopLongStability(t *testing.T) {
 			}
 			if tr.Event.Kind() == "response_loaded" && tr.To.Phase == core.PhaseIdle {
 				repairs++
-			}
-			if tr.Facts.ContextState != nil {
-				current = *tr.Facts.ContextState
 			}
 			settled := tr.Event.Kind() == "response_saved" || tr.Event.Kind() == "response_incomplete" || tr.Event.Kind() == "request_rejected" || tr.Event.Kind() == "stop_requested" && tr.From.Phase == core.PhaseRequestSent
 			lost := tr.Event.Kind() == "attempt_started" && tr.From.Phase == core.PhaseRequestSent

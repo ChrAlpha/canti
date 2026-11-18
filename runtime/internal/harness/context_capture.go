@@ -17,6 +17,7 @@ type ContextCapture struct {
 	PreviousRun      string             `json:",omitempty"`
 	Retrievals       []ContextRetrieval `json:",omitempty"`
 	Sources          []ContextSource    `json:",omitempty"`
+	Budget           *ContextBudget     `json:",omitempty"`
 }
 
 // ContextBytes accounts the rendered bytes of one request per section and per

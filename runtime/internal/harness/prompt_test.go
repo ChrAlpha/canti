@@ -346,11 +346,11 @@ func TestPromptResourceCapIncludesEveryRenderedByte(t *testing.T) {
 func TestSystemContextKeepsItsContractWithinBudget(t *testing.T) {
 	system := testFrame().contextSystem()
 	start := strings.Index(system, "\n\nEvery step completed since the current anchor")
-	end := strings.Index(system, "read smaller ranges when one result is too large.")
+	end := strings.Index(system, "Read smaller ranges when one result is too large.")
 	if start < 0 || end < start {
 		t.Fatal("system lacks the context contract")
 	}
-	section := system[start : end+len("read smaller ranges when one result is too large.")]
+	section := system[start : end+len("Read smaller ranges when one result is too large.")]
 	if len(section) > 2500 {
 		t.Fatalf("the context contract is %d bytes", len(section))
 	}

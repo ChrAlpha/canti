@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
@@ -42,4 +43,35 @@ func (s *Store) MaxAcceptedInput(ctx context.Context, runID string, before int64
 		return 0, false, err
 	}
 	return maximum, reported != 0, nil
+}
+
+// ComparableUsage reads the previous request of runID before seq, when it
+// was frozen at or after anchor and an attempt of it reported input usage.
+func (s *Store) ComparableUsage(ctx context.Context, runID string, before, anchor int64) (harness.ComparableUsage, bool, error) {
+	return scanComparable(s.db.QueryRowContext(ctx, comparableUsageSQL, runID, before, anchor))
+}
+
+func scanComparable(row *sql.Row) (harness.ComparableUsage, bool, error) {
+	var u harness.ComparableUsage
+	var bytes sql.NullInt64
+	err := row.Scan(&u.Seq, &bytes, &u.Input)
+	if errors.Is(err, sql.ErrNoRows) {
+		return u, false, nil
+	}
+	if err != nil {
+		return u, false, err
+	}
+	if !bytes.Valid {
+		return u, false, fmt.Errorf("%w: request %d has no context capture", ErrIncompatible, u.Seq)
+	}
+	u.Bytes = int(bytes.Int64)
+	return u, true, nil
+}
+
+// PriorRequest reads the sequence of the latest request of runID frozen
+// before seq, zero when there is none.
+func (s *Store) PriorRequest(ctx context.Context, runID string, before int64) (int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, priorRequestSQL, runID, before).Scan(&seq)
+	return seq, err
 }

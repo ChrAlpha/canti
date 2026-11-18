@@ -121,7 +121,14 @@ func CheckContextMutation(t Transition, current ContextState) error {
 		if r.ContextState == nil {
 			return fmt.Errorf("%w: frozen context is required", ErrFacts)
 		}
-		if !current.Equal(*r.ContextState) {
+		frozenUnder := current
+		if t.Facts.ContextState != nil {
+			if r.Context == nil || r.Context.Budget == nil || r.Context.Budget.Replaced == nil || !r.Context.Budget.Replaced.Equal(current) {
+				return fmt.Errorf("%w: a budget anchor must replace the current head", ErrFacts)
+			}
+			frozenUnder = *t.Facts.ContextState
+		}
+		if !frozenUnder.Equal(*r.ContextState) {
 			return fmt.Errorf("%w: frozen context differs from current head", ErrFacts)
 		}
 	}
@@ -143,6 +150,7 @@ func CheckContextMutation(t Transition, current ContextState) error {
 		}
 	case core.Performed:
 		return checkHandoverHead(t, current)
+	case core.RequestFrozen:
 	default:
 		if next != nil {
 			return fmt.Errorf("%w: context mutation does not belong to %s", ErrFacts, t.Event.Kind())
