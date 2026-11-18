@@ -38,7 +38,9 @@ func TestContextEventsPreserveAttemptIdentity(t *testing.T) {
 	}
 	commit(core.AttemptStarted{Step: 1, Attempt: 2}, harness.Facts{})
 	commit(core.ResponseSaved{Step: 1, Attempt: 2}, harness.Facts{})
-	tr = commit(core.ResponseLoaded{Step: 1, Attempt: 2, Body: []byte("malformed")}, harness.Facts{})
+	malformed := []byte("malformed")
+	_, malformedErr := core.Decode(malformed)
+	tr = commit(testLoaded(1, 2, malformed), harness.Facts{Diagnostic: malformedErr.Error()})
 	v = harness.DescribeContextEvent(tr, false)
 	if v.Attempt != 2 || v.Revision != 1 || v.Outcome != "protocol_rejected" || v.Failure == "" || state.Attempt != 3 {
 		t.Fatalf("repair misattributed: %+v", v)
@@ -102,7 +104,11 @@ func TestContextEventsReportTheCommittedDecodeOutcome(t *testing.T) {
 		{"returned", `{"kind":"return","payload":"done"}`, returned, "returned", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := harness.Transition{Seq: 4, From: saved, To: tc.to, Event: core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(tc.body)}}
+			facts := harness.Facts{}
+			if _, err := core.Decode([]byte(tc.body)); err != nil {
+				facts.Diagnostic = err.Error()
+			}
+			tr := harness.Transition{Seq: 4, From: saved, To: tc.to, Event: testLoaded(1, 1, []byte(tc.body)), Facts: facts}
 			if v := harness.DescribeContextEvent(tr, false); v.Outcome != tc.outcome || v.Failure != tc.failure {
 				t.Fatalf("event = %+v, want outcome %q and failure %q", v, tc.outcome, tc.failure)
 			}

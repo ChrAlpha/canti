@@ -36,9 +36,9 @@ is not.
 | `runtime/internal/project` | Read-only discovery of a workspace's instruction files and `.agents/skills` index at run creation: Pi's per-directory rule, symlinks inside the workspace, bounded reads, and skip diagnostics | Offline tests on real directories |
 | `runtime/internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `runtime/internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
-| `runtime/internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
-| `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
-| `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
+| `runtime/internal/harness/provider` | One streaming HTTP exchange of frozen bytes: bounded SSE parsing, idle-read timeout, status and in-stream error classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
+| `runtime/internal/harness/openai` | Streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
+| `runtime/internal/harness/anthropic` | Streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
 | `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 13, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, the project context bound at run creation, bounded newest-first history pages for reopening a line with line tokens, follow watermarks, run summaries, held inputs and bounded withdrawal names, and the job_processes_terminated cessation), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
@@ -87,14 +87,14 @@ malformed or incomplete JSON, and trailing values. It does not extract JSON
 from Markdown. Transport completeness is a separate adapter responsibility:
 valid JSON alone does not prove that a model response completed.
 
-A raw provider response and the decision payload are different layers. The
-adapter records the complete raw response with its provenance
+An assembled provider response and the decision payload are different layers.
+The adapter records the assembled response object with its provenance
 (model/protocol/adapter); it then extracts the decision text, which
 `ResponseLoaded` carries into the core and which is persisted as part of that
-transition. When the adapter extracts no text, the raw body is carried
+transition. When the adapter extracts no text, the assembled body is carried
 instead, which the strict decoder rejects unless it is itself exactly one
-decision object; the core never interprets provider content blocks or HTTP
-framing.
+decision object; the core never interprets provider content blocks, SSE
+events, or HTTP framing.
 
 ## Identity and causality
 
@@ -640,54 +640,129 @@ only while it runs, and a key is sent only to the exact provider its caller
 resolved, which must be the run's; otherwise the drive is refused before any
 request. Both adapters build a
 deterministic body that never contains credentials from the system prompt and
-one user message with a text part per prompt block, describe the decision
-with `harness.DecisionSchema`, and send the run's effort only when the run
-names one, since each API's effort levels and default differ by model. The
-body and the model, protocol, and adapter identifiers are committed with
-`RequestFrozen` before any send.
+one user message with a text part per prompt block, request streaming with
+`stream: true`, describe the decision with `harness.DecisionSchema`, and send
+the run's effort only when the run names one, since each API's effort levels
+and default differ by model. The body and the model, protocol, and adapter
+identifiers are committed with `RequestFrozen` before any send. The adapter
+assembles the provider's final response object from the stream and records
+that object.
 
-`provider.Endpoint` sends exactly the frozen body once over `net/http`, with
-no SDK, no hidden retries, and no followed redirects, under a per-attempt
-timeout (10 min by default) and an 8 MiB response limit, and replaces the
-credential with `[redacted]` wherever a response body echoes it. The base URL
-must use `https` unless it is a loopback address. A malformed, truncated, or
-oversized body and statuses 408, 409, 429, and 5xx are incomplete and
+`provider.Endpoint` opens exactly one streaming exchange of the frozen body
+over `net/http`, with no SDK, no hidden retries, no followed redirects, and an
+idle-read timeout (10 min by default) between response bytes, reset when
+headers arrive and on every body byte. A generation that keeps sending bytes
+is not bounded by that timeout; a silent reasoning phase is, because streaming
+alone guarantees nothing until the first byte.
+The parser is bounded by line, event, and whole-stream limits derived from
+the 8 MiB assembled-response limit. It tolerates comments and keep-alives and
+refuses unknown framing rather than treating raw bytes as JSON. The
+credential is replaced with `[redacted]` wherever a response, event, assembled
+body, failure text, an HTTP header, or a typed error field echoes it, including
+inside decoded JSON strings and after a credential is split across deltas.
+Redaction is one linear left-to-right pass. Every individual persisted or
+emitted string goes through RedactValue, and whole bodies through RedactJSON;
+both share the same policy. A string token whose decoded value is a JSON
+object, array or string is rewritten recursively, to a depth of four; past
+that bound the field fails closed. A JSON scalar or non-JSON value is literal-redacted when it is the content of
+a string token; a number lexeme outside a string is never touched. Non-JSON prose is checked through successive Go/JSON escape views without
+pairing quotes; an escape is decoded only when it matches the exact Go/JSON
+grammar and yields a byte below 0x80, and any other bytes stay as written. Any
+view containing the credential becomes the marker, and the bound fails closed. Each adapter passes its whole result through one reflection walker
+before the harness sees it, so a missed individual site cannot leak. Configuration refuses a credential
+that contains the marker or whose prefix/suffix overlaps the marker's proper
+suffix/prefix, so a replacement cannot create a new occurrence; an unreachable
+final check fails closed by replacing the whole field. The rewrite preserves every other
+byte, number lexeme, key order, and duplicate key. A valid JSON body is only
+token-rewritten, never literal-rewritten, so an unrelated number equal to the
+secret survives. Typed error and signal enumerations are canonical allowlisted
+protocol constants or `unrecognized`, never provider free text; free-text
+fields and every error reachable through single- or multi-cause Unwrap are
+redacted while sentinel identity and net timeout behavior are preserved, and
+known transport wrappers keep their type with sanitized fields, and a replaced
+leaf retains the known sentinel matches of the value it replaced. A credential
+shorter than 16 bytes, not printable ASCII (0x21-0x7E), a substring of an
+adapter's protocol vocabulary, containing the redaction marker, a single
+repeated character, or overlapping either marker border is refused at configuration without echoing it, so redaction never has to exempt
+a canonical constant. Envelope validation, duplicate-key checks and decision
+decoding use the raw provider object. The decision or the sanitized
+protocol-repair diagnostic is computed once while that object is in memory and
+committed with `ResponseSaved` as a discriminated union; a diagnostic always
+takes the protocol-failure path and its body is display evidence only. Every
+later consumer, including a fresh model after resume or `-once`, uses that
+committed extraction; a ResponseSaved without a well-formed extraction, and a
+committed decision that fails the core decision rules, are corrupt facts.
+Context projections read the committed diagnostic; they never decode display
+bytes to infer an outcome. The sanitized copy is
+only presented and persisted, and raw provider bytes never become durable. The literal pass applies to non-JSON text and to the verified
+prefix of a malformed body; an unterminated or unparseable remainder is
+truncated at its last verified token. The base URL must use
+`https` unless it is a loopback address.
+
+A non-2xx status is read as a bounded JSON error body. A cut, malformed, or
+oversized stream and statuses 408, 409, 429, and 5xx are incomplete and
 retryable; 402, or the API's exhausted-credit signal, is
-`StopError{budget_exhausted}`; any other status or an unsupported protocol or
-adapter is `StopError{unrecoverable}`.
+`StopError{budget_exhausted}`; any other status, an in-stream error event
+with a terminal class, or an unsupported protocol or adapter is
+`StopError{unrecoverable}`. In-stream error events use the class named by the nested error type, with the
+exchange's actual HTTP status as evidence; they never manufacture a status,
+and overflow remains confirmed only by the exact stop-reason or HTTP-status
+rules above.
 
-`anthropic.Model` implements `Model` for the non-streaming Messages API at
-API version `2023-06-01`, as adapter `canti-anthropic/4`: model, `max_tokens`
-(16,000 by default), the system prompt as a string, text blocks, optionally an
-`output_config` with the effort and a JSON-schema format for the decision
-object, and, with `-fallbacks`, server-side refusal fallbacks. The first and
+`anthropic.Model` implements `Model` for the streaming Messages API at
+API version `2023-06-01`, as adapter `canti-anthropic/5`: model, `max_tokens`
+(16,000 by default), `stream: true`, the system prompt as a string, text
+blocks, optionally an `output_config` with the effort and a JSON-schema format
+for the decision object, and, with `-fallbacks`, server-side refusal
+fallbacks. The first and
 the last stable block carry `ephemeral` `cache_control` breakpoints, so that
 a provider that caches prompt prefixes can reuse the stable blocks of the
 previous request, within the current anchor; actual cache reuse depends on
 the provider. Confirmed overflow requires exact, unique canonical discriminator keys: HTTP 200
 `stop_reason=model_context_window_exceeded`, or HTTP 400 `invalid_request_error`
 with `prompt is too long`. Other incomplete content is not confirmed overflow.
-A 2xx response is complete only with `stop_reason` `end_turn`,
-`stop_sequence`, or `refusal`; 400 with a credit-balance message exhausts the
-budget. Usage is the provider-reported input tokens, including cache creation
-and reads, plus output tokens. `Decision` concatenates the text blocks.
+`Complete` assembles the final `message` from `message_start`,
+`content_block_start`, `content_block_delta`, `message_delta`, and
+`message_stop`, preserving text, thinking, tool input, stop reason, usage, and
+unknown extensions such as `container` or `stop_details`. A content block of
+type `fallback` is the server-side fallback boundary: its `to.model` names the
+serving model, content before it is discarded for the decision, and exact parity with
+the non-streaming object is not available in that case. A second
+`message_start` is a protocol error.
+A stream cut before `message_stop` is incomplete even if `message_start`
+already carried a whole message; a `message_delta` without final usage leaves
+output tokens unknown while known input and cache counters are retained. A 2xx stream is complete only with
+`message_stop` and `stop_reason` `end_turn`, `stop_sequence`, or `refusal`;
+400 with a credit-balance message exhausts the budget. Usage is the
+provider-reported `message_start` input tokens, including cache creation and
+reads, plus the final `message_delta` output tokens. `Decision` concatenates
+the text blocks.
 
-`openai.Model` implements `Model` for the non-streaming Responses API as
-adapter `canti-openai-responses/2`, protocol `openai-responses/v1`, explicitly disabling truncation and posting to
-the base URL plus `/responses`: model, the system prompt as `instructions`,
-`input_text` parts, `max_output_tokens` (16,000 by default), optionally
-`reasoning.effort` and a strict `json_schema` text format, and `store: false`,
-since the journal keeps the response. The provider caches prompt prefixes
-without breakpoints. A 2xx response is complete only with status `completed`;
-`incomplete`, with its reason, and `failed` are retryable;
-`insufficient_quota` exhausts the budget. Exact HTTP 400 `error.code` or
-HTTP 200 failed-response `error.code` of `context_length_exceeded` confirms
-overflow; `max_output_tokens` does not. Usage is `input_tokens`, which
-include cached ones, plus `output_tokens`. `Decision` concatenates the
-`output_text` parts of the message items, so a refusal holds no decision.
+`openai.Model` implements `Model` for the streaming Responses API as
+adapter `canti-openai-responses/3`, protocol `openai-responses/v1`, explicitly
+disabling truncation and posting to the base URL plus `/responses`: model,
+`stream: true`, the system prompt as `instructions`, `input_text` parts,
+`max_output_tokens` (16,000 by default), optionally `reasoning.effort` and a
+strict `json_schema` text format, and `store: false`, since the journal keeps
+the response. The provider caches prompt prefixes
+without breakpoints. `Complete` reads the terminal `response.completed`, `response.incomplete`, or
+`response.failed` event and records its `response` object, which is the same
+body the non-streaming transport returned; delta events need not be
+assembled because the terminal event carries the whole object. The terminal event kind
+must agree with the object's `status`; a mismatch is malformed and never
+complete, and a `response.*` event outside the documented streaming-events set
+is refused rather than ignored. A stream cut before a terminal event is
+incomplete. A stream is complete only with status `completed`; `incomplete`, with its reason, and `failed` are retryable;
+`insufficient_quota` exhausts the budget. Exact HTTP 400 `error.code`, HTTP
+200 failed-response `error.code`, or an in-stream error `code` of
+`context_length_exceeded` confirms overflow; `max_output_tokens` does not.
+Usage is the terminal response's `input_tokens`, which include cached ones,
+plus `output_tokens`; cached and reasoning token details remain in the
+recorded response body. `Decision` concatenates the `output_text` parts of
+the message items, so a refusal holds no decision.
 
-With `-decision-format tool` the adapters are `canti-anthropic/4-tool` and
-`canti-openai-responses/2-tool`: the body offers one strict `canti_decision`
+With `-decision-format tool` the adapters are `canti-anthropic/5-tool` and
+`canti-openai-responses/3-tool`: the body offers one strict `canti_decision`
 tool whose input schema is the decision object, instead of the output format,
 with tool choice `auto` and no parallel calls. A response that calls the tool
 is complete, and `Decision` returns the input of its single `canti_decision`
@@ -699,9 +774,11 @@ without a purpose still decodes. The adapter identifiers name how a frozen
 request is sent and its decision extracted, which neither the purpose nor the
 tool choice changed.
 
-A resend reuses the frozen bytes; changing the input requires a new revision. Response records keep the raw body,
-completeness, usage, and provenance, and an incomplete response keeps its
-failure text. A run's configuration is stored in its run record; the code
+A resend reuses the frozen bytes; changing the input requires a new revision.
+Response records keep the assembled provider response object, completeness,
+usage, and provenance, and an incomplete response keeps its failure text and
+the partial object assembled before the stream failed. No journal fact or
+wire message changed shape, so no host protocol version changed. A run's configuration is stored in its run record; the code
 revision is not. The configuration records the context version of the canti
 that created the run, which names the rules that render its prompts and
 account for their bytes. `TestContextVersionPinsItsRules` records, once per

@@ -47,10 +47,10 @@ func candidates(s core.State) []core.Event {
 	}
 	for _, at := range [][2]int{{s.Step, s.Attempt}, {s.Step, s.Attempt + 1}, {s.Step + 1, s.Attempt}} {
 		out = append(out, core.AttemptStarted{Step: at[0], Attempt: at[1]}, core.ResponseSaved{Step: at[0], Attempt: at[1]},
-			core.ResponseIncomplete{Step: at[0], Attempt: at[1]}, core.RequestRejected{Step: at[0], Attempt: at[1]}, core.ResponseLoaded{Step: at[0], Attempt: at[1], Body: execBody})
+			core.ResponseIncomplete{Step: at[0], Attempt: at[1]}, core.RequestRejected{Step: at[0], Attempt: at[1]}, loaded(at[0], at[1], execBody))
 	}
 	for _, body := range [][]byte{returnBody, invalidBody, purposeBody, returnPurposeBody, blankBody} {
-		out = append(out, core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body})
+		out = append(out, loaded(s.Step, s.Attempt, body))
 	}
 	for _, effect := range []string{s.EffectID, "other"} {
 		out = append(out, core.EffectRecovered{EffectID: effect}, core.OutcomeUnknown{EffectID: effect},

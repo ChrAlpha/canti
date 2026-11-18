@@ -138,7 +138,6 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 		return
 	}
-	w.Header().Set("content-type", "application/json")
 	responses := r.URL.Path == "/responses"
 	key, bearer := r.Header.Get("x-api-key"), r.Header.Get("authorization")
 	if responses && (key != "" || bearer != "Bearer "+m.key) || !responses && (r.URL.Path != "/v1/messages" || key != m.key || bearer != "") {
@@ -158,6 +157,7 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 	}
 	if re.status != 0 {
+		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(re.status)
 		io.WriteString(w, re.body)
 		return
@@ -186,23 +186,163 @@ func (m *scriptedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		msg = responsesReply(text, re.stopReason)
 	}
 	if re.cut {
-		cutConnection(w, msg)
+		if responses {
+			writePartialResponses(w, text)
+		} else {
+			writePartialMessage(w, text)
+		}
 		return
 	}
-	json.NewEncoder(w).Encode(msg)
+	if responses {
+		writeResponsesStream(w, msg)
+	} else {
+		writeMessagesStream(w, msg)
+	}
 }
 
-// cutConnection sends the first half of msg under a Content-Length of all of
-// it and closes the connection.
-func cutConnection(w http.ResponseWriter, msg any) {
-	data, _ := json.Marshal(msg)
-	conn, buf, err := w.(http.Hijacker).Hijack()
-	if err != nil {
+func writeMessagesStream(w http.ResponseWriter, message any) {
+	data, _ := json.Marshal(message)
+	var full struct {
+		ID           string            `json:"id"`
+		Type         string            `json:"type"`
+		Role         string            `json:"role"`
+		Model        string            `json:"model"`
+		Content      []json.RawMessage `json:"content"`
+		StopReason   json.RawMessage   `json:"stop_reason"`
+		StopSequence json.RawMessage   `json:"stop_sequence"`
+		Usage        json.RawMessage   `json:"usage"`
+	}
+	if json.Unmarshal(data, &full) != nil {
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", data)
+		io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":null}\n\n")
+		io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 		return
 	}
-	defer conn.Close()
-	fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(data), data[:len(data)/2])
-	buf.Flush()
+	w.Header().Set("content-type", "text/event-stream")
+	start := map[string]any{"id": full.ID, "type": full.Type, "role": full.Role, "model": full.Model, "content": []any{}, "stop_reason": nil}
+	if len(full.Usage) > 0 {
+		start["usage"] = full.Usage
+	}
+	startData, _ := json.Marshal(start)
+	fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", startData)
+	for index, raw := range full.Content {
+		var block struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+		}
+		_ = json.Unmarshal(raw, &block)
+		switch block.Type {
+		case "text":
+			writeBlockStart(w, index, map[string]any{"type": "text", "text": ""})
+			writeTextDeltas(w, index, block.Text)
+		case "thinking":
+			writeBlockStart(w, index, map[string]any{"type": "thinking", "thinking": "", "signature": ""})
+			writeThinkingDeltas(w, index, block.Thinking)
+			if block.Signature != "" {
+				signature, _ := json.Marshal(block.Signature)
+				fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"signature_delta\",\"signature\":%s}}\n\n", index, signature)
+			}
+		case "tool_use":
+			writeBlockStart(w, index, map[string]any{"type": "tool_use", "id": block.ID, "name": block.Name, "input": map[string]any{}})
+			input := block.Input
+			if len(input) == 0 {
+				input = json.RawMessage(`{}`)
+			}
+			writeInputDeltas(w, index, string(input))
+		default:
+			fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", index, raw)
+		}
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", index)
+	}
+	delta := map[string]any{"stop_reason": nil}
+	if len(full.StopReason) > 0 && string(full.StopReason) != "null" {
+		delta["stop_reason"] = full.StopReason
+	}
+	if len(full.StopSequence) > 0 && string(full.StopSequence) != "null" {
+		delta["stop_sequence"] = full.StopSequence
+	}
+	messageDelta := map[string]any{"delta": delta}
+	if len(full.Usage) > 0 {
+		messageDelta["usage"] = full.Usage
+	}
+	deltaData, _ := json.Marshal(messageDelta)
+	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",%s}\n\n", deltaData[1:len(deltaData)-1])
+	io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+}
+
+func writeBlockStart(w http.ResponseWriter, index int, block any) {
+	raw, _ := json.Marshal(block)
+	fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", index, raw)
+}
+
+func writeTextDeltas(w http.ResponseWriter, index int, text string) {
+	for _, part := range splitText(text) {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", index, raw)
+	}
+}
+
+func writeThinkingDeltas(w http.ResponseWriter, index int, text string) {
+	for _, part := range splitText(text) {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":%s}}\n\n", index, raw)
+	}
+}
+
+func writeInputDeltas(w http.ResponseWriter, index int, input string) {
+	for _, part := range splitText(input) {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%s}}\n\n", index, raw)
+	}
+}
+
+func splitText(text string) []string {
+	runes := []rune(text)
+	if len(runes) < 2 {
+		return []string{text}
+	}
+	middle := len(runes) / 2
+	return []string{string(runes[:middle]), string(runes[middle:])}
+}
+
+func writeResponsesStream(w http.ResponseWriter, response any) {
+	data, _ := json.Marshal(response)
+	var envelope struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(data, &envelope)
+	typ := "response.completed"
+	switch envelope.Status {
+	case "incomplete":
+		typ = "response.incomplete"
+	case "failed":
+		typ = "response.failed"
+	}
+	w.Header().Set("content-type", "text/event-stream")
+	fmt.Fprintf(w, "event: %s\ndata: {\"type\":\"%s\",\"response\":%s}\n\n", typ, typ, data)
+}
+
+func writePartialMessage(w http.ResponseWriter, text string) {
+	w.Header().Set("content-type", "text/event-stream")
+	io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":100,\"output_tokens\":1}}}\n\n")
+	io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+	payload, _ := json.Marshal(text)
+	fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", payload)
+	w.(http.Flusher).Flush()
+}
+
+func writePartialResponses(w http.ResponseWriter, text string) {
+	w.Header().Set("content-type", "text/event-stream")
+	io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"model\":\"responses-test\",\"status\":\"in_progress\",\"output\":[],\"usage\":null}}\n\n")
+	payload, _ := json.Marshal(text)
+	fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":%s}\n\n", payload)
+	w.(http.Flusher).Flush()
 }
 
 // holdRequests makes the model answer no request until its client goes

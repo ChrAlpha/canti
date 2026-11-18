@@ -44,12 +44,13 @@ func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply, m.replies = m.replies[0], m.replies[1:]
 	}
 	m.mu.Unlock()
-	w.Header().Set("content-type", "application/json")
 	if body, ok := strings.CutPrefix(reply, "raw:"); ok {
-		io.WriteString(w, body)
+		w.Header().Set("content-type", "text/event-stream")
+		streamMessage(w, body)
 		return
 	}
 	if !scripted {
+		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"unscripted request"}}`)
 		return
@@ -59,8 +60,138 @@ func (m *corpusModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		text, _ := json.Marshal(reply)
 		content, stop = `[{"type":"text","text":`+string(text)+`}]`, "end_turn"
 	}
-	fmt.Fprintf(w, `{"id":"msg_%02d","type":"message","role":"assistant","model":"claude-opus-5","content":%s,"stop_reason":%q,`+
+	message := fmt.Sprintf(`{"id":"msg_%02d","type":"message","role":"assistant","model":"claude-opus-5","content":%s,"stop_reason":%q,`+
 		`"usage":{"input_tokens":1000,"output_tokens":20}}`, n, content, stop)
+	w.Header().Set("content-type", "text/event-stream")
+	streamAssembledMessage(w, message)
+}
+
+// streamAssembledMessage turns a whole Messages object into the real block
+// and delta events. The raw-envelope hook above remains only for the
+// historical malformed-envelope boundary tests.
+func streamAssembledMessage(w http.ResponseWriter, message string) {
+	var full struct {
+		ID           string            `json:"id"`
+		Type         string            `json:"type"`
+		Role         string            `json:"role"`
+		Model        string            `json:"model"`
+		Content      []json.RawMessage `json:"content"`
+		StopReason   json.RawMessage   `json:"stop_reason"`
+		StopSequence json.RawMessage   `json:"stop_sequence"`
+		Usage        json.RawMessage   `json:"usage"`
+	}
+	if json.Unmarshal([]byte(message), &full) != nil {
+		streamMessage(w, message)
+		return
+	}
+	start := map[string]any{"id": full.ID, "type": full.Type, "role": full.Role, "model": full.Model, "content": []any{}, "stop_reason": nil}
+	if len(full.Usage) > 0 {
+		start["usage"] = full.Usage
+	}
+	startData, _ := json.Marshal(start)
+	fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", startData)
+	for index, raw := range full.Content {
+		var block struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+		}
+		_ = json.Unmarshal(raw, &block)
+		switch block.Type {
+		case "text":
+			corpusBlockStart(w, index, map[string]any{"type": "text", "text": ""})
+			corpusTextDeltas(w, index, block.Text)
+		case "thinking":
+			corpusBlockStart(w, index, map[string]any{"type": "thinking", "thinking": "", "signature": ""})
+			corpusThinkingDeltas(w, index, block.Thinking)
+			if block.Signature != "" {
+				signature, _ := json.Marshal(block.Signature)
+				fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"signature_delta\",\"signature\":%s}}\n\n", index, signature)
+			}
+		case "tool_use":
+			corpusBlockStart(w, index, map[string]any{"type": "tool_use", "id": block.ID, "name": block.Name, "input": map[string]any{}})
+			input := block.Input
+			if len(input) == 0 {
+				input = json.RawMessage(`{}`)
+			}
+			corpusInputDeltas(w, index, string(input))
+		default:
+			fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", index, raw)
+		}
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", index)
+	}
+	delta := map[string]any{"stop_reason": nil}
+	if len(full.StopReason) > 0 && string(full.StopReason) != "null" {
+		delta["stop_reason"] = full.StopReason
+	}
+	if len(full.StopSequence) > 0 && string(full.StopSequence) != "null" {
+		delta["stop_sequence"] = full.StopSequence
+	}
+	messageDelta := map[string]any{"delta": delta}
+	if len(full.Usage) > 0 {
+		messageDelta["usage"] = full.Usage
+	}
+	deltaData, _ := json.Marshal(messageDelta)
+	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",%s}\n\n", deltaData[1:len(deltaData)-1])
+	io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+}
+
+func corpusBlockStart(w http.ResponseWriter, index int, block any) {
+	raw, _ := json.Marshal(block)
+	fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", index, raw)
+}
+
+func corpusTextDeltas(w http.ResponseWriter, index int, text string) {
+	runes := []rune(text)
+	parts := []string{text}
+	if len(runes) > 1 {
+		middle := len(runes) / 2
+		parts = []string{string(runes[:middle]), string(runes[middle:])}
+	}
+	for _, part := range parts {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", index, raw)
+	}
+}
+
+func corpusThinkingDeltas(w http.ResponseWriter, index int, text string) {
+	runes := []rune(text)
+	parts := []string{text}
+	if len(runes) > 1 {
+		middle := len(runes) / 2
+		parts = []string{string(runes[:middle]), string(runes[middle:])}
+	}
+	for _, part := range parts {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":%s}}\n\n", index, raw)
+	}
+}
+
+func corpusInputDeltas(w http.ResponseWriter, index int, input string) {
+	runes := []rune(input)
+	parts := []string{input}
+	if len(runes) > 1 {
+		middle := len(runes) / 2
+		parts = []string{string(runes[:middle]), string(runes[middle:])}
+	}
+	for _, part := range parts {
+		raw, _ := json.Marshal(part)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%s}}\n\n", index, raw)
+	}
+}
+
+// streamMessage carries a whole Messages object in message_start and follows
+// it with an empty message_delta and message_stop. The adapter returns the
+// exact start bytes when no delta changes them, so the corpus keeps the raw
+// envelopes it tests.
+func streamMessage(w http.ResponseWriter, message string) {
+	fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", message)
+	io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":null}\n\n")
+	io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 }
 
 func (m *corpusModel) sent() [][]byte {
@@ -204,7 +335,7 @@ func newCorpusRig(t *testing.T, sc frozenScenario) *corpusRig {
 	if sc.tool {
 		format = "tool"
 	}
-	m, err := anthropic.New(anthropic.Config{BaseURL: server.URL, APIKey: "corpus-key", Model: "claude-opus-5", MaxTokens: 16000,
+	m, err := anthropic.New(anthropic.Config{BaseURL: server.URL, APIKey: "corpus-credential-key", Model: "claude-opus-5", MaxTokens: 16000,
 		StructuredOutput: true, DecisionFormat: format, Fallbacks: true})
 	if err != nil {
 		t.Fatal(err)

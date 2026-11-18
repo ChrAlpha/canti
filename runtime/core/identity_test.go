@@ -47,7 +47,8 @@ func TestEffectIDsMatchCommittedLiterals(t *testing.T) {
 			continue
 		}
 		s := State{RunID: tc.runID, Step: tc.step, Attempt: 1, RequestRev: 1, Phase: PhaseResponseSaved, Limits: Limits{MaxAttempts: 1}}
-		next, err := s.Next(ResponseLoaded{Step: tc.step, Attempt: 1, Body: []byte(`{"kind":"exec","payload":"true"}`)})
+		decision := Decision{Kind: Exec, Payload: "true"}
+		next, err := s.Next(ResponseLoaded{Step: tc.step, Attempt: 1, Decision: &decision})
 		if err != nil || next.EffectID != tc.want {
 			t.Errorf("decided effect of %q step %d = %q, %v; want %q", tc.runID, tc.step, next.EffectID, err, tc.want)
 		}

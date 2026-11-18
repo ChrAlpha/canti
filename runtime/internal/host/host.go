@@ -95,6 +95,11 @@ type Host struct {
 // state directory must exist. Unless create is set, a missing journal is an
 // error.
 func Open(ctx context.Context, opts Options, create bool) (*Host, error) {
+	for _, keys := range opts.Credentials {
+		if err := keys.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	state, err := CanonicalState(opts.Workspace, opts.State)
 	if err != nil {
 		return nil, err

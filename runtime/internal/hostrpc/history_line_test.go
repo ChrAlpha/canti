@@ -21,7 +21,7 @@ func TestHistoryLineTokenPinsPaginationAcrossAFreshLine(t *testing.T) {
 		RequestBytes: 256 << 10, ContextVersion: host.ContextVersion},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 		Budget: harness.Budget{WallTime: time.Hour, ContextTokens: 200_000, OutputBytes: 1 << 20, JobTimeout: time.Minute}}
-	binding := host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}
+	binding := host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}
 	first, err := h.Submit(ctx, host.Submission{Goal: "first line", Spec: spec, Binding: binding, Now: time.Now()})
 	if err != nil {
 		t.Fatal(err)

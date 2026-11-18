@@ -13,7 +13,7 @@ func TestUnlimitedSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	for step := 1; step <= 25; step++ {
-		s = walk(t, s, core.RequestFrozen{}, core.AttemptStarted{Step: step, Attempt: 1}, core.ResponseSaved{Step: step, Attempt: 1}, core.ResponseLoaded{Step: step, Attempt: 1, Body: execBody})
+		s = walk(t, s, core.RequestFrozen{}, core.AttemptStarted{Step: step, Attempt: 1}, core.ResponseSaved{Step: step, Attempt: 1}, loaded(step, 1, execBody))
 		s = walk(t, s, core.Observed{EffectID: s.EffectID, Execution: core.ExecutionExited})
 		if err := s.Validate(); err != nil {
 			t.Fatal(err)
@@ -22,7 +22,7 @@ func TestUnlimitedSteps(t *testing.T) {
 			t.Fatalf("did not advance: %+v", s)
 		}
 	}
-	s = walk(t, s, core.RequestFrozen{}, core.AttemptStarted{Step: 26, Attempt: 1}, core.ResponseSaved{Step: 26, Attempt: 1}, core.ResponseLoaded{Step: 26, Attempt: 1, Body: returnBody})
+	s = walk(t, s, core.RequestFrozen{}, core.AttemptStarted{Step: 26, Attempt: 1}, core.ResponseSaved{Step: 26, Attempt: 1}, loaded(26, 1, returnBody))
 	if s.Phase != core.PhaseReturned {
 		t.Fatalf("did not return: %+v", s)
 	}
@@ -63,7 +63,7 @@ func TestUnlimitedStepsExhaustAttempts(t *testing.T) {
 			}
 			s = walk(t, s, core.AttemptStarted{Step: 1, Attempt: attempt})
 			if invalid {
-				s = walk(t, s, core.ResponseSaved{Step: 1, Attempt: attempt}, core.ResponseLoaded{Step: 1, Attempt: attempt, Body: invalidBody})
+				s = walk(t, s, core.ResponseSaved{Step: 1, Attempt: attempt}, loaded(1, attempt, invalidBody))
 			} else {
 				s = walk(t, s, core.ResponseIncomplete{Step: 1, Attempt: attempt})
 			}

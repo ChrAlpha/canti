@@ -25,7 +25,7 @@ func TestLiveDecision(t *testing.T) {
 		system = "Call the canti_decision tool exactly once; never reply with text."
 	}
 	m, err := anthropic.New(anthropic.Config{BaseURL: os.Getenv("ANTHROPIC_BASE_URL"), APIKey: key, Model: model, MaxTokens: 1024,
-		Effort: effort, DecisionFormat: format, StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", Timeout: 2 * time.Minute})
+		Effort: effort, DecisionFormat: format, StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", IdleTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

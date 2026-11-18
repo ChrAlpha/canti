@@ -58,17 +58,17 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 }
 
 func TestCredentialsReadAndRemoveEveryVariable(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "key")
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
-	t.Setenv("OPENAI_API_KEY", "openai")
-	if c, err := credentials(); err != nil || c != (host.Keys{AnthropicKey: "key", OpenAIKey: "openai"}) {
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-credential")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token-credential")
+	t.Setenv("OPENAI_API_KEY", "openai-credential")
+	if c, err := credentials(); err != nil || c != (host.Keys{AnthropicKey: "anthropic-credential", OpenAIKey: "openai-credential"}) {
 		t.Errorf("credentials = %+v, %v", c, err)
 	}
 	if _, err := credentials(); err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 		t.Errorf("a credential stayed in the environment: %v", err)
 	}
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token")
-	if c, err := credentials(); err != nil || c != (host.Keys{AnthropicToken: "token"}) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token-credential")
+	if c, err := credentials(); err != nil || c != (host.Keys{AnthropicToken: "anthropic-token-credential"}) {
 		t.Errorf("credentials = %+v, %v", c, err)
 	}
 }
@@ -76,11 +76,11 @@ func TestCredentialsReadAndRemoveEveryVariable(t *testing.T) {
 func TestNewModelUsesTheCredentialAndBaseURLOfItsAPI(t *testing.T) {
 	messages := host.RunConfig{API: host.APIMessages, Model: "m", MaxTokens: 100, Effort: "high", Structured: true, DecisionFormat: "tool", Fallbacks: true}
 	responses := host.RunConfig{API: host.APIResponses, Model: "m", MaxTokens: 100, Effort: "low", Structured: true}
-	if got := host.AnthropicConfig(messages, "https://a.test", host.Keys{AnthropicKey: "k", OpenAIKey: "o"}); got != (anthropic.Config{BaseURL: "https://a.test", APIKey: "k",
+	if got := host.AnthropicConfig(messages, "https://a.test", host.Keys{AnthropicKey: "test-credential-key", OpenAIKey: "test-credential-openai"}); got != (anthropic.Config{BaseURL: "https://a.test", APIKey: "test-credential-key",
 		Model: "m", MaxTokens: 100, Effort: "high", StructuredOutput: true, DecisionFormat: "tool", Fallbacks: true}) {
 		t.Errorf("anthropic config = %+v", got)
 	}
-	if got := host.OpenAIConfig(responses, "https://o.test/v1", host.Keys{AnthropicKey: "k", OpenAIKey: "o"}); got != (openai.Config{BaseURL: "https://o.test/v1", APIKey: "o",
+	if got := host.OpenAIConfig(responses, "https://o.test/v1", host.Keys{AnthropicKey: "test-credential-key", OpenAIKey: "test-credential-openai"}); got != (openai.Config{BaseURL: "https://o.test/v1", APIKey: "test-credential-openai",
 		Model: "m", MaxTokens: 100, Effort: "low", StructuredOutput: true}) {
 		t.Errorf("openai config = %+v", got)
 	}
@@ -89,19 +89,40 @@ func TestNewModelUsesTheCredentialAndBaseURLOfItsAPI(t *testing.T) {
 		cred host.Keys
 		err  string
 	}{
-		{messages, host.Keys{OpenAIKey: "o"}, "set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call an anthropic-messages model"},
-		{responses, host.Keys{AnthropicKey: "k"}, "set OPENAI_API_KEY to call an openai-responses model"},
-		{host.RunConfig{API: host.APICompletions, Model: "m"}, host.Keys{OpenAIKey: "o"}, "not supported"},
+		{messages, host.Keys{OpenAIKey: "test-credential-openai"}, "set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to call an anthropic-messages model"},
+		{responses, host.Keys{AnthropicKey: "test-credential-key"}, "set OPENAI_API_KEY to call an openai-responses model"},
+		{host.RunConfig{API: host.APICompletions, Model: "m"}, host.Keys{OpenAIKey: "test-credential-openai"}, "not supported"},
 	} {
 		if _, err := newModel(tc.c, "https://model.test", tc.cred); err == nil || !strings.Contains(err.Error(), tc.err) {
 			t.Errorf("newModel(%s) = %v, want %q", tc.c.API, err, tc.err)
 		}
 	}
 	t.Setenv("OPENAI_BASE_URL", "ftp://not-a-model")
-	if _, err := newModel(responses, "", host.Keys{OpenAIKey: "o"}); err == nil || !strings.Contains(err.Error(), "BaseURL") {
+	if _, err := newModel(responses, "", host.Keys{OpenAIKey: "test-credential-openai"}); err == nil || !strings.Contains(err.Error(), "BaseURL") {
 		t.Errorf("OPENAI_BASE_URL was not used: %v", err)
 	}
-	if _, err := newModel(responses, "https://o.test/v1", host.Keys{OpenAIKey: "o"}); err != nil {
+	if _, err := newModel(responses, "https://o.test/v1", host.Keys{OpenAIKey: "test-credential-openai"}); err != nil {
 		t.Errorf("-model-url did not override OPENAI_BASE_URL: %v", err)
+	}
+}
+
+func TestNewModelRefusesDegenerateCredentialsWithoutEcho(t *testing.T) {
+	responses := host.RunConfig{API: host.APIResponses, Model: "m", MaxTokens: 100}
+	for _, key := range []string{"short", "context_length_exceeded", "response.created", "                ", "aaaaaaaaaaaaaaaa"} {
+		_, err := newModel(responses, "https://o.test/v1", host.Keys{OpenAIKey: key})
+		if err == nil || strings.Contains(err.Error(), key) {
+			t.Fatalf("newModel(%d-byte credential) = %v; want refusal without an echo", len(key), err)
+		}
+	}
+}
+
+func TestCredentialsRefuseNonASCIICredentialsWithoutEcho(t *testing.T) {
+	for _, key := range []string{"sk-astra-é-012345", "sk-astra-🧪-012345"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_API_KEY", key)
+			if _, err := credentials(); err == nil || strings.Contains(err.Error(), key) {
+				t.Fatalf("credentials(%q) = %v; want refusal without an echo", key, err)
+			}
+		})
 	}
 }

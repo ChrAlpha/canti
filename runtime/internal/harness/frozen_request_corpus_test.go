@@ -30,7 +30,7 @@ const (
 	corpusThirdRun = "run_5d1e8c3a7b2f4e9d6a0c8b5f3e1d9a72"
 	corpusSteps    = "/canti/runs/" + corpusRun + "/steps"
 	corpusListing  = `printf 'alpha\nbeta\ngamma\n'`
-	corpusVersion  = 25
+	corpusVersion  = 26
 )
 
 type frozenScenario struct {
@@ -195,9 +195,9 @@ func TestLoopScenariosKeepTheirCommittedRecords(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			rig := newCorpusRig(t, sc)
 			rig.drive(t, sc)
-			adapter := "canti-anthropic/4"
+			adapter := "canti-anthropic/5"
 			if sc.tool {
-				adapter = "canti-anthropic/4-tool"
+				adapter = "canti-anthropic/5-tool"
 			}
 			got, requests := map[string][]byte{}, map[string]harness.Request{}
 			var committed [][]byte

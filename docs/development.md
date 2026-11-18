@@ -62,8 +62,8 @@ failure. Do not run a repository-wide rewrite as part of an unrelated change.
 Build tags keep slow and paid tests out of the default run. `integration`
 marks tests that need Docker or take tens of seconds; CI runs them in
 separate jobs. `live` marks the `live_test.go` of each model adapter, which
-sends one real request and is never part of `make check`, `make integration`,
-or CI:
+sends one real streaming request, assembles its final response, and is never
+part of `make check`, `make integration`, or CI:
 
 ```sh
 ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=... go test -count=1 -tags live -run TestLiveDecision -v ./runtime/internal/harness/anthropic
@@ -308,7 +308,20 @@ the exact provider its command resolves, from `-model-url`, the base URL
 variable, or the default, so a command whose resolution names another
 provider than the run stores is refused before any request, and its key is
 never sent; a run stored before runs kept their provider takes the
-command's, as `run` does. The credential is never saved. Every command removes all three credential variables from
+command's, as `run` does. Every attempt is sent with `stream: true`; the
+adapter records the assembled response, and an idle-read timeout, not a
+whole-response deadline, bounds a provider that sends no bytes while a model
+reasons silently. A credential must be at least 16 bytes of printable ASCII (0x21-0x7E, no
+spaces or control bytes), must not occur inside the adapter's protocol
+vocabulary, must not contain the redaction marker, must not be a single
+repeated character, and must not overlap a marker border; a degenerate
+credential is refused without echoing it. All individual provider strings, including model, request IDs, headers, error
+fields and decision fields, use the shared nested redaction entry point before
+they are formatted. The decision or protocol-repair diagnostic is computed from raw bytes and
+committed with `ResponseSaved` as a discriminated union, so resume and `-once`
+never re-extract from a persisted sanitized body; a diagnostic never becomes
+an accepted decision, and a committed decision must pass the core decision
+rules. The credential is never saved. Every command removes all three credential variables from
 its environment before it starts a process. `-effort` takes a level of the
 run's API and is sent only when set; `-fallbacks` requires
 `anthropic-messages`. The goal, constraints, and the image, limit, model,
@@ -648,8 +661,8 @@ among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read, apart from the instruction files
 and skills index bound at run creation.
 
-Each run stores current context version 25. Schema 9 keeps one agent log of
-transitions and admitted inputs, semantics 8 bounds and supersedes principal
+Each run stores current context version 26. Schema 9 keeps one agent log of
+transitions and admitted inputs, semantics 9 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 2,
 host protocol 13 and capture helper protocol 4 form one current contract.
 Unsupported formats and context

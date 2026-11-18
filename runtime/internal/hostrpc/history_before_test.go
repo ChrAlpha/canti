@@ -21,10 +21,10 @@ func TestHistoryBeforeIsExclusiveForACallerPosition(t *testing.T) {
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 		Budget: harness.Budget{WallTime: time.Hour, ContextTokens: 200_000, OutputBytes: 1 << 20, JobTimeout: time.Minute}}
 	if _, err := h.Submit(ctx, host.Submission{Goal: "goal", Spec: spec, Now: time.Now(),
-		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}}); err != nil {
+		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Submit(ctx, host.Submission{InputID: "steer", Goal: "steer", Delivery: harness.DeliverySteer, Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}}); err != nil {
+	if _, err := h.Submit(ctx, host.Submission{InputID: "steer", Goal: "steer", Delivery: harness.DeliverySteer, Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := c.History(ctx, "", 1)
@@ -68,10 +68,10 @@ func TestHistoryRejectsAForgedSnapshotCursor(t *testing.T) {
 		RequestBytes: 256 << 10, ContextVersion: host.ContextVersion},
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 		Budget: harness.Budget{WallTime: time.Hour, ContextTokens: 200_000, OutputBytes: 1 << 20, JobTimeout: time.Minute}}
-	if _, err := h.Submit(ctx, host.Submission{Goal: "goal", Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}}); err != nil {
+	if _, err := h.Submit(ctx, host.Submission{Goal: "goal", Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Submit(ctx, host.Submission{InputID: "steer", Goal: "steer", Delivery: harness.DeliverySteer, Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}}); err != nil {
+	if _, err := h.Submit(ctx, host.Submission{InputID: "steer", Goal: "steer", Delivery: harness.DeliverySteer, Spec: spec, Now: time.Now(), Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := c.History(ctx, "", 1)

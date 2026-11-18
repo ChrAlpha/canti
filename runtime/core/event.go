@@ -91,12 +91,16 @@ type RequestRejected struct {
 	Attempt int
 }
 
-// ResponseLoaded carries the saved response body of the named attempt for
-// decoding.
+// ResponseLoaded carries the committed extraction of the named attempt: the
+// already-decoded decision, or a diagnostic that must take the protocol-repair
+// path. Body is display evidence only and is never parsed when Diagnostic is
+// set.
 type ResponseLoaded struct {
-	Step    int
-	Attempt int
-	Body    []byte
+	Step       int
+	Attempt    int
+	Body       []byte    `json:",omitempty"`
+	Decision   *Decision `json:",omitempty"`
+	Diagnostic bool      `json:",omitempty"`
 }
 
 // EffectRecovered reports authoritative pending or running evidence for an

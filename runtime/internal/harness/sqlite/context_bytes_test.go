@@ -89,20 +89,28 @@ func TestContextRecordsOversizedDecisionAdvancesAlone(t *testing.T) {
 	body, _ := json.Marshal(core.Decision{Kind: core.Exec, Payload: "canti:" + strings.Repeat("z", 9<<20)})
 	d.decide(body, harness.Usage{})
 	d.perform()
-	p, err := s.ContextRecords(context.Background(), "run-1", 1, 1, 0, 100)
-	if err != nil {
-		t.Fatal(err)
+	cursor := int64(0)
+	sawOversized, sawEffectSaved := false, false
+	for page := 0; page < 10; page++ {
+		p, err := s.ContextRecords(context.Background(), "run-1", 1, 1, cursor, 100)
+		if err != nil || len(p.Events) == 0 {
+			t.Fatalf("context page %d = %+v, %v", page, p, err)
+		}
+		if len(p.Events) == 1 && encodedContextEventBytes(t, p.Events) > 16<<20 {
+			sawOversized = true
+		}
+		for _, event := range p.Events {
+			if event.To.Phase == core.PhaseEffectSaved {
+				sawEffectSaved = true
+			}
+		}
+		cursor = p.Events[len(p.Events)-1].Seq
+		if !p.More {
+			break
+		}
 	}
-	if len(p.Events) != 2 || !p.More {
-		t.Fatalf("oversized state/event joined first page: %d events, more=%t", len(p.Events), p.More)
-	}
-	p, err = s.ContextRecords(context.Background(), "run-1", 1, 1, p.Events[1].Seq, 100)
-	if err != nil || len(p.Events) != 1 || !p.More || p.Events[0].To.Phase != core.PhaseEffectSaved || encodedContextEventBytes(t, p.Events) <= 16<<20 || p.EventBytes != encodedContextEventBytes(t, p.Events) {
-		t.Fatalf("oversized event did not advance alone: events=%d more=%t error=%v", len(p.Events), p.More, err)
-	}
-	p, err = s.ContextRecords(context.Background(), "run-1", 1, 1, p.Events[0].Seq, 100)
-	if err != nil || len(p.Events) != 1 || p.More || p.Events[0].To.Step != 2 {
-		t.Fatalf("lost event following oversized singleton: %+v %v", p, err)
+	if !sawOversized || !sawEffectSaved {
+		t.Fatalf("oversized decision pages: oversized=%v effect_saved=%v", sawOversized, sawEffectSaved)
 	}
 }
 

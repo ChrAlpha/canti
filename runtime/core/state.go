@@ -64,7 +64,7 @@ type State struct {
 // be bumped whenever a legal transition, an intent, or the meaning of an
 // event changes, so a stored run can refuse to continue under semantics it
 // was not committed with.
-const SemanticsVersion = 8
+const SemanticsVersion = 9
 
 var (
 	// ErrIllegalTransition reports a valid event that the current phase does
@@ -279,7 +279,27 @@ func (s State) Next(event Event) (State, error) {
 			if err := s.claimAttempt(e.Step, e.Attempt); err != nil {
 				return s, err
 			}
-			return s.decide(e.Body), nil
+			if e.Diagnostic {
+				return s.retry(StopProtocolFailure, PhaseIdle), nil
+			}
+			if e.Decision != nil {
+				if err := e.Decision.Validate(); err != nil {
+					return s, fmt.Errorf("%w: %v", ErrInvalidEvent, err)
+				}
+				if s.Inputs > s.Seen {
+					s.Decision = Decision{}
+					return s.advance(), nil
+				}
+				s.Decision = *e.Decision
+				if e.Decision.Kind == Return {
+					s.Phase = PhaseReturned
+					return s, nil
+				}
+				s.Phase = PhaseEffectSaved
+				s.EffectID = effectID(s.RunID, s.Step)
+				return s, nil
+			}
+			return s, fmt.Errorf("%w: response decision or diagnostic is required", ErrInvalidEvent)
 		}
 	case EffectRecovered:
 		if s.Phase == PhaseNeedsResolution {
@@ -373,8 +393,13 @@ func validateEvent(event Event) error {
 	case ResponseIncomplete:
 	case RequestRejected:
 	case ResponseLoaded:
-		if len(e.Body) == 0 {
-			return fmt.Errorf("%w: response body is required", ErrInvalidEvent)
+		if e.Diagnostic == (e.Decision != nil) {
+			return fmt.Errorf("%w: response requires exactly one of decision or diagnostic", ErrInvalidEvent)
+		}
+		if e.Decision != nil {
+			if err := e.Decision.Validate(); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidEvent, err)
+			}
 		}
 	case EffectRecovered:
 		if e.EffectID == "" {
@@ -456,41 +481,6 @@ func (s State) retry(exhausted StopReason, resume Phase) State {
 	}
 	s.Phase = PhaseStopped
 	s.Reason = exhausted
-	return s
-}
-
-// Superseded reports the decoded decision of the current request when the
-// request did not include every instruction bound to the run: that decision
-// is set aside, and the step completes without an effect or a return. A body
-// that does not decode is not superseded; it follows the repair rule instead.
-// Next applies the same rule in decide.
-func (s State) Superseded(body []byte) (Decision, bool) {
-	if s.Inputs <= s.Seen {
-		return Decision{}, false
-	}
-	decision, err := Decode(body)
-	if err != nil {
-		return Decision{}, false
-	}
-	return decision, true
-}
-
-func (s State) decide(body []byte) State {
-	if _, superseded := s.Superseded(body); superseded {
-		s.Decision = Decision{}
-		return s.advance()
-	}
-	decision, err := Decode(body)
-	if err != nil {
-		return s.retry(StopProtocolFailure, PhaseIdle)
-	}
-	s.Decision = decision
-	if decision.Kind == Return {
-		s.Phase = PhaseReturned
-		return s
-	}
-	s.Phase = PhaseEffectSaved
-	s.EffectID = effectID(s.RunID, s.Step)
 	return s
 }
 

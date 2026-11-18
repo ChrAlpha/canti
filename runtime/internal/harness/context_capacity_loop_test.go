@@ -107,7 +107,7 @@ func TestSerializedRequestCapIncludesProviderEscaping(t *testing.T) {
 	f.cfg.Limits = harness.DefaultPromptLimits()
 	// The fake model freezes the unescaped rendering. Use a real adapter to
 	// prove that escaped serialized bytes are independently capped.
-	model, err := anthropic.New(anthropic.Config{APIKey: "offline-unused", Model: "offline"})
+	model, err := anthropic.New(anthropic.Config{APIKey: "offline-unused-credential", Model: "offline"})
 	if err != nil {
 		t.Fatal(err)
 	}

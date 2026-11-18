@@ -37,6 +37,9 @@ func credentials() (host.Keys, error) {
 	if c == (host.Keys{}) {
 		return c, host.ErrNoKeys
 	}
+	if err := c.Validate(); err != nil {
+		return host.Keys{}, err
+	}
 	return c, nil
 }
 

@@ -21,7 +21,8 @@ func (execModel) Freeze(p harness.Prompt) (harness.Request, error) {
 }
 
 func (execModel) Complete(context.Context, harness.Request) (harness.Response, error) {
-	return harness.Response{Body: []byte(`{"kind":"exec","payload":"true"}`), Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, nil
+	body := []byte(`{"kind":"exec","payload":"true"}`)
+	return harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Extraction: testExtraction(body)}, nil
 }
 
 func (execModel) Decision(resp harness.Response) []byte { return resp.Body }
@@ -200,4 +201,12 @@ func TestLoopObservesTheExitOfAWaitedJobAtOnce(t *testing.T) {
 	if waits := lf.calls("wait"); len(waits) != 1 || waits[0] != "wait c-"+lf.effect+" not-running" {
 		t.Fatalf("waits = %q, want one for the effect's container to stop running", waits)
 	}
+}
+
+func testExtraction(body []byte) *harness.Extraction {
+	decision, err := core.Decode(body)
+	if err == nil {
+		return &harness.Extraction{Decision: &decision, Found: true}
+	}
+	return &harness.Extraction{Body: body, Diagnostic: err.Error(), Found: true}
 }

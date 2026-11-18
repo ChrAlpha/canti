@@ -41,7 +41,7 @@ func wireMessages() map[string]any {
 	code := 3
 	spec := Spec{Environment: "/environment", EnvironmentWorkdir: "/workspace/subdir", Ephemeral: true, Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
-		RequestBytes: 262144, ContextVersion: host.ContextVersion, HistoryImports: "/i", NoProjectContext: true, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
+		RequestBytes: 262144, ContextVersion: 25, HistoryImports: "/i", NoProjectContext: true, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
 	binding := &ProjectBinding{Disabled: true, Root: "/workspace", InstructionBytes: 10, SkillsIndexBytes: 20, SkillsIndexSHA256: "sha",
 		Instructions: []ProjectFile{{Path: "/workspace/AGENTS.md", ResolvedPath: "/workspace/SHARED.md", Size: 10, SHA256: "sum"}}, InstructionsTotal: 1,
 		Skills:      []ProjectSkill{{Name: "go", Description: "Go conventions.", Path: "/workspace/.agents/skills/go/SKILL.md", ResolvedPath: "/workspace/.agents/skills/go/SKILL.md"}},
@@ -240,7 +240,7 @@ func TestHistoryReadsTheLineThroughThePublicProtocol(t *testing.T) {
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
 		Budget: harness.Budget{WallTime: time.Hour, ContextTokens: 200_000, OutputBytes: 1 << 20, JobTimeout: time.Minute}}
 	ack, err := h.Submit(ctx, host.Submission{Goal: "history goal", Spec: spec, Now: time.Now(),
-		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}})
+		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

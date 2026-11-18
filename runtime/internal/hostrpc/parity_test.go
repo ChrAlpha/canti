@@ -21,7 +21,7 @@ func paritySpec(t *testing.T, h *host.Host) sdk.Spec {
 func TestValidateAndSubmitAgreeOnWorkingAndQuiescentSubmissions(t *testing.T) {
 	h, c := serving(t)
 	state := filepath.Dir(c.Path)
-	binding := sdk.Binding{AnthropicKey: "test-key"}
+	binding := sdk.Binding{AnthropicKey: "test-credential-key"}
 	if _, err := c.Submit(context.Background(), sdk.Submission{Goal: "open", Spec: paritySpec(t, h)}, binding, true); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestValidateAndSubmitAgreeOnWorkingAndQuiescentSubmissions(t *testing.T) {
 	}{
 		{"working missing delivery", sdk.Submission{Goal: "join", Spec: paritySpec(t, h)}, binding, true},
 		{"working steer ignores request cap", sdk.Submission{Goal: "steer", Delivery: "steer", Spec: func() sdk.Spec { s := paritySpec(t, h); s.RequestBytes = 1; return s }()}, binding, false},
-		{"working follow-up invalid provider", sdk.Submission{Goal: "follow", Delivery: "follow_up", Spec: paritySpec(t, h)}, sdk.Binding{Provider: "://bad", AnthropicKey: "test-key"}, true},
+		{"working follow-up invalid provider", sdk.Submission{Goal: "follow", Delivery: "follow_up", Spec: paritySpec(t, h)}, sdk.Binding{Provider: "://bad", AnthropicKey: "test-credential-key"}, true},
 		{"working malformed input ID", sdk.Submission{InputID: "bad id", Goal: "steer", Delivery: "steer", Spec: paritySpec(t, h)}, binding, true},
 		{"working steer unsupported context version", sdk.Submission{Goal: "steer", Delivery: "steer", Spec: func() sdk.Spec { s := paritySpec(t, h); s.ContextVersion = host.ContextVersion - 1; return s }()}, binding, true},
 	} {

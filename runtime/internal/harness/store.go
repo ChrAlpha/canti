@@ -102,6 +102,7 @@ type Journal interface {
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
+	Extraction(ctx context.Context, runID string, step, attempt int) (*Extraction, error)
 	Accepted(ctx context.Context, runID string, step, attempt int) (Accepted, error)
 	Recent(ctx context.Context, runID string, before int64, limit int) ([]StepRecord, error)
 	Receipts(ctx context.Context, runID string, before int64, limit int) ([]StepReceipt, error)
@@ -395,6 +396,7 @@ type Facts struct {
 	Request      *Request
 	Delivered    *Delivered `json:",omitempty"`
 	Response     *Response
+	Extraction   *Extraction `json:",omitempty"`
 	Observation  *Observation
 	Action       *Action            `json:",omitempty"`
 	Execution    *ExecutionIdentity `json:",omitempty"`
@@ -404,6 +406,7 @@ type Facts struct {
 	ContextState *ContextState      `json:",omitempty"`
 	Rejection    *ContextRejection  `json:",omitempty"`
 	Supersede    *Superseded        `json:",omitempty"`
+	Diagnostic   string             `json:",omitempty"`
 	Failure      string
 }
 

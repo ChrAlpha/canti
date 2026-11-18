@@ -471,6 +471,28 @@ func (l *Loop) late(run Run) string {
 	return ""
 }
 
+func (l *Loop) loadedEvent(ctx context.Context, s core.State) (core.ResponseLoaded, *Extraction, error) {
+	extraction, err := l.journal.Extraction(ctx, s.RunID, s.Step, s.Attempt)
+	if err != nil {
+		return core.ResponseLoaded{}, nil, err
+	}
+	if extraction == nil {
+		return core.ResponseLoaded{}, nil, fmt.Errorf("%w: saved response has no extraction", ErrIncompatible)
+	}
+	event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt}
+	switch {
+	case extraction.Diagnostic != "":
+		event.Diagnostic = true
+		event.Body = extraction.Body
+	case extraction.Decision != nil:
+		event.Decision = extraction.Decision
+		event.Body = extraction.DecisionBody()
+	default:
+		return core.ResponseLoaded{}, nil, fmt.Errorf("%w: saved response has an empty extraction", ErrIncompatible)
+	}
+	return event, extraction, nil
+}
+
 func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, error) {
 	s := snap.State
 	req, err := l.journal.Request(ctx, s.RunID, s.Step, s.RequestRev)
@@ -498,11 +520,16 @@ func (l *Loop) send(ctx context.Context, run Run, snap Snapshot) (Snapshot, erro
 	if err == nil && (!resp.Complete || len(resp.Body) == 0) {
 		err = errors.New("harness: model reported success without a complete response")
 	}
+	extraction := resp.Extraction
+	resp.Extraction = nil
 	var limit *ContextLimitError
 	var stop *StopError
 	switch {
 	case err == nil:
-		return l.runner.Commit(ctx, snap, core.ResponseSaved{Step: s.Step, Attempt: attempt}, Facts{Response: &resp})
+		if extraction == nil {
+			return snap, errors.New("harness: complete response has no extraction")
+		}
+		return l.runner.Commit(ctx, snap, core.ResponseSaved{Step: s.Step, Attempt: attempt}, Facts{Response: &resp, Extraction: extraction})
 	case errors.As(err, &limit):
 		return l.reject(ctx, snap, req, resp, limit)
 	case errors.As(err, &stop):
@@ -550,12 +577,10 @@ func (l *Loop) bind(ctx context.Context, snap Snapshot) (Snapshot, error) {
 // such a decision is superseded, and the step completes without an effect.
 func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 	s := snap.State
-	resp, err := l.journal.Response(ctx, s.RunID, s.Step, s.Attempt)
+	event, extraction, err := l.loadedEvent(ctx, s)
 	if err != nil {
 		return snap, err
 	}
-	body := l.decision(resp)
-	event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}
 	for {
 		if snap, err = l.bind(ctx, snap); err != nil {
 			return snap, err
@@ -565,7 +590,13 @@ func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 			return snap, contextError{fmt.Errorf("harness: response of step %d attempt %d no longer belongs to the run", event.Step, event.Attempt)}
 		}
 		facts := Facts{}
-		decision, superseded := s.Superseded(body)
+		if event.Diagnostic {
+			facts.Diagnostic = extraction.Diagnostic
+		}
+		decision, superseded := core.Decision{}, false
+		if event.Decision != nil && s.Inputs > s.Seen {
+			decision, superseded = *event.Decision, true
+		}
 		if superseded {
 			facts.Supersede = &Superseded{Instruction: s.Seen + 1, Kind: decision.Kind, Purpose: decision.Purpose}
 		} else if accepted, err := s.Next(event); err == nil && accepted.Phase == core.PhaseEffectSaved {
@@ -594,15 +625,6 @@ func (l *Loop) decode(ctx context.Context, snap Snapshot) (Snapshot, error) {
 		}
 		return next, nil
 	}
-}
-
-// decision is the model's decision text of resp, or its raw body when the
-// model extracts none, so that an empty extraction is rejected by decoding.
-func (l *Loop) decision(resp Response) []byte {
-	if b := l.model.Decision(resp); len(b) > 0 {
-		return b
-	}
-	return resp.Body
 }
 
 // watch returns control to harness policy between bounded executor operations.

@@ -573,7 +573,7 @@ func TestRequestResourceCapsStopLocallyBeforeProviderSend(t *testing.T) {
 				t.Fatal(err)
 			}
 			rendered := len(prompt.System) + len(prompt.User())
-			model, err := anthropic.New(anthropic.Config{BaseURL: "https://unused.test", APIKey: "offline-fixture", Model: "offline-fixture-model"})
+			model, err := anthropic.New(anthropic.Config{BaseURL: "https://unused.test", APIKey: "offline-fixture-credential", Model: "offline-fixture-model"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1244,7 +1244,7 @@ func (m *windowModel) Complete(_ context.Context, req harness.Request) (harness.
 	}
 	body, _ := json.Marshal(d)
 	return harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake",
-		Usage: harness.Usage{InputTokens: int64(len(req.Body)), InputReported: true, OutputTokens: 1, OutputReported: true}}, nil
+		Usage: harness.Usage{InputTokens: int64(len(req.Body)), InputReported: true, OutputTokens: 1, OutputReported: true}, Extraction: testExtraction(body)}, nil
 }
 
 func (m *windowModel) Decision(r harness.Response) []byte { return r.Body }

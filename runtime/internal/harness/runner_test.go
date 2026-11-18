@@ -103,7 +103,7 @@ func snapAt(t *testing.T, phase core.Phase) Snapshot {
 
 func effectSaved(t *testing.T) Snapshot {
 	t.Helper()
-	return advance(t, snapAt(t, core.PhaseResponseSaved), core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody})
+	return advance(t, snapAt(t, core.PhaseResponseSaved), testLoaded(1, 1, execBody))
 }
 
 func TestNewRunnerRequiresDependencies(t *testing.T) {
@@ -452,8 +452,8 @@ var commandAction = Action{Name: ActionCommand, Recovery: RecoveryExternal}
 func TestCommitPermitsActionsOutcomesAndWindowsOnlyWhereTheyBelong(t *testing.T) {
 	ctx := context.Background()
 	saved := snapAt(t, core.PhaseResponseSaved)
-	accept := core.ResponseLoaded{Step: 1, Attempt: 1, Body: execBody}
-	reject := core.ResponseLoaded{Step: 1, Attempt: 1, Body: []byte(`{"kind":"wait","payload":"x"}`)}
+	accept := testLoaded(1, 1, execBody)
+	reject := testLoaded(1, 1, []byte(`{"kind":"wait","payload":"x"}`))
 	effect, err := saved.State.Next(accept)
 	if err != nil {
 		t.Fatal(err)

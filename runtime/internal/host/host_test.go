@@ -70,8 +70,34 @@ func testSpec(h *Host) Spec {
 	}
 }
 
-// answering serves the Messages API, answering the n-th request with the
-// n-th decision, and the last one after that.
+// writeMessageStream carries a whole Messages object in message_start and
+// follows it with an empty message_delta and message_stop, which the adapter
+// records byte for byte. Host tests need only the decision, but the transport
+// must be the streaming one.
+func writeMessageStream(w http.ResponseWriter, message any) {
+	data, _ := json.Marshal(message)
+	var full struct {
+		Usage      json.RawMessage `json:"usage"`
+		StopReason json.RawMessage `json:"stop_reason"`
+	}
+	_ = json.Unmarshal(data, &full)
+	w.Header().Set("content-type", "text/event-stream")
+	fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", data)
+	delta := map[string]any{"stop_reason": nil}
+	if len(full.StopReason) > 0 && string(full.StopReason) != "null" {
+		delta["stop_reason"] = full.StopReason
+	}
+	messageDelta := map[string]any{"delta": delta}
+	if len(full.Usage) > 0 {
+		messageDelta["usage"] = full.Usage
+	}
+	deltaData, _ := json.Marshal(messageDelta)
+	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",%s}\n\n", deltaData[1:len(deltaData)-1])
+	io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+}
+
+// answering serves the streaming Messages API, answering the n-th request
+// with the n-th decision, and the last one after that.
 func answering(t *testing.T, decisions ...core.Decision) string {
 	t.Helper()
 	var mu sync.Mutex
@@ -82,7 +108,7 @@ func answering(t *testing.T, decisions ...core.Decision) string {
 		n++
 		mu.Unlock()
 		text, _ := json.Marshal(d)
-		json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model", "stop_reason": "end_turn",
+		writeMessageStream(w, map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model", "stop_reason": "end_turn",
 			"content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
 	}))
 	t.Cleanup(srv.Close)
@@ -103,7 +129,9 @@ func holding(t *testing.T) (string, <-chan struct{}) {
 	return srv.URL, got
 }
 
-func binding(url string) Binding { return Binding{Provider: url, Keys: Keys{AnthropicKey: "sk-test"}} }
+func binding(url string) Binding {
+	return Binding{Provider: url, Keys: Keys{AnthropicKey: "sk-test-credential"}}
+}
 
 func submit(t *testing.T, h *Host, s Submission) Ack {
 	t.Helper()
@@ -183,9 +211,9 @@ func TestSubmitRefusesARunItsSubmitterCannotDrive(t *testing.T) {
 		want string
 	}{
 		{Binding{Provider: "http://127.0.0.1:1"}, "to call the model"},
-		{Binding{Provider: "http://127.0.0.1:1", Keys: Keys{OpenAIKey: "k"}}, "no credential is given or bound for anthropic-messages at http://127.0.0.1:1"},
-		{Binding{Provider: "https://user:secret@model.test", Keys: Keys{AnthropicKey: "k"}}, "user information"},
-		{Binding{Provider: "https://model.test/?key=1", Keys: Keys{AnthropicKey: "k"}}, "query"},
+		{Binding{Provider: "http://127.0.0.1:1", Keys: Keys{OpenAIKey: "test-credential-o"}}, "no credential is given or bound for anthropic-messages at http://127.0.0.1:1"},
+		{Binding{Provider: "https://user:secret@model.test", Keys: Keys{AnthropicKey: "test-credential-k"}}, "user information"},
+		{Binding{Provider: "https://model.test/?key=1", Keys: Keys{AnthropicKey: "test-credential-k"}}, "query"},
 	} {
 		if _, err := h.Submit(context.Background(), Submission{InputID: "i", Goal: "g", Spec: testSpec(h), Binding: tc.b}); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("Submit with %v = %v, want %q", tc.b, err, tc.want)
@@ -219,8 +247,8 @@ func errString(_ Ack, err error) string {
 // the caller gives no key, whose own keys win.
 func TestAKeyIsSentOnlyToTheProviderItIsBoundTo(t *testing.T) {
 	stored := RunConfig{API: APIMessages, Provider: "https://stored.test"}
-	own := Keys{AnthropicKey: "host-key"}
-	given := Keys{AnthropicKey: "client-key"}
+	own := Keys{AnthropicKey: "host-key-credential"}
+	given := Keys{AnthropicKey: "client-key-credential"}
 	for _, tc := range []struct {
 		name  string
 		c     RunConfig
@@ -234,7 +262,7 @@ func TestAKeyIsSentOnlyToTheProviderItIsBoundTo(t *testing.T) {
 		{"default against a stored provider", stored, Binding{Keys: given}, nil, Keys{}, "credential given is for anthropic-messages at https://api.anthropic.com"},
 		{"another fallback", stored, Binding{Fallback: "https://terminal.test", Keys: given}, nil, Keys{}, "credential given is for anthropic-messages at https://terminal.test"},
 		{"another named provider", stored, Binding{Provider: "https://other.test", Keys: given}, nil, Keys{}, "credential given is for anthropic-messages at https://other.test"},
-		{"keys of another API", stored, Binding{Provider: "https://stored.test", Keys: Keys{OpenAIKey: "o"}}, nil, Keys{}, "no credential is given or bound for anthropic-messages at https://stored.test"},
+		{"keys of another API", stored, Binding{Provider: "https://stored.test", Keys: Keys{OpenAIKey: "test-credential-o"}}, nil, Keys{}, "no credential is given or bound for anthropic-messages at https://stored.test"},
 		{"host credential", stored, Binding{}, map[Pair]Keys{{APIMessages, "https://stored.test"}: own}, own, ""},
 		{"host credential of another provider", stored, Binding{}, map[Pair]Keys{{APIMessages, "https://other.test"}: own}, Keys{}, "no credential is given or bound"},
 		{"host credential of another API", stored, Binding{}, map[Pair]Keys{{APIResponses, "https://stored.test"}: {OpenAIKey: "o"}}, Keys{}, "no credential is given or bound"},
@@ -267,7 +295,7 @@ func recording(t *testing.T, decision core.Decision) (string, func() []string) {
 		keys = append(keys, r.Header.Get("x-api-key"))
 		mu.Unlock()
 		text, _ := json.Marshal(decision)
-		json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model", "stop_reason": "end_turn",
+		writeMessageStream(w, map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model", "stop_reason": "end_turn",
 			"content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
 	}))
 	t.Cleanup(srv.Close)
@@ -283,19 +311,19 @@ func TestADriveNeverSendsAKeyToAnUnboundProvider(t *testing.T) {
 	otherURL, otherKeys := recording(t, core.Decision{Kind: core.Return, Payload: "elsewhere"})
 	h := testHost(t, Options{})
 	id := submit(t, h, Submission{Binding: binding(storedURL)}).Run.ID
-	for _, b := range []Binding{{Fallback: otherURL, Keys: Keys{AnthropicKey: "sk-other"}}, {Keys: Keys{AnthropicKey: "sk-default"}}} {
+	for _, b := range []Binding{{Fallback: otherURL, Keys: Keys{AnthropicKey: "sk-other-credential"}}, {Keys: Keys{AnthropicKey: "sk-default-credential"}}} {
 		if _, err := h.Drive(context.Background(), id, b, DriveOptions{}); err == nil || !strings.Contains(err.Error(), "calls the model at "+storedURL) {
 			t.Fatalf("Drive with %v = %v", b, err)
 		}
 	}
-	d, err := h.Drive(context.Background(), id, Binding{Fallback: storedURL, Keys: Keys{AnthropicKey: "sk-stored"}}, DriveOptions{})
+	d, err := h.Drive(context.Background(), id, Binding{Fallback: storedURL, Keys: Keys{AnthropicKey: "sk-stored-credential"}}, DriveOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snap, err := d.Result(); err != nil || snap.State.Phase != core.PhaseReturned {
 		t.Fatalf("drive = %+v, %v", snap.State, err)
 	}
-	if got := storedKeys(); len(got) != 1 || got[0] != "sk-stored" || len(otherKeys()) != 0 {
+	if got := storedKeys(); len(got) != 1 || got[0] != "sk-stored-credential" || len(otherKeys()) != 0 {
 		t.Fatalf("the stored provider got keys %q and the other %q", got, otherKeys())
 	}
 }
@@ -332,7 +360,7 @@ func TestAHostDrivesWithItsOwnCredentialOnlyForItsPair(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts.Credentials = map[Pair]Keys{{APIMessages, "https://other.test"}: {AnthropicKey: "sk-other-pair"}, {APIMessages, url}: {AnthropicKey: "sk-host"}}
+	opts.Credentials = map[Pair]Keys{{APIMessages, "https://other.test"}: {AnthropicKey: "sk-other-pair-credential"}, {APIMessages, url}: {AnthropicKey: "sk-host-credential"}}
 	h, err = Open(context.Background(), opts, false)
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +379,7 @@ func TestAHostDrivesWithItsOwnCredentialOnlyForItsPair(t *testing.T) {
 		v, _ := h.View(context.Background(), id)
 		return v.Snapshot.State.Phase == core.PhaseReturned && !v.Driving
 	})
-	if got := keys(); len(got) != 1 || got[0] != "sk-host" {
+	if got := keys(); len(got) != 1 || got[0] != "sk-host-credential" {
 		t.Fatalf("the provider got keys %q, want the host's", got)
 	}
 	if err := h.ResumeOpen(context.Background()); err != nil || len(keys()) != 1 {
@@ -910,7 +938,7 @@ func TestShutdownEndsStopsInFlightAndQueued(t *testing.T) {
 // TestKeyBearingValuesNeverShowTheirKeys requires that no formatting, JSON
 // encoding, or structured log of keys or a binding shows a key.
 func TestKeyBearingValuesNeverShowTheirKeys(t *testing.T) {
-	k := Keys{AnthropicKey: "sk-secret-1", AnthropicToken: "sk-secret-2", OpenAIKey: "sk-secret-3"}
+	k := Keys{AnthropicKey: "sk-secret-1-credential", AnthropicToken: "sk-secret-2-credential", OpenAIKey: "sk-secret-3-credential"}
 	b := Binding{Provider: "https://p.test", Keys: k}
 	var out strings.Builder
 	log := slog.New(slog.NewJSONHandler(&out, nil))
@@ -1241,10 +1269,10 @@ func TestAURLItRefusesNeverShowsWhatMayHoldASecret(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%q was accepted", u)
 		}
-		b := Binding{Provider: u, Fallback: u, Keys: Keys{AnthropicKey: "k"}}
-		_, kerr := h.keysFor("r", RunConfig{API: APIMessages, Provider: "https://stored.test/v1"}, "https://stored.test/v1", Binding{Fallback: u, Keys: Keys{AnthropicKey: "k"}})
+		b := Binding{Provider: u, Fallback: u, Keys: Keys{AnthropicKey: "test-credential-k"}}
+		_, kerr := h.keysFor("r", RunConfig{API: APIMessages, Provider: "https://stored.test/v1"}, "https://stored.test/v1", Binding{Fallback: u, Keys: Keys{AnthropicKey: "test-credential-k"}})
 		_, nerr := h.keysFor("r", RunConfig{API: APIMessages, Provider: "https://stored.test/v1"}, "https://stored.test/v1", Binding{Provider: u})
-		_, serr := h.Submit(context.Background(), Submission{Goal: "g", Spec: testSpec(h), Binding: Binding{Fallback: u, Keys: Keys{AnthropicKey: "k"}}})
+		_, serr := h.Submit(context.Background(), Submission{Goal: "g", Spec: testSpec(h), Binding: Binding{Fallback: u, Keys: Keys{AnthropicKey: "test-credential-k"}}})
 		for _, l := range logs {
 			l.Info("m", "binding", b, "wrapped", struct{ B Binding }{b}, "err", err)
 		}
@@ -1260,7 +1288,7 @@ func TestAURLItRefusesNeverShowsWhatMayHoldASecret(t *testing.T) {
 		if d := DescribeURL(u); d != u {
 			t.Fatalf("a valid base URL is described as %q", d)
 		}
-		_, err := h.keysFor("r", RunConfig{API: APIMessages, Provider: "https://stored.test/v1"}, "https://stored.test/v1", Binding{Fallback: u, Keys: Keys{AnthropicKey: "k"}})
+		_, err := h.keysFor("r", RunConfig{API: APIMessages, Provider: "https://stored.test/v1"}, "https://stored.test/v1", Binding{Fallback: u, Keys: Keys{AnthropicKey: "test-credential-k"}})
 		if err == nil || !strings.Contains(err.Error(), u) {
 			t.Fatalf("a valid provider is not named in %v", err)
 		}
@@ -1642,7 +1670,7 @@ func TestProgressPublishesHandoverAndProviderResetWithoutAdvancingTheRejectedSte
 			decision = core.Decision{Kind: core.Exec, Payload: "canti:handover phase one done"}
 		}
 		text, _ := json.Marshal(decision)
-		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
+		writeMessageStream(w, map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
 	}))
 	defer server.Close()
 	ack := submit(t, h, Submission{Binding: binding(server.URL)})
@@ -1706,7 +1734,7 @@ func TestProgressPublishesABudgetAnchorAndTheRunKeepsItsBudget(t *testing.T) {
 			input = 1000
 		}
 		text, _ := json.Marshal(decision)
-		json.NewEncoder(w).Encode(map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": input, "output_tokens": 1}})
+		writeMessageStream(w, map[string]any{"type": "message", "model": "test-model", "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": string(text)}}, "usage": map[string]int{"input_tokens": input, "output_tokens": 1}})
 	}))
 	defer server.Close()
 	spec := testSpec(h)
@@ -2037,5 +2065,13 @@ func TestNewRunRefusesAnEphemeralRunWithoutHelperIdentity(t *testing.T) {
 	spec := testSpec(h)
 	if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil || !strings.Contains(err.Error(), "verifiable canti-job helper") {
 		t.Fatalf("new ephemeral run without helper = %v", err)
+	}
+}
+
+func TestBindingRefusesNonASCIICredentialsWithoutEcho(t *testing.T) {
+	for _, key := range []string{"sk-astra-é-012345", "sk-astra-🧪-012345", "sk-astra space-012345"} {
+		if err := (Keys{AnthropicKey: key}).Validate(); err == nil || strings.Contains(err.Error(), key) {
+			t.Errorf("Validate(%q) = %v; want refusal without an echo", key, err)
+		}
 	}
 }

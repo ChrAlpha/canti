@@ -24,9 +24,9 @@ func shortcut(s core.State) (core.Event, harness.Facts) {
 	case core.PhaseRequestFrozen:
 		return core.AttemptStarted{Step: s.Step, Attempt: s.Attempt}, harness.Facts{}
 	case core.PhaseRequestSent:
-		return core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: responseFor(s, body, harness.Usage{InputTokens: 2, OutputTokens: 1})}
+		return core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: responseFor(s, body, harness.Usage{InputTokens: 2, OutputTokens: 1}), Extraction: testExtraction(body)}
 	case core.PhaseResponseSaved:
-		event := core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}
+		event := addTestLoaded(core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: body}).(core.ResponseLoaded)
 		return event, acceptance(s, event)
 	case core.PhaseEffectSaved:
 		a := harness.NormalizeAction(s.Decision.Payload, true)

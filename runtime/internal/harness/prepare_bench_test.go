@@ -44,6 +44,9 @@ func prepareFixtureTotal(t testing.TB, completed, window, total int) (*probe, *h
 	current := harness.InitialContext()
 	commit := func(event core.Event, facts harness.Facts) {
 		t.Helper()
+		if _, ok := event.(core.ResponseSaved); ok && facts.Response != nil && facts.Extraction == nil {
+			facts.Extraction = testExtraction(facts.Response.Body)
+		}
 		var err error
 		snap, err = runner.Commit(ctx, snap, event, facts)
 		if err != nil {
@@ -70,12 +73,12 @@ func prepareFixtureTotal(t testing.TB, completed, window, total int) (*probe, *h
 		attempt := snap.State.Attempt
 		commit(core.AttemptStarted{Step: step, Attempt: attempt}, harness.Facts{})
 		commit(core.ResponseSaved{Step: step, Attempt: attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true}})
-		commit(core.ResponseLoaded{Step: step, Attempt: attempt, Body: body}, harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution("go test ./...")})
+		commit(testLoaded(step, attempt, body), harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution("go test ./...")})
 		observation := harness.Observation{Execution: core.ExecutionFailedToStart, Preview: strings.Repeat("output\n", 600)}
 		receipt := fixtureReceipt(snap.State, observation)
 		commit(core.Observed{EffectID: snap.State.EffectID, Execution: core.ExecutionFailedToStart}, harness.Facts{Observation: &observation, Receipt: &receipt})
 	}
-	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused", Model: "offline-benchmark"})
+	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused-credential", Model: "offline-benchmark"})
 	if err != nil {
 		t.Fatal(err)
 	}

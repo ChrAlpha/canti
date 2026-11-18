@@ -44,14 +44,14 @@ func TestValidationOfASteerNeedsNoNewRunWindow(t *testing.T) {
 		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 2},
 	}
 	opened, err := h.Submit(context.Background(), host.Submission{Goal: "working", Spec: spec,
-		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-key"}}})
+		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "test-credential-key"}}})
 	if err != nil || !opened.Opened() || opened.Run.Budget.ContextTokens != 200_000 {
 		t.Fatalf("opening run = %+v, %v", opened, err)
 	}
 	steer := SpecOf(spec)
 	steer.ContextTokens = 0
 	validation := wire.Validation{State: state, Submission: wire.Submission{Goal: "steer", Delivery: "steer", Spec: steer},
-		Binding: wire.Binding{Provider: "http://127.0.0.1:1", AnthropicKey: "test-key"}}
+		Binding: wire.Binding{Provider: "http://127.0.0.1:1", AnthropicKey: "test-credential-key"}}
 	if v, err := client.Validate(context.Background(), validation); err != nil || v.State != state {
 		t.Fatalf("steer validation = %+v, %v", v, err)
 	}
@@ -72,7 +72,7 @@ func TestServingHostValidateRejectsWrongLocationFirst(t *testing.T) {
 				API: "anthropic-messages", Model: "m", MaxTokens: 1000, OutputLimit: 8 << 20, RequestBytes: 262144,
 				MaxSteps: 20, MaxAttempts: 3, WallTime: "30m", JobTimeout: "10m", OutputBudget: 8 << 20, ContextTokens: 200_000},
 		},
-		Binding: wire.Binding{AnthropicKey: "test-key"},
+		Binding: wire.Binding{AnthropicKey: "test-credential-key"},
 	}
 	if v, err := client.Validate(context.Background(), base); err != nil || v.State != state || v.Spec.Workspace != h.Workspace() {
 		t.Fatalf("control validation = %+v, %v", v, err)

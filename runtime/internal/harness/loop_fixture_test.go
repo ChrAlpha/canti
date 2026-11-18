@@ -104,7 +104,11 @@ func (m *fakeModel) Complete(ctx context.Context, req harness.Request) (harness.
 	if err := ctx.Err(); err != nil && !r.late {
 		return harness.Response{}, err
 	}
-	return harness.Response{Body: []byte(r.body), Complete: (r.err == nil) != r.flip, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: r.usage}, r.err
+	resp := harness.Response{Body: []byte(r.body), Complete: (r.err == nil) != r.flip, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake", Usage: r.usage}
+	if resp.Complete {
+		resp.Extraction = testExtraction(resp.Body)
+	}
+	return resp, r.err
 }
 
 func (m *fakeModel) Decision(resp harness.Response) []byte {
@@ -659,4 +663,20 @@ func (f *fixture) runningEffect() harness.Snapshot {
 		f.t.Fatal(err)
 	}
 	return snap
+}
+
+func testExtraction(body []byte) *harness.Extraction {
+	decision, err := core.Decode(body)
+	if err == nil {
+		return &harness.Extraction{Decision: &decision, Found: true}
+	}
+	return &harness.Extraction{Body: body, Diagnostic: err.Error(), Found: true}
+}
+
+func testLoaded(step, attempt int, body []byte) core.ResponseLoaded {
+	decision, err := core.Decode(body)
+	if err == nil {
+		return core.ResponseLoaded{Step: step, Attempt: attempt, Body: body, Decision: &decision}
+	}
+	return core.ResponseLoaded{Step: step, Attempt: attempt, Body: body, Diagnostic: true}
 }

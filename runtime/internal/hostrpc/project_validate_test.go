@@ -21,7 +21,7 @@ func TestValidateAndSubmitAgreeOnAQuiescentSteer(t *testing.T) {
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, OutputLimit: 8 << 20, RequestBytes: 256 << 10,
 		MaxSteps: 20, MaxAttempts: 3, WallTime: "30m", JobTimeout: "10m", OutputBudget: 8 << 20}
 	submission := sdk.Submission{Goal: "steer", Delivery: "steer", Spec: spec}
-	binding := sdk.Binding{AnthropicKey: "test-key"}
+	binding := sdk.Binding{AnthropicKey: "test-credential-key"}
 	_, err := c.Validate(context.Background(), sdk.Validation{State: state, Submission: submission, Binding: binding})
 	if err == nil || !strings.Contains(err.Error(), "65537 bytes") {
 		t.Fatalf("quiescent steer validation = %v", err)

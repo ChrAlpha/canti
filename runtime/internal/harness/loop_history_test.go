@@ -117,10 +117,10 @@ func growHistory(t *testing.T, f *fixture, r harness.Runner, n int) {
 				next := harness.ContextState{AnchorSeq: snap.Seq + 1, FirstStep: s.Step, Minimal: current.Minimal, Rejection: &harness.RejectionRef{Seq: snap.Seq + 1, Step: s.Step}}
 				event, facts = core.RequestRejected{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: &harness.Response{Body: []byte(`{}`)}, Failure: "confirmed overflow", Rejection: rejection, ContextState: &next}
 			} else {
-				event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step)}
+				event, facts = core.ResponseSaved{Step: s.Step, Attempt: s.Attempt}, harness.Facts{Response: historyResponse(s.Step), Extraction: testExtraction(historyResponse(s.Step).Body)}
 			}
 		case core.PhaseResponseSaved:
-			event = core.ResponseLoaded{Step: s.Step, Attempt: s.Attempt, Body: historyResponse(s.Step).Body}
+			event = testLoaded(s.Step, s.Attempt, historyResponse(s.Step).Body)
 			facts = harness.Facts{Action: &harness.Action{Name: harness.ActionCommand, Recovery: harness.RecoveryExternal}, Execution: fixtureExecution(stringPayload(historyResponse(s.Step).Body))}
 		case core.PhaseEffectSaved:
 			obs := historyObservation(s)
@@ -246,7 +246,7 @@ func measureRequest(t *testing.T, f *fixture, m harness.Model, n int) historySam
 func TestLoopBoundsRequestsAsHistoryGrows(t *testing.T) {
 	top := historyLadder[len(historyLadder)-1]
 	f := newFixture(t, core.Limits{MaxSteps: top + 1, MaxAttempts: 3}, harness.Budget{Tokens: 1 << 50, OutputBytes: 1 << 50})
-	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused", Model: "claude-opus-5"})
+	m, err := anthropic.New(anthropic.Config{APIKey: "offline-unused-credential", Model: "claude-opus-5"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -391,12 +391,21 @@ func (l *Loop) repairFrame(ctx context.Context, run Run, snap Snapshot, current 
 	if err != nil {
 		return err
 	}
-	body := l.decision(response)
-	if _, err := core.Decode(body); err == nil {
-		return contextError{errors.New("harness: protocol repair lacks an invalid decision")}
-	} else {
-		f.Rejected = &Rejection{Error: err.Error(), Response: string(body)}
+	extraction, err := l.journal.Extraction(ctx, run.ID, snap.State.Step, snap.State.Attempt-1)
+	if err != nil {
+		return err
 	}
+	if extraction == nil {
+		return fmt.Errorf("%w: protocol-repair response has no extraction", ErrIncompatible)
+	}
+	if extraction.Diagnostic == "" {
+		return contextError{errors.New("harness: protocol repair lacks an invalid decision")}
+	}
+	body := extraction.Body
+	if len(body) == 0 {
+		body = response.Body
+	}
+	f.Rejected = &Rejection{Error: extraction.Diagnostic, Response: string(body)}
 	return nil
 }
 

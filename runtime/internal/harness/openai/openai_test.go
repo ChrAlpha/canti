@@ -53,10 +53,27 @@ func serve(t *testing.T, h http.HandlerFunc) *httptest.Server {
 func reply(status int, body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("content-type", "application/json")
 		w.Header().Set("x-request-id", "req_hdr")
+		if status/100 != 2 {
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
+		typ := "response.completed"
+		var response struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal([]byte(body), &response)
+		switch response.Status {
+		case "incomplete":
+			typ = "response.incomplete"
+		case "failed":
+			typ = "response.failed"
+		}
+		_, _ = io.WriteString(w, "event: "+typ+"\ndata: {\"type\":\""+typ+"\",\"response\":"+body+"}\n\n")
 	}
 }
 
@@ -101,7 +118,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 
 func TestFreeze(t *testing.T) {
 	base := `{"model":"test-model","instructions":"sys","input":[{"role":"user","content":[{"type":"input_text","text":"head"},` +
-		`{"type":"input_text","text":"step"},{"type":"input_text","text":"tail"}]}],"max_output_tokens":16000`
+		`{"type":"input_text","text":"step"},{"type":"input_text","text":"tail"}]}],"max_output_tokens":16000,"stream":true`
 	for _, tc := range []struct {
 		name    string
 		edit    func(*Config)
@@ -190,7 +207,7 @@ func TestCompleteSendsFrozenBytesOnceWithBearer(t *testing.T) {
 	if resp.Model != "test-model-2026" || resp.Usage != (harness.Usage{InputTokens: 10, OutputTokens: 7, InputReported: true, OutputReported: true}) || resp.Protocol != protocol || resp.Adapter != adapter {
 		t.Fatalf("response = %+v", resp)
 	}
-	if d := string(m.Decision(resp)); d != `{"kind":"return","payload":"done"}` {
+	if d := string(decisionFor(t, m, resp)); d != `{"kind":"return","payload":"done"}` {
 		t.Fatalf("Decision = %s", d)
 	}
 }
@@ -239,6 +256,11 @@ func TestCompleteRequiresACompletedStatus(t *testing.T) {
 		{"in progress", `{"model":"m","status":"in_progress","output":[]}`, "in_progress"},
 		{"duplicate status", `{"model":"m","status":"completed","status":"failed","output":[]}`, "malformed"},
 		{"not json", `{"model":`, "malformed"},
+		{"output not array", `{"status":"completed","output":"not an array"}`, "malformed"},
+		{"message content not array", `{"status":"completed","output":[{"type":"message","content":"not an array"}]}`, "malformed"},
+		{"output item type not string", `{"status":"completed","output":[{"type":42}]}`, "malformed"},
+		{"function arguments not string", `{"status":"completed","output":[{"type":"function_call","arguments":42}]}`, "malformed"},
+		{"case variant item type", `{"status":"completed","output":[{"Type":"message","type":"message","content":[]}]}`, "malformed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(t, serve(t, reply(http.StatusOK, tc.body)).URL, nil)
@@ -263,7 +285,7 @@ func TestCompleteRefusesAnotherProtocolOrAdapter(t *testing.T) {
 	m := newModel(t, "https://unused.test/v1", nil)
 	for _, req := range []harness.Request{
 		{Body: []byte(`{}`), Protocol: "anthropic-messages/2023-06-01", Adapter: adapter},
-		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/4"},
+		{Body: []byte(`{}`), Protocol: protocol, Adapter: "canti-anthropic/5"},
 	} {
 		if _, err := m.Complete(context.Background(), req); stopReason(err) != core.StopUnrecoverable {
 			t.Errorf("Complete(%s %s) = %v, want unrecoverable", req.Protocol, req.Adapter, err)
@@ -274,10 +296,10 @@ func TestCompleteRefusesAnotherProtocolOrAdapter(t *testing.T) {
 func TestDecisionWithoutTextReturnsTheBody(t *testing.T) {
 	m := newModel(t, "https://unused.test/v1", nil)
 	refusal := respond(`"completed"`, `[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]`)
-	if got := string(m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: adapter})); got != refusal {
+	if got := string(decisionFor(t, m, harness.Response{Body: []byte(refusal), Complete: true, Adapter: adapter})); got != refusal {
 		t.Fatalf("Decision = %s", got)
 	}
-	if got := m.Decision(harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/4"}); got != nil {
+	if got := decisionFor(t, m, harness.Response{Body: []byte(refusal), Complete: true, Adapter: "canti-anthropic/5"}); got != nil {
 		t.Fatalf("Decision of another adapter = %s", got)
 	}
 }
@@ -303,7 +325,7 @@ func TestToolDecision(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(t, "https://unused.test/v1", func(c *Config) { c.DecisionFormat = "tool" })
-			got := m.Decision(harness.Response{Body: []byte(respond(`"completed"`, tc.output)), Complete: tc.complete, Adapter: toolAdapter})
+			got := decisionFor(t, m, harness.Response{Body: []byte(respond(`"completed"`, tc.output)), Complete: tc.complete, Adapter: toolAdapter})
 			if string(got) != tc.want {
 				t.Fatalf("Decision = %q, want %q", got, tc.want)
 			}
@@ -430,9 +452,10 @@ func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
 		t.Run(format, func(t *testing.T) {
 			body := `{"usage":{"input_tokens":3,"output_tokens":0},"status":"failed","error":{"code":"context_length_exceeded"}}`
 			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body)
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Content-Length", "4096")
-				io.WriteString(w, body)
+				_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":"+body+"}\n\n")
 			})
 			m := newModel(t, server.URL, func(c *Config) { c.DecisionFormat = format })
 			response, err := m.Complete(context.Background(), freeze(t, m))
@@ -441,5 +464,28 @@ func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
 				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
 			}
 		})
+	}
+}
+
+func TestNewRefusesDegenerateCredentials(t *testing.T) {
+	for _, value := range []string{"short", "response.created", "response.output_text.delta", "context_length_exceeded", "sk-sol-[redacted]", "                ", "aaaaaaaaaaaaaaaa", "abc\x01defghijklmnop"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := New(Config{APIKey: value, Model: "m"})
+			if err == nil || strings.Contains(err.Error(), value) {
+				t.Fatalf("New(%d-byte credential) = %v; want refusal without an echo", len(value), err)
+			}
+		})
+	}
+}
+
+func TestEveryProtocolNameIsRefusedAsACredential(t *testing.T) {
+	for _, name := range ProtocolNames() {
+		if name == "" {
+			continue
+		}
+		_, err := New(Config{APIKey: name, Model: "m"})
+		if err == nil || strings.Contains(err.Error(), name) {
+			t.Fatalf("New with protocol name %q = %v; want refusal without an echo", name, err)
+		}
 	}
 }

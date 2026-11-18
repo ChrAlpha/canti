@@ -24,7 +24,7 @@ func TestLiveDecision(t *testing.T) {
 		system = "Call the canti_decision tool exactly once; never reply with text."
 	}
 	m, err := openai.New(openai.Config{BaseURL: os.Getenv("OPENAI_BASE_URL"), APIKey: key, Model: model, MaxTokens: 1024,
-		Effort: os.Getenv("CANTI_LIVE_EFFORT"), DecisionFormat: format, StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", Timeout: 2 * time.Minute})
+		Effort: os.Getenv("CANTI_LIVE_EFFORT"), DecisionFormat: format, StructuredOutput: os.Getenv("CANTI_LIVE_STRUCTURED") != "0", IdleTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

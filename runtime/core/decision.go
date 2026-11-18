@@ -2,6 +2,12 @@
 // decision decoding and the pure transitions of a run State.
 package core
 
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
 // Kind identifies the only two decisions understood by the core protocol.
 type Kind string
 
@@ -19,4 +25,15 @@ type Decision struct {
 	Kind    Kind   `json:"kind"`
 	Purpose string `json:"purpose,omitempty"`
 	Payload string `json:"payload"`
+}
+
+// Validate applies the decoder's rules to an already-decoded decision.
+func (d Decision) Validate() error {
+	if d.Kind != Exec && d.Kind != Return {
+		return fmt.Errorf("core: %w: unsupported kind %q", errInvalidDecision, d.Kind)
+	}
+	if d.Kind == Exec && strings.TrimSpace(d.Payload) == "" {
+		return errors.New("core: invalid decision: exec payload is blank")
+	}
+	return nil
 }

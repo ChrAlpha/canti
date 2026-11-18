@@ -896,7 +896,15 @@ func (m *attachedScriptedModel) Complete(context.Context, harness.Request) (harn
 	if err != nil {
 		return harness.Response{}, err
 	}
-	return harness.Response{Body: body, Complete: true, Model: "scripted", Protocol: "scripted/v1", Adapter: "scripted"}, nil
+	return harness.Response{Body: body, Complete: true, Model: "scripted", Protocol: "scripted/v1", Adapter: "scripted", Extraction: scriptedExtraction(body)}, nil
 }
 
 func (m *attachedScriptedModel) Decision(response harness.Response) []byte { return response.Body }
+
+func scriptedExtraction(body []byte) *harness.Extraction {
+	decision, err := core.Decode(body)
+	if err == nil {
+		return &harness.Extraction{Decision: &decision, Found: true}
+	}
+	return &harness.Extraction{Body: body, Diagnostic: err.Error(), Found: true}
+}

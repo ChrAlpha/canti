@@ -86,6 +86,9 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 		Attempt: t.From.Attempt, Phase: t.To.Phase, Outcome: t.Event.Kind(),
 		Reason: t.To.Reason, Failure: t.Facts.Failure,
 	}
+	if t.Facts.Diagnostic != "" {
+		v.Failure = t.Facts.Diagnostic
+	}
 	if t.Facts.Rejection != nil {
 		v.Signal = &t.Facts.Rejection.Signal
 	}
@@ -122,9 +125,6 @@ func DescribeContextEvent(t Transition, bodies bool) ContextEvent {
 		case core.PhaseEffectSaved:
 		default:
 			v.Outcome = "protocol_rejected"
-			if _, err := core.Decode(e.Body); err != nil {
-				v.Failure = err.Error()
-			}
 		}
 	}
 	return v

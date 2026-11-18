@@ -46,7 +46,7 @@ func testPreflightValidation(t *testing.T) hostrpc.Validation {
 				OutputBudget: 256 << 20, JobTimeout: "10m",
 			},
 		},
-		Binding: hostrpc.Binding{OpenAIKey: "x"},
+		Binding: hostrpc.Binding{OpenAIKey: "test-credential-openai"},
 	}
 }
 

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -57,6 +58,48 @@ type Response struct {
 	Protocol string
 	Adapter  string
 	Usage    Usage
+	// Extraction is computed once from the raw response by Complete and moved
+	// to Facts with ResponseSaved; it is never persisted on Response.
+	Extraction *Extraction `json:"-"`
+}
+
+// Extraction is the committed outcome of reading a provider response: either
+// a decoded decision with redacted free text, or the sanitized protocol
+// diagnostic (and sanitized response text) that made the response undecodable.
+type Extraction struct {
+	Decision   *core.Decision `json:",omitempty"`
+	Body       []byte         `json:",omitempty"`
+	Diagnostic string         `json:",omitempty"`
+	Found      bool           `json:",omitempty"`
+}
+
+// DecisionBody returns the decision bytes a ResponseLoaded event needs.
+func (e *Extraction) DecisionBody() []byte {
+	if e == nil || e.Decision == nil {
+		return nil
+	}
+	out, err := json.Marshal(e.Decision)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// Validate reports whether the extraction is a discriminated union of one
+// decoded decision or one diagnostic. Diagnostic Body is display evidence.
+func (e *Extraction) Validate() error {
+	if e == nil {
+		return errors.New("harness: saved response has no extraction")
+	}
+	if (e.Decision == nil) == (e.Diagnostic == "") {
+		return errors.New("harness: extraction must be exactly one of decision or diagnostic")
+	}
+	if e.Decision != nil {
+		if err := e.Decision.Validate(); err != nil {
+			return fmt.Errorf("harness: %v", err)
+		}
+	}
+	return nil
 }
 
 // Usage is the provider-reported token count of one attempt.

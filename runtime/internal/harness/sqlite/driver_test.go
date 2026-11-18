@@ -46,6 +46,8 @@ func newDriver(t testing.TB, store harness.Store, snap harness.Snapshot) *driver
 }
 
 func (d *driver) try(event core.Event, facts harness.Facts) error {
+	event = addTestLoaded(event)
+	addTestExtraction(event, &facts)
 	next, err := d.runner.Commit(context.Background(), d.snap, event, facts)
 	if err == nil {
 		d.snap = next
@@ -54,6 +56,8 @@ func (d *driver) try(event core.Event, facts harness.Facts) error {
 }
 
 func (d *driver) do(event core.Event, facts harness.Facts) {
+	event = addTestLoaded(event)
+	addTestExtraction(event, &facts)
 	if _, ok := event.(core.Resolved); ok {
 		facts.Resolution = &harness.Resolution{Source: harness.ResolutionOperator, OwnerID: "operator-owner"}
 		if facts.Observation.Execution != core.ExecutionUnknown {
@@ -113,6 +117,7 @@ func (d *driver) load(body []byte) {
 // acceptance returns the facts of event, from s, which carry the action of
 // an accepted exec decision under a request that requires no handover.
 func acceptance(s core.State, event core.ResponseLoaded) harness.Facts {
+	event = addTestLoaded(event).(core.ResponseLoaded)
 	next, err := s.Next(event)
 	if err != nil || next.Phase != core.PhaseEffectSaved {
 		return harness.Facts{}
@@ -167,6 +172,25 @@ func requestFor(s core.State) *harness.Request {
 	return &harness.Request{ContextState: &harness.ContextState{FirstStep: 1}, Body: fmt.Appendf(nil, "request %d.%d", s.Step, s.RequestRev+1), Model: "m", Protocol: "p", Adapter: "a"}
 }
 
+func addTestLoaded(event core.Event) core.Event {
+	loaded, ok := event.(core.ResponseLoaded)
+	if !ok || loaded.Decision != nil || loaded.Diagnostic || len(loaded.Body) == 0 {
+		return event
+	}
+	if decision, err := core.Decode(loaded.Body); err == nil {
+		loaded.Decision = &decision
+	} else {
+		loaded.Diagnostic = true
+	}
+	return loaded
+}
+
+func addTestExtraction(event core.Event, facts *harness.Facts) {
+	if _, ok := event.(core.ResponseSaved); ok && facts.Response != nil && facts.Extraction == nil {
+		facts.Extraction = testExtraction(facts.Response.Body)
+	}
+}
+
 func responseFor(s core.State, body []byte, usage harness.Usage) *harness.Response {
 	return &harness.Response{Body: body, Complete: true, Model: fmt.Sprintf("m-%d.%d", s.Step, s.Attempt), Usage: usage}
 }
@@ -185,6 +209,7 @@ func observation(execution core.ExecutionState, outputBytes int64) *harness.Obse
 // without storing it.
 func derive(t testing.TB, snap harness.Snapshot, event core.Event, facts harness.Facts) harness.Transition {
 	t.Helper()
+	addTestExtraction(event, &facts)
 	var got harness.Transition
 	runner := newRunner(t, storeFunc(func(_ context.Context, tr harness.Transition) error {
 		got = tr
@@ -214,4 +239,12 @@ func receipt(s core.State, obs harness.Observation) harness.Job {
 		j.Status = harness.JobUnknown
 	}
 	return j
+}
+
+func testExtraction(body []byte) *harness.Extraction {
+	decision, err := core.Decode(body)
+	if err == nil {
+		return &harness.Extraction{Decision: &decision, Found: true}
+	}
+	return &harness.Extraction{Body: body, Diagnostic: err.Error(), Found: true}
 }

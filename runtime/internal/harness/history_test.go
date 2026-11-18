@@ -39,13 +39,13 @@ func seed(t *testing.T, f *fixture, r harness.Runner, d core.Decision, obs harne
 	step := snap.State.Step
 	commit(core.RequestFrozen{}, harness.Facts{Request: &harness.Request{ContextState: &harness.ContextState{FirstStep: 1}, Body: []byte("frozen"), Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
 	commit(core.AttemptStarted{Step: step, Attempt: snap.State.Attempt}, harness.Facts{})
-	commit(core.ResponseSaved{Step: step, Attempt: snap.State.Attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}})
+	commit(core.ResponseSaved{Step: step, Attempt: snap.State.Attempt}, harness.Facts{Response: &harness.Response{Body: body, Complete: true, Model: "fake-1", Protocol: "fake/v1", Adapter: "fake"}, Extraction: testExtraction(body)})
 	if d.Kind == core.Return {
-		commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{})
+		commit(testLoaded(step, snap.State.Attempt, body), harness.Facts{})
 		return
 	}
 	a := harness.NormalizeAction(d.Payload, true)
-	commit(core.ResponseLoaded{Step: step, Attempt: snap.State.Attempt, Body: body}, harness.Facts{Action: &a, Execution: fixtureExecution(d.Payload)})
+	commit(testLoaded(step, snap.State.Attempt, body), harness.Facts{Action: &a, Execution: fixtureExecution(d.Payload)})
 	effect := snap.State.EffectID
 	if resolved {
 		obs.Output = harness.ArtifactRef{Detail: "resolved by operator"}

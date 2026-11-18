@@ -1,15 +1,15 @@
-// Package provider holds what the model adapters share: one HTTP exchange
-// of frozen request bytes, the classification of a failed status, and the
-// strict reading of a JSON envelope.
+// Package provider holds what the model adapters share: one streaming HTTP
+// exchange of frozen request bytes, the classification of a failed status,
+// bounded server-sent event parsing, and the strict reading of a JSON
+// envelope.
 //
 // It uses net/http instead of a provider SDK so that every attempt sends
 // exactly the frozen bytes once, is counted by the harness without hidden
-// retries, and keeps the raw response body.
+// retries, and can record the assembled response the stream produced.
 package provider
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,8 +29,8 @@ type Config struct {
 	Name             string        // prefix of every error, e.g. "anthropic"
 	URL              string        // absolute endpoint URL; https unless the host is a loopback address
 	Secret           string        // credential replaced by "[redacted]" wherever a response echoes it
-	Timeout          time.Duration // per-attempt HTTP timeout; default 10m
-	MaxResponseBytes int64         // default 8 MiB; larger bodies are incomplete
+	IdleTimeout      time.Duration // longest wait between response bytes; default 10m
+	MaxResponseBytes int64         // default 8 MiB; larger assembled responses and events are incomplete
 	Client           *http.Client  // optional; redirects are never followed
 }
 
@@ -48,12 +48,17 @@ type Reply struct {
 }
 
 // DefaultMaxResponseBytes is the response limit of an Endpoint whose Config
-// names none: a longer body is incomplete.
+// names none: a longer assembled response or event is incomplete.
 const DefaultMaxResponseBytes = 8 << 20
+
+// DefaultIdleTimeout is the longest an Endpoint whose Config names none waits
+// between response bytes. A streaming response that stays silent longer is a
+// failed attempt; a generation that keeps sending bytes is not bounded by it.
+const DefaultIdleTimeout = 10 * time.Minute
 
 // New validates cfg and returns an Endpoint.
 func New(cfg Config) (*Endpoint, error) {
-	if cfg.Timeout < 0 || cfg.MaxResponseBytes < 0 {
+	if cfg.IdleTimeout < 0 || cfg.MaxResponseBytes < 0 {
 		return nil, fmt.Errorf("%s: limits must not be negative", cfg.Name)
 	}
 	u, err := url.Parse(cfg.URL)
@@ -63,8 +68,8 @@ func New(cfg Config) (*Endpoint, error) {
 	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return nil, fmt.Errorf("%s: BaseURL must use https unless it is a loopback address", cfg.Name)
 	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 10 * time.Minute
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = DefaultIdleTimeout
 	}
 	if cfg.MaxResponseBytes == 0 {
 		cfg.MaxResponseBytes = DefaultMaxResponseBytes
@@ -75,59 +80,6 @@ func New(cfg Config) (*Endpoint, error) {
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Endpoint{cfg: cfg, client: &client}, nil
-}
-
-// Post sends body once with header under the per-attempt timeout. It
-// returns a nil error when a whole body within the response limit arrived,
-// whatever its status, with the credential redacted from it. Otherwise it
-// returns what arrived and an error: ctx's error once ctx is done, a timeout,
-// a transport failure, or a body over the limit, cut to the limit.
-func (e *Endpoint) Post(ctx context.Context, body []byte, header http.Header) (Reply, error) {
-	if err := ctx.Err(); err != nil {
-		return Reply{}, err
-	}
-	attempt, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
-	defer cancel()
-	hr, err := http.NewRequestWithContext(attempt, http.MethodPost, e.cfg.URL, bytes.NewReader(body))
-	if err != nil {
-		return Reply{}, Unrecoverable(fmt.Errorf("%s: %w", e.cfg.Name, err))
-	}
-	hr.Header = header.Clone()
-	res, err := e.client.Do(hr)
-	if err != nil {
-		return Reply{}, e.failure(ctx, attempt, err)
-	}
-	defer res.Body.Close()
-	r := Reply{Status: res.StatusCode, Header: res.Header.Clone()}
-	if e.cfg.Secret != "" {
-		for name, values := range r.Header {
-			for i, value := range values {
-				r.Header[name][i] = strings.ReplaceAll(value, e.cfg.Secret, "[redacted]")
-			}
-		}
-	}
-	r.Body, err = io.ReadAll(io.LimitReader(res.Body, e.cfg.MaxResponseBytes+1))
-	if e.cfg.Secret != "" {
-		r.Body = bytes.ReplaceAll(r.Body, []byte(e.cfg.Secret), []byte("[redacted]"))
-	}
-	if err != nil || ctx.Err() != nil {
-		return r, e.failure(ctx, attempt, err)
-	}
-	if int64(len(r.Body)) > e.cfg.MaxResponseBytes {
-		r.Body = r.Body[:e.cfg.MaxResponseBytes]
-		return r, fmt.Errorf("%s: response exceeds %d bytes", e.cfg.Name, e.cfg.MaxResponseBytes)
-	}
-	return r, nil
-}
-
-func (e *Endpoint) failure(ctx, attempt context.Context, err error) error {
-	switch {
-	case ctx.Err() != nil:
-		return fmt.Errorf("%s: %w", e.cfg.Name, ctx.Err())
-	case attempt.Err() != nil:
-		return fmt.Errorf("%s: attempt timed out after %v", e.cfg.Name, e.cfg.Timeout)
-	}
-	return fmt.Errorf("%s: %w", e.cfg.Name, err)
 }
 
 // Failure is what a provider's error body and headers say about a failed
@@ -163,6 +115,74 @@ func StatusError(name string, status int, f Failure) error {
 	return Unrecoverable(err)
 }
 
+// MinCredentialBytes is the shortest credential an adapter accepts. Shorter
+// values are refused rather than treated as a low-entropy secret.
+const MinCredentialBytes = 16
+
+// CheckCredential refuses a credential that is shorter than MinCredentialBytes
+// or that occurs inside the adapter's protocol vocabulary. The error never
+// echoes the value.
+func CheckCredential(adapter, value string, vocabulary []string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) < MinCredentialBytes {
+		return fmt.Errorf("%s: credential must be at least %d bytes", adapter, MinCredentialBytes)
+	}
+	if strings.Contains(value, redactedMarker) || markerEdge(value) {
+		return fmt.Errorf("%s: credential overlaps the adapter protocol vocabulary", adapter)
+	}
+	if !validCredentialCharacters(value) {
+		return fmt.Errorf("%s: credential must contain printable, non-repeating characters", adapter)
+	}
+	for _, token := range vocabulary {
+		if strings.Contains(token, value) {
+			return fmt.Errorf("%s: credential overlaps the adapter protocol vocabulary", adapter)
+		}
+	}
+	return nil
+}
+
+func validCredentialCharacters(value string) bool {
+	seen, mixed := false, false
+	var first rune
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+		if !seen {
+			first, seen = r, true
+		} else if r != first {
+			mixed = true
+		}
+	}
+	return seen && mixed
+}
+
+// markerEdge rejects credentials whose prefix is a proper suffix of the
+// marker or whose suffix is a proper prefix of it. A single left-to-right
+// replacement cannot then create a new occurrence at a marker boundary.
+func markerEdge(value string) bool {
+	for k := 1; k < len(redactedMarker) && k <= len(value); k++ {
+		if value[:k] == redactedMarker[len(redactedMarker)-k:] || value[len(value)-k:] == redactedMarker[:k] {
+			return true
+		}
+	}
+	return false
+}
+
+// CanonicalEnum returns value when it is one of allowed, otherwise the fixed
+// "unrecognized" marker. Typed error and signal enums never carry provider
+// free text.
+func CanonicalEnum(value string, allowed ...string) string {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return "unrecognized"
+}
+
 // Unrecoverable wraps err as a failure no resend of the same bytes can fix.
 func Unrecoverable(err error) error {
 	return &harness.StopError{Reason: core.StopUnrecoverable, Err: err}
@@ -196,6 +216,19 @@ func ExactField(fields map[string]json.RawMessage, name string) json.RawMessage 
 		}
 	}
 	return fields[name]
+}
+
+// NoCaseAliases reports whether fields holds no case-variant alias of any
+// name. Unknown, differently named extension fields remain allowed.
+func NoCaseAliases(fields map[string]json.RawMessage, names ...string) bool {
+	for key := range fields {
+		for _, name := range names {
+			if key != name && strings.EqualFold(key, name) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Discriminator reads an exact canonical string without case aliases.

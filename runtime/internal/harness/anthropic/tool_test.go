@@ -13,7 +13,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
 )
 
-const toolAdapter = "canti-anthropic/4-tool"
+const toolAdapter = "canti-anthropic/5-tool"
 
 func toolMessage(stop, content string) string { return message(stop, content) }
 
@@ -45,7 +45,7 @@ func TestToolDecisionPreservesInputAndRejectsAmbiguity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := toolMessage(tc.stop, tc.blocks)
 			m := newModel(t, "https://unused.test", nil)
-			got := m.Decision(harness.Response{Body: []byte(body), Complete: tc.complete, Adapter: toolAdapter})
+			got := decisionFor(t, m, harness.Response{Body: []byte(body), Complete: tc.complete, Adapter: toolAdapter})
 			if tc.want != "" && string(got) != tc.want {
 				t.Fatalf("Decision = %s, want %s", got, tc.want)
 			}
@@ -65,7 +65,7 @@ func TestToolDecisionRejectsDuplicateTopLevelFields(t *testing.T) {
 		`{"stop_reason":"end_turn","Stop_Reason":"tool_use","content":` + valid + `}`,
 		`{"stop_reason":"tool_use","content":[],"Content":` + valid + `}`,
 	} {
-		got := newModel(t, "https://unused.test", nil).Decision(harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
+		got := decisionFor(t, newModel(t, "https://unused.test", nil), harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
 		if _, err := core.Decode(got); err == nil {
 			t.Fatalf("accepted duplicate response field: %s", body)
 		}
@@ -75,7 +75,7 @@ func TestToolDecisionRejectsDuplicateTopLevelFields(t *testing.T) {
 func TestToolDecisionUsesOnlyExactFieldNames(t *testing.T) {
 	input := `{"kind":"return","payload":"ok"}`
 	body := `{"stop_reason":"tool_use","Stop_Reason":"end_turn","content":[{"type":"tool_use","Type":"text","id":"toolu_1","name":"canti_decision","Name":"other","input":` + input + `,"Input":null}],"Content":[]}`
-	got := newModel(t, "https://unused.test", nil).Decision(harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
+	got := decisionFor(t, newModel(t, "https://unused.test", nil), harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
 	if string(got) != input {
 		t.Fatalf("exact fields changed: %s", got)
 	}
@@ -91,7 +91,7 @@ func TestCompleteUsesFrozenToolAdapterAfterConfigChange(t *testing.T) {
 	if err != nil || !resp.Complete || resp.Adapter != toolAdapter || string(resp.Body) != body {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
-	if got := string(m.Decision(resp)); got != input {
+	if got := string(decisionFor(t, m, resp)); got != input {
 		t.Fatalf("Decision = %s", got)
 	}
 	if strings.Contains(string(resp.Body), apiKey) {
@@ -171,14 +171,14 @@ func TestCompleteUsesFrozenTextAdapterAfterConfigChange(t *testing.T) {
 	if err != nil || !resp.Complete || resp.Adapter != adapter {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
-	if got := string(m.Decision(resp)); got != `{"kind":"return","payload":"done"}` {
+	if got := string(decisionFor(t, m, resp)); got != `{"kind":"return","payload":"done"}` {
 		t.Fatalf("Decision = %s", got)
 	}
 }
 
 func TestToolDecisionRejectsUnknownAdapter(t *testing.T) {
 	m := newModel(t, "https://unused.test", nil)
-	if _, err := core.Decode(m.Decision(harness.Response{Adapter: "unknown", Complete: true, Body: []byte(`{"kind":"return","payload":"bad"}`)})); err == nil {
+	if _, err := core.Decode(decisionFor(t, m, harness.Response{Adapter: "unknown", Complete: true, Body: []byte(`{"kind":"return","payload":"bad"}`)})); err == nil {
 		t.Fatal("unknown adapter accepted")
 	}
 }
@@ -186,7 +186,7 @@ func TestToolDecisionRejectsUnknownAdapter(t *testing.T) {
 func TestToolDecisionPassesDuplicateFieldsToCore(t *testing.T) {
 	input := `{"kind":"return","kind":"exec","payload":"echo 雪"}`
 	body := toolMessage(`"tool_use"`, `[{"type":"tool_use","id":"toolu_1","name":"canti_decision","input":`+input+`}]`)
-	got := newModel(t, "https://unused.test", nil).Decision(harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
+	got := decisionFor(t, newModel(t, "https://unused.test", nil), harness.Response{Body: []byte(body), Complete: true, Adapter: toolAdapter})
 	if string(got) != input {
 		t.Fatalf("input changed: %s", got)
 	}
@@ -203,7 +203,7 @@ func TestToolDecisionRejectsEndTurnAfterComplete(t *testing.T) {
 	if err != nil || !resp.Complete || string(resp.Body) != body || resp.Adapter != toolAdapter {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
-	if got := m.Decision(resp); len(got) != 0 {
+	if got := decisionFor(t, m, resp); len(got) != 0 {
 		t.Fatalf("incomplete decision = %s", got)
 	}
 }
@@ -249,7 +249,7 @@ func TestCompleteSendsRequestsFrozenBeforePurpose(t *testing.T) {
 				if sent := (<-got).body; string(sent) != tc.body {
 					t.Fatalf("sent %s, want the frozen %s", sent, tc.body)
 				}
-				d, err := core.Decode(m.Decision(resp))
+				d, err := core.Decode(decisionFor(t, m, resp))
 				if err != nil || d != (core.Decision{Kind: core.Exec, Purpose: purpose, Payload: "ls"}) {
 					t.Fatalf("decision = %#v, %v", d, err)
 				}

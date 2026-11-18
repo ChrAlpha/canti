@@ -25,7 +25,7 @@ const (
 	authToken    = "sk-ant-oat-SECRET-token"
 	protocol     = "anthropic-messages/2023-06-01"
 	fallbackBeta = "server-side-fallback-2026-07-01"
-	adapter      = "canti-anthropic/4"
+	adapter      = "canti-anthropic/5"
 	cached       = `,"cache_control":{"type":"ephemeral"}`
 	purposeField = `"purpose":{"type":"string","description":"One short line: what this step is for and what you will do next with its result."}`
 	schema       = `{"format":{"type":"json_schema","schema":{"type":"object","properties":{"kind":{"type":"string","enum":["exec","return"]},` + purposeField + `,"payload":{"type":"string"}},"required":["kind","payload","purpose"],"additionalProperties":false}}}`
@@ -66,10 +66,26 @@ func serve(t *testing.T, h http.HandlerFunc) *httptest.Server {
 func reply(status int, body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("content-type", "application/json")
+		w.Header().Set("x-request-id", "req_hdr")
+		if status/100 != 2 {
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
+		_, _ = io.WriteString(w, streamReply(body))
 	}
+}
+
+// streamReply carries a whole non-streaming message in message_start and an
+// empty message_delta, so the assembler returns those exact bytes. Tests that
+// exercise deltas build their own events.
+func streamReply(body string) string {
+	return "event: message_start\ndata: {\"type\":\"message_start\",\"message\":" + body + "}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":null}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 }
 
 func message(stop, content string) string {
@@ -104,7 +120,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		"relative url":     {APIKey: apiKey, Model: "m", BaseURL: "api.anthropic.com"},
 		"cleartext remote": {APIKey: apiKey, Model: "m", BaseURL: "http://api.example.com"},
 		"negative tokens":  {APIKey: apiKey, Model: "m", MaxTokens: -1},
-		"negative timeout": {APIKey: apiKey, Model: "m", Timeout: -time.Second},
+		"negative timeout": {APIKey: apiKey, Model: "m", IdleTimeout: -time.Second},
 		"negative limit":   {APIKey: apiKey, Model: "m", MaxResponseBytes: -1},
 		"unknown effort":   {APIKey: apiKey, Model: "m", Effort: "extreme"},
 	} {
@@ -117,7 +133,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestFreeze(t *testing.T) {
-	base := `{"model":"claude-opus-5","max_tokens":16000,"system":"sys","messages":[{"role":"user","content":[` +
+	base := `{"model":"claude-opus-5","max_tokens":16000,"stream":true,"system":"sys","messages":[{"role":"user","content":[` +
 		`{"type":"text","text":"head"` + cached + `},{"type":"text","text":"step"` + cached + `},{"type":"text","text":"tail"}]}]`
 	for _, tc := range []struct {
 		name     string
@@ -154,7 +170,7 @@ func TestFreezeOmitsEmptySystemAndRequiresUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"model":"claude-opus-5","max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"hi"` + cached + `}]}]}`; string(req.Body) != want {
+	if want := `{"model":"claude-opus-5","max_tokens":16000,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"` + cached + `}]}]}`; string(req.Body) != want {
 		t.Fatalf("body = %s, want %s", req.Body, want)
 	}
 	for name, p := range map[string]harness.Prompt{
@@ -184,7 +200,7 @@ func TestFreezeMarksTheFirstAndLastStableBlocks(t *testing.T) {
 		{[]string{"only"}, 1, `{"type":"text","text":"only"` + cached + `}`},
 	} {
 		req, err := m.Freeze(harness.Prompt{Blocks: tc.blocks, Stable: tc.stable})
-		want := `{"model":"claude-opus-5","max_tokens":16000,"messages":[{"role":"user","content":[` + tc.want + `]}]}`
+		want := `{"model":"claude-opus-5","max_tokens":16000,"stream":true,"messages":[{"role":"user","content":[` + tc.want + `]}]}`
 		if err != nil || string(req.Body) != want {
 			t.Errorf("Freeze(%q, %d stable) = %s, %v\nwant %s", tc.blocks, tc.stable, req.Body, err, want)
 		}
@@ -329,7 +345,7 @@ func TestCompleteHonorsFrozenProtocol(t *testing.T) {
 		"unknown protocol": {Body: req.Body, Model: req.Model, Protocol: "anthropic-messages/2099-01-01", Adapter: adapter},
 		"unknown adapter":  {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "other/1"},
 		"earlier adapter":  {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/1"},
-		"future adapter":   {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/3"},
+		"future adapter":   {Body: req.Body, Model: req.Model, Protocol: protocol, Adapter: "canti-anthropic/6"},
 		"no adapter":       {Body: req.Body, Model: req.Model, Protocol: protocol},
 	} {
 		if _, err := m.Complete(context.Background(), req); stopReason(err) != core.StopUnrecoverable {
@@ -462,7 +478,11 @@ func TestCompleteClassifiesStopReason(t *testing.T) {
 			if stopReason(err) != "" {
 				t.Fatalf("err = %v, want retryable", err)
 			}
-			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, OutputTokens: 7, InputReported: true, OutputReported: true}}
+			want := harness.Response{Body: []byte(body), Complete: tc.complete, Model: "claude-opus-5-live", Protocol: protocol, Adapter: adapter, Usage: harness.Usage{InputTokens: 18, InputReported: true}}
+			if tc.complete != (resp.Extraction != nil) {
+				t.Fatalf("extraction presence = %v, want complete=%v", resp.Extraction != nil, tc.complete)
+			}
+			want.Extraction = resp.Extraction
 			if !reflect.DeepEqual(resp, want) {
 				t.Fatalf("response = %+v\nwant %+v", resp, want)
 			}
@@ -474,7 +494,7 @@ func TestCompleteDefaultsResponseModel(t *testing.T) {
 	srv := serve(t, reply(http.StatusOK, `{"type":"message","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`))
 	m := newModel(t, srv.URL, nil)
 	resp, err := m.Complete(context.Background(), freeze(t, m))
-	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, OutputTokens: 2, InputReported: true, OutputReported: true}) {
+	if err != nil || resp.Model != "claude-opus-5" || resp.Usage != (harness.Usage{InputTokens: 1, InputReported: true}) {
 		t.Fatalf("Complete = %+v, %v", resp, err)
 	}
 }
@@ -493,18 +513,25 @@ func cut(t *testing.T, raw string) http.HandlerFunc {
 	}
 }
 
-func TestCompleteTreatsTruncatedBodyAsIncomplete(t *testing.T) {
-	partial := `{"id":"msg_1","type":"message","content":[{"type":"text","text":"{\"kind\"`
-	trailing := message(`"end_turn"`, decision) + "x"
+func TestCompleteTreatsAStreamCutBeforeMessageStopAsIncomplete(t *testing.T) {
+	partial := `{"id":"msg_1","type":"message","content":[{"type":"text","text":"{\"kind\""}],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}`
+	events := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":" + partial + "}\n\n"
 	for _, tc := range []struct {
 		name string
 		h    http.HandlerFunc
-		sent string
 	}{
-		{"short content length", cut(t, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n"+partial), partial},
-		{"unterminated chunks", cut(t, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"+strconv.FormatInt(int64(len(partial)), 16)+"\r\n"+partial+"\r\n"), partial},
-		{"cut json", reply(http.StatusOK, partial), partial},
-		{"trailing bytes", reply(http.StatusOK, trailing), trailing},
+		{"short content length", cut(t, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\n\r\n"+events)},
+		{"unterminated chunks", cut(t, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"+strconv.FormatInt(int64(len(events)), 16)+"\r\n"+events+"\r\n")},
+		{"clean eof", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("content-type", "text/event-stream")
+			_, _ = io.WriteString(w, events)
+		}},
+		{"cut event", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("content-type", "text/event-stream")
+			_, _ = io.WriteString(w, events+"event: message_delta\ndata: {\"type\":\"message_delta\"")
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(t, serve(t, tc.h).URL, nil)
@@ -515,8 +542,11 @@ func TestCompleteTreatsTruncatedBodyAsIncomplete(t *testing.T) {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("err = %v, not a context error", err)
 			}
-			if string(resp.Body) != tc.sent {
-				t.Fatalf("body = %q, want the bytes read %q", resp.Body, tc.sent)
+			if string(resp.Body) != partial {
+				t.Fatalf("body = %q, want the assembled partial message %q", resp.Body, partial)
+			}
+			if resp.Usage != (harness.Usage{InputTokens: 5, InputReported: true}) {
+				t.Fatalf("usage = %+v", resp.Usage)
 			}
 		})
 	}
@@ -542,33 +572,36 @@ func TestCompleteBoundsResponseSize(t *testing.T) {
 	}
 }
 
+// block answers only once ctx is done.
 func block(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	<-r.Context().Done()
 }
 
-func TestCompleteTimesOutEachAttempt(t *testing.T) {
+func TestCompleteTimesOutAnIdleStream(t *testing.T) {
+	body := message(`"end_turn"`, decision)
 	for name, h := range map[string]http.HandlerFunc{
 		"before headers": block,
 		"during body": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("content-type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"type":"message"`)
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":"+body+"}\n\n")
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			m := newModel(t, serve(t, h).URL, func(c *anthropic.Config) { c.Timeout = 50 * time.Millisecond })
+			m := newModel(t, serve(t, h).URL, func(c *anthropic.Config) { c.IdleTimeout = 50 * time.Millisecond })
 			resp, err := m.Complete(context.Background(), freeze(t, m))
-			if err == nil || resp.Complete || stopReason(err) != "" {
-				t.Fatalf("Complete = %v, %v; want retryable timeout", resp.Complete, err)
+			if err == nil || resp.Complete || stopReason(err) != "" || !strings.Contains(err.Error(), "no response bytes") {
+				t.Fatalf("Complete = %v, %v; want retryable idle timeout", resp.Complete, err)
 			}
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				t.Fatalf("attempt timeout %v must not look like a done controller context", err)
+				t.Fatalf("idle timeout %v must not look like a done controller context", err)
 			}
-			if name == "during body" && string(resp.Body) != `{"type":"message"` {
-				t.Fatalf("body = %q, want the partial bytes", resp.Body)
+			if name == "during body" && string(resp.Body) != body {
+				t.Fatalf("body = %q, want the assembled partial message", resp.Body)
 			}
 		})
 	}
@@ -647,7 +680,7 @@ func TestDecision(t *testing.T) {
 		{"not json", "<html>oops</html>", "<html>oops</html>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := newModel(t, "https://unused.test", nil).Decision(harness.Response{Body: []byte(tc.body), Complete: true})
+			got := decisionFor(t, newModel(t, "https://unused.test", nil), harness.Response{Body: []byte(tc.body), Complete: true})
 			if string(got) != tc.want {
 				t.Fatalf("Decision = %s, want %s", got, tc.want)
 			}
@@ -698,8 +731,8 @@ func TestUsagePresenceReachesTheResponseAndAnInvalidCounterStops(t *testing.T) {
 		invalid     bool
 	}{
 		{"missing", `null`, harness.Usage{}, false},
-		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
-		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true}, false},
+		{"partial", `{"output_tokens":2}`, harness.Usage{}, false},
 		{"invalid", `{"input_tokens":-1}`, harness.Usage{}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -765,16 +798,43 @@ func TestReceivedUsageSurvivesIncompleteHTTPFraming(t *testing.T) {
 		t.Run(format, func(t *testing.T) {
 			body := `{"usage":{"input_tokens":3,"output_tokens":0},"stop_reason":"model_context_window_exceeded"}`
 			server := serve(t, func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body)
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Content-Length", "4096")
-				io.WriteString(w, body)
+				io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":"+body+"}\n\n")
 			})
 			m := newModel(t, server.URL, func(c *anthropic.Config) { c.DecisionFormat = format })
 			response, err := m.Complete(context.Background(), freeze(t, m))
 			var limit *harness.ContextLimitError
-			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true, OutputReported: true}) {
+			if err == nil || errors.As(err, &limit) || response.Complete || string(response.Body) != body || response.Usage != (harness.Usage{InputTokens: 3, InputReported: true}) {
 				t.Fatalf("incomplete framing lost received usage or claimed confirmed overflow: response=%+v error=%v", response, err)
 			}
 		})
+	}
+}
+
+func TestNewRefusesDegenerateCredentials(t *testing.T) {
+	for _, value := range []string{"short", "message_start", "content_block_start", "context_length_exceeded", "sk-sol-[redacted]", "                ", "aaaaaaaaaaaaaaaa", "abc\x01defghijklmnop"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := anthropic.New(anthropic.Config{APIKey: value, Model: "m"})
+			if err == nil || strings.Contains(err.Error(), value) {
+				t.Fatalf("New(%d-byte credential) = %v; want refusal without an echo", len(value), err)
+			}
+		})
+	}
+	if _, err := anthropic.New(anthropic.Config{AuthToken: "short", Model: "m"}); err == nil || strings.Contains(err.Error(), "short") {
+		t.Fatalf("AuthToken refusal = %v", err)
+	}
+}
+
+func TestEveryProtocolNameIsRefusedAsACredential(t *testing.T) {
+	for _, name := range anthropic.ProtocolNames() {
+		if name == "" {
+			continue
+		}
+		_, err := anthropic.New(anthropic.Config{APIKey: name, Model: "m"})
+		if err == nil || strings.Contains(err.Error(), name) {
+			t.Fatalf("New with protocol name %q = %v; want refusal without an echo", name, err)
+		}
 	}
 }

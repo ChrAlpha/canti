@@ -127,7 +127,10 @@ func (f Facts) responseSaved() (Facts, error) {
 	if f.Response == nil || !f.Response.Complete || len(f.Response.Body) == 0 {
 		return Facts{}, fmt.Errorf("%w: complete response with a body is required", ErrFacts)
 	}
-	return Facts{Response: f.Response}, nil
+	if err := f.Extraction.Validate(); err != nil {
+		return Facts{}, fmt.Errorf("%w: %v", ErrFacts, err)
+	}
+	return Facts{Response: f.Response, Extraction: f.Extraction}, nil
 }
 
 func (f Facts) responseIncomplete() (Facts, error) {
@@ -145,6 +148,12 @@ func (f Facts) requestRejected() (Facts, error) {
 }
 
 func (f Facts) responseLoaded(next core.State) (Facts, error) {
+	if f.Diagnostic != "" {
+		if next.Phase == core.PhaseEffectSaved || next.Phase == core.PhaseReturned {
+			return Facts{}, fmt.Errorf("%w: a diagnostic cannot be accepted or returned", ErrFacts)
+		}
+		return Facts{Diagnostic: f.Diagnostic}, nil
+	}
 	switch {
 	case f.Supersede != nil:
 		if next.Phase == core.PhaseEffectSaved || next.Phase == core.PhaseReturned {

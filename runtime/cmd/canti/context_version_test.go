@@ -304,7 +304,7 @@ func runtimeMappingRules(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			model, err := newModel(c, "https://model.test", host.Keys{AnthropicKey: "test-key", OpenAIKey: "test-key"})
+			model, err := newModel(c, "https://model.test", host.Keys{AnthropicKey: "test-credential-key", OpenAIKey: "test-credential-key"})
 			if err != nil {
 				t.Fatal(err)
 			}

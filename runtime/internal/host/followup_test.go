@@ -2,7 +2,6 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -84,7 +83,7 @@ func TestFollowUpBindingIsRememberedBeforeItCanOpen(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model",
+		writeMessageStream(w, map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "test-model",
 			"stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": `{"kind":"return","payload":"done"}`}},
 			"usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
 	}))

@@ -106,9 +106,29 @@ func decodeObject(raw []byte) (map[string]*string, []string, error) {
 	}
 	if token, err := decoder.Token(); err != io.EOF {
 		if err == nil {
-			return nil, nil, fmt.Errorf("trailing value %v", token)
+			return nil, nil, fmt.Errorf("%s", describeToken(token))
 		}
 		return nil, nil, err
 	}
 	return fields, order, nil
+}
+
+func describeToken(token any) string {
+	switch value := token.(type) {
+	case string:
+		return fmt.Sprintf("trailing value of type string (%d bytes)", len(value))
+	case json.Number:
+		return fmt.Sprintf("trailing value of type number (%d bytes)", len(value))
+	case bool:
+		return "trailing value of type boolean"
+	case nil:
+		return "trailing value of type null"
+	case json.Delim:
+		if value == '{' {
+			return "trailing value of type object"
+		}
+		return "trailing value of type array"
+	default:
+		return fmt.Sprintf("trailing value of type %T", token)
+	}
 }

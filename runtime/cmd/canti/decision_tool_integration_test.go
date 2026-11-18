@@ -15,7 +15,7 @@ import (
 
 func TestToolLineRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 	f, image := recoveryFixture(t, nil)
-	const identity = "canti-anthropic/4-tool"
+	const identity = "canti-anthropic/5-tool"
 	const protocol = "anthropic-messages/2023-06-01"
 	answer := func(step, call int, body string) {
 		f.model.answer(step, call, reply{status: http.StatusOK, body: body})
@@ -98,7 +98,7 @@ func TestToolLineRetainsFrozenIdentityAcrossRetryAndRestart(t *testing.T) {
 				if resp.Adapter != identity || resp.Protocol != protocol {
 					t.Fatalf("saved response lost adapter/protocol: %+v", resp)
 				}
-				savedInvalid = savedInvalid || string(resp.Body) == invalid
+				savedInvalid = savedInvalid || resp.Complete && bytes.Count(resp.Body, []byte(`"name":"canti_decision"`)) >= 2
 			}
 			if e.Kind == "response_loaded" && e.To == core.PhaseIdle {
 				rejected++

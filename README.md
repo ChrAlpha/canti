@@ -6,9 +6,10 @@ the right information for each agent step.
 canti is a single-machine durable agent: a stateless Go decision core and a
 harness that commits every fact to a SQLite journal before acting on it, runs
 commands in an explicitly prepared persistent Docker development environment or
-an explicitly selected ephemeral container, and asks a model for one decision
-per step through the Anthropic Messages API or the Responses API; the run
-names its model API and model, and canti assumes neither. Later processes reconstruct the accepted run configuration from the journal
+an explicitly selected ephemeral container, and streams one model request per
+step through the Anthropic Messages API or the Responses API, recording the
+provider's assembled final response; the run names its model API and model,
+and canti assumes neither. Later processes reconstruct the accepted run configuration from the journal
 and recover its execution evidence.
 It is an architectural experiment for a future Memoh agent runtime.
 
@@ -49,10 +50,11 @@ observable.
   distinct Exec IDs and shared environment authority, and ephemeral per-effect
   containers. Both retain accepted execution identities and bounded output.
 - `runtime/cmd/canti-job` is the one-shot capture helper packaged beside `canti`.
-- `runtime/internal/harness/anthropic` and `runtime/internal/harness/openai` are the Messages
-  and Responses adapters; `runtime/internal/harness/provider` sends the frozen request
-  bytes of each attempt once over `net/http` for both. The Chat Completions
-  API is not supported.
+- `runtime/internal/harness/anthropic` and `runtime/internal/harness/openai` are the streaming Messages
+  and Responses adapters; `runtime/internal/harness/provider` streams the frozen
+  request bytes of each attempt once over `net/http` for both and parses the
+  server-sent events within fixed bounds. The Chat Completions API is not
+  supported.
 - `runtime/cmd/canti` is the operational CLI and host executable.
 - `sdk/go/hostrpc` is the independent protocol and client module.
 - `apps/tui/cmd/canti-tui` is the independent terminal and pipe chat client.
@@ -205,7 +207,7 @@ Those cover cold restarts after every step, SIGKILL before and after each
 commit of an exec step, a job that outlives its controller, unknown outcomes,
 competing writers, retries with frozen bytes, large outputs, cancellation,
 budgets, and the container trust boundary. The model in every end-to-end test
-is a scripted local HTTP server speaking the Messages format.
+is a scripted local HTTP server speaking the streaming Messages format.
 [V1 acceptance](docs/v1-acceptance.md) records each gate, its tests, and their
 limits; three gates are partial.
 

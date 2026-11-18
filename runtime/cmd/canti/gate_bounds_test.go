@@ -135,11 +135,11 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 	for _, tc := range []struct {
 		name, failure string
 		first         reply
-		paid          int64
+		input, output int64
 	}{
-		{"overloaded", "status 529 overloaded_error", reply{status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`}, 2},
-		{"max_tokens", `stop_reason "max_tokens"`, reply{stopReason: "max_tokens", text: `{"kind":"exec","payload":"echo truncated > trunc.txt"}`}, 3},
-		{"cut", "unexpected EOF", reply{cut: true}, 2},
+		{"overloaded", "status 529 overloaded_error", reply{status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`}, 200, 20},
+		{"max_tokens", `stop_reason "max_tokens"`, reply{stopReason: "max_tokens", text: `{"kind":"exec","payload":"echo truncated > trunc.txt"}`}, 300, 30},
+		{"cut", "unexpected EOF", reply{cut: true}, 300, 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, image := evFixture(t, map[int]core.Decision{1: {Kind: core.Exec, Payload: "echo ok >> ok.txt"}, 2: {Kind: core.Return, Payload: "done"}})
@@ -160,7 +160,7 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 				!bytes.Equal(sent[2], h[7].Facts.Request.Body) {
 				t.Fatalf("%d requests do not replay the frozen bytes %+v", len(sent), frozen)
 			}
-			if frozen.Model != "fixture-model" || frozen.Adapter != "canti-anthropic/4" || !strings.HasPrefix(frozen.Protocol, "anthropic-messages/2023-06-01") {
+			if frozen.Model != "fixture-model" || frozen.Adapter != "canti-anthropic/5" || !strings.HasPrefix(frozen.Protocol, "anthropic-messages/2023-06-01") {
 				t.Errorf("request provenance = %+v", frozen)
 			}
 			for i, a := range map[int]core.AttemptStarted{1: {Step: 1, Attempt: 1}, 3: {Step: 1, Attempt: 2}} {
@@ -183,8 +183,14 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 					t.Errorf("partial response = %s", partial.Body)
 				}
 			case "cut":
-				if json.Valid(partial.Body) {
-					t.Errorf("cut response is whole: %s", partial.Body)
+				var message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+					StopReason *string `json:"stop_reason"`
+				}
+				if json.Unmarshal(partial.Body, &message) != nil || message.StopReason != nil || len(message.Content) == 0 || !strings.Contains(message.Content[0].Text, "echo ok") || !strings.Contains(message.Content[0].Text, "ok.txt") {
+					t.Errorf("cut response did not keep the partial content without a stop reason: %s", partial.Body)
 				}
 			}
 			if got := evEvent[core.ResponseSaved](t, h[4]); got != (core.ResponseSaved{Step: 1, Attempt: 2}) || h[4].Facts.Response.Model != "claude-test" {
@@ -207,8 +213,8 @@ func TestGateFrozenRequestReplay(t *testing.T) {
 			if recs := checkReleased(t, f, h); len(recs) != 1 {
 				t.Errorf("records %+v, want the one job of attempt 2", recs)
 			}
-			if s := f.status(); s.Totals.InputTokens != 100*tc.paid || s.Totals.OutputTokens != 10*tc.paid {
-				t.Errorf("totals = %+v, want the usage of %d responses", s.Totals, tc.paid)
+			if s := f.status(); s.Totals.InputTokens != tc.input || s.Totals.OutputTokens != tc.output {
+				t.Errorf("totals = %+v, want %d input and %d output tokens", s.Totals, tc.input, tc.output)
 			}
 			evLog(t, image, "frozen request replay", "step 1 attempt 1: "+tc.name,
 				fmt.Sprintf("response_incomplete %q, attempt 2 saved and dispatched once, returned", lost.Facts.Failure),

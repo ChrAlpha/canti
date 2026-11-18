@@ -10,6 +10,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/openai"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/provider"
 )
 
 // The model APIs a run can name. canti supports them as equals and assumes
@@ -56,6 +57,17 @@ func (k Keys) String() string { return "[redacted]" }
 // GoString hides every secret of k.
 func (k Keys) GoString() string { return "host.Keys{[redacted]}" }
 
+// Validate refuses a credential that is not a printable ASCII provider key.
+// The error never echoes the value.
+func (k Keys) Validate() error {
+	for _, key := range []string{k.AnthropicKey, k.AnthropicToken, k.OpenAIKey} {
+		if err := provider.CheckCredential("credential", key, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // For returns the keys of k that model API api uses, and none of the others.
 func (k Keys) For(api string) Keys {
 	switch api {
@@ -78,6 +90,9 @@ func (k Keys) MarshalJSON() ([]byte, error) { return []byte(`"[redacted]"`), nil
 // with the key of that API. An empty url selects the adapter's default; the
 // host reads no environment.
 func NewModel(c RunConfig, url string, k Keys) (harness.Model, error) {
+	if err := k.Validate(); err != nil {
+		return nil, err
+	}
 	if err := CheckModel(c); err != nil {
 		return nil, err
 	}

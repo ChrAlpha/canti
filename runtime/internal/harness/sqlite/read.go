@@ -219,7 +219,18 @@ func decodeEvent(kind, data string, semantics int) (core.Event, error) {
 	if err := strict(data, event.Interface()); err != nil {
 		return nil, err
 	}
-	return event.Elem().Interface().(core.Event), nil
+	decoded := event.Elem().Interface().(core.Event)
+	if loaded, ok := decoded.(core.ResponseLoaded); ok {
+		if loaded.Diagnostic == (loaded.Decision != nil) {
+			return nil, fmt.Errorf("%w: response_loaded requires exactly one of decision or diagnostic", ErrIncompatible)
+		}
+		if loaded.Decision != nil {
+			if err := loaded.Decision.Validate(); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrIncompatible, err)
+			}
+		}
+	}
+	return decoded, nil
 }
 
 // Request returns the request frozen at revision rev of step.
@@ -239,11 +250,30 @@ func (s *Store) request(ctx context.Context, tx *sql.Tx, runID string, step, rev
 }
 
 // Response returns the complete response saved for attempt of step.
-func (s *Store) Response(ctx context.Context, runID string, step, attempt int) (harness.Response, error) {
-	facts, err := s.facts(ctx, responseSQL, runID, step, attempt)
-	if err == nil && facts.Response == nil {
-		err = fmt.Errorf("%w: saved response without a response record", ErrIncompatible)
+func (s *Store) Extraction(ctx context.Context, runID string, step, attempt int) (*harness.Extraction, error) {
+	facts, err := s.savedFacts(ctx, runID, step, attempt)
+	if err != nil {
+		return nil, err
 	}
+	return facts.Extraction, nil
+}
+
+func (s *Store) savedFacts(ctx context.Context, runID string, step, attempt int) (harness.Facts, error) {
+	facts, err := s.facts(ctx, responseSQL, runID, step, attempt)
+	if err != nil {
+		return harness.Facts{}, err
+	}
+	if facts.Response == nil {
+		return harness.Facts{}, fmt.Errorf("%w: saved response without a response record", ErrIncompatible)
+	}
+	if err := facts.Extraction.Validate(); err != nil {
+		return harness.Facts{}, fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
+	return facts, nil
+}
+
+func (s *Store) Response(ctx context.Context, runID string, step, attempt int) (harness.Response, error) {
+	facts, err := s.savedFacts(ctx, runID, step, attempt)
 	if err != nil {
 		return harness.Response{}, err
 	}
