@@ -3,6 +3,7 @@ package hostrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,8 +13,26 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 	wire "github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "canti-hostrpc-helper-")
+	if err != nil {
+		panic(err)
+	}
+	helper := filepath.Join(dir, "canti-job")
+	if err := os.WriteFile(helper, fmt.Appendf(nil, "#!/bin/sh\necho %d\n", jobrunner.Protocol), 0o555); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("CANTI_JOB_HELPER", helper); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestValidationOfASteerNeedsNoNewRunWindow(t *testing.T) {
 	h, _, client, _ := servingWith(t, slog.New(slog.DiscardHandler))

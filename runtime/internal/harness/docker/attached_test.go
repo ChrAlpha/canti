@@ -3,6 +3,8 @@ package docker
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -289,7 +291,7 @@ func (f *attachedFake) executor(t *testing.T) *Attached {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x, err := NewAttached(AttachedConfig{Attachment: a, Workspace: f.workspace, State: state, Workdir: cwd, OutputLimit: 1024, PreviewLimit: 128})
+	x, err := NewAttached(AttachedConfig{Attachment: a, Workspace: f.workspace, State: state, Workdir: cwd, OutputLimit: 1024, PreviewLimit: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,9 +306,11 @@ func (f *attachedFake) complete(t *testing.T, x *Attached, e harness.Effect, cod
 	if err != nil || !found {
 		t.Fatalf("command=%+v: %v", r, err)
 	}
-	rec := jobrunner.Record{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, Generation: r.Generation, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), ExitCode: &code, Bytes: int64(len(text)), Stored: int64(len(text)), Digest: harness.ConfigDigest([]byte(text)), Preview: text}
+	sum := sha256.Sum256([]byte(text))
+	rec := jobrunner.Record{Protocol: jobrunner.Protocol, EffectID: e.ID, Spec: e.Spec, Generation: r.Generation, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), ExitCode: &code, Bytes: int64(len(text)), Stored: int64(len(text)), Digest: harness.ConfigDigest([]byte(text)), Preview: text,
+		PreviewDigest: hex.EncodeToString(sum[:]), PreviewBytes: len(text), PreviewLines: jobrunner.PreviewLines(text)}
 	data, _ := json.Marshal(rec)
-	for name, body := range map[string][]byte{"output": []byte(text), "completion.json": data} {
+	for name, body := range map[string][]byte{"output": []byte(text), "completion.json": data, jobrunner.PreviewFile: []byte(text)} {
 		if err = os.WriteFile(filepath.Join(f.dir, "spool", e.ID, name), body, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -1514,5 +1518,78 @@ func TestAttachedProjectReadRechecksEpochAfterExecCreation(t *testing.T) {
 	}
 	if f.starts != 0 {
 		t.Fatalf("sent %d starts into a changed epoch", f.starts)
+	}
+}
+
+func TestAttachedCompletedCommandMarksBrokenPreviewUnavailable(t *testing.T) {
+	for name, breakPreview := range map[string]func(string) error{
+		"missing": func(string) error { return nil },
+		"empty": func(path string) error {
+			return os.WriteFile(path, nil, 0600)
+		},
+		"replaced": func(path string) error {
+			return os.WriteFile(path, []byte("other"), 0600)
+		},
+		"same length": func(path string) error {
+			return os.WriteFile(path, []byte("real!"), 0600)
+		},
+		"too many lines": func(path string) error {
+			return os.WriteFile(path, []byte(strings.Repeat("\n", 2001)), 0600)
+		},
+		"invalid UTF-8": func(path string) error {
+			return os.WriteFile(path, []byte{0xff, 0xfe}, 0600)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAttachedFake(t)
+			x := f.executor(t)
+			e := effectFor(x, "effect_preview", "true")
+			if _, err := x.Drive(t.Context(), e); err != nil {
+				t.Fatal(err)
+			}
+			f.complete(t, x, e, 0, "real")
+			path := filepath.Join(f.dir, "spool", e.ID, jobrunner.PreviewFile)
+			if name == "missing" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := breakPreview(path); err != nil {
+				t.Fatal(err)
+			}
+			_, before, err := readEnvironment(f.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j, err := x.Inspect(t.Context(), e)
+			if err != nil || j.Status != harness.JobSucceeded || j.Output.Path != e.ID+"/output" ||
+				!strings.Contains(j.Preview, "preview unavailable") || !strings.Contains(j.Preview, spoolOutput(e.ID)) {
+				t.Fatalf("broken preview = %+v: %v", j, err)
+			}
+			cancelled, err := x.Cancel(t.Context(), e)
+			if err != nil || cancelled.Status != harness.JobSucceeded {
+				t.Fatalf("Cancel stopped a completed command: %+v: %v", cancelled, err)
+			}
+			_, after, err := readEnvironment(f.dir)
+			if err != nil || after.Gate != before.Gate || f.stops != 0 {
+				t.Fatalf("completed command changed the environment: before %+v after %+v stops %d err %v", before, after, f.stops, err)
+			}
+		})
+	}
+}
+
+func TestAttachedMissingOutputAfterCompletionIsUnknown(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_missing_output", "true")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	f.complete(t, x, e, 0, "done")
+	if err := os.Remove(filepath.Join(f.dir, "spool", e.ID, "output")); err != nil {
+		t.Fatal(err)
+	}
+	j, err := x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobUnknown || j.Output.Available {
+		t.Fatalf("missing attached output = %+v, %v", j, err)
 	}
 }

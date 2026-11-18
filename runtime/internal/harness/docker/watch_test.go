@@ -190,9 +190,8 @@ func TestLoopObservesTheExitOfAWaitedJobAtOnce(t *testing.T) {
 	lf.hook("wait", func(*http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		lf.reply("inspect", exited)
-		lf.reply("cp", exitArchive(t, "0\n"))
 	})
-	lf.output("done\n")
+	lf.writeCaptureFor(lf.effect, "done\n", 0)
 	began := time.Now()
 	snap, err := l.Step(lf.ctx, "run-1")
 	if err != nil || snap.State.Phase != core.PhaseIdle || time.Since(began) > 5*time.Second {

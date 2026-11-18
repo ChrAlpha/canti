@@ -28,7 +28,7 @@ type PromptLimits struct {
 func DefaultPromptLimits() PromptLimits {
 	return PromptLimits{
 		Goal: 32 << 10, Constraints: 16 << 10, Environment: 2 << 10, Command: 2 << 10,
-		Preview: 4 << 10, Rejected: 2 << 10, Total: MaxRequestBytes, Purpose: 512,
+		Preview: 50 << 10, Rejected: 2 << 10, Total: MaxRequestBytes, Purpose: 512,
 		Instructions: 32 << 10,
 	}
 }
@@ -220,14 +220,11 @@ func block(s string, limit int) string {
 }
 
 func writeBlock(b *strings.Builder, s string, limit int) {
+	// The fence is chosen from the clipped content but charged outside the
+	// content allowance, so backticks never shorten what the limit admits.
 	text := clip(s, limit)
-	n := fence(text)
-	if n > 3 {
-		text = clip(s, max(0, limit-2*(n-3)))
-		n = fence(text)
-	}
 	marks := "```"
-	if n > 3 {
+	if n := fence(text); n > 3 {
 		marks = strings.Repeat("`", n)
 	}
 	b.Grow(len(text) + 2*len(marks) + 3)

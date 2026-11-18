@@ -3,12 +3,12 @@ package docker
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 func (x *Attached) cancel(ctx context.Context, s *environmentState, r *attachedRecord) (harness.Job, error) {
@@ -136,22 +136,26 @@ func (x *Attached) publishCessation(s *environmentState, r *attachedRecord, kind
 	j.Status = harness.JobCancelled
 	j.Cessation = &harness.Cessation{AuthorityID: a.AuthorityID, BackendID: a.DaemonID, EnvironmentID: a.ContainerID, StartEpoch: r.Epoch, EffectID: r.Effect.ID, Spec: r.Effect.Spec, OwnerID: r.ExecID, StopIntent: digest, Incarnation: a.Incarnation, Generation: r.Generation, Kind: kind, RequestedAt: r.CancelAt, ConfirmedAt: time.Now().UTC()}
 	j.Output.Detail = "environment stopped; command exit code unavailable; background services also stopped"
-	data, err := spoolEvidence(a.Directory, r.Effect.ID, "output", x.cfg.OutputLimit)
+	spool, err := os.OpenRoot(filepath.Join(a.Directory, "spool"))
 	if err == nil {
-		path := filepath.Join(x.cfg.State, "artifacts", r.Effect.ID, "output")
-		if err = os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return harness.Job{}, err
+		defer spool.Close()
+		command, openErr := spool.OpenRoot(r.Effect.ID)
+		if openErr == nil {
+			defer command.Close()
+			n, copyErr := publishOutputEvidence(command, filepath.Join(x.cfg.State, "artifacts", r.Effect.ID, "output"), x.cfg.OutputLimit)
+			if copyErr == nil && n > 0 {
+				j.Output.Path, j.Output.Bytes, j.Output.Available = r.Effect.ID+"/output", n, true
+				if preview, previewErr := jobrunner.PreviewEvidence(command, "output", x.cfg.OutputLimit, x.cfg.PreviewLimit, spoolOutput(r.Effect.ID), x.cfg.OutputLimit, true); previewErr == nil {
+					j.Preview = preview
+				}
+			}
+			if copyErr != nil && !(errors.Is(copyErr, jobrunner.ErrEvidenceSource) && errors.Is(copyErr, os.ErrNotExist)) {
+				return harness.Job{}, copyErr
+			}
 		}
-		if err = publish(path, data, false); err != nil {
-			return harness.Job{}, err
-		}
-		if err = syncDir(filepath.Dir(filepath.Dir(path))); err != nil {
-			return harness.Job{}, err
-		}
-		tap := &tap{w: io.Discard, limit: x.cfg.OutputLimit, previewLimit: x.cfg.PreviewLimit}
-		_, _ = tap.Write(data)
-		j.Preview = tap.preview()
-		j.Output.Path, j.Output.Bytes, j.Output.Available = r.Effect.ID+"/output", int64(len(data)), true
+	}
+	if j.Preview == "" {
+		j.Preview = partialUnavailablePreview(spoolOutput(r.Effect.ID))
 	}
 	if kind == harness.CessationQuarantined {
 		j.Output.Detail += "; environment is quarantined until explicit retirement and replacement"

@@ -38,7 +38,7 @@ func TestGateUnknownOutcomeOfAJobKilledOutsideCanti(t *testing.T) {
 		return len(cs) == 1 && cs[0].state == "exited"
 	})
 
-	const detail = "no exit record at /tmp/.canti-exit: the process was killed before it could record, or the record could not be written"
+	const detail = "no helper completion: the command did not publish capture evidence before the container exited"
 	// unknown checks that a resume of f halts in needs_resolution with the
 	// detail, after committing exactly one outcome_unknown, and keeps the
 	// killed job without a record, a second job, or a second request.

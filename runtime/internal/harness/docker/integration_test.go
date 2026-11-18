@@ -30,6 +30,13 @@ func setup(t *testing.T, cfg docker.Config) (docker.Config, func(name string) st
 	t.Helper()
 	cfg.Image = cmp.Or(os.Getenv("CANTI_TEST_IMAGE"), "alpine:3.23")
 	cfg.Workspace, cfg.State = t.TempDir(), t.TempDir()
+	if cfg.Helper == "" {
+		cfg.Helper = filepath.Join(t.TempDir(), "canti-job")
+		build := exec.Command("go", "build", "-o", cfg.Helper, "github.com/ChrAlpha/canti/runtime/cmd/canti-job")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build capture helper: %v %s", err, out)
+		}
+	}
 	prefix := fmt.Sprintf("it%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=canti.effect", "--filter", "name=canti-"+prefix).Output()
@@ -379,7 +386,9 @@ func TestOutputIsBoundedAndVerified(t *testing.T) {
 	if err != nil || len(b) != 1<<20 || !strings.HasPrefix(string(b), "START\n0123456789") {
 		t.Fatalf("artifact has %d bytes: %v", len(b), err)
 	}
-	if p := job.Preview; len(p) > 4<<10 || !strings.HasPrefix(p, "START\n") || !strings.HasSuffix(p, "\nEND-TAIL\n") || !strings.Contains(p, " bytes omitted ...\n") {
+	if p := job.Preview; len(p) > 50<<10 || !strings.HasPrefix(p, "START\n") || !strings.HasSuffix(p, "\nEND-TAIL\n") ||
+		!strings.Contains(p, "output truncated") || !strings.Contains(p, "artifact keeps 1048576 of 20971536 bytes (-output-limit)") ||
+		!strings.Contains(p, archive.ArtifactsRoot+"/"+job.Output.Path) || !strings.Contains(p, "dd if=") || !strings.Contains(p, "bs=1") {
 		t.Fatalf("preview (%d bytes) = %q", len(p), p)
 	}
 
@@ -593,5 +602,31 @@ func TestBindingPublicationFailureRecoversTheSameNeverStartedOwner(t *testing.T)
 	}
 	if b, err := os.ReadFile(filepath.Join(cfg.Workspace, "binding.runs")); err != nil || string(b) != "run\n" {
 		t.Fatalf("runs: %q %v", b, err)
+	}
+}
+
+func TestEphemeralCaptureUsesPipeSemantics(t *testing.T) {
+	cfg, id := setup(t, docker.Config{})
+	ctx := testContext(t, time.Minute)
+	e := harness.Effect{ID: id("pipe"), Command: "echo first; echo second > /dev/stdout"}
+	job := run(ctx, t, open(t, cfg), e)
+	if job.Status != harness.JobSucceeded || job.Preview != "first\nsecond\n" || !job.Output.Complete {
+		t.Fatalf("seekable capture semantics = %+v", job)
+	}
+}
+
+func TestEphemeralCaptureDirectoryIsWritableByTheContainerUser(t *testing.T) {
+	for user, want := range map[string]string{"0:0": "0\n", "65534:65534": "65534\n"} {
+		t.Run(user, func(t *testing.T) {
+			cfg, id := setup(t, docker.Config{User: user})
+			if err := os.Chmod(cfg.Workspace, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			ctx := testContext(t, time.Minute)
+			job := run(ctx, t, open(t, cfg), harness.Effect{ID: id("user"), Command: "id -u"})
+			if job.Status != harness.JobSucceeded || job.Preview != want || !job.Output.Complete {
+				t.Fatalf("container user %s capture = %+v", user, job)
+			}
+		})
 	}
 }

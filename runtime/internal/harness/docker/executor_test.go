@@ -18,10 +18,23 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
+
+func testHelper(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "canti-job")
+	if err := os.WriteFile(path, fmt.Appendf(nil, "#!/bin/sh\necho %d\n", jobrunner.Protocol), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func newTestExecutor(t *testing.T, cfg Config) *Executor {
 	t.Helper()
+	if cfg.Helper == "" {
+		cfg.Helper = testHelper(t)
+	}
 	if cfg.Image == "" {
 		cfg.Image = "alpine:3.23"
 	}
@@ -42,7 +55,7 @@ func TestNewAppliesDefaults(t *testing.T) {
 	x := newTestExecutor(t, Config{})
 	want := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	c := x.cfg
-	if c.Docker != "docker" || c.User != want || c.Network != "none" || c.StopGrace != 5*time.Second || c.OutputLimit != 8<<20 || c.PreviewLimit != 4<<10 {
+	if c.Docker != "docker" || c.User != want || c.Network != "none" || c.StopGrace != 5*time.Second || c.OutputLimit != 8<<20 || c.PreviewLimit != 50<<10 {
 		t.Fatalf("defaults = %+v", c)
 	}
 	for _, dir := range []string{"jobs", "artifacts"} {
@@ -92,7 +105,7 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		{"same dir", Config{Image: "i", Workspace: ws, State: link}},
 		{"colon in path", Config{Image: "i", Workspace: ws, State: filepath.Join(root, "a:b")}},
 		{"negative output limit", Config{Image: "i", Workspace: ws, State: state, OutputLimit: -1}},
-		{"tiny preview", Config{Image: "i", Workspace: ws, State: state, PreviewLimit: 63}},
+		{"tiny preview", Config{Image: "i", Workspace: ws, State: state, PreviewLimit: 1023}},
 		{"negative grace", Config{Image: "i", Workspace: ws, State: state, StopGrace: -time.Second}},
 		{"relative mount", mount("records", "/canti/run")},
 		{"missing mount", mount(filepath.Join(root, "none"), "/canti/run")},
@@ -173,7 +186,7 @@ func TestCheckLayoutAgreesWithNewBeforeTheStateExists(t *testing.T) {
 			if err := os.MkdirAll(state, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := New(Config{Image: "i", Workspace: link, State: state}); (err != nil) != tc.overlap {
+			if _, err := New(Config{Helper: testHelper(t), Image: "i", Workspace: link, State: state}); (err != nil) != tc.overlap {
 				t.Fatalf("New() = %v once the state exists; CheckLayout predicted an overlap %t", err, tc.overlap)
 			}
 		})
@@ -337,18 +350,19 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"TINI_KILL_PROCESS_GROUP=1"}
+	env := []string{}
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"} {
 		env = append(env, k+"=", strings.ToLower(k)+"=")
 	}
-	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": spec, "canti.exit": exitFile}
-	if r.User != "1234:5678" || r.Image != "alpine:3.23" || r.WorkingDir != WorkDir || !r.AttachStdout || !r.AttachStderr ||
-		!slices.Equal(r.Entrypoint, []string{"/bin/sh"}) || !slices.Equal(r.Cmd, []string{"-c", wrapper, "canti", "exec 2>&1\necho hi"}) ||
+	labels := map[string]string{"canti.effect": "effect_1", "canti.state": x.cfg.State, "canti.spec": spec}
+	if r.User != "1234:5678" || r.Image != "alpine:3.23" || r.WorkingDir != "/" || !r.AttachStdout || !r.AttachStderr ||
+		!slices.Equal(r.Entrypoint, []string{"/canti-job"}) || !slices.Equal(r.Cmd, []string{"-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot + "/effect_1/output", "-effect", "effect_1", "-spec", spec, "-generation", "1", "-workdir", WorkDir, "-output-limit", "8388608", "-preview-limit", "51200", "--", "echo hi"}) ||
 		!slices.Equal(r.Env, env) || !maps.Equal(r.Labels, labels) {
 		t.Errorf("create request = %+v", r)
 	}
 	h := r.HostConfig
 	binds := []string{x.cfg.Workspace + ":" + WorkDir, filepath.Join(x.cfg.State, "artifacts") + ":" + archive.ArtifactsRoot + ":ro",
+		x.cfg.Helper + ":/canti-job:ro", filepath.Join(x.cfg.State, "jobs", "effect_1", "capture") + ":/canti/capture:rw",
 		runs + ":/canti/runs:ro", records + ":/canti/run:ro"}
 	if !slices.Equal(h.Binds, binds) || h.NetworkMode != "none" || !slices.Equal(h.CapDrop, []string{"ALL"}) ||
 		!slices.Equal(h.SecurityOpt, []string{"no-new-privileges"}) || !h.Init || h.Memory != 256<<20 || h.NanoCpus != 5e8 ||
@@ -381,7 +395,7 @@ func TestCreateRequestIsolatesTheJob(t *testing.T) {
 
 func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 	ws, state, records := t.TempDir(), t.TempDir(), t.TempDir()
-	base := Config{Image: "alpine:3.23", Workspace: ws, State: state}
+	base := Config{Helper: testHelper(t), Image: "alpine:3.23", Workspace: ws, State: state}
 	hash := func(cfg Config, command string) string {
 		return newTestExecutor(t, cfg).Specification(command)
 	}
@@ -390,7 +404,7 @@ func TestSpecHashCoversTheExecutionSpec(t *testing.T) {
 		t.Fatalf("hash is not deterministic: %s != %s", again, want)
 	}
 	policy := base
-	policy.StopGrace, policy.OutputLimit, policy.PreviewLimit, policy.Docker = time.Second, 1, 64, "/usr/bin/docker"
+	policy.StopGrace, policy.OutputLimit, policy.PreviewLimit, policy.Docker = time.Second, 1, jobrunner.MinPreviewBytes, "/usr/bin/docker"
 	if got := hash(policy, "echo hi"); got == want {
 		t.Fatalf("output and stop policy were omitted from specification")
 	}
@@ -532,5 +546,54 @@ func TestResolveStateReturnsCanonicalProspectiveDirectory(t *testing.T) {
 		if got, err := ResolveState(workspace, path); err == nil || got != "" {
 			t.Fatalf("unresolved ancestor fell back to %q: %v", got, err)
 		}
+	}
+}
+
+func TestSpecificationPinsHelperContentNotItsPath(t *testing.T) {
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "first"), filepath.Join(dir, "second")
+	body := []byte("#!/bin/sh\necho 2\n")
+	if err := os.WriteFile(first, body, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, body, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	workspace, state := t.TempDir(), t.TempDir()
+	make := func(helper string) *Executor {
+		return newTestExecutor(t, Config{Helper: helper, Image: "alpine:3.23", Workspace: workspace, State: state})
+	}
+	a, b := make(first), make(second)
+	if a.Specification("true") != b.Specification("true") {
+		t.Fatal("identical helper content at another path changed the specification")
+	}
+	if err := os.Chmod(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("#!/bin/sh\necho 3\n"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if a.Specification("true") == make(second).Specification("true") {
+		t.Fatal("different helper content did not change the specification")
+	}
+}
+
+func TestHelperIsPinnedByContentAtConstruction(t *testing.T) {
+	helper := testHelper(t)
+	if err := os.Chmod(helper, 0644); err != nil {
+		t.Fatal(err)
+	}
+	x := newTestExecutor(t, Config{Helper: helper, Image: "alpine:3.23", Workspace: t.TempDir(), State: t.TempDir()})
+	if x.cfg.Helper == helper || x.cfg.HelperDigest == "" {
+		t.Fatalf("helper was not pinned: %+v", x.cfg)
+	}
+	if got, err := jobrunner.HelperDigest(x.cfg.Helper); err != nil || got != x.cfg.HelperDigest {
+		t.Fatalf("pinned helper digest = %q, %v; want %q", got, err, x.cfg.HelperDigest)
+	}
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := jobrunner.HelperDigest(x.cfg.Helper); err != nil || got != x.cfg.HelperDigest {
+		t.Fatalf("pinned helper changed with its source: %q, %v", got, err)
 	}
 }

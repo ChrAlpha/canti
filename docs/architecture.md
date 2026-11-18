@@ -234,8 +234,20 @@ whether it was set by explicit resolution, the output's container path or
 `unavailable`, its bytes, whether it is complete, and any detail; `command`,
 `purpose`, and `preview` hold the committed command, decision purpose, and
 preview verbatim, so the command and purpose are whole where the prompt cuts
-them, and the preview holds the output's head and true tail even when its
-artifact kept only a prefix. `purpose` is empty when the decision had none; a
+them. The preview is the step's bounded output view: at most 2,000 lines and
+51,200 bytes, a line-aligned head and true tail unless one line exceeds the
+remaining side budget, interrupted by one marker that names the shown and
+omitted line ranges, the observed totals, whether `-output-limit` cut the
+artifact, the job-readable artifact named exactly once in a bounded byte-range
+`dd` paging command for only the omitted data the artifact still stores; line
+numbers in that marker are orientation, while the page uses the same
+rendered-size accounting and configured preview limit as the preview and
+addresses exact source bytes. The mandatory marker parts are budgeted first;
+optional prose is trimmed before any recorded head or tail. Output is unmarked only when it
+fits both limits, the artifact is complete, and capture finished cleanly; an
+`-output-limit` cut adds the marker even when all observed bytes fit. Both
+execution paths count source bytes and render the same content; only the
+job-readable artifact path differs. `purpose` is empty when the decision had none; a
 historical imported step directory may lack `purpose`. Publication repairs a
 missing derived purpose from the committed decision. A step the harness performed itself ran no
 process; its `meta` and `preview` present its outcome as context version 12
@@ -316,14 +328,14 @@ stop observable as owned work across interruption of the old drive and durable
 cleanup. Waiters stay attached; they receive the stop result or its actual bounded
 failure, while the interrupted drive retains its own cancellation result. This
 ownership is operational state, not a new journal event. The cleanup deadline
-must also cover copying the cancelled job's Docker log into its artifact, so
+must also cover copying the cancelled job's raw output file into its artifact, so
 a job that wrote a large output needs a longer `-cleanup`. A stop that is
 abandoned or misses its deadline leaves the run for a later `canti stop`. A
 stop of a run in `needs_resolution` records its reason and exits with status
 4: the job may still run until `canti resolve -job` records it, after which
 `canti stop` cancels it. A job whose container exited without an exit record
 inspects the same way every time, so `canti resolve -job` refuses it, and only
-`canti resolve -execution`, after reading `docker logs canti-<effect ID>`,
+`canti resolve -execution`, after reading `<state>/jobs/<effect ID>/capture/output`,
 moves its run on.
 `run` refuses to start a run while the latest run of its state directory is
 open or needs resolution, and publishes the step records of that run first,
@@ -370,8 +382,9 @@ the reason, until a client acts on it.
 Readers follow one total agent log, a projection of its committed transitions
 and admitted inputs: one page of at most 64 rows that never selects a request,
 a response, or retrieved evidence, and that clips every text in SQL to its cap
-(a command or purpose 2 KiB, a returned result 8 KiB, a preview 4 KiB, an input
-text 2 KiB, any other text 2 KiB), then cuts it at a rune boundary and marks the
+(a command or purpose 2 KiB, a returned result 8 KiB, an agent-log preview
+4 KiB, an input text 2 KiB, any other text 2 KiB), then cuts it at a rune
+boundary and marks the
 item `Truncated`. Every item therefore fits a page of 256 KiB, and `View` keeps
 the full result. Cursors are opaque agent-log positions; items carry the
 position and the run they belong to when they belong to one. Items report admitted principal inputs and
@@ -460,14 +473,19 @@ successful handover.
 
 `PromptLimits` bounds bytes, never predicted tokens. Defaults are 32 KiB for the
 goal, 16 KiB for constraints, 2 KiB for environment and command, 512 bytes per
-purpose, 4 KiB per preview, 2 KiB for rejected reply/error, and an 8 MiB total
-resource ceiling. `-request-bytes` can lower that ceiling. Both rendered input and
+purpose, 50 KiB and 2,000 lines per preview, 2 KiB for rejected reply/error,
+and an 8 MiB total resource ceiling; a preview limit below 4 KiB is refused so the marker fits. `-request-bytes` can lower that ceiling. Both rendered input and
 serialized provider body must fit. Goal and constraints are never truncated.
 Per-field cuts, the rendered bytes of each step block, and the total request cap
-are accounted separately and captured per step. Resident steps are loaded in
-bounded pages while the running total is checked, so an unbounded epoch is never
-materialized. Exceeding the resource ceiling fails visibly and terminally; it is
-never a provider rejection. There is no tokenizer, model-window table or reserve;
+are accounted separately and captured per step. A fence is chosen longer than
+any backtick run in the content and is charged outside the content allowance, so
+content within its limit is not shortened by fence overhead. Resident steps are
+loaded in bounded pages while the running total is checked, so an unbounded
+epoch is never materialized. Exceeding the resource ceiling fails visibly and
+terminally; it is never a provider rejection. A small `-request-bytes` cap takes
+precedence over anchoring: when resident steps alone exceed it, no budget anchor
+can discard an older step before the request is frozen, and the run stops at
+that local resource ceiling. There is no tokenizer, model-window table or reserve;
 the only projection is the budget anchor's, from reported usage and rendered bytes.
 
 Native retrieval commits exact observed source bytes with its outcome, including
@@ -706,7 +724,7 @@ Context 18 describes logical retrieval addresses in attached mode, and RPC 7
 projects pinned environments and typed command binding/cessation evidence.
 Earlier frozen context and wire records retain their original bytes.
 The ephemeral Docker executor computes a canonical specification over its effective
-configuration, command, wrapper and retention policy. It uses one named container per effect,
+configuration, command, helper entrypoint and retention policy. It uses one named container per effect,
 with effect/state/spec ownership labels. Configuration identity does not freeze
 workspace contents, image tags or daemon defaults. DOCKER_DEFAULT_PLATFORM is
 not an implicit create/pull override.
@@ -723,14 +741,32 @@ owner ID, not a fabricated job. The fence prevents launch but does not relabel a
 already-exited result. When cancellation observes a running owner, it publishes
 an identity/owner stop witness before the stop call. That witness permits a
 cancelled result after termination, including a natural exit racing the request.
-Without it, wrapper exit evidence decides the result and externally killed work
-without an exit record remains unknown. A running owner can truthfully be fenced.
+Without it, helper completion evidence decides the result and externally killed
+work without a completion remains unknown. A running owner can truthfully be fenced.
 
-Jobs run a shell wrapper whose child executes the command with stderr merged into
-stdout; its exit record in /tmp/.canti-exit must match Docker's exit code. Missing
-or contradictory evidence remains unknown. The image must provide /bin/sh and a
-writable /tmp. Known terminal output is captured within OutputLimit and PreviewLimit;
-publication/capture failure retains the container for retry. The terminal receipt
+An ephemeral job runs the same read-only mounted `canti-job` helper as a
+persistent environment, as its container entrypoint. The helper is pinned by
+content digest into `state/helpers/<digest>/canti-job` and verified there; a
+replacement at the original path cannot change the bytes a pinned effect runs. The helper executes the
+command with stderr merged into stdout through a pipe, and writes raw output,
+preview and completion into a host-backed per-effect capture directory. The
+capture directory is mode 0777 only inside a controller-only 0700
+`state/jobs/<effect>` parent, is removed after the durable receipt and artifact are published (kept for an unknown outcome), and is the only effect directory mounted; root,
+image-user and configured `--user` jobs can write their own capture, while
+other effects and the journal stay unreachable. The controller reads regular
+files without following links and validates the completion and preview before
+publishing the artifact. Before the launch latch, canti executes the host
+helper's `-version` and compares the image platform with the host, so a wrong
+helper protocol or an image that cannot run the host-built helper is a clear
+configuration error before the command starts. Missing
+or contradictory capture evidence remains unknown. The image must provide
+/bin/sh for the command and a writable /tmp; the helper's own files live only in
+the capture mount. Docker's json-file log
+is not the capture source, so invalid UTF-8 reaches both paths unchanged. Known terminal output is captured within OutputLimit and PreviewLimit;
+a preview is at most 51,200 bytes and 2,000 lines, names the job-readable
+artifact even when its own head-and-tail view is cut, and states an incomplete
+capture or write failure instead of claiming a complete artifact.
+Publication/capture failure retains the container for retry. The terminal receipt
 is published before release by real owner ID, and remains unchanged across all
 later operations, including Cancel. Failed release is retried on a later sample
 of that effect; no unbounded cross-effect sweep is part of Drive.
@@ -746,13 +782,22 @@ journal exposure without creating directories; dispatch also checks actual mount
 
 Every command has its own real Exec ID, start epoch, command generation, local
 reference/binding/latch mirrors and an authoritative record outside the writable
-environment. A versioned read-only `canti-job` helper captures bounded output in
-a separate writable spool. Its evidence is cross-checked with exact exec metadata;
-missing metadata never permits replay. Retained terminal receipts survive later
+environment. A versioned read-only `canti-job` helper, also mounted into
+ephemeral containers, captures bounded output and a separate bounded preview in
+a writable capture directory. Its completion binds the
+preview's SHA-256 digest, byte length and line count; the controller verifies all
+three and the structural bounds before the preview becomes model evidence. A
+missing or invalid preview leaves the completed result and its artifact path,
+with the preview marked unavailable; it never invents a preview from a prefix.
+Its evidence is cross-checked with exact exec metadata; missing metadata never
+permits replay. Retained terminal receipts survive later
 container or authority loss. The spool stays private to the host user;
 attachment proves its pinned container user can create evidence in a command
 directory, and helper evidence stays collector-readable when a root command
-writes it.
+writes it. canti removes neither a command's spool directory nor its `output`:
+retained spool contents prevent a fresh initialization of that environment, so
+the path a preview marker names stays readable to later steps of the run until
+the environment is retired or its spool is explicitly cleared.
 
 Raw start/stop requests are single-send and keep durable exact-request references.
 Only their specific successful acknowledgements, or positive exact-exec start
@@ -815,7 +860,7 @@ can end up to one response over its token budget; cost is not measured. The
 output-byte budget counts retained artifact bytes and is checked between
 steps, so a run can end up to one per-job output limit over it. It is not a
 filesystem quota: workspace writes, the journal's request and response
-bodies, and Docker's log of a running job are not counted. See
+bodies, and a running job's raw output file are not counted. See
 [V1 acceptance](v1-acceptance.md) for the evidence.
 
 ## Complexity budget

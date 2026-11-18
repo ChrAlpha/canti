@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -16,7 +17,7 @@ import (
 
 func config(t *testing.T, command string) Config {
 	t.Helper()
-	return Config{Directory: t.TempDir(), EffectID: "effect_test", Spec: strings.Repeat("a", 64), Generation: 1, Workdir: t.TempDir(), Command: command, OutputLimit: 1024, PreviewLimit: 128}
+	return Config{Directory: t.TempDir(), EffectID: "effect_test", Spec: strings.Repeat("a", 64), Artifact: "/canti/artifacts/effect_test/output", Generation: 1, Workdir: t.TempDir(), Command: command, OutputLimit: 1024, PreviewLimit: 4096}
 }
 func TestCompletionKeepsCommandExitAndImmutableCapture(t *testing.T) {
 	c := config(t, "printf hello; printf error >&2; exit 7")
@@ -67,7 +68,9 @@ func TestInheritedBackgroundPipeCannotHoldCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 800*time.Millisecond || !rec.Incomplete || rec.CaptureError != "" || *rec.ExitCode != 0 || rec.Preview != "foreground" {
+	if time.Since(start) > 800*time.Millisecond || !rec.Incomplete || rec.CaptureError != "" || *rec.ExitCode != 0 ||
+		!strings.Contains(rec.Preview, "foreground") || !strings.Contains(rec.Preview, "capture incomplete") ||
+		!strings.Contains(rec.Preview, "artifact keeps all 10 observed bytes, but capture was not complete") {
 		t.Fatalf("elapsed=%v record=%+v", time.Since(start), rec)
 	}
 }
@@ -162,7 +165,7 @@ func TestCaptureDeadlineRetainsPendingBytesWithinItsOutputLimit(t *testing.T) {
 		w.Close()
 		t.Fatal("deadline drain waited for the live writer")
 	}
-	if got.eof || got.err != nil || got.total != int64(len(text)) || got.stored != 16 || out.String() != text[:16] || len(got.preview()) > 128 {
+	if got.eof || got.err != nil || got.total != int64(len(text)) || got.stored != 16 || out.String() != text[:16] || len(got.preview(PreviewOptions{Artifact: "/canti/artifacts/effect_test/output", Stored: got.stored, StoredLines: got.storedLines()})) > 128 {
 		t.Fatalf("deadline lost pending bytes or limits: %+v output=%q", got, out.String())
 	}
 }
@@ -324,14 +327,14 @@ func TestArbitraryBytePreviewRespectsTheFinalUTF8ByteLimit(t *testing.T) {
 		data = append(data, byte(i%256))
 	}
 	for _, size := range []int{64, 128, 4096} {
-		got := collect(bytes.NewReader(data), io.Discard, 4096, size).preview()
+		got := collect(bytes.NewReader(data), io.Discard, 4096, size).preview(PreviewOptions{Artifact: "/canti/artifacts/effect_test/output", Stored: 4096, StoredLines: 4096})
 		if !utf8.ValidString(got) || len(got) > size {
 			t.Fatalf("limit=%d bytes=%d valid=%v", size, len(got), utf8.ValidString(got))
 		}
 	}
 }
 
-func TestControlByteOutputCannotOverflowCompletionMetadata(t *testing.T) {
+func TestControlByteOutputKeepsPreviewOutsideCompletionMetadata(t *testing.T) {
 	c := config(t, "printf '"+strings.Repeat("\\001", 4096)+"'")
 	c.OutputLimit = 4096
 	c.PreviewLimit = 4096
@@ -339,7 +342,7 @@ func TestControlByteOutputCannotOverflowCompletionMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *rec.ExitCode != 0 || rec.Bytes != 4096 || rec.Stored != 4096 || len(rec.Preview) > 4096 {
+	if *rec.ExitCode != 0 || rec.Bytes != 4096 || rec.Stored != 4096 || len(rec.Preview) > 4096 || !utf8.ValidString(rec.Preview) {
 		t.Fatalf("record=%+v", rec)
 	}
 	data, err := os.ReadFile(filepath.Join(c.Directory, "completion.json"))
@@ -353,11 +356,13 @@ func TestControlByteOutputCannotOverflowCompletionMetadata(t *testing.T) {
 	if err = json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rec.Preview, "preview shortened for metadata") {
-		t.Fatal("metadata truncation was silent")
+	preview, err := os.ReadFile(filepath.Join(c.Directory, PreviewFile))
+	if err != nil || string(preview) != rec.Preview {
+		t.Fatalf("preview evidence=%q: %v", preview, err)
 	}
-	if saved.Preview != rec.Preview || saved.Digest != rec.Digest {
-		t.Fatal("returned and published records disagree")
+	if saved.Preview != "" || saved.Digest != rec.Digest || saved.PreviewDigest != rec.PreviewDigest ||
+		saved.PreviewBytes != len(rec.Preview) || saved.PreviewLines != PreviewLines(rec.Preview) {
+		t.Fatalf("published completion=%+v", saved)
 	}
 }
 
@@ -416,3 +421,97 @@ func TestEvidenceRejectsLinksOversizeAndEscape(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewLimitBelowMarkerMinimumIsRefused(t *testing.T) {
+	c := config(t, "printf hello")
+	c.PreviewLimit = MinPreviewBytes - 1
+	if _, err := Run(c); err == nil {
+		t.Fatal("accepted a preview limit that cannot hold the marker")
+	}
+}
+
+func TestPreviewRefusesArtifactPathThatNeedsShellQuoting(t *testing.T) {
+	c := config(t, "printf hello")
+	c.Artifact = "/canti/artifacts/a path/output"
+	if _, err := Run(c); err == nil {
+		t.Fatal("accepted an artifact path that the paging command cannot name safely")
+	}
+}
+
+func TestCaptureRejectsASameSizeArtifactEdit(t *testing.T) {
+	c := config(t, "printf original; sleep 0.2; printf REPLACED > output")
+	c.Workdir = c.Directory
+	if _, err := Run(c); err == nil || !strings.Contains(err.Error(), "output changed during capture") {
+		t.Fatalf("same-size edit = %v", err)
+	}
+}
+
+func TestRunPublishesCompletionWhenPreviewCannotBePublished(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "preview"), []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Run(Config{Directory: dir, EffectID: "e", Spec: strings.Repeat("a", 64), Generation: 1,
+		Command: "printf hello", Workdir: "/", Artifact: "/tmp/out", OutputLimit: 1024, PreviewLimit: MinPreviewBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ExitCode == nil || *rec.ExitCode != 0 {
+		t.Fatalf("completion = %+v", rec)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "completion.json")); err != nil {
+		t.Fatalf("completion was not published: %v", err)
+	}
+}
+
+func TestVerifyFileRefusesAnOversizedFileBeforeReadingIt(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(32 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(f, strings.Repeat("0", 64), 0, 1<<10); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("oversized verify = %v", err)
+	}
+}
+
+func TestPreviewEvidenceStreamsA32MiBFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "output")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(f, io.LimitReader(zeroReader{}, 32<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	preview, err := PreviewEvidence(root, "output", 32<<20, MaxPreviewBytes, "/canti/artifacts/e/output", 32<<20, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+	if len(preview) == 0 || len(preview) > MaxPreviewBytes {
+		t.Fatalf("preview = %d bytes", len(preview))
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 4<<20 {
+		t.Fatalf("streaming a 32 MiB file allocated %d bytes", allocated)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }

@@ -1,43 +1,15 @@
 package docker
 
 import (
-	"archive/tar"
-	"bytes"
-	"context"
 	"errors"
 	"io/fs"
-	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
-
-// tarEntry is the archive the daemon sends of one entry.
-func tarEntry(t *testing.T, h tar.Header, body string) string {
-	t.Helper()
-	var b bytes.Buffer
-	w := tar.NewWriter(&b)
-	h.Size = int64(len(body))
-	if h.Typeflag != tar.TypeReg {
-		h.Size = 0
-	}
-	if err := w.WriteHeader(&h); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte(body[:h.Size])); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return b.String()
-}
-
-func exitArchive(t *testing.T, body string) string {
-	return tarEntry(t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeReg, Mode: 0o644}, body)
-}
 
 func TestRecordedExitIsFinal(t *testing.T) {
 	f := newFake(t)
@@ -52,56 +24,47 @@ func TestRecordedExitIsFinal(t *testing.T) {
 		t.Fatalf("record %v release %v", err, f.calls("rm"))
 	}
 }
-func TestUnrecordedExitStaysUnknown(t *testing.T) {
-	cases := map[string]func(*fake){
-		"missing": func(f *fake) { f.fail("cp", 404, "Could not find the file /tmp/.canti-exit in container c-e") },
-		"directory": func(f *fake) {
-			f.reply("cp", tarEntry(f.t, tar.Header{Name: ".canti-exit/", Typeflag: tar.TypeDir}, ""))
-		},
-		"symlink": func(f *fake) {
-			f.reply("cp", tarEntry(f.t, tar.Header{Name: ".canti-exit", Typeflag: tar.TypeSymlink, Linkname: "/workspace/x"}, ""))
-		},
+func TestMissingHelperCompletionStaysUnknown(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.reply("inspect", f.container("exited", 255))
+	j, err := f.x.Inspect(t.Context(), f.effect())
+	if err != nil || j.Status != harness.JobUnknown || j.ExitCode != nil || j.ID != "c-e" {
+		t.Fatalf("missing completion = %+v, %v", j, err)
 	}
-	for _, value := range []string{"", "ok\n", "25", "300\n", "+0\n", "-1\n"} {
-		value := value
-		cases["invalid:"+value] = func(f *fake) { f.reply("cp", exitArchive(f.t, value)) }
-	}
-	for name, set := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newFake(t)
-			f.latch(latchStart)
-			f.reply("inspect", f.container("exited", 255))
-			set(f)
-			e := f.effect()
-			for _, op := range []func(context.Context, harness.Effect) (harness.Job, error){f.x.Inspect, freshExecutor(f).Drive, freshExecutor(f).Cancel} {
-				j, err := op(t.Context(), e)
-				if err != nil || j.Status != harness.JobUnknown || j.ExitCode != nil || j.ID != "c-e" {
-					t.Fatalf("unknown: %+v %v", j, err)
-				}
-			}
-			for _, op := range []string{"create", "start", "stop", "logs", "rm"} {
-				if len(f.calls(op)) != 0 {
-					t.Fatalf("uncertain effect called %s: %v", op, f.calls(op))
-				}
-			}
-			if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) {
-				t.Fatal("unknown became terminal")
-			}
-		})
+	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatalf("unknown became terminal: %v", err)
 	}
 }
-func TestFailedExitRecordReadRetainsPhysicalEvidence(t *testing.T) {
-	for name, set := range map[string]func(*fake){"daemon down": func(f *fake) { f.down("cp") }, "daemon error": func(f *fake) { f.fail("cp", http.StatusInternalServerError, "unavailable") }, "oversized": func(f *fake) { f.reply("cp", exitArchive(f.t, "0\n"+strings.Repeat("x", 1<<20))) }} {
+func TestDamagedHelperCaptureDoesNotBecomeKnown(t *testing.T) {
+	for name, set := range map[string]struct {
+		damage func(*fake)
+		want   harness.JobStatus
+		err    bool
+	}{
+		"missing completion": {func(f *fake) { os.Remove(filepath.Join(f.x.capture("e"), "completion.json")) }, harness.JobUnknown, false},
+		"invalid completion": {func(f *fake) {
+			os.WriteFile(filepath.Join(f.x.capture("e"), "completion.json"), []byte("{"), 0600)
+		}, "", true},
+		"oversized completion": {func(f *fake) {
+			os.WriteFile(filepath.Join(f.x.capture("e"), "completion.json"), []byte(strings.Repeat("x", 20<<10)), 0600)
+		}, "", true},
+	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			f.latch(latchStart)
 			f.exited(0)
-			set(f)
-			if _, err := f.x.Inspect(t.Context(), f.effect()); err == nil {
-				t.Fatal("unreadable record became known")
+			set.damage(f)
+			j, err := f.x.Inspect(t.Context(), f.effect())
+			if set.err {
+				if err == nil {
+					t.Fatalf("damaged completion became terminal: %+v", j)
+				}
+			} else if err != nil || j.Status != set.want {
+				t.Fatalf("damaged completion = %+v, %v", j, err)
 			}
 			if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
-				t.Fatalf("released unreadable owner: %v", err)
+				t.Fatalf("released damaged owner: %v", err)
 			}
 		})
 	}

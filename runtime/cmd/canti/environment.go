@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 func environmentCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -159,5 +160,5 @@ func initializeCLIEnvironment(dir, helper string, encoder *json.Encoder) error {
 	if err != nil {
 		return err
 	}
-	return encoder.Encode(map[string]any{"directory": dir, "helper_protocol": 1, "authority_id": identity})
+	return encoder.Encode(map[string]any{"directory": dir, "helper_protocol": jobrunner.Protocol, "authority_id": identity})
 }

@@ -2,6 +2,8 @@ package docker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +34,7 @@ type execRequest struct {
 
 func (x *Attached) execRequest(r attachedRecord) execRequest {
 	a := x.cfg.Attachment
-	command := []string{a.Helper, "-directory", spoolRoot + "/" + r.Effect.ID, "-effect", r.Effect.ID, "-spec", r.Effect.Spec, "-generation", strconv.FormatUint(r.Generation, 10), "-workdir", x.cfg.Workdir, "-output-limit", strconv.FormatInt(x.cfg.OutputLimit, 10), "-preview-limit", strconv.Itoa(x.cfg.PreviewLimit)}
+	command := []string{a.Helper, "-directory", spoolRoot + "/" + r.Effect.ID, "-artifact", spoolOutput(r.Effect.ID), "-effect", r.Effect.ID, "-spec", r.Effect.Spec, "-generation", strconv.FormatUint(r.Generation, 10), "-workdir", x.cfg.Workdir, "-output-limit", strconv.FormatInt(x.cfg.OutputLimit, 10), "-preview-limit", strconv.Itoa(x.cfg.PreviewLimit)}
 	if a.Init != "" {
 		command = append(command, "-init", a.Init)
 	}
@@ -138,6 +140,8 @@ func (x *Attached) inspectExec(ctx context.Context, r attachedRecord) (execMetad
 	}
 	return m, nil
 }
+func spoolOutput(effectID string) string { return spoolRoot + "/" + effectID + "/output" }
+
 func (x *Attached) baseJob(r attachedRecord) harness.Job {
 	j := harness.Job{EffectID: r.Effect.ID, Spec: r.Effect.Spec, ID: r.ExecID, Fenced: r.Fenced, DispatchedAt: r.DispatchedAt}
 	if r.ExecID != "" {
@@ -228,19 +232,28 @@ func (x *Attached) completed(ctx context.Context, s *environmentState, r *attach
 		return x.unknown(*r, "invalid command completion evidence")
 	}
 	now := time.Now().UTC()
-	if rec.Protocol != jobrunner.Protocol || rec.EffectID != r.Effect.ID || rec.Spec != r.Effect.Spec || rec.Generation != r.Generation || rec.ExitCode == nil || *rec.ExitCode != *m.ExitCode || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt) || rec.StartedAt.Before(r.DispatchedAt.Add(-time.Second)) || rec.FinishedAt.After(now.Add(time.Second)) || rec.Stored < 0 || rec.Bytes < rec.Stored || rec.Stored > x.cfg.OutputLimit || len(rec.Preview) > x.cfg.PreviewLimit {
+	if rec.Protocol != jobrunner.Protocol || rec.EffectID != r.Effect.ID || rec.Spec != r.Effect.Spec || rec.Generation != r.Generation || rec.ExitCode == nil || *rec.ExitCode != *m.ExitCode || rec.StartedAt.IsZero() || rec.FinishedAt.Before(rec.StartedAt) || rec.StartedAt.Before(r.DispatchedAt.Add(-time.Second)) || rec.FinishedAt.After(now.Add(time.Second)) || rec.Stored < 0 || rec.Bytes < rec.Stored || rec.Stored > x.cfg.OutputLimit {
 		return x.unknown(*r, "command completion contradicts bound process evidence or capture limits")
 	}
+	preview, previewErr := x.previewEvidence(r.Effect.ID, rec)
 	j := x.baseJob(*r)
 	j.ExitCode = rec.ExitCode
 	j.StartedAt, j.FinishedAt = rec.StartedAt, rec.FinishedAt
-	j.Preview = rec.Preview
+	j.Preview = preview
+	if previewErr != nil {
+		j.Preview = unavailablePreview(spoolOutput(r.Effect.ID))
+	}
 	j.Status = harness.JobSucceeded
 	if *j.ExitCode != 0 {
 		j.Status = harness.JobFailed
 	}
 	if r.Fenced {
 		j.Status = harness.JobCancelled
+		if previewErr == nil {
+			j.Preview = cancelledProjection(preview, rec, spoolOutput(r.Effect.ID), x.cfg.PreviewLimit)
+		} else {
+			j.Preview = partialUnavailablePreview(spoolOutput(r.Effect.ID))
+		}
 	}
 	j, err = x.collectAttached(*r, j, rec)
 	if err != nil {
@@ -255,24 +268,47 @@ func (x *Attached) completed(ctx context.Context, s *environmentState, r *attach
 	return x.finishAttached(s, r, j)
 }
 func (x *Attached) collectAttached(r attachedRecord, j harness.Job, rec jobrunner.Record) (harness.Job, error) {
-	data, err := spoolEvidence(x.cfg.Attachment.Directory, r.Effect.ID, "output", x.cfg.OutputLimit)
+	spool, err := os.OpenRoot(filepath.Join(x.cfg.Attachment.Directory, "spool"))
 	if err != nil {
 		return j, errors.Join(errAttachedEvidence, err)
 	}
-	if int64(len(data)) != rec.Stored || harness.ConfigDigest(data) != rec.Digest {
-		return j, errors.Join(errAttachedEvidence, errors.New("docker: command output differs from its completion record"))
+	defer spool.Close()
+	command, err := spool.OpenRoot(r.Effect.ID)
+	if err != nil {
+		return j, errors.Join(errAttachedEvidence, err)
 	}
+	defer command.Close()
 	path := filepath.Join(x.cfg.State, "artifacts", r.Effect.ID, "output")
 	if err = os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return j, err
 	}
-	if err = publish(path, data, false); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return j, err
+	}
+	if err = f.Chmod(0644); err == nil {
+		h := sha256.New()
+		var n int64
+		n, err = jobrunner.CopyEvidence(command, "output", x.cfg.OutputLimit, f, h)
+		if err == nil && (n != rec.Stored || hex.EncodeToString(h.Sum(nil)) != rec.Digest) {
+			err = errors.Join(errAttachedEvidence, errors.New("docker: command output differs from its completion record"))
+		}
+		if err == nil {
+			j.Output = harness.ArtifactRef{Path: r.Effect.ID + "/output", Bytes: n, Available: true, Complete: !rec.Incomplete && rec.CaptureError == "" && rec.Bytes == rec.Stored}
+		}
+	}
+	if err != nil && !errors.Is(err, jobrunner.ErrEvidenceDestination) {
+		err = errors.Join(errAttachedEvidence, err)
+	}
+	if err := install(f, path, false, err); err != nil {
 		return j, err
 	}
 	if err = syncDir(filepath.Dir(filepath.Dir(path))); err != nil {
 		return j, err
 	}
-	j.Output = harness.ArtifactRef{Path: r.Effect.ID + "/output", Bytes: int64(len(data)), Available: true, Complete: !rec.Incomplete && rec.CaptureError == "" && rec.Bytes == rec.Stored}
+	if j.Output.Path == "" {
+		j.Output = harness.ArtifactRef{Path: r.Effect.ID + "/output", Bytes: rec.Stored, Available: true, Complete: !rec.Incomplete && rec.CaptureError == "" && rec.Bytes == rec.Stored}
+	}
 	switch {
 	case rec.CaptureError != "":
 		j.Output.Detail = rec.CaptureError
@@ -280,6 +316,10 @@ func (x *Attached) collectAttached(r attachedRecord, j harness.Job, rec jobrunne
 		j.Output.Detail = "foreground capture ended before inherited output pipes closed; only observed bytes are counted"
 	case rec.Bytes > rec.Stored:
 		j.Output.Detail = fmt.Sprintf("kept %d of %d observed bytes", rec.Stored, rec.Bytes)
+	}
+	if j.Status == harness.JobCancelled {
+		j.Output.Complete = false
+		j.Output.Detail = strings.TrimPrefix(j.Output.Detail+"; job was cancelled; output is partial", "; ")
 	}
 	return j, nil
 }

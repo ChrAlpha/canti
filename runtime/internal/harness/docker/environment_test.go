@@ -38,6 +38,7 @@ func TestEnvironmentInitializationPinsTheHelperAndNeverResetsAuthority(t *testin
 func TestEnvironmentInitializationRefusesAnUnsupportedHelper(t *testing.T) {
 	helper := filepath.Join(t.TempDir(), "wrong-helper")
 	if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol+1)), 0555); err != nil {
+
 		t.Fatal(err)
 	}
 	if err := InitEnvironment(t.TempDir(), helper); err == nil {

@@ -217,11 +217,11 @@ are not tested. Of two host reboots met live, a job killed by one was recorded
 with Docker's exit code 255; canti now reports a job killed before its shell
 records an exit status unknown rather than exited, tested with `docker kill`,
 while a signal the job observes, as from a graceful daemon shutdown, is
-reported as its exit status. In ephemeral mode, the container of an unknown job is kept for
-`docker logs canti-<effect ID>` and must be removed by hand. Several hosts are
+reported as its exit status. In ephemeral mode, the container of an unknown job is kept
+and its helper evidence remains under `<state>/jobs/<effect ID>/capture/`; remove the container by hand. Several hosts are
 out of scope. Cost is not measured. Only retained job output is bounded on
 disk, per job and per run; workspace writes, the journal, and a running job's
-Docker log and container layer are not, and there is no filesystem quota.
+container layer are not, and there is no filesystem quota.
 
 Distributed scheduling, multi-tenant policy, generic workflow graphs,
 automatic planning, and automatic memory compaction are outside this scope.

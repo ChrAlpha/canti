@@ -26,6 +26,23 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 )
 
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "canti-host-helper-")
+	if err != nil {
+		panic(err)
+	}
+	helper := filepath.Join(dir, "canti-job")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 2\n"), 0o555); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("CANTI_JOB_HELPER", helper); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // testHost opens a host on a fresh workspace and state directory.
 func testHost(t *testing.T, opts Options) *Host {
 	t.Helper()
@@ -2011,5 +2028,14 @@ func TestHostCanonicalStateSurvivesAliasRetargeting(t *testing.T) {
 	entries, err := os.ReadDir(other)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("host wrote through retargeted alias: %v,%v", entries, err)
+	}
+}
+
+func TestNewRunRefusesAnEphemeralRunWithoutHelperIdentity(t *testing.T) {
+	h := testHost(t, Options{})
+	t.Setenv("CANTI_JOB_HELPER", filepath.Join(t.TempDir(), "missing"))
+	spec := testSpec(h)
+	if _, _, err := NewRun("goal", "", spec, time.Now()); err == nil || !strings.Contains(err.Error(), "verifiable canti-job helper") {
+		t.Fatalf("new ephemeral run without helper = %v", err)
 	}
 }

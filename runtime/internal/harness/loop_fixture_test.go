@@ -138,6 +138,7 @@ type fakeExec struct {
 	hold    bool
 	tick    func()
 	inspect func(effectID string) (harness.Job, bool, error)
+	preview func(command string) string
 }
 
 func jobID(effectID string) string { return "job-" + strings.TrimPrefix(effectID, "effect_")[:12] }
@@ -274,7 +275,11 @@ func (x *fakeExec) Cancel(ctx context.Context, e harness.Effect) (harness.Job, e
 }
 
 func (x *fakeExec) finish(j *fakeJob, status harness.JobStatus) {
-	j.Status, j.FinishedAt, j.Preview = status, x.clock.Now(), "ran: "+j.command
+	preview := "ran: " + j.command
+	if x.preview != nil {
+		preview = x.preview(j.command)
+	}
+	j.Status, j.FinishedAt, j.Preview = status, x.clock.Now(), preview
 	if status == harness.JobCancelled && j.StartedAt.IsZero() {
 		j.FinishedAt = time.Time{}
 		j.Preview = ""

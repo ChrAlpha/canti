@@ -28,9 +28,6 @@ func referenceBlock(s string, limit int) string {
 		return longest + 1
 	}
 	text := clip(s, limit)
-	if n := fence(text); n > 3 {
-		text = clip(s, max(0, limit-2*(n-3)))
-	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}

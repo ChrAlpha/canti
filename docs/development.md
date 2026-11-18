@@ -547,10 +547,10 @@ among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read, apart from the instruction files
 and skills index bound at run creation.
 
-Each run stores current context version 23. Schema 8 keeps one agent log of
+Each run stores current context version 24. Schema 8 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 1,
-host protocol 11 and helper protocol 2 form one current contract. Unsupported formats and context
+host protocol 11 and capture helper protocol 3 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. A run created under an earlier context version is
 refused; within the current version, resuming and driving a run use its stored

@@ -32,7 +32,7 @@ func appear(ctx context.Context, t *testing.T, path string) {
 	}
 }
 
-const noRecord = "no exit record at /tmp/.canti-exit: the process was killed before it could record, or the record could not be written"
+const noRecord = "no helper completion: the command did not publish capture evidence before the container exited"
 
 // kill kills the container of job from outside canti and waits until Docker
 // reports it exited.

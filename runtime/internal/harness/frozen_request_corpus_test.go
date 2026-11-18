@@ -30,7 +30,7 @@ const (
 	corpusThirdRun = "run_5d1e8c3a7b2f4e9d6a0c8b5f3e1d9a72"
 	corpusSteps    = "/canti/runs/" + corpusRun + "/steps"
 	corpusListing  = `printf 'alpha\nbeta\ngamma\n'`
-	corpusVersion  = 23
+	corpusVersion  = 24
 )
 
 type frozenScenario struct {

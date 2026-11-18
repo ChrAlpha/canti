@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
+	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/openai"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 )
@@ -42,6 +43,7 @@ func TestRunNamesItsModelAPIAndModel(t *testing.T) {
 		s := parseSpec(t, append([]string{"-ephemeral", "-context-tokens", "200000"}, args...)...)
 		s.Config.Workspace = "/work"
 		s.Config.Provider = "http://127.0.0.1:1"
+		s.Config.HelperDigest, s.Config.HelperProtocol, _ = docker.DefaultHelperIdentity()
 		run, _, err := host.NewRun("goal", "", s, time.Time{})
 		if err != nil {
 			t.Fatalf("host.NewRun(%q) = %v", args, err)

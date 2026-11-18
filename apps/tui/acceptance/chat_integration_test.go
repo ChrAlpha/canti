@@ -33,7 +33,7 @@ func TestChatShowsATimedOutJob(t *testing.T) {
 	})
 	_, wait := f.startWith(strings.NewReader("wait\n"), nil, tuiCommand, "-image", image, "-job-timeout", "2s")
 	r := wait()
-	if r.code != exitOK || r.stdout != "gave up\n" || !strings.Contains(r.stderr, "$ sleep 60\n└ timed_out") || strings.Contains(r.stderr, "exit 1") {
+	if r.code != exitOK || r.stdout != "gave up\n" || !strings.Contains(r.stderr, "$ sleep 60\n") || !strings.Contains(r.stderr, "└ timed_out") || !strings.Contains(r.stderr, "command was cancelled; output is partial") || strings.Contains(r.stderr, "exit 1") {
 		t.Fatalf("chat: %+v", r)
 	}
 }

@@ -3,23 +3,24 @@
 package jobrunner
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
-const Protocol = 2
+const Protocol = 3
 const MetadataLimit = 16 << 10
 
 // lingerGrace bounds how long capture waits, once the foreground shell has
@@ -30,6 +31,7 @@ const lingerGrace = 100 * time.Millisecond
 // Workdir is entered by the command's shell, so it need not exist at launch.
 type Config struct {
 	Directory, EffectID, Spec, Command, Workdir, Init string
+	Artifact                                          string
 	Generation                                        uint64
 	OutputLimit                                       int64
 	PreviewLimit                                      int
@@ -45,11 +47,17 @@ type Record struct {
 	ExitCode                      *int
 	Bytes, Stored                 int64
 	Digest, Preview, CaptureError string
+	PreviewDigest                 string
+	PreviewBytes, PreviewLines    int
+	PreviewMarked                 bool
+	PreviewMarkerStart            int
+	PreviewMarkerLength           int
+	PreviewCancelledMarker        string
 	Incomplete                    bool
 }
 
 func (c Config) validate() error {
-	if !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Workdir) || c.EffectID == "" || len(c.EffectID) > 128 || !utf8.ValidString(c.EffectID) || c.Generation == 0 || c.OutputLimit < 1 || c.PreviewLimit < 64 || c.PreviewLimit > 4096 {
+	if !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Workdir) || !filepath.IsAbs(c.Artifact) || len(c.Artifact) > MaxArtifactPath || !safeArtifactPath(c.Artifact) || c.EffectID == "" || len(c.EffectID) > 128 || !utf8.ValidString(c.EffectID) || c.Generation == 0 || c.OutputLimit < 1 || c.PreviewLimit < MinPreviewBytes || c.PreviewLimit > MaxPreviewBytes {
 		return errors.New("job runner: invalid identity, directory or capture limits")
 	}
 	b, err := hex.DecodeString(c.Spec)
@@ -119,7 +127,7 @@ func Run(c Config) (Record, error) {
 	rec.ExitCode = &code
 	rec.FinishedAt = time.Now().UTC()
 	got := awaitCapture(reader, captured, lingerGrace)
-	rec.Bytes, rec.Stored, rec.Preview = got.total, got.stored, got.preview()
+	rec.Bytes, rec.Stored = got.total, got.stored
 	rec.Incomplete = !got.eof || got.err != nil
 	if got.err != nil {
 		rec.CaptureError = "capture failed"
@@ -127,24 +135,105 @@ func Run(c Config) (Record, error) {
 	if err := out.Sync(); err != nil {
 		return rec, fmt.Errorf("job runner: sync output: %w", err)
 	}
-	// Keep the descriptor of the file we created. An editable pathname must
-	// not redirect hashing into a FIFO, device, or replacement file.
-	if _, err := out.Seek(0, io.SeekStart); err != nil {
+	rec.Digest = hex.EncodeToString(got.digest.Sum(nil))
+	if err := verifyFile(out, rec.Digest, rec.Stored, c.OutputLimit); err != nil {
 		return rec, err
 	}
-	hash := sha256.New()
-	n, err := io.Copy(hash, io.LimitReader(out, c.OutputLimit+1))
-	if err != nil {
-		return rec, err
+	rec.Preview, rec.PreviewMarked, rec.PreviewMarkerStart, rec.PreviewMarkerLength, rec.PreviewCancelledMarker = got.renderPreview(PreviewOptions{Artifact: c.Artifact, Stored: got.stored, ArtifactLimit: c.OutputLimit, StoredLines: got.storedLines(), Incomplete: rec.Incomplete, CaptureError: rec.CaptureError, PreviewLimit: c.PreviewLimit,
+		PageEnd: func(start, max int64) int64 {
+			if end, err := pageEndFromFile(out, start, max, c.PreviewLimit); err == nil {
+				return end
+			}
+			return min(max, start+int64(c.PreviewLimit))
+		}})
+	rec.PreviewDigest = digestString(rec.Preview)
+	rec.PreviewBytes = len(rec.Preview)
+	rec.PreviewLines = PreviewLines(rec.Preview)
+	if rec.PreviewBytes > c.PreviewLimit || rec.PreviewLines > MaxPreviewLines {
+		return rec, errors.New("job runner: preview exceeds its bound")
 	}
-	if n != rec.Stored {
-		return rec, errors.New("job runner: output changed during capture")
+	if err := publishPreview(root, rec.Preview); err != nil {
+		// The preview is an optional projection; its publication failure must
+		// not turn a completed command into an unknown outcome. The collector
+		// reports the missing preview as unavailable.
+		rec.PreviewDigest, rec.PreviewBytes, rec.PreviewLines = "", 0, 0
 	}
-	rec.Digest = hex.EncodeToString(hash.Sum(nil))
 	if err := publish(root, &rec); err != nil {
 		return rec, err
 	}
 	return rec, nil
+}
+
+func safeArtifactPath(path string) bool {
+	if !utf8.ValidString(path) || !filepath.IsAbs(path) {
+		return false
+	}
+	for _, r := range path {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '/' || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func verifyFile(f *os.File, digest string, size, limit int64) error {
+	before, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if before.Size() > limit || before.Size() != size {
+		return errors.New("job runner: output changed during capture")
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, size))
+	if err != nil {
+		return err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if n != size || after.Size() != size || hex.EncodeToString(h.Sum(nil)) != digest {
+		return errors.New("job runner: output changed during capture")
+	}
+	return nil
+}
+
+// pageEndFromFile finds the longest recommended page under the configured
+// preview limits, using the same rendered-size accounting as PreviewBuffer.
+func pageEndFromFile(f *os.File, start, max int64, previewLimit int) (int64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return start, err
+	}
+	return pageEndFromReaderAt(f, info.Size(), start, max, previewLimit)
+}
+
+func pageEndFromReaderAt(r io.ReaderAt, size, start, max int64, previewLimit int) (int64, error) {
+	if start < 0 {
+		start = 0
+	}
+	if max > size {
+		max = size
+	}
+	if previewLimit <= 0 {
+		return start, nil
+	}
+	rawEnd := min(max, start+int64(previewLimit))
+	if rawEnd <= start {
+		return start, nil
+	}
+	raw := make([]byte, rawEnd-start)
+	n, err := r.ReadAt(raw, start)
+	if err != nil && err != io.EOF {
+		return start, err
+	}
+	raw = raw[:n]
+	return start + int64(pageEndForRaw(raw, previewLimit)), nil
 }
 
 func exitCode(err error) (int, error) {
@@ -183,18 +272,30 @@ func forwardSignals(pid int) func() {
 	return func() { signal.Stop(signals); close(done) }
 }
 
-func publish(root *os.Root, rec *Record) error {
-	// UTF-8 validity and JSON expansion have independent bounds. Compute the
-	// exact space available for the preview rather than losing a valid result
-	// because control bytes expand to six-byte JSON escapes.
-	preview := rec.Preview
-	rec.Preview = ""
-	base, err := json.Marshal(rec)
+func publishPreview(root *os.Root, preview string) error {
+	f, err := root.OpenFile(PreviewFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return err
 	}
-	rec.Preview = metadataPreview(preview, MetadataLimit-len(base))
-	data, err := json.Marshal(rec)
+	_, err = io.WriteString(f, preview)
+	err = errors.Join(err, f.Chmod(0644))
+	err = errors.Join(err, f.Sync(), f.Close())
+	if err != nil {
+		return err
+	}
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
+}
+
+func publish(root *os.Root, rec *Record) error {
+	// The preview is separate mutable evidence; the completion record keeps
+	// only facts whose JSON remains within MetadataLimit.
+	published := *rec
+	published.Preview = ""
+	data, err := json.Marshal(published)
 	if err != nil {
 		return err
 	}
@@ -244,15 +345,17 @@ func awaitCapture(r *os.File, captured <-chan capture, grace time.Duration) capt
 }
 
 type capture struct {
-	total, stored int64
-	head, tail    []byte
-	limit         int
-	eof           bool
-	err           error
+	total, stored  int64
+	storedNewlines int64
+	storedLast     byte
+	buffer         PreviewBuffer
+	digest         hash.Hash
+	eof            bool
+	err            error
 }
 
 func collect(r io.Reader, w io.Writer, limit int64, preview int) capture {
-	c := capture{limit: preview}
+	c := capture{buffer: NewPreviewBuffer(preview), digest: sha256.New()}
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := r.Read(buf)
@@ -274,32 +377,46 @@ func collect(r io.Reader, w io.Writer, limit int64, preview int) capture {
 }
 func (c *capture) write(w io.Writer, p []byte, limit int64) {
 	c.total += int64(len(p))
-	n := min(len(p), c.limit-len(c.head))
-	c.head = append(c.head, p[:n]...)
-	c.tail = append(c.tail, p[max(0, len(p)-c.limit):]...)
-	if len(c.tail) > c.limit {
-		c.tail = append(c.tail[:0], c.tail[len(c.tail)-c.limit:]...)
-	}
+	c.buffer.Observe(p)
 	if c.err == nil && c.stored < limit {
 		wanted := min(int64(len(p)), limit-c.stored)
 		n, err := w.Write(p[:wanted])
+		if n > 0 {
+			c.storedNewlines += int64(bytes.Count(p[:n], []byte{'\n'}))
+			c.storedLast = p[n-1]
+		}
 		c.stored += int64(n)
+		if n > 0 && c.digest != nil {
+			_, _ = c.digest.Write(p[:n])
+		}
 		if err == nil && int64(n) != wanted {
 			err = io.ErrShortWrite
 		}
 		c.err = err
 	}
 }
-func (c capture) preview() string {
-	validHead := strings.ToValidUTF8(string(c.head), "�")
-	if c.total <= int64(c.limit) && len(validHead) <= c.limit {
-		return validHead
+func (c capture) preview(o PreviewOptions) string {
+	return c.buffer.String(o)
+}
+
+func (c *capture) renderPreview(o PreviewOptions) (string, bool, int, int, string) {
+	preview := c.buffer.String(o)
+	return preview, c.buffer.marked, c.buffer.markerStart, c.buffer.markerLength, c.buffer.cancelledMarker
+}
+
+func (c capture) storedLines() int64 {
+	if c.stored == 0 {
+		return 0
 	}
-	marker := fmt.Sprintf("\n... %d observed bytes ...\n", c.total)
-	n := (c.limit - len(marker)) / 2
-	head := utf8Prefix(validHead, n)
-	tail := utf8Prefix(strings.ToValidUTF8(string(c.tail[len(c.tail)-n:]), "�"), n)
-	return head + marker + tail
+	if c.storedLast == '\n' {
+		return c.storedNewlines
+	}
+	return c.storedNewlines + 1
+}
+
+func digestString(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func utf8Prefix(s string, limit int) string {
@@ -310,30 +427,4 @@ func utf8Prefix(s string, limit int) string {
 		limit--
 	}
 	return s[:max(0, limit)]
-}
-
-func jsonBoundedPreview(s string, limit int) string {
-	used := 0
-	for i, r := range s {
-		data, _ := json.Marshal(string(r))
-		used += len(data) - 2
-		if used > limit {
-			return s[:i]
-		}
-	}
-	return s
-}
-
-func metadataPreview(s string, limit int) string {
-	prefix := jsonBoundedPreview(s, limit)
-	if len(prefix) == len(s) {
-		return s
-	}
-	marker := "\n... preview shortened for metadata ...\n"
-	encoded, _ := json.Marshal(marker)
-	cost := len(encoded) - 2
-	if cost > limit {
-		return prefix
-	}
-	return jsonBoundedPreview(s, limit-cost) + marker
 }

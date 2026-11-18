@@ -84,7 +84,7 @@ func TestAttachedDockerRetainsEnvironmentAcrossCommandsAndRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestAttachedDockerMissingWorkdirCompletesAndReleasesEnvironment(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: project, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: project, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -263,7 +263,7 @@ func TestAttachedDockerMissingWorkdirCompletesAndReleasesEnvironment(t *testing.
 			if err != nil || status.Active != "" || status.Gate != "open" || status.Unsettled != 0 {
 				t.Fatalf("cwd failure retained ownership: %+v: %v", status, err)
 			}
-			good, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: "/workspace", OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+			good, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: "/workspace", OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -292,7 +292,7 @@ func TestAttachedDockerStopsAfterCommandRemovesWorkspace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: project, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: project, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,7 +368,7 @@ func TestAttachedDockerSupportedUserWritesCommandEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 1024, StopGrace: time.Second})
+			x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 4096, PreviewLimit: 4096, StopGrace: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}

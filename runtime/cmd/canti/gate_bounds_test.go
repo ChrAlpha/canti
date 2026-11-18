@@ -225,7 +225,7 @@ func evFlood(lines int) string {
 	return fmt.Sprintf(`yes "$(printf '%%0%dd' 0)" | head -n %d; echo tail-marker`, evLine-1, lines)
 }
 
-var evOmitted = regexp.MustCompile(`\n\.\.\. \d+ bytes omitted \.\.\.\n`)
+var evOmitted = regexp.MustCompile(`\n\.\.\. output truncated:`)
 
 // evCheckFlood checks the observation of an evFlood of total bytes kept to limit.
 func evCheckFlood(t *testing.T, f *fixture, obs *harness.Observation, total, limit int64) {
@@ -243,8 +243,11 @@ func evCheckFlood(t *testing.T, f *fixture, obs *harness.Observation, total, lim
 		t.Errorf("artifact holds %d bytes, %v; want the first %d bytes of the output", len(data), err, limit)
 	}
 	marker := evOmitted.FindString(obs.Preview)
-	if marker == "" || len(obs.Preview) > 4<<10 || !strings.HasPrefix(obs.Preview, line) || !strings.HasSuffix(obs.Preview, line+"tail-marker\n") {
-		t.Errorf("preview of %d bytes, marker %q: %q...%q", len(obs.Preview), marker, obs.Preview[:min(64, len(obs.Preview))], obs.Preview[max(0, len(obs.Preview)-64):])
+	artifact := archive.ArtifactsRoot + "/" + o.Path
+	if marker == "" || len(obs.Preview) > 50<<10 || !strings.HasPrefix(obs.Preview, line) || !strings.HasSuffix(obs.Preview, line+"tail-marker\n") ||
+		!strings.Contains(obs.Preview, fmt.Sprintf("artifact keeps %d of %d bytes (-output-limit);", limit, total)) ||
+		!strings.Contains(obs.Preview, "dd if="+artifact) || !strings.Contains(obs.Preview, "bs=1") {
+		t.Errorf("preview of %d bytes, marker %q, artifact %q: %q...%q", len(obs.Preview), marker, artifact, obs.Preview[:min(64, len(obs.Preview))], obs.Preview[max(0, len(obs.Preview)-64):])
 	}
 }
 

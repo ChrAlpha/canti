@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 // AttachedConfig rebuilds a command executor from immutable run wiring. Its
@@ -42,7 +43,7 @@ func prepareAttachedConfig(c AttachedConfig) (AttachedConfig, error) {
 	if err := c.Attachment.validate(); err != nil {
 		return c, err
 	}
-	if !filepath.IsAbs(c.State) || filepath.Clean(c.State) != c.State || !filepath.IsAbs(c.Workspace) || filepath.Clean(c.Workspace) != c.Workspace || !filepath.IsAbs(c.Workdir) || filepath.Clean(c.Workdir) != c.Workdir || c.OutputLimit < 1 || c.PreviewLimit < 64 || c.PreviewLimit > 4096 || c.StopGrace < 0 {
+	if !filepath.IsAbs(c.State) || filepath.Clean(c.State) != c.State || !filepath.IsAbs(c.Workspace) || filepath.Clean(c.Workspace) != c.Workspace || !filepath.IsAbs(c.Workdir) || filepath.Clean(c.Workdir) != c.Workdir || c.OutputLimit < 1 || c.PreviewLimit < jobrunner.MinPreviewBytes || c.PreviewLimit > jobrunner.MaxPreviewBytes || c.StopGrace < 0 {
 		return c, errors.New("docker: invalid attached execution configuration")
 	}
 	for _, other := range []string{c.Workspace, c.Attachment.Directory} {

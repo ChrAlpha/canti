@@ -10,8 +10,6 @@
 package docker
 
 import (
-	"archive/tar"
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -20,16 +18,15 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 // WorkDir is the working directory of every job, where Config.Workspace is
@@ -40,6 +37,13 @@ const WorkDir = "/workspace"
 type Config struct {
 	// Docker is the CLI path; "docker" by default.
 	Docker string
+	// Helper is the canti-job executable mounted into every ephemeral
+	// container. It defaults to the canti-job beside this executable.
+	Helper string `json:"-"`
+	// HelperDigest pins the helper content in the execution specification;
+	// HelperProtocol pins its record contract.
+	HelperDigest   string
+	HelperProtocol int
 	// Image runs every job; required.
 	Image string
 	// Workspace is an absolute host directory mounted read-write at WorkDir.
@@ -63,7 +67,7 @@ type Config struct {
 	// OutputLimit bounds the bytes retained per job artifact; 8 MiB by
 	// default.
 	OutputLimit int64
-	// PreviewLimit bounds the preview bytes; 4 KiB by default, at least 64.
+	// PreviewLimit bounds the preview bytes; 50 KiB by default, at least 4 KiB.
 	PreviewLimit int
 	// Mounts are mounted read-only into every job, in order.
 	Mounts []Mount
@@ -116,13 +120,39 @@ func prepareConfig(cfg Config) (Config, error) {
 		return Config{}, errors.New("docker: limits must not be negative")
 	}
 	cfg.Docker = cmp.Or(cfg.Docker, "docker")
+	if cfg.Helper == "" {
+		cfg.Helper = os.Getenv("CANTI_JOB_HELPER")
+		if cfg.Helper == "" {
+			exe, err := os.Executable()
+			if err != nil {
+				return Config{}, fmt.Errorf("docker: locate canti-job: %w", err)
+			}
+			cfg.Helper = filepath.Join(filepath.Dir(exe), "canti-job")
+		}
+	}
+	if !filepath.IsAbs(cfg.Helper) {
+		return Config{}, errors.New("docker: helper must be an absolute path")
+	}
+	if cfg.HelperProtocol == 0 {
+		cfg.HelperProtocol = jobrunner.Protocol
+	}
+	if cfg.HelperProtocol != jobrunner.Protocol {
+		return Config{}, fmt.Errorf("docker: helper protocol %d is not supported; want %d", cfg.HelperProtocol, jobrunner.Protocol)
+	}
+	if digest, err := jobrunner.HelperDigest(cfg.Helper); err == nil {
+		if cfg.HelperDigest == "" {
+			cfg.HelperDigest = digest
+		}
+	} else if cfg.HelperDigest == "" {
+		return Config{}, fmt.Errorf("docker: helper cannot be verified: %w", err)
+	}
 	cfg.User = cmp.Or(cfg.User, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	cfg.Network = cmp.Or(cfg.Network, "none")
 	cfg.StopGrace = cmp.Or(cfg.StopGrace, 5*time.Second)
 	cfg.OutputLimit = cmp.Or(cfg.OutputLimit, 8<<20)
-	cfg.PreviewLimit = cmp.Or(cfg.PreviewLimit, 4<<10)
-	if cfg.PreviewLimit < 64 {
-		return Config{}, errors.New("docker: preview limit must be at least 64 bytes")
+	cfg.PreviewLimit = cmp.Or(cfg.PreviewLimit, jobrunner.MaxPreviewBytes)
+	if cfg.PreviewLimit < jobrunner.MinPreviewBytes || cfg.PreviewLimit > jobrunner.MaxPreviewBytes {
+		return Config{}, fmt.Errorf("docker: preview limit must be %d..%d bytes", jobrunner.MinPreviewBytes, jobrunner.MaxPreviewBytes)
 	}
 	// Validate numeric runtime settings before accepting a configuration whose
 	// pure specification must describe a constructible request.
@@ -177,6 +207,10 @@ func New(cfg Config) (*Executor, error) {
 		return nil, err
 	}
 	cfg.Workspace, cfg.State, cfg.Mounts = ws, state, mounts
+	cfg, err = pinHelper(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &Executor{cfg: cfg, client: newClient(cliEngine(cfg.Docker))}, nil
 }
 
@@ -260,36 +294,42 @@ func within(dir, path string) bool {
 // job; every job sets them empty.
 var proxies = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "FTP_PROXY", "ALL_PROXY"}
 
-func (x *Executor) binds() []string {
-	b := []string{x.cfg.Workspace + ":" + WorkDir, x.artifacts() + ":" + archive.ArtifactsRoot + ":ro"}
+func (x *Executor) binds(effectID string) []string {
+	b := []string{x.cfg.Workspace + ":" + WorkDir, x.artifacts() + ":" + archive.ArtifactsRoot + ":ro",
+		x.cfg.Helper + ":/canti-job:ro", x.capture(effectID) + ":/canti/capture:rw"}
 	for _, m := range x.cfg.Mounts {
 		b = append(b, m.Source+":"+m.Target+":ro")
 	}
 	return b
 }
 
-func script(command string) string { return "exec 2>&1\n" + command }
+func (x *Executor) capture(id string) string { return filepath.Join(x.dir(id), "capture") }
 
-// wrapper runs the job's script in a child shell and records the child's
-// exit status in the container's
-// writable layer, which outlives a container killed outside canti. It
-// discards its own diagnostics, survives the stop signals that tini sends the
-// whole process group, and unsets the variables it adds to the environment.
-const wrapper = `exec 3>&2 2>/dev/null
-unset TINI_KILL_PROCESS_GROUP SHLVL
-trap : HUP INT QUIT TERM USR1 USR2
-(exec /bin/sh -c "$1" 2>&3 3>&-)
-s=$?
-rm -f ` + exitFile + `
-set -C
-echo $s >` + exitFile + `
-exit $s`
+func (x *Executor) ensureCapture(id string) error {
+	parent := x.dir(id)
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(parent, 0700); err != nil {
+		return err
+	}
+	path := x.capture(id)
+	if err := os.MkdirAll(path, 0777); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0777)
+}
 
 // Specification hashes the actual create request, exact normalized config and
 // retention rules. Its identity labels are blank to avoid self-reference.
 // Image contents and daemon defaults remain external environment.
 func (x *Executor) Specification(command string) string {
 	request, _ := x.request(harness.Effect{Command: command}, "")
+	for i, bind := range request.HostConfig.Binds {
+		if bind == x.cfg.Helper+":/canti-job:ro" {
+			request.HostConfig.Binds[i] = "/canti-job:/canti-job:ro"
+		}
+	}
 	canonical, _ := json.Marshal(struct {
 		Protocol string
 		Config   Config
@@ -328,43 +368,6 @@ func (x *Executor) lock(ctx context.Context, id string) (func(), error) {
 }
 
 var errMissing = errors.New("no such container")
-
-// capped bounds the archive of the exit record, which a job controls.
-type capped struct{ b *bytes.Buffer }
-
-func (c capped) Write(p []byte) (int, error) {
-	if c.b.Len()+len(p) > 64<<10 {
-		return 0, errors.New("output exceeds 64 KiB")
-	}
-	return c.b.Write(p)
-}
-
-// exitStatus reads the exit status that wrapper wrote to file in the
-// container; it is nil when the file holds none.
-func (x *Executor) exitStatus(ctx context.Context, containerID, file string) (*int, error) {
-	var out bytes.Buffer
-	err := x.api(ctx, "cp", http.MethodGet, "/containers/"+containerID+"/archive?path="+url.QueryEscape(file), nil, func(r *http.Response) error {
-		_, err := io.Copy(capped{&out}, r.Body)
-		return err
-	})
-	if status(err) == http.StatusNotFound && !errors.Is(err, errMissing) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	r := tar.NewReader(&out)
-	if h, err := r.Next(); err != nil || h.Typeflag != tar.TypeReg || h.Size > 4 {
-		return nil, nil
-	}
-	b, err := io.ReadAll(r)
-	s, ok := strings.CutSuffix(string(b), "\n")
-	code, cerr := strconv.Atoi(s)
-	if err != nil || !ok || cerr != nil || strconv.Itoa(code) != s || code < 0 || code > 255 {
-		return nil, nil
-	}
-	return &code, nil
-}
 
 func (x *Executor) inspect(ctx context.Context, id string) (container, bool, error) {
 	var c container

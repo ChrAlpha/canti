@@ -25,11 +25,12 @@ func run(args []string, exitOnDeadline bool) int {
 	mounts := fs.String("mounts", "", "bounded JSON mount metadata for -project-read")
 	deadline := fs.Duration("deadline", 9*time.Second, "project read deadline")
 	fs.StringVar(&c.Directory, "directory", "", "command evidence directory")
+	fs.StringVar(&c.Artifact, "artifact", "", "path the job can read the retained output")
 	fs.StringVar(&c.EffectID, "effect", "", "accepted effect ID")
 	fs.StringVar(&c.Spec, "spec", "", "accepted specification")
 	fs.Uint64Var(&c.Generation, "generation", 0, "command generation")
 	fs.Int64Var(&c.OutputLimit, "output-limit", 8<<20, "retained output bytes")
-	fs.IntVar(&c.PreviewLimit, "preview-limit", 4096, "preview bytes")
+	fs.IntVar(&c.PreviewLimit, "preview-limit", jobrunner.MaxPreviewBytes, "preview bytes")
 	fs.StringVar(&c.Workdir, "workdir", "", "directory the command shell enters")
 	fs.StringVar(&c.Init, "init", "", "optional shell initialization file")
 	if err := fs.Parse(args); err != nil {

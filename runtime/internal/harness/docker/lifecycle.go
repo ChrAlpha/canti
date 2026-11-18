@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
@@ -37,7 +39,7 @@ func (x *Executor) observe(ctx context.Context, effect harness.Effect) (o observ
 	}
 	if found {
 		labels := o.c.Config.Labels
-		if labels["canti.spec"] != effect.Spec || labels[exitLabel] != exitFile {
+		if labels["canti.spec"] != effect.Spec {
 			return o, false, fmt.Errorf("docker: effect %s container has a different specification or execution protocol", effect.ID)
 		}
 		if err := x.binding(effect, o.c); err != nil {
@@ -47,20 +49,24 @@ func (x *Executor) observe(ctx context.Context, effect harness.Effect) (o observ
 	return o, found, nil
 }
 
-func (o observation) exitRecord() string {
-	if o.latch != latchStart || o.marked || o.c.State.Status != "exited" && o.c.State.Status != "dead" {
-		return ""
-	}
-	return exitFile
+func (o observation) exitRecord() bool {
+	return o.latch == latchStart && !o.marked && (o.c.State.Status == "exited" || o.c.State.Status == "dead")
 }
 
 func (x *Executor) finalize(ctx context.Context, effect harness.Effect, o observation) (harness.Job, error) {
 	var recorded *int
-	if file := o.exitRecord(); file != "" {
-		var err error
-		if recorded, err = x.exitStatus(ctx, o.c.ID, file); err != nil {
-			return harness.Job{}, err
+	if o.exitRecord() {
+		if !x.captureComplete(effect.ID) {
+			job := derive(o.latch, o.c, o.marked, nil)
+			job.EffectID, job.Spec, job.Fenced = effect.ID, effect.Spec, o.fenced
+			job.Output.Detail = unrecorded
+			if o.c.State.OOMKilled {
+				job.Output.Detail += "; Docker observed an out-of-memory kill in the container"
+			}
+			return job, nil
 		}
+		code := o.c.State.ExitCode
+		recorded = &code
 	}
 	job := derive(o.latch, o.c, o.marked, recorded)
 	job.EffectID, job.Spec, job.Fenced = effect.ID, effect.Spec, o.fenced
@@ -68,6 +74,11 @@ func (x *Executor) finalize(ctx context.Context, effect harness.Effect, o observ
 		return x.finish(ctx, effect, job)
 	}
 	return job, job.Validate(effect)
+}
+
+func (x *Executor) captureComplete(id string) bool {
+	fi, err := os.Lstat(filepath.Join(x.capture(id), "completion.json"))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 func (x *Executor) absent(ctx context.Context, effect harness.Effect, fenced bool) (harness.Job, error) {
@@ -117,6 +128,9 @@ func (x *Executor) createOwner(ctx context.Context, effect harness.Effect) (obse
 	if err := ctx.Err(); err != nil {
 		return observation{}, err
 	}
+	if err := x.checkHelper(ctx); err != nil {
+		return observation{}, err
+	}
 	created := x.create(ctx, effect, effect.Spec)
 	// A lost acknowledgement can still leave a matching owner. Lookup must
 	// positively identify it before publication; lookup failure is not absence.
@@ -132,6 +146,9 @@ func (x *Executor) createOwner(ctx context.Context, effect harness.Effect) (obse
 
 func (x *Executor) launch(ctx context.Context, effect harness.Effect, o observation) (harness.Job, error) {
 	if err := ctx.Err(); err != nil {
+		return harness.Job{}, err
+	}
+	if err := x.checkHelper(ctx); err != nil {
 		return harness.Job{}, err
 	}
 	if err := setLatch(x.dir(effect.ID), latchStart); err != nil {

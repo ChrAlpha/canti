@@ -12,6 +12,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -42,6 +43,21 @@ import (
 // the loop, and CANTI_TEST_SETUP=checked an input after its checks,
 // after creating that file, until the process receives SIGINT or SIGTERM.
 func TestMain(m *testing.M) {
+	if os.Getenv("CANTI_TEST_MAIN") == "" && os.Getenv("CANTI_JOB_HELPER") == "" {
+		dir, err := os.MkdirTemp("", "canti-test-helper")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		helper := filepath.Join(dir, "canti-job")
+		build := exec.Command("go", "build", "-o", helper, "github.com/ChrAlpha/canti/runtime/cmd/canti-job")
+		if out, err := build.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "build canti-job: %v\n%s", err, out)
+			os.Exit(1)
+		}
+		os.Setenv("CANTI_JOB_HELPER", helper)
+		defer os.RemoveAll(dir)
+	}
 	if filepath.Base(os.Args[0]) == "docker" {
 		os.Exit(preflightDockerProxy())
 	}
@@ -1106,6 +1122,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 		"-output-budget", "1000000", "-job-timeout", "90s")
 	s.Config.Workspace = "/work"
 	s.Config.Provider = "http://127.0.0.1:1"
+	s.Config.HelperDigest, s.Config.HelperProtocol, _ = docker.DefaultHelperIdentity()
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	run, initial, err := host.NewRun("goal", "constraints", s, now)
 	if err != nil {
@@ -1128,6 +1145,7 @@ func TestRunFlagsPersistInTheRun(t *testing.T) {
 	x := host.ExecutorConfig(c, "/state")
 	if !reflect.DeepEqual(x, docker.Config{Image: "alpine:3.23", Workspace: "/work", State: "/state", Network: "bridge", Memory: "512m",
 		CPUs: "1.5", PidsLimit: 64, OutputLimit: 4096, PreviewLimit: harness.DefaultPromptLimits().Preview,
+		HelperDigest: s.Config.HelperDigest, HelperProtocol: s.Config.HelperProtocol,
 		Mounts: []docker.Mount{{Source: "/state/history", Target: "/canti/runs"}, {Source: "/state/inputs", Target: "/canti/inputs"}}}) {
 		t.Errorf("executor config = %+v", x)
 	}

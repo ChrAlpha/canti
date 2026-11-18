@@ -20,7 +20,7 @@ func TestEnvironmentInitializationIsIndependentOfRunState(t *testing.T) {
 	}
 	var out, diagnostics bytes.Buffer
 	code := cli(context.Background(), []string{"environment", "init", "-environment", dir, "-helper", helper}, &out, &diagnostics)
-	if code != exitOK || !strings.Contains(out.String(), `"helper_protocol":1`) {
+	if code != exitOK || !strings.Contains(out.String(), fmt.Sprintf(`"helper_protocol":%d`, jobrunner.Protocol)) {
 		t.Fatalf("init=%d %s %s", code, out.String(), diagnostics.String())
 	}
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {

@@ -109,7 +109,7 @@ func newClient(e *engine) client {
 func (d client) api(ctx context.Context, op, method, path string, body any, handle func(*http.Response) error) error {
 	limit := d.timeouts.call
 	switch op {
-	case "create", "logs", "wait":
+	case "create", "logs", "wait", "image":
 		limit = d.timeouts.transfer
 	}
 	_, err := d.call(ctx, op, limit, method, path, body, !d.engine.single, handle)

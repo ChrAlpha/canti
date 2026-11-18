@@ -286,6 +286,12 @@ func (h *Host) replay(ctx context.Context, s Submission, previous harness.Input)
 			return Ack{}, err
 		}
 		submitted := s.Spec
+		if submitted.Config.HelperDigest == "" {
+			submitted.Config.HelperDigest = c.HelperDigest
+		}
+		if submitted.Config.HelperProtocol == 0 {
+			submitted.Config.HelperProtocol = c.HelperProtocol
+		}
 		if p, err := newProvider(submitted.Config.API, s.Binding); err == nil {
 			submitted.Config.Provider = p
 		}
@@ -300,7 +306,14 @@ func (h *Host) replay(ctx context.Context, s Submission, previous harness.Input)
 		return ack, nil
 	}
 	if haveSpec {
-		ack.Differs = fieldsDiffering("", storedSpec.Config, s.Spec.Config)
+		submitted := s.Spec.Config
+		if submitted.HelperDigest == "" {
+			submitted.HelperDigest = storedSpec.Config.HelperDigest
+		}
+		if submitted.HelperProtocol == 0 {
+			submitted.HelperProtocol = storedSpec.Config.HelperProtocol
+		}
+		ack.Differs = fieldsDiffering("", storedSpec.Config, submitted)
 		ack.Differs = append(ack.Differs, fieldsDiffering("budget.", storedSpec.Budget, s.Spec.Budget)...)
 		ack.Differs = append(ack.Differs, fieldsDiffering("limits.", storedSpec.Limits, s.Spec.Limits)...)
 	}

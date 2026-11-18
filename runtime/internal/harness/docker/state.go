@@ -17,6 +17,7 @@ import (
 const (
 	latchStart  = "start"
 	latchCancel = "cancel"
+	unrecorded  = "no helper completion: the command did not publish capture evidence before the container exited"
 )
 
 type container struct {
@@ -33,15 +34,6 @@ type container struct {
 		FinishedAt time.Time
 	}
 }
-
-// A container labelled exitLabel runs wrapper, which writes the exit status
-// of the job's command to exitFile just before it exits. Only that record,
-// read as recorded, makes such a job's exit final.
-const (
-	exitLabel  = "canti.exit"
-	exitFile   = "/tmp/.canti-exit"
-	unrecorded = "no exit record at " + exitFile + ": the process was killed before it could record, or the record could not be written"
-)
 
 func derive(latch string, c container, marked bool, recorded *int) harness.Job {
 	job := harness.Job{ID: c.ID, Status: harness.JobUnknown, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt}

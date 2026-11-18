@@ -108,12 +108,11 @@ func TestDeriveKeepsZeroTimes(t *testing.T) {
 func TestDeriveTrustsOnlyARecordedExit(t *testing.T) {
 	code := func(n int) *int { return &n }
 	const (
-		noRecord = "no exit record at /tmp/.canti-exit: the process was killed before it could record, or the record could not be written"
+		noRecord = "no helper completion: the command did not publish capture evidence before the container exited"
 		oomKill  = noRecord + "; Docker observed an out-of-memory kill in the container"
 	)
 	for _, tt := range []struct {
 		name     string
-		labeled  bool
 		state    string
 		exit     int
 		oom      bool
@@ -122,27 +121,24 @@ func TestDeriveTrustsOnlyARecordedExit(t *testing.T) {
 		want     harness.JobStatus
 		detail   string
 	}{
-		{"recorded success", true, "exited", 0, false, false, code(0), harness.JobSucceeded, ""},
-		{"recorded failure", true, "exited", 3, false, false, code(3), harness.JobFailed, ""},
-		{"recorded signal", true, "exited", 137, false, false, code(137), harness.JobFailed, ""},
-		{"recorded out of memory", true, "exited", 137, true, false, code(137), harness.JobFailed, ""},
-		{"recorded after a child ran out of memory", true, "exited", 0, true, false, code(0), harness.JobSucceeded, ""},
-		{"recorded dead", true, "dead", 3, false, false, code(3), harness.JobFailed, ""},
-		{"killed by a host restart", true, "exited", 255, false, false, nil, harness.JobUnknown, noRecord},
-		{"killed from outside", true, "exited", 137, false, false, nil, harness.JobUnknown, noRecord},
-		{"dead unrecorded", true, "dead", 137, false, false, nil, harness.JobUnknown, noRecord},
-		{"killed after a child ran out of memory", true, "exited", 137, true, false, nil, harness.JobUnknown, oomKill},
-		{"out of memory flag after a host restart", true, "exited", 255, true, false, nil, harness.JobUnknown, oomKill},
-		{"record contradicts the container", true, "exited", 137, false, false, code(0), harness.JobUnknown,
+		{"recorded success", "exited", 0, false, false, code(0), harness.JobSucceeded, ""},
+		{"recorded failure", "exited", 3, false, false, code(3), harness.JobFailed, ""},
+		{"recorded signal", "exited", 137, false, false, code(137), harness.JobFailed, ""},
+		{"recorded out of memory", "exited", 137, true, false, code(137), harness.JobFailed, ""},
+		{"recorded after a child ran out of memory", "exited", 0, true, false, code(0), harness.JobSucceeded, ""},
+		{"recorded dead", "dead", 3, false, false, code(3), harness.JobFailed, ""},
+		{"killed by a host restart", "exited", 255, false, false, nil, harness.JobUnknown, noRecord},
+		{"killed from outside", "exited", 137, false, false, nil, harness.JobUnknown, noRecord},
+		{"dead unrecorded", "dead", 137, false, false, nil, harness.JobUnknown, noRecord},
+		{"killed after a child ran out of memory", "exited", 137, true, false, nil, harness.JobUnknown, oomKill},
+		{"out of memory flag after a host restart", "exited", 255, true, false, nil, harness.JobUnknown, oomKill},
+		{"record contradicts the container", "exited", 137, false, false, code(0), harness.JobUnknown,
 			"recorded exit status 0 differs from the container's exit code 137"},
-		{"cancelled", true, "exited", 143, false, true, nil, harness.JobCancelled, ""},
-		{"cancelled after a recorded exit", true, "exited", 0, false, true, code(0), harness.JobCancelled, ""},
+		{"cancelled", "exited", 143, false, true, nil, harness.JobCancelled, ""},
+		{"cancelled after a recorded exit", "exited", 0, false, true, code(0), harness.JobCancelled, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var c container
-			if tt.labeled {
-				c.Config.Labels = map[string]string{exitLabel: exitFile}
-			}
 			c.State.Status, c.State.ExitCode, c.State.OOMKilled = tt.state, tt.exit, tt.oom
 			job := derive(latchStart, c, tt.marked, tt.recorded)
 			if job.Status != tt.want || job.Output.Detail != tt.detail {

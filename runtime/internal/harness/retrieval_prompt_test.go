@@ -126,7 +126,7 @@ func TestRetrievalPromptKeepsQueryWhenCommandIsClipped(t *testing.T) {
 	for _, query := range []archive.RetrievalQuery{
 		{Operation: "search", Path: "/canti/runs/R/steps/00000001/preview", Query: strings.Repeat("x", 2500), Reason: "check the original scope"},
 		{Operation: "read", Path: "/canti/imports/" + strings.Repeat("segment/", 375) + "evidence", Reason: "check the original scope"},
-		{Operation: "search", Path: "/canti/imports/evidence", Query: strings.Repeat("`", 800), Reason: "check the original scope"},
+		{Operation: "search", Path: "/canti/imports/evidence", Query: strings.Repeat("`", 3000), Reason: "check the original scope"},
 	} {
 		r := archive.Retrieval{Query: query}
 		body, _ := json.Marshal(r)

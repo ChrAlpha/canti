@@ -12,11 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
 // createRequest is the container that the docker CLI creates for the run
-// arguments of a job, under wrapper, with its identity labels.
+// arguments of a job, under the helper entrypoint, with its identity labels.
 type createRequest struct {
 	User         string
 	AttachStdout bool
@@ -46,14 +47,16 @@ type createRequest struct {
 // request is the canonical container configuration and identity labels.
 func (x *Executor) request(effect harness.Effect, spec string) (createRequest, error) {
 	c := x.cfg
-	r := createRequest{User: c.User, AttachStdout: true, AttachStderr: true, Image: c.Image, WorkingDir: WorkDir, Entrypoint: []string{"/bin/sh"},
-		Env: []string{"TINI_KILL_PROCESS_GROUP=1"}, Cmd: []string{"-c", wrapper, "canti", script(effect.Command)},
-		Labels: map[string]string{"canti.effect": effect.ID, "canti.state": c.State, "canti.spec": spec, exitLabel: exitFile}}
+	args := []string{"-directory", "/canti/capture", "-artifact", archive.ArtifactsRoot + "/" + effect.ID + "/output",
+		"-effect", effect.ID, "-spec", spec, "-generation", "1", "-workdir", WorkDir,
+		"-output-limit", strconv.FormatInt(c.OutputLimit, 10), "-preview-limit", strconv.Itoa(c.PreviewLimit), "--", effect.Command}
+	r := createRequest{User: c.User, AttachStdout: true, AttachStderr: true, Image: c.Image, WorkingDir: "/", Entrypoint: []string{"/canti-job"}, Cmd: args,
+		Env: []string{}, Labels: map[string]string{"canti.effect": effect.ID, "canti.state": c.State, "canti.spec": spec}}
 	for _, k := range proxies {
 		r.Env = append(r.Env, k+"=", strings.ToLower(k)+"=")
 	}
 	h := &r.HostConfig
-	h.Binds, h.NetworkMode, h.CapDrop, h.SecurityOpt, h.Init = x.binds(), c.Network, []string{"ALL"}, []string{"no-new-privileges"}, true
+	h.Binds, h.NetworkMode, h.CapDrop, h.SecurityOpt, h.Init = x.binds(effect.ID), c.Network, []string{"ALL"}, []string{"no-new-privileges"}, true
 	h.LogConfig.Type, h.LogConfig.Config = "json-file", map[string]string{"max-size": "1p", "mode": "blocking"}
 	if c.PidsLimit > 0 {
 		n := int64(c.PidsLimit)
@@ -72,6 +75,9 @@ func (x *Executor) request(effect harness.Effect, spec string) (createRequest, e
 // create creates the deterministic owner, pulling the image if necessary.
 // An ambiguous reply is recovered by the caller's identity-checked lookup.
 func (x *Executor) create(ctx context.Context, effect harness.Effect, spec string) error {
+	if err := x.ensureCapture(effect.ID); err != nil {
+		return fmt.Errorf("docker create: prepare capture: %w", err)
+	}
 	req, err := x.request(effect, spec)
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)

@@ -2,7 +2,8 @@ package docker
 
 import (
 	"context"
-	"encoding/binary"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -22,20 +24,22 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 // fake is the Docker daemon of the executor under test. It answers each
 // operation, after running the operation's hook, with the reply set for it
 // or a default success, and records the call. Its docker CLI only pulls.
 type fake struct {
-	t       *testing.T
-	ctl     string
-	x       *Executor
-	stop    chan struct{}
-	mu      sync.Mutex
-	replies map[string]reply
-	hooks   map[string]func(*http.Request)
-	log     []string
+	t        *testing.T
+	ctl      string
+	x        *Executor
+	stop     chan struct{}
+	mu       sync.Mutex
+	replies  map[string]reply
+	hooks    map[string]func(*http.Request)
+	log      []string
+	exitCode int
 }
 
 // reply answers an operation with body, or, with an error status, with body
@@ -53,7 +57,7 @@ exit "$(cat %[1]q/pull.exit 2>/dev/null || echo 0)"
 `
 
 func newFake(t *testing.T) *fake {
-	f := &fake{t: t, ctl: t.TempDir(), stop: make(chan struct{}), replies: map[string]reply{},
+	f := &fake{t: t, ctl: t.TempDir(), stop: make(chan struct{}), replies: map[string]reply{"image": {body: fmt.Sprintf(`{"Os":%q,"Architecture":%q}`, runtime.GOOS, runtime.GOARCH)}},
 		hooks: map[string]func(*http.Request){}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
@@ -130,6 +134,8 @@ func route(r *http.Request) (string, string) {
 		return "create", "create " + q.Get("name") + " for " + q.Get("platform")
 	case path == "containers/create":
 		return "create", "create " + q.Get("name")
+	case len(parts) == 3 && parts[0] == "images" && parts[2] == "json":
+		return "image", "image " + parts[1]
 	case len(parts) == 2 && r.Method == http.MethodDelete:
 		return "rm", "rm " + parts[1] + " v=" + q.Get("v")
 	case len(parts) != 3:
@@ -153,22 +159,36 @@ func route(r *http.Request) (string, string) {
 	return op, call
 }
 
-// frame is body as one frame of stream in a multiplexed log.
-func frame(stream byte, body string) string {
-	if body == "" {
-		return ""
-	}
-	h := []byte{stream, 0, 0, 0, 0, 0, 0, 0}
-	binary.BigEndian.PutUint32(h[4:], uint32(len(body)))
-	return string(h) + body
-}
-
 func (f *fake) reply(op, body string) { f.answer(op, reply{body: body}) }
 
-// output makes the job's log text, written to its standard output.
-func (f *fake) output(text string) { f.reply("logs", frame(1, text)) }
+// output makes the job's raw output.
+func (f *fake) output(text string) { f.writeCapture(text, f.exitCode) }
+
+func (f *fake) writeCapture(text string, code int) { f.writeCaptureFor("e", text, code) }
+
+func (f *fake) writeCaptureFor(id, text string, code int) {
+	root := f.x.capture(id)
+	if err := os.MkdirAll(root, 0777); err != nil {
+		f.t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(text))
+	started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	rec := jobrunner.Record{Protocol: jobrunner.Protocol, EffectID: id, Spec: f.x.Specification("true"), Generation: 1,
+		StartedAt: started, FinishedAt: started.Add(time.Second), ExitCode: &code, Bytes: int64(len(text)), Stored: int64(len(text)),
+		Digest: harness.ConfigDigest([]byte(text)), Preview: text, PreviewDigest: hex.EncodeToString(sum[:]), PreviewBytes: len(text), PreviewLines: jobrunner.PreviewLines(text)}
+	data, _ := json.Marshal(rec)
+	for name, body := range map[string][]byte{"output": []byte(text), "completion.json": data, jobrunner.PreviewFile: []byte(text)} {
+		if err := os.WriteFile(filepath.Join(root, name), body, 0o644); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
 
 func (f *fake) fail(op string, status int, message string) {
+	if op == "output" {
+		os.Remove(filepath.Join(f.x.capture("e"), "completion.json"))
+		return
+	}
 	f.answer(op, reply{status: status, body: message})
 }
 
@@ -221,13 +241,13 @@ func (f *fake) container(status string, exit int) string {
 
 // containerOf is the inspect output of the container Bind creates for id.
 func (f *fake) containerOf(id, command, status string, exit int) string {
-	return f.inspected(id, command, status, exit, map[string]string{exitLabel: exitFile})
+	return f.inspected(id, command, status, exit, map[string]string{})
 }
 
 // legacy is f.container as an earlier revision created it, without the exit
 // label.
 func (f *fake) legacy(status string, exit int) string {
-	return f.inspected("e", "true", status, exit, nil)
+	return f.inspected("e", "true", status, exit, map[string]string{"canti.spec": ""})
 }
 
 func (f *fake) inspected(id, command, status string, exit int, labels map[string]string) string {
@@ -253,8 +273,9 @@ func (f *fake) inspected(id, command, status string, exit int, labels map[string
 
 // exited makes the job of effect e exit with code, which its shell recorded.
 func (f *fake) exited(code int) {
+	f.exitCode = code
 	f.reply("inspect", f.container("exited", code))
-	f.reply("cp", exitArchive(f.t, fmt.Sprintf("%d\n", code)))
+	f.writeCapture("", code)
 }
 
 // calls returns the recorded calls of op, in order.
@@ -512,7 +533,7 @@ func TestCancellationFenceDoesNotTurnAmbiguousLookupIntoKnownAbsence(t *testing.
 	}
 	f.ready()
 	j, err := freshExecutor(f).Drive(t.Context(), e)
-	if err != nil || j.Status != harness.JobCancelled || len(f.calls("start")) != 0 {
+	if err != nil || j.Status != harness.JobCancelled || len(f.calls("start")) != 0 || j.Output.Detail != "job never started; no output captured" {
 		t.Fatalf("late fenced owner: %+v %v", j, err)
 	}
 }
@@ -576,10 +597,11 @@ func TestFailedCaptureRetainsOwnerUntilPublicationCanRetry(t *testing.T) {
 	f := newFake(t)
 	f.latch(latchStart)
 	f.exited(0)
-	f.fail("logs", 500, "capture failed")
+	f.fail("output", 500, "capture failed")
 	e := f.effect()
-	if _, err := f.x.Inspect(t.Context(), e); err == nil {
-		t.Fatal("capture failure became terminal")
+	j, err := f.x.Inspect(t.Context(), e)
+	if err != nil || j.Status != harness.JobUnknown {
+		t.Fatalf("capture failure = %+v, %v; want unknown", j, err)
 	}
 	if len(f.calls("rm")) != 0 {
 		t.Fatal("released uncaptured owner")
@@ -588,7 +610,7 @@ func TestFailedCaptureRetainsOwnerUntilPublicationCanRetry(t *testing.T) {
 		t.Fatal("published failed capture")
 	}
 	f.output("recovered")
-	j, err := freshExecutor(f).Inspect(t.Context(), e)
+	j, err = freshExecutor(f).Inspect(t.Context(), e)
 	if err != nil || j.Preview != "recovered" || len(f.calls("rm")) != 1 {
 		t.Fatalf("capture retry: %+v %v", j, err)
 	}
@@ -737,19 +759,15 @@ func TestTerminalPublicationFailureRetainsTheOwnerForRetry(t *testing.T) {
 	f.output("retained output")
 	e := f.effect()
 	blocker := f.x.record(e.ID)
-	f.hook("logs", func(*http.Request) {
-		if err := os.Mkdir(blocker, 0700); err != nil {
-			t.Error(err)
-		}
-	})
+	if err := os.Mkdir(blocker, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.x.Inspect(t.Context(), e); err == nil {
 		t.Fatal("failed publication became a terminal receipt")
 	}
 	if len(f.calls("rm")) != 0 {
 		t.Fatal("owner released before terminal publication")
 	}
-	f.hook("logs", nil)
-	f.output("retained output")
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
@@ -836,5 +854,73 @@ func TestAmbientPlatformCannotChangeAcceptedExecution(t *testing.T) {
 	creates, pulls := f.calls("create"), f.pulls()
 	if len(creates) != 2 || creates[0] != "create canti-e" || creates[1] != "create canti-e" || len(pulls) != 1 || strings.Contains(pulls[0], "ambient-platform") {
 		t.Fatalf("ambient platform reached create/pull: %v %v", creates, pulls)
+	}
+}
+
+func TestLaunchRefusesWrongHelperProtocolBeforeStarting(t *testing.T) {
+	f := newFake(t)
+	f.ready()
+	helper := filepath.Join(t.TempDir(), "canti-job")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	f.x.cfg.Helper = helper
+	if _, err := f.x.Drive(t.Context(), f.effect()); err == nil || !strings.Contains(err.Error(), "protocol") {
+		t.Fatalf("wrong helper protocol = %v", err)
+	}
+	if len(f.calls("start")) != 0 {
+		t.Fatal("started with a wrong helper")
+	}
+}
+
+func TestLaunchRefusesAnImageThatCannotRunTheHostHelper(t *testing.T) {
+	f := newFake(t)
+	f.ready()
+	f.reply("image", `{"Os":"linux","Architecture":"not-the-host"}`)
+	if _, err := f.x.Drive(t.Context(), f.effect()); err == nil || !strings.Contains(err.Error(), "cannot run the host canti-job helper") {
+		t.Fatalf("platform mismatch = %v", err)
+	}
+	if len(f.calls("start")) != 0 {
+		t.Fatal("started on a mismatched image")
+	}
+}
+
+func TestCaptureRejectsASameSizeOutputEdit(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.exited(0)
+	f.output("real")
+	if err := os.WriteFile(filepath.Join(f.x.capture("e"), "output"), []byte("fake"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	j, err := f.x.Inspect(t.Context(), f.effect())
+	if err != nil || j.Status != harness.JobUnknown || j.Output.Available {
+		t.Fatalf("same-size output edit = %+v, %v", j, err)
+	}
+	if _, err := os.Stat(f.x.record("e")); !errors.Is(err, fs.ErrNotExist) || len(f.calls("rm")) != 0 {
+		t.Fatal("published a same-size edited output")
+	}
+}
+
+func TestMissingOutputAfterCompletionIsUnknown(t *testing.T) {
+	f := newFake(t)
+	f.latch(latchStart)
+	f.exited(0)
+	f.output("hello")
+	if err := os.Remove(filepath.Join(f.x.capture("e"), "output")); err != nil {
+		t.Fatal(err)
+	}
+	j, err := f.x.Inspect(t.Context(), f.effect())
+	if err != nil || j.Status != harness.JobUnknown || j.Output.Available || len(f.calls("rm")) != 0 {
+		t.Fatalf("missing completion output = %+v, %v", j, err)
+	}
+}
+
+func TestImageInspectUsesTheTransferDeadline(t *testing.T) {
+	f := newFake(t)
+	f.x.timeouts = timeouts{call: 50 * time.Millisecond, transfer: 2 * time.Second}
+	f.hooks["image"] = func(*http.Request) { time.Sleep(100 * time.Millisecond) }
+	if err := f.x.checkHelper(t.Context()); err != nil {
+		t.Fatalf("image inspect under the call deadline: %v", err)
 	}
 }

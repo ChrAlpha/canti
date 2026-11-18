@@ -36,6 +36,8 @@ type RunConfig struct {
 	CPUs               string             `json:"cpus"`
 	Pids               int                `json:"pids"`
 	OutputLimit        int64              `json:"output_limit"`
+	HelperDigest       string             `json:"helper_digest,omitempty"`
+	HelperProtocol     int                `json:"helper_protocol,omitempty"`
 	API                string             `json:"api"`
 	Model              string             `json:"model"`
 	Provider           string             `json:"provider,omitempty"`
@@ -55,7 +57,7 @@ type RunConfig struct {
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 23
+const ContextVersion = 24
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -104,6 +106,13 @@ func newRun(goal, constraints string, s Spec, now time.Time, requireWindow bool)
 	}
 	if b.ContextTokens <= 0 && requireWindow {
 		return harness.Run{}, core.State{}, errors.New("-context-tokens is required and must be positive; set it to the model's input window or lower")
+	}
+	if c.Ephemeral && c.HelperDigest == "" {
+		digest, protocol, helperErr := docker.DefaultHelperIdentity()
+		if helperErr != nil {
+			return harness.Run{}, core.State{}, fmt.Errorf("new ephemeral run needs a verifiable canti-job helper: %w", helperErr)
+		}
+		c.HelperDigest, c.HelperProtocol = digest, protocol
 	}
 	if c.HistoryImports != "" {
 		var err error
@@ -223,6 +232,7 @@ func ExecutorConfig(c RunConfig, state string) docker.Config {
 	return docker.Config{
 		Image: c.Image, Workspace: c.Workspace, State: state, Network: c.Network,
 		Memory: c.Memory, CPUs: c.CPUs, PidsLimit: c.Pids, OutputLimit: c.OutputLimit, PreviewLimit: PromptLimits(c).Preview,
+		HelperDigest: c.HelperDigest, HelperProtocol: c.HelperProtocol,
 		Mounts: []docker.Mount{{Source: HistoryRoot(state), Target: archive.RunsRoot}, {Source: InputsRoot(state), Target: archive.InputsRoot}},
 	}
 }
