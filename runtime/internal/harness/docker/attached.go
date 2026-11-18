@@ -106,28 +106,34 @@ func (x *Attached) readJob(e harness.Effect) (attachedRecord, bool, error) {
 	if err != nil || !found {
 		return r, found, err
 	}
+	return r, true, x.checkJob(e, r)
+}
+
+// checkJob validates the command record r of accepted effect e, read under
+// the authority lock.
+func (x *Attached) checkJob(e harness.Effect, r attachedRecord) error {
 	validated, err := prepareAttachedConfig(r.Config)
 	if err != nil {
-		return r, false, err
+		return err
 	}
 	if r.Format != 1 || r.Effect != e || attachedSpecification(validated, e.Command) != e.Spec || r.Config.Attachment.Directory != x.cfg.Attachment.Directory || r.Generation == 0 {
-		return r, false, errors.New("docker: command authority contradicts accepted effect or origin")
+		return errors.New("docker: command authority contradicts accepted effect or origin")
 	}
 	if r.ExecID != "" && !canonicalDigest(r.ExecID) {
-		return r, false, errors.New("docker: invalid attached exec identity")
+		return errors.New("docker: invalid attached exec identity")
 	}
 	if r.Terminal != nil {
 		if err := validateAttachedTerminal(r); err != nil {
-			return r, false, err
+			return err
 		}
 	}
 	if (r.Launch == "") != r.DispatchedAt.IsZero() {
-		return r, false, errors.New("docker: incomplete command launch latch")
+		return errors.New("docker: incomplete command launch latch")
 	}
 	if r.ExecID != "" && r.Epoch == "" || !r.DispatchedAt.IsZero() && (r.ExecID == "" || r.Launch == "") {
-		return r, false, errors.New("docker: invalid attached command publication chain")
+		return errors.New("docker: invalid attached command publication chain")
 	}
-	return r, true, nil
+	return nil
 }
 func (x *Attached) saveJob(r attachedRecord) error {
 	dir := x.jobDir(r.Effect.ID)
@@ -311,13 +317,12 @@ func (x *Attached) activeOwner(s environmentState, c preparedContainer) (*Attach
 	if r.Effect.ID != s.Active || r.Effect.Spec != s.ActiveSpec || r.Config.State != s.ActiveState || r.Config.Attachment.AuthorityID != x.cfg.Attachment.AuthorityID || attachedSpecification(r.Config, r.Effect.Command) != s.ActiveSpec {
 		return nil, r, errors.New("docker: active command origin contradicts its authority slot")
 	}
+	if err = x.checkJob(r.Effect, r); err != nil {
+		return nil, r, errors.Join(err, errors.New("docker: invalid active command authority"))
+	}
 	owner, err := NewAttached(r.Config)
 	if err != nil {
 		return nil, r, err
-	}
-	r, found, err = owner.readJob(r.Effect)
-	if err != nil || !found {
-		return nil, r, errors.Join(err, errors.New("docker: invalid active command authority"))
 	}
 	if !r.Config.Attachment.sameIdentity(x.cfg.Attachment) {
 		return nil, r, fmt.Errorf("%w: active command belongs to another environment attachment", harness.ErrJobLost)
@@ -356,11 +361,8 @@ func (x *Attached) releaseSlot(s *environmentState, r attachedRecord) error {
 }
 
 func (x *Attached) unbound(ctx context.Context, e harness.Effect, op string, s *environmentState) (attachedRecord, harness.Job, bool, error) {
-	switch op {
-	case "cancel":
-		j, err := x.cancelAbsent(e)
-		return attachedRecord{}, j, true, err
-	case "inspect":
+	// loaded settles an unbound cancel before the slot is prepared.
+	if op == "inspect" {
 		return attachedRecord{}, harness.Job{EffectID: e.ID, Spec: e.Spec, Status: harness.JobAbsent}, true, nil
 	}
 	if s.Gate != "open" || len(s.Requests) != 0 {

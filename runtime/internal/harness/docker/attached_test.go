@@ -609,6 +609,33 @@ func TestAttachedCompetingStatesCannotDispatchBesideSurvivingCommand(t *testing.
 	}
 }
 
+// Reconciliation validates the active command record it read before its
+// rebuilt owner may stop anything.
+func TestAttachedInvalidActiveRecordStopsReconciliationBeforeTheDaemon(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_invalid", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := x.readJob(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Format = 2
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ControlEnvironment(t.Context(), f.dir, "stop"); err == nil || !strings.Contains(err.Error(), "invalid active command authority") {
+		t.Fatalf("stop beside an invalid active record: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stops != 0 {
+		t.Fatalf("sent %d stops", f.stops)
+	}
+}
+
 func TestAttachedDelayedStopKeepsSameIDQuarantinedAcrossTakeover(t *testing.T) {
 	f := newAttachedFake(t)
 	first, second := f.executor(t), f.executor(t)
