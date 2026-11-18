@@ -34,7 +34,7 @@ func (x *Attached) cancel(ctx context.Context, s *environmentState, r *attachedR
 		j.Status = harness.JobCancelled
 		return x.finishAttached(s, r, j)
 	}
-	c, err := x.backend.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
+	c, err := x.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
 	if err != nil {
 		return harness.Job{}, err
 	}
@@ -50,7 +50,7 @@ func (x *Attached) cancel(ctx context.Context, s *environmentState, r *attachedR
 		if err = x.saveJob(*r); err != nil {
 			return harness.Job{}, err
 		}
-		c, err = x.backend.inspectPrepared(context.WithoutCancel(ctx), x.cfg.Attachment.ContainerID)
+		c, err = x.inspectPrepared(context.WithoutCancel(ctx), x.cfg.Attachment.ContainerID)
 		if err != nil {
 			return harness.Job{}, errors.Join(stopErr, err)
 		}

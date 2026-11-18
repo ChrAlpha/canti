@@ -55,7 +55,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 		return harness.Job{}, err
 	}
 	a := x.cfg.Attachment
-	c, err := x.backend.inspectPrepared(ctx, a.ContainerID)
+	c, err := x.inspectPrepared(ctx, a.ContainerID)
 	if err != nil {
 		return harness.Job{}, err
 	}
@@ -73,7 +73,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 			return harness.Job{}, err
 		}
 		var created struct{ ID string }
-		err = x.backend.api(ctx, "exec-create", http.MethodPost, "/containers/"+a.ContainerID+"/exec", x.execRequest(*r), decodeResponse(&created))
+		err = x.api(ctx, "exec-create", http.MethodPost, "/containers/"+a.ContainerID+"/exec", x.execRequest(*r), decodeResponse(&created))
 		if err != nil {
 			return harness.Job{}, err
 		}
@@ -91,7 +91,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 	if err = ctx.Err(); err != nil {
 		return harness.Job{}, err
 	}
-	c, err = x.backend.inspectPrepared(ctx, a.ContainerID)
+	c, err = x.inspectPrepared(ctx, a.ContainerID)
 	if err != nil {
 		return harness.Job{}, err
 	}
@@ -115,8 +115,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 		return harness.Job{}, err
 	}
 	call := context.WithoutCancel(ctx)
-	response := 0
-	started := x.backend.api(call, "start", http.MethodPost, "/exec/"+r.ExecID+"/start", struct{ Detach, Tty bool }{Detach: true}, func(res *http.Response) error { response = res.StatusCode; return nil })
+	response, started := x.start(call, "/exec/"+r.ExecID+"/start", struct{ Detach, Tty bool }{Detach: true})
 	if started == nil {
 		started = acknowledgeRequest(dir, request, response, false)
 	}
@@ -130,7 +129,7 @@ func (x *Attached) dispatch(ctx context.Context, s *environmentState, r *attache
 }
 func (x *Attached) inspectExec(ctx context.Context, r attachedRecord) (execMetadata, error) {
 	var m execMetadata
-	err := x.backend.api(ctx, "exec-inspect", http.MethodGet, "/exec/"+r.ExecID+"/json", nil, decodeResponse(&m))
+	err := x.api(ctx, "exec-inspect", http.MethodGet, "/exec/"+r.ExecID+"/json", nil, decodeResponse(&m))
 	if err != nil {
 		return m, err
 	}
@@ -169,7 +168,7 @@ func (x *Attached) sample(ctx context.Context, s *environmentState, r *attachedR
 	if err := x.ensureLaunchReference(s, *r); err != nil {
 		return harness.Job{}, err
 	}
-	c, err := x.backend.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
+	c, err := x.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
 	if err != nil {
 		return harness.Job{}, err
 	}

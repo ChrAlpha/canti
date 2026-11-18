@@ -230,17 +230,17 @@ func (a Attachment) validate() error {
 	}
 	return validatePreparedMounts(a.Directory, a.Mounts)
 }
-func environmentEngine(endpoint string) *Executor {
-	return &Executor{cfg: Config{Docker: "docker", StopGrace: 5 * time.Second}, timeouts: timeouts{callTimeout, transferTimeout}, engine: endpointEngine("docker", endpoint)}
+func environmentClient(endpoint string) client {
+	return newClient(endpointEngine("docker", endpoint))
 }
-func (x *Executor) inspectPrepared(ctx context.Context, id string) (preparedContainer, error) {
+func (d client) inspectPrepared(ctx context.Context, id string) (preparedContainer, error) {
 	var c preparedContainer
-	err := x.api(ctx, "inspect", http.MethodGet, "/containers/"+url.PathEscape(id)+"/json", nil, decodeResponse(&c))
+	err := d.api(ctx, "inspect", http.MethodGet, "/containers/"+url.PathEscape(id)+"/json", nil, decodeResponse(&c))
 	return c, err
 }
-func (x *Executor) daemon(ctx context.Context) (string, error) {
+func (d client) daemon(ctx context.Context) (string, error) {
 	var info struct{ ID, OSType, Architecture string }
-	if err := x.api(ctx, "info", http.MethodGet, "/info", nil, decodeResponse(&info)); err != nil {
+	if err := d.api(ctx, "info", http.MethodGet, "/info", nil, decodeResponse(&info)); err != nil {
 		return "", err
 	}
 	arch := info.Architecture
@@ -273,7 +273,7 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	if parseErr != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
 		return Attachment{}, errors.New("docker: attachment requires a local Unix Docker endpoint")
 	}
-	x := environmentEngine(endpoint)
+	d := environmentClient(endpoint)
 	unlock, err := flock(ctx, filepath.Join(dir, "authority", "lock"))
 	if err != nil {
 		return Attachment{}, err
@@ -286,18 +286,18 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	if state.Active != "" {
 		return Attachment{}, errors.New("docker: environment has unreconciled work")
 	}
-	backend, err := x.daemon(ctx)
+	backend, err := d.daemon(ctx)
 	if err != nil {
 		return Attachment{}, err
 	}
-	c, err := x.inspectPrepared(ctx, selector)
+	c, err := d.inspectPrepared(ctx, selector)
 	if err != nil {
 		return Attachment{}, err
 	}
 	if err = checkPrepared(dir, m.AuthorityID, c); err != nil {
 		return Attachment{}, err
 	}
-	if err = x.solePreparedContainer(ctx, dir, c.ID); err != nil {
+	if err = d.solePreparedContainer(ctx, dir, c.ID); err != nil {
 		return Attachment{}, err
 	}
 	a := Attachment{Mounts: mountProjection(c), Format: environmentFormat, AuthorityID: m.AuthorityID, Directory: dir, Endpoint: endpoint, DaemonID: backend, ContainerID: c.ID, Incarnation: 1, Helper: "/canti/" + m.Helper, HelperDigest: m.Digest, User: c.Config.User, Init: init, AdmissionEpoch: c.State.StartedAt.Format(time.RFC3339Nano)}
@@ -328,10 +328,10 @@ func AttachEnvironment(ctx context.Context, directory, endpoint, selector, init 
 	if err = a.validate(); err != nil {
 		return Attachment{}, err
 	}
-	if err = x.mountChallenge(ctx, a); err != nil {
+	if err = d.mountChallenge(ctx, a); err != nil {
 		return Attachment{}, err
 	}
-	if err = x.spoolChallenge(ctx, a); err != nil {
+	if err = d.spoolChallenge(ctx, a); err != nil {
 		return Attachment{}, err
 	}
 	if err = saveJSON(filepath.Join(dir, "authority", "environment.json"), a, false); err != nil {
@@ -440,7 +440,7 @@ func readEnvironment(dir string) (environmentManifest, environmentState, error) 
 func saveEnvironmentState(dir string, s environmentState) error {
 	return saveJSON(filepath.Join(dir, "authority", "state.json"), s, false)
 }
-func (x *Executor) mountChallenge(ctx context.Context, a Attachment) error {
+func (d client) mountChallenge(ctx context.Context, a Attachment) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
@@ -452,7 +452,7 @@ func (x *Executor) mountChallenge(ctx context.Context, a Attachment) error {
 		return err
 	}
 	defer os.Remove(file)
-	got, err := x.archiveFile(ctx, a.ContainerID, "/canti/"+name, 4096)
+	got, err := d.archiveFile(ctx, a.ContainerID, "/canti/"+name, 4096)
 	if err != nil {
 		return err
 	}
@@ -467,7 +467,7 @@ func (x *Executor) mountChallenge(ctx context.Context, a Attachment) error {
 // one: private to the host user that owns the spool. A container user whose
 // UID differs, or is remapped by a user namespace, is refused here instead of
 // failing every command before its completion can be written.
-func (x *Executor) spoolChallenge(ctx context.Context, a Attachment) error {
+func (d client) spoolChallenge(ctx context.Context, a Attachment) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
@@ -480,20 +480,20 @@ func (x *Executor) spoolChallenge(ctx context.Context, a Attachment) error {
 	defer os.RemoveAll(dir)
 	request := execRequest{User: a.User, WorkingDir: "/", Cmd: []string{"/bin/sh", "-c", `: > "$1"`, "canti-attach", spoolRoot + "/" + name + "/probe"}, Env: commandEnv(a)}
 	var created struct{ ID string }
-	if err := x.api(ctx, "exec-create", http.MethodPost, "/containers/"+a.ContainerID+"/exec", request, decodeResponse(&created)); err != nil {
+	if err := d.api(ctx, "exec-create", http.MethodPost, "/containers/"+a.ContainerID+"/exec", request, decodeResponse(&created)); err != nil {
 		return err
 	}
 	if len(created.ID) != 64 {
 		return errors.New("docker: exec creation returned an invalid physical ID")
 	}
-	if err := x.api(ctx, "start", http.MethodPost, "/exec/"+created.ID+"/start", struct{ Detach, Tty bool }{Detach: true}, nil); err != nil {
+	if _, err := d.start(ctx, "/exec/"+created.ID+"/start", struct{ Detach, Tty bool }{Detach: true}); err != nil {
 		return err
 	}
-	call, cancel := context.WithTimeout(ctx, x.timeouts.call)
+	call, cancel := context.WithTimeout(ctx, d.timeouts.call)
 	defer cancel()
 	for {
 		var m execMetadata
-		if err := x.api(call, "exec-inspect", http.MethodGet, "/exec/"+created.ID+"/json", nil, decodeResponse(&m)); err != nil {
+		if err := d.api(call, "exec-inspect", http.MethodGet, "/exec/"+created.ID+"/json", nil, decodeResponse(&m)); err != nil {
 			return err
 		}
 		if !m.Running && m.ExitCode != nil {
@@ -505,7 +505,7 @@ func (x *Executor) spoolChallenge(ctx context.Context, a Attachment) error {
 		}
 		select {
 		case <-call.Done():
-			return fmt.Errorf("docker: spool write challenge did not finish within %v", x.timeouts.call)
+			return fmt.Errorf("docker: spool write challenge did not finish within %v", d.timeouts.call)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
@@ -554,7 +554,7 @@ func observedEnvironmentWorkdir(ctx context.Context, a Attachment, workspace, st
 	if err != nil {
 		return "", preparedContainer{}, err
 	}
-	c, err := environmentEngine(a.Endpoint).checkAttachment(ctx, a)
+	c, err := environmentClient(a.Endpoint).checkAttachment(ctx, a)
 	if err != nil {
 		return "", c, err
 	}
@@ -602,7 +602,7 @@ func pinnedEnvironmentWorkdir(a Attachment, workspace, state, requested string) 
 // checkAttachment observes, once per operation, that a still names the current
 // attachment, daemon and labelled container with verified bind sources, and
 // returns that container observation for the operation's later checks.
-func (x *Executor) checkAttachment(ctx context.Context, a Attachment) (preparedContainer, error) {
+func (d client) checkAttachment(ctx context.Context, a Attachment) (preparedContainer, error) {
 	if err := a.validate(); err != nil {
 		return preparedContainer{}, err
 	}
@@ -613,14 +613,14 @@ func (x *Executor) checkAttachment(ctx context.Context, a Attachment) (preparedC
 	if current.AuthorityID != a.AuthorityID || current.ContainerID != a.ContainerID || current.DaemonID != a.DaemonID || current.Incarnation != a.Incarnation || current.Endpoint != a.Endpoint {
 		return preparedContainer{}, fmt.Errorf("%w: environment attachment changed", harness.ErrJobLost)
 	}
-	id, err := x.daemon(ctx)
+	id, err := d.daemon(ctx)
 	if err != nil {
 		return preparedContainer{}, err
 	}
 	if id != a.DaemonID {
 		return preparedContainer{}, fmt.Errorf("%w: Docker daemon identity changed", harness.ErrJobLost)
 	}
-	c, err := x.inspectPrepared(ctx, a.ContainerID)
+	c, err := d.inspectPrepared(ctx, a.ContainerID)
 	if err != nil {
 		return c, err
 	}
@@ -720,10 +720,10 @@ func EnvironmentIdentity(directory string) (string, error) {
 	return m.AuthorityID, err
 }
 
-func (x *Executor) solePreparedContainer(ctx context.Context, directory, id string) error {
+func (d client) solePreparedContainer(ctx context.Context, directory, id string) error {
 	filters, _ := marshal(map[string][]string{"label": {controlLabel + "=" + directory}})
 	var containers []struct{ ID string }
-	err := x.api(ctx, "environment-claims", http.MethodGet, "/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil, decodeResponse(&containers))
+	err := d.api(ctx, "environment-claims", http.MethodGet, "/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil, decodeResponse(&containers))
 	if err != nil {
 		return err
 	}

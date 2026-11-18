@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// The executor speaks the Docker Engine API over connections that the
+// The client speaks the Docker Engine API over connections that the
 // docker CLI's "system dial-stdio" command opens, so the CLI resolves the
 // daemon as it does for its own commands (DOCKER_HOST, the current context,
 // TLS, ssh), and a CLI process starts per pooled connection instead of per
@@ -90,45 +90,77 @@ func status(err error) int {
 	return 0
 }
 
-// api sends one request of operation op under the operation's own deadline,
-// and handles a successful response, if handle is set, within it. Once ctx is
-// done it returns ctx's error; a call past only its own deadline fails with an
-// ordinary error, never mistaken for the caller's shutdown. Reads and deterministic
-// create/remove requests may be retried on a fresh connection. Start and stop
-// are never replayed: a delayed duplicate could disturb a later start epoch.
-func (x *Executor) api(ctx context.Context, op, method, path string, body any, handle func(*http.Response) error) error {
-	limit := x.timeouts.call
+// client sends Engine API requests to one daemon, each under its own
+// deadline, so a hung daemon cannot hold an effect's lock forever.
+type client struct {
+	engine   *engine
+	timeouts timeouts
+}
+
+func newClient(e *engine) client {
+	return client{engine: e, timeouts: timeouts{callTimeout, transferTimeout}}
+}
+
+// api sends a read or a deterministic create or remove request of operation
+// op, which may be retried on a fresh connection, and handles a successful
+// response, if handle is set, within the call's deadline: the transfer
+// timeout to create a container, read its log, or wait for it, the call
+// timeout otherwise.
+func (d client) api(ctx context.Context, op, method, path string, body any, handle func(*http.Response) error) error {
+	limit := d.timeouts.call
 	switch op {
 	case "create", "logs", "wait":
-		limit = x.timeouts.transfer
-	case "stop":
-		limit += x.cfg.StopGrace
+		limit = d.timeouts.transfer
 	}
+	_, err := d.call(ctx, op, limit, method, path, body, !d.engine.single, handle)
+	return err
+}
+
+// start sends a container or exec start exactly once, since a delayed
+// duplicate could disturb a later start epoch, and returns the status of its
+// success.
+func (d client) start(ctx context.Context, path string, body any) (int, error) {
+	return d.call(ctx, "start", d.timeouts.call, http.MethodPost, path, body, false, nil)
+}
+
+// stop asks once that container id stop, letting it exit for grace rounded up
+// to whole seconds, and returns the status of its success.
+func (d client) stop(ctx context.Context, id string, grace time.Duration) (int, error) {
+	seconds := strconv.Itoa(int((grace + time.Second - 1) / time.Second))
+	return d.call(ctx, "stop", d.timeouts.call+grace, http.MethodPost, "/containers/"+id+"/stop?t="+seconds, nil, false, nil)
+}
+
+// call sends one request under limit. Once ctx is done it returns ctx's
+// error; a call past only its own deadline fails with an ordinary error,
+// never mistaken for the caller's shutdown.
+func (d client) call(ctx context.Context, op string, limit time.Duration, method, path string, body any, replay bool, handle func(*http.Response) error) (int, error) {
 	call, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	err := x.engine.do(call, method, path, body, !x.engine.single && op != "start" && op != "stop", handle)
+	code, err := d.engine.do(call, method, path, body, replay, handle)
 	switch {
 	case err == nil:
-		return nil
+		return code, nil
 	case ctx.Err() != nil:
-		return ctx.Err()
+		return 0, ctx.Err()
 	case call.Err() != nil:
-		return fmt.Errorf("docker %s: no response within %v", op, limit)
+		return 0, fmt.Errorf("docker %s: no response within %v", op, limit)
 	}
 	if u, ok := err.(*url.Error); ok {
 		err = u.Err
 	}
-	return fmt.Errorf("docker %s: %w", op, err)
+	return 0, fmt.Errorf("docker %s: %w", op, err)
 }
 
-func (e *engine) do(ctx context.Context, method, path string, body any, replay bool, handle func(*http.Response) error) error {
+// do returns the status of a successful response, which for 304 Not
+// Modified has no body to handle.
+func (e *engine) do(ctx context.Context, method, path string, body any, replay bool, handle func(*http.Response) error) (int, error) {
 	version, err := e.negotiate(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	res, err := e.send(ctx, method, "/v"+version+path, body, replay)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 && res.StatusCode != http.StatusNotModified {
@@ -137,15 +169,15 @@ func (e *engine) do(ctx context.Context, method, path string, body any, replay b
 		if json.Unmarshal(data, &msg) != nil || msg.Message == "" {
 			msg.Message = strings.TrimSpace(string(data))
 		}
-		return &apiError{res.StatusCode, msg.Message}
+		return 0, &apiError{res.StatusCode, msg.Message}
 	}
 	if handle != nil && res.StatusCode != http.StatusNotModified {
 		if err := handle(res); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	io.Copy(io.Discard, io.LimitReader(res.Body, 4<<10))
-	return nil
+	return res.StatusCode, nil
 }
 
 func (e *engine) send(ctx context.Context, method, path string, body any, replay bool) (*http.Response, error) {

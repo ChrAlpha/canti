@@ -612,6 +612,8 @@ func TestAttachedCompetingStatesCannotDispatchBesideSurvivingCommand(t *testing.
 func TestAttachedDelayedStopKeepsSameIDQuarantinedAcrossTakeover(t *testing.T) {
 	f := newAttachedFake(t)
 	first, second := f.executor(t), f.executor(t)
+	// Its grace is part of the accepted specification and bounds the stop call.
+	first.cfg.StopGrace = time.Millisecond
 	e := effectFor(first, "effect_old", "sleep 30")
 	if _, err := first.Drive(t.Context(), e); err != nil {
 		t.Fatal(err)
@@ -620,8 +622,7 @@ func TestAttachedDelayedStopKeepsSameIDQuarantinedAcrossTakeover(t *testing.T) {
 	f.dropStop = true
 	release := sync.OnceFunc(func() { close(f.stopRelease) })
 	defer release()
-	first.backend.timeouts.call = 30 * time.Millisecond
-	first.backend.cfg.StopGrace = time.Millisecond
+	first.timeouts.call = 30 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { _, err := first.Cancel(t.Context(), e); done <- err }()
 	<-f.stopEntered

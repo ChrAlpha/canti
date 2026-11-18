@@ -25,8 +25,8 @@ type AttachedConfig struct {
 // Attached runs distinct Docker execs inside one explicitly prepared environment.
 // All physical authority is outside the writable environment and run journals.
 type Attached struct {
-	cfg     AttachedConfig
-	backend *Executor
+	cfg AttachedConfig
+	client
 }
 
 var _ harness.Executor = (*Attached)(nil)
@@ -36,9 +36,7 @@ func NewAttached(c AttachedConfig) (*Attached, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := environmentEngine(c.Attachment.Endpoint)
-	x.cfg.StopGrace = c.StopGrace
-	return &Attached{cfg: c, backend: x}, nil
+	return &Attached{cfg: c, client: environmentClient(c.Attachment.Endpoint)}, nil
 }
 func prepareAttachedConfig(c AttachedConfig) (AttachedConfig, error) {
 	if err := c.Attachment.validate(); err != nil {
@@ -187,7 +185,7 @@ func (x *Attached) locked(ctx context.Context) (func(), environmentState, error)
 	if err != nil {
 		return nil, s, err
 	}
-	call, cancel := context.WithTimeout(ctx, x.backend.timeouts.call)
+	call, cancel := context.WithTimeout(ctx, x.timeouts.call)
 	defer cancel()
 	unlock, err := flock(call, filepath.Join(x.authority(), "lock"))
 	if err != nil {
@@ -277,7 +275,7 @@ func (x *Attached) cancelAbsent(e harness.Effect) (harness.Job, error) {
 	return j, x.mirror(r)
 }
 func (x *Attached) reserve(ctx context.Context, e harness.Effect, s *environmentState) (attachedRecord, error) {
-	c, err := x.backend.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
+	c, err := x.inspectPrepared(ctx, x.cfg.Attachment.ContainerID)
 	if err != nil {
 		return attachedRecord{}, err
 	}
@@ -402,7 +400,7 @@ func validateAttachedTerminal(r attachedRecord) error {
 // effects check identity and the stored canonical mapping only, so a workspace
 // removed after admission fails its command's cd instead of its operation.
 func (x *Attached) prepareSlot(ctx context.Context, e harness.Effect, s *environmentState) error {
-	c, err := x.backend.checkAttachment(ctx, x.cfg.Attachment)
+	c, err := x.checkAttachment(ctx, x.cfg.Attachment)
 	if err != nil {
 		return err
 	}
