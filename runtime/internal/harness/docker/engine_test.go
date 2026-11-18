@@ -101,7 +101,7 @@ func (d *daemon) sent() []string {
 }
 
 func testEngineExecutor(e *engine) *Executor {
-	return &Executor{timeouts: timeouts{5 * time.Second, 5 * time.Second}, engine: e}
+	return &Executor{client: client{engine: e, timeouts: timeouts{5 * time.Second, 5 * time.Second}}}
 }
 
 func TestEngineSpeaksTheNearestVersionTheDaemonSupports(t *testing.T) {
@@ -160,16 +160,24 @@ func TestEngineReportsTheDaemonsMessage(t *testing.T) {
 }
 
 func TestDisruptiveRequestsAreNeverSentTwice(t *testing.T) {
+	ctx, body := t.Context(), map[string]string{}
 	for _, tt := range []struct {
-		op, method, path string
-		replay           bool
+		name, sent string
+		send       func(client) error
+		replay     bool
 	}{
-		{"inspect", http.MethodGet, "/containers/c/json", true},
-		{"create", http.MethodPost, "/containers/create?name=c", true},
-		{"stop", http.MethodPost, "/containers/c/stop?t=1", false},
-		{"rm", http.MethodDelete, "/containers/c?v=1", true},
-		{"start", http.MethodPost, "/containers/c/start", false},
-		{"start", http.MethodPost, "/exec/e/start", false},
+		{"inspect", "GET /containers/c/json", func(d client) error {
+			return d.api(ctx, "inspect", http.MethodGet, "/containers/c/json", nil, nil)
+		}, true},
+		{"create", "POST /containers/create?name=c", func(d client) error {
+			return d.api(ctx, "create", http.MethodPost, "/containers/create?name=c", body, nil)
+		}, true},
+		{"rm", "DELETE /containers/c?v=1", func(d client) error {
+			return d.api(ctx, "rm", http.MethodDelete, "/containers/c?v=1", nil, nil)
+		}, true},
+		{"stop", "POST /containers/c/stop?t=1", func(d client) error { _, err := d.stop(ctx, "c", time.Second); return err }, false},
+		{"start", "POST /containers/c/start", func(d client) error { _, err := d.start(ctx, "/containers/c/start", nil); return err }, false},
+		{"exec start", "POST /exec/e/start", func(d client) error { _, err := d.start(ctx, "/exec/e/start", body); return err }, false},
 	} {
 		d, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, nth int) {
 			if nth > 1 {
@@ -182,20 +190,67 @@ func TestDisruptiveRequestsAreNeverSentTwice(t *testing.T) {
 		})
 		e := dialing(srv)
 		e.client.Transport.(*http.Transport).MaxConnsPerHost = 1
-		var body any
-		if tt.method == http.MethodPost {
-			body = map[string]string{}
-		}
-		err := testEngineExecutor(e).api(t.Context(), tt.op, tt.method, tt.path, body, nil)
-		want := []string{tt.method + " /v" + apiMax + tt.path + " "}
+		err := tt.send(testEngineExecutor(e).client)
+		method, path, _ := strings.Cut(tt.sent, " ")
+		want := []string{method + " /v" + apiMax + path + " "}
 		if tt.replay {
 			want = append(want, want[0])
 		}
 		if got := d.sent(); (err == nil) != tt.replay || !slices.Equal(got, want) {
-			t.Fatalf("%s whose connection broke = %v after %q, want %q", tt.op, err, got, want)
+			t.Fatalf("%s whose connection broke = %v after %q, want %q", tt.name, err, got, want)
 		}
 	}
 }
+
+// A fenced start or stop is acknowledged by the status the daemon returned,
+// including a bodyless 304 for a container already in the requested state.
+func TestStartAndStopReturnTheStatusOfTheirSuccess(t *testing.T) {
+	statuses := map[string]int{"/containers/c/stop": http.StatusNotModified, "/containers/c/start": http.StatusNoContent, "/exec/e/start": http.StatusOK}
+	_, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, _ int) {
+		w.WriteHeader(statuses[strings.TrimPrefix(r.URL.Path, "/v"+apiMax)])
+	})
+	d := testEngineExecutor(dialing(srv)).client
+	stopped, err := d.stop(t.Context(), "c", time.Second)
+	if err != nil || stopped != http.StatusNotModified {
+		t.Fatalf("stop = %d, %v", stopped, err)
+	}
+	for path, want := range map[string]int{"/containers/c/start": http.StatusNoContent, "/exec/e/start": http.StatusOK} {
+		if got, err := d.start(t.Context(), path, nil); err != nil || got != want {
+			t.Fatalf("start %s = %d, %v; want %d", path, got, err, want)
+		}
+	}
+}
+
+// A stop's deadline extends the call timeout by the grace it gives the
+// container, rounded up to whole seconds for the daemon, so a container that
+// exits within its grace is not mistaken for a hung daemon.
+func TestStopWaitsOutTheGraceItGrants(t *testing.T) {
+	d, srv := newDaemon(t, apiMax, "1.24", noContent)
+	e := dialing(srv)
+	var left time.Duration
+	transport := e.client.Transport
+	e.client.Transport = roundTripper(func(r *http.Request) (*http.Response, error) {
+		if deadline, ok := r.Context().Deadline(); ok && strings.HasSuffix(r.URL.Path, "/stop") {
+			left = time.Until(deadline)
+		}
+		return transport.RoundTrip(r)
+	})
+	c := testEngineExecutor(e).client
+	c.timeouts.call = 10 * time.Second
+	if got, err := c.stop(t.Context(), "c", 4500*time.Millisecond); err != nil || got != http.StatusNoContent {
+		t.Fatalf("stop = %d, %v", got, err)
+	}
+	if left <= 12*time.Second || left > 14500*time.Millisecond {
+		t.Fatalf("stop had %v left of a 14.5s deadline", left)
+	}
+	if want := []string{"POST /v" + apiMax + "/containers/c/stop?t=5 "}; !slices.Equal(d.sent(), want) {
+		t.Fatalf("sent %q, want %q", d.sent(), want)
+	}
+}
+
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestEngineReachesTheDaemonThroughTheDockerCLI(t *testing.T) {
 	exe, err := os.Executable()
@@ -353,7 +408,7 @@ func TestAttachedTransportNeverReplaysARedirectedMutation(t *testing.T) {
 	_, srv := newDaemon(t, apiMax, "1.24", func(w http.ResponseWriter, r *http.Request, _ int) {
 		sends++
 		if sends == 1 {
-			w.Header().Set("Location", "/v"+apiMax+"/containers/c/stop")
+			w.Header().Set("Location", "/v"+apiMax+"/containers/c/stop?t=1")
 			w.WriteHeader(http.StatusTemporaryRedirect)
 			return
 		}
@@ -361,7 +416,7 @@ func TestAttachedTransportNeverReplaysARedirectedMutation(t *testing.T) {
 	})
 	e := dialing(srv)
 	e.single = true
-	err := testEngineExecutor(e).api(t.Context(), "stop", http.MethodPost, "/containers/c/stop", map[string]any{}, nil)
+	_, err := testEngineExecutor(e).stop(t.Context(), "c", time.Second)
 	if err == nil || sends != 1 {
 		t.Fatalf("redirected mutation: sends=%d err=%v", sends, err)
 	}

@@ -146,14 +146,28 @@ class ShardTests(unittest.TestCase):
 
     def test_discovery_keeps_tests_fuzz_seeds_and_examples(self):
         events = '\n'.join([
-            '{"Action":"output","Output":"TestOne\\n"}',
-            '{"Action":"output","Output":"FuzzDecode\\n"}',
-            '{"Action":"output","Output":"ExampleRun\\n"}',
-            '{"Action":"output","Output":"Example\\n"}',
-            '{"Action":"output","Output":"BenchmarkDecode\\n"}',
-            '{"Action":"output","Output":"ok package\\n"}',
+            '{"Action":"output","Package":"p","Output":"TestOne\\n"}',
+            '{"Action":"output","Package":"p","Output":"FuzzDecode\\n"}',
+            '{"Action":"output","Package":"p","Output":"ExampleRun\\n"}',
+            '{"Action":"output","Package":"q","Output":"Example\\n"}',
+            '{"Action":"output","Package":"q","Output":"BenchmarkDecode\\n"}',
+            '{"Action":"output","Package":"q","Output":"ok package\\n"}',
         ])
-        self.assertEqual(shard.test_names(events), ["Example", "ExampleRun", "FuzzDecode", "TestOne"])
+        self.assertEqual(shard.test_names(events), {("q", "Example"), ("p", "ExampleRun"),
+                                                    ("p", "FuzzDecode"), ("p", "TestOne")})
+
+    def test_added_tests_are_compared_within_each_package(self):
+        tagged = {("a", "TestBase"), ("b", "TestBase"), ("b", "TestTagged")}
+        self.assertEqual(shard.added_names(tagged, {("a", "TestBase"), ("b", "TestBase")}), ["TestTagged"])
+        # An added name that a default test elsewhere shares cannot be selected alone.
+        with self.assertRaises(SystemExit):
+            shard.added_names(tagged, {("a", "TestBase")})
+        self.assertEqual(shard.without_tag(["-race", "-tags", "acceptance,integration", "-run", "x"],
+                                           "integration"), ["-race", "-tags", "acceptance", "-run", "x"])
+        self.assertEqual(shard.without_tag(["-tags", "integration", "./..."], "integration"), ["-tags", "", "./..."])
+        for args in (["./..."], ["-tags", "acceptance", "./..."]):
+            with self.assertRaises(SystemExit):
+                shard.without_tag(args, "integration")
 
 
 class LaneTests(unittest.TestCase):
@@ -174,7 +188,7 @@ class LaneTests(unittest.TestCase):
         self.assertIn("go-version: '1.26.x'", setup)
         self.assertIn("apps/tui/third_party/*/go.sum", setup)
 
-    def test_make_lanes_partition_modules_and_executable_acceptance_once(self):
+    def test_make_lanes_run_every_test_once_across_modules_and_acceptance(self):
         # Exercise Make -> module/acceptance orchestration -> shard discovery ->
         # reporter. The fake compiler records selected tests, so this checks the
         # actual call path without Docker, sibling builds, or expensive suites.
@@ -190,15 +204,17 @@ if not args or args[0] != 'test' or '-c' in args:
     sys.exit(0)
 acceptance = './acceptance' in args
 module = pathlib.Path.cwd().relative_to(os.environ['CI_FIXTURE_ROOT']).as_posix()
-tags = args[args.index('-tags') + 1] if '-tags' in args else ''
+flags = os.environ.get('GOFLAGS', '').split()
+inherited = next((f.split('=', 1)[1] for f in flags if f.startswith('-tags=')), '')
+tags = args[args.index('-tags') + 1] if '-tags' in args else inherited
 if acceptance:
     names = ['TestAcceptanceOne', 'TestAcceptanceTwo', 'TestChatKeepsInheritedDescriptorsBlocking']
     if 'integration' in tags:
         names += ['TestChatStopsDockerWithBlockedStderr', 'TestLineDialogueSurvivesHandoverRetryAndRestart']
 elif module == 'runtime':
-    names = ['TestRuntimeUnit']
+    names = ['TestRuntimeUnit', 'TestContextCaptureBoundsRejectedRetrievalAcrossReopen']
     if 'integration' in tags:
-        names += ['TestRuntimeIntegration', 'TestContextCaptureBoundsRejectedRetrievalAcrossReopen']
+        names += ['TestRuntimeIntegration']
 elif module == 'sdk/go':
     names = ['TestSDKUnit']
 else:
@@ -207,7 +223,7 @@ else:
         names += ['TestAppUnit']
 if '-list' in args:
     for name in names:
-        print(json.dumps({'Action': 'output', 'Output': name + '\n'}))
+        print(json.dumps({'Action': 'output', 'Package': module, 'Output': name + '\n'}))
 else:
     run, skip = '.', '^$'
     for index, arg in enumerate(args):
@@ -234,15 +250,26 @@ else:
             cases = {
                 "ci-unit": (4, ['TestRuntimeUnit', 'TestSDKUnit', 'TestAppUnit',
                                 'TestAcceptanceOne', 'TestAcceptanceTwo']),
-                "ci-integration": (6, ['TestRuntimeUnit', 'TestRuntimeIntegration', 'TestSDKUnit',
-                                       'TestAppUnit', 'TestAcceptanceOne', 'TestAcceptanceTwo',
-                                       'TestChatStopsDockerWithBlockedStderr']),
+                "ci-integration": (6, ['TestRuntimeIntegration', 'TestChatStopsDockerWithBlockedStderr']),
                 "ci-long": (4, ['TestContextCaptureBoundsRejectedRetrievalAcrossReopen',
                                 'TestLineDialogueSurvivesHandoverRetryAndRestart']),
                 "ci-pty": (1, ['TestPTYNativeRawRestore', 'TestChatKeepsInheritedDescriptorsBlocking']),
             }
+            every = [name for _, expected in cases.values() for name in expected]
+            self.assertCountEqual(every, ['TestRuntimeUnit', 'TestContextCaptureBoundsRejectedRetrievalAcrossReopen',
+                                          'TestRuntimeIntegration', 'TestSDKUnit', 'TestPTYNativeRawRestore',
+                                          'TestAppUnit', 'TestAcceptanceOne', 'TestAcceptanceTwo',
+                                          'TestChatKeepsInheritedDescriptorsBlocking',
+                                          'TestChatStopsDockerWithBlockedStderr',
+                                          'TestLineDialogueSurvivesHandoverRetryAndRestart'])
             for target, (count, expected) in cases.items():
                 calls.write_text("")
+                # Each lane's selection holds whatever the caller inherits.
+                env.pop("CI_SHARD_ADDED_BY", None)
+                env["ACCEPTANCE_TAGS"] = "acceptance,integration"
+                env["GOFLAGS"] = "-tags=integration"
+                if target != "ci-integration":
+                    env["CI_SHARD_ADDED_BY"] = "integration"
                 for index in range(count):
                     # PTY must override even an inherited nonzero shard index.
                     values = ("6", "5") if target == "ci-pty" else (str(count), str(index))

@@ -192,10 +192,6 @@ func evidence(r *archive.Retrieval) string {
 	return b.String()
 }
 
-func fullBlock(s string) string {
-	return block(s, len(s)+2*max(0, fence(s)-3))
-}
-
 func quote(label, s string, limit int) string {
 	var b strings.Builder
 	writeQuote(&b, label, s, limit)

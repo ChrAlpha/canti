@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
-	"time"
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
@@ -140,7 +138,7 @@ func (x *Executor) launch(ctx context.Context, effect harness.Effect, o observat
 		return harness.Job{}, err
 	}
 	launch := context.WithoutCancel(ctx)
-	started := x.api(launch, "start", http.MethodPost, "/containers/"+o.c.ID+"/start", nil, nil)
+	_, started := x.start(launch, "/containers/"+o.c.ID+"/start", nil)
 	observed, found, err := x.observe(launch, effect)
 	if err != nil {
 		return harness.Job{}, errors.Join(started, err)
@@ -209,8 +207,7 @@ func (x *Executor) Cancel(ctx context.Context, effect harness.Effect) (harness.J
 		if err := x.stopRequested(effect, o.c.ID); err != nil {
 			return harness.Job{}, err
 		}
-		grace := (x.cfg.StopGrace + time.Second - 1) / time.Second
-		if err := x.api(ctx, "stop", http.MethodPost, "/containers/"+o.c.ID+"/stop?t="+strconv.Itoa(int(grace)), nil, nil); err != nil {
+		if _, err := x.stop(ctx, o.c.ID, x.cfg.StopGrace); err != nil {
 			return harness.Job{}, err
 		}
 		if o, _, err = x.observe(ctx, effect); err != nil {

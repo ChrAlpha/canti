@@ -100,9 +100,14 @@ integration:
 	$(MODULES) go test -count=1 -race -timeout=15m -tags integration ./...
 	ACCEPTANCE_TAGS=acceptance,integration scripts/run-acceptance.sh -timeout=15m
 
+# Each discovered test has one lane: unit runs the default build without LONG
+# and PTY, integration only the tests its tag adds, long and pty their lists.
+ci-unit ci-long ci-pty: export CI_SHARD_ADDED_BY =
+ci-integration: export CI_SHARD_ADDED_BY = integration
+
 ci-unit:
-	$(MODULES) $(CI_TEST) -skip '$(PTY)' ./...
-	ACCEPTANCE_REPORT=1 scripts/run-acceptance.sh -skip '$(PTY)'
+	$(MODULES) $(CI_TEST) -tags '' -skip '$(LONG)|$(PTY)' ./...
+	ACCEPTANCE_REPORT=1 ACCEPTANCE_TAGS=acceptance scripts/run-acceptance.sh -skip '$(LONG)|$(PTY)'
 
 ci-integration:
 	$(MODULES) $(CI_TEST) -timeout=15m -tags integration -skip '$(LONG)|$(PTY)' ./...

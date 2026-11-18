@@ -86,16 +86,14 @@ type Mount struct{ Source, Target string }
 // Once recorded, a job is reported
 // from its record alone. Host environment variables never reach a job.
 type Executor struct {
-	cfg      Config
-	timeouts timeouts
-	engine   *engine
+	cfg Config
+	client
 }
 
-// Every daemon call has its own deadline, so a hung daemon cannot hold an
-// effect's lock forever: callTimeout, extended by Config.StopGrace for a
-// stop, or transferTimeout to create a container, which can copy the image,
-// to pull the image, to read a job's whole Docker log, and to wait for a job
-// to stop.
+// Every daemon call has its own deadline: callTimeout, extended by the stop
+// grace for a stop, or transferTimeout to create a container, which can copy
+// the image, to pull the image, to read a job's whole Docker log, and to wait
+// for a job to stop.
 const (
 	callTimeout     = 30 * time.Second
 	transferTimeout = 10 * time.Minute
@@ -179,7 +177,7 @@ func New(cfg Config) (*Executor, error) {
 		return nil, err
 	}
 	cfg.Workspace, cfg.State, cfg.Mounts = ws, state, mounts
-	return &Executor{cfg: cfg, timeouts: timeouts{callTimeout, transferTimeout}, engine: cliEngine(cfg.Docker)}, nil
+	return &Executor{cfg: cfg, client: newClient(cliEngine(cfg.Docker))}, nil
 }
 
 // CheckLayout refuses, as New does, a workspace and a state directory that

@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -179,34 +181,73 @@ func corpusDigest(t *testing.T, dir string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// TestEarlierVersionsKeepTheirCorpus requires that every scenario a later
-// context version renders anew keeps, under frozen-requests-v<version>, the
-// requests and journal that its earlier version froze: the files whose
-// digest that version's recorded rules hold, never rewritten.
+// partialRetention names the scenarios that context versions 13 and 14 kept;
+// they predate keeping every scenario that the next version renders anew.
+var partialRetention = []string{"decision-purpose", "directory-search-pages", "discovery-pages",
+	"failed-context-actions", "handover", "handover-carry", "handover-carry-again", "handover-carry-no-room",
+	"handover-carry-refused", "handover-carry-snapshots", "handover-carry-unsolicited", "handover-failed-twice",
+	"handover-gate", "handover-gate-retrieval", "handover-json-text", "handover-thresholds-reached",
+	"handover-thresholds-short", "history-imports", "purpose-across-windows", "removed-evidence",
+	"retrieval-command-at-cap", "retrieval-failure-guidance", "session-handover-paths", "session-history-files",
+	"shell-and-retrieval", "symlinked-evidence"}
+
+var corpusRule = regexp.MustCompile(`(?m)^corpus (\S+): sha256 ([0-9a-f]{64})$`)
+
+// TestEarlierVersionsKeepTheirCorpus requires each context version from 13
+// to retain, under frozen-requests-v<version>, exactly the scenarios that the
+// next version renders anew, as the files whose digest its recorded rules
+// hold, never rewritten. A scenario the next version renders identically is
+// that version's to keep, and the current version keeps its whole corpus.
 func TestEarlierVersionsKeepTheirCorpus(t *testing.T) {
+	const first, complete = 13, 15
 	root := filepath.Join("..", "..", "internal", "harness", "testdata")
-	dirs, err := filepath.Glob(filepath.Join(root, "frozen-requests-v*"))
-	if err != nil || len(dirs) == 0 {
-		t.Fatalf("no retained corpus of an earlier version: %v", err)
+	dirs, err := filepath.Glob(filepath.Join(root, "frozen-requests*"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	dirs = append(dirs, filepath.Join(root, "frozen-requests"))
 	for _, dir := range dirs {
-		version := strings.TrimPrefix(filepath.Base(dir), "frozen-requests-v")
-		if filepath.Base(dir) == "frozen-requests" {
-			version = "16"
+		version, err := strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), "frozen-requests-v"))
+		if err != nil || filepath.Base(dir) != fmt.Sprintf("frozen-requests-v%d", version) || version < first || version > host.ContextVersion {
+			t.Errorf("%s is not the corpus of a context version from %d to %d", dir, first, host.ContextVersion)
 		}
-		rules, err := os.ReadFile(filepath.Join("testdata", "context-v"+version+".txt"))
-		if err != nil {
-			t.Fatalf("retained corpus %s has no recorded context version: %v", dir, err)
-		}
-		scenarios, err := os.ReadDir(dir)
+	}
+	recorded := map[int]map[string]string{}
+	for version := first; version <= host.ContextVersion; version++ {
+		rules, err := os.ReadFile(filepath.Join("testdata", fmt.Sprintf("context-v%d.txt", version)))
 		if err != nil {
 			t.Fatal(err)
 		}
+		recorded[version] = map[string]string{}
+		for _, m := range corpusRule.FindAllStringSubmatch(string(rules), -1) {
+			recorded[version][m[1]] = m[2]
+		}
+	}
+	for version := first; version <= host.ContextVersion; version++ {
+		keep := map[string]bool{}
+		for name, sum := range recorded[version] {
+			anew := version == host.ContextVersion || recorded[version+1][name] != sum
+			keep[name] = anew && (version >= complete || slices.Contains(partialRetention, name))
+		}
+		dir := filepath.Join(root, fmt.Sprintf("frozen-requests-v%d", version))
+		scenarios, err := os.ReadDir(dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
 		for _, sc := range scenarios {
-			retained := corpusDigest(t, filepath.Join(dir, sc.Name()))
-			if !strings.Contains(string(rules), fmt.Sprintf("corpus %s: sha256 %s\n", sc.Name(), retained)) {
-				t.Errorf("version %s retains %s as sha256 %s, which its recorded rules do not identify", version, sc.Name(), retained)
+			name := sc.Name()
+			switch want, ok := recorded[version][name]; {
+			case !ok:
+				t.Errorf("version %d retains %s, which its recorded rules do not hold", version, name)
+			case !keep[name]:
+				t.Errorf("version %d retains %s, which version %d renders identically and keeps", version, name, version+1)
+			case corpusDigest(t, filepath.Join(dir, name)) != want:
+				t.Errorf("version %d retains %s as other files than its recorded rules identify", version, name)
+			}
+			delete(keep, name)
+		}
+		for name, required := range keep {
+			if required {
+				t.Errorf("version %d no longer retains %s, which it must keep", version, name)
 			}
 		}
 	}

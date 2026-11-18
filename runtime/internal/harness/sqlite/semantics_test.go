@@ -10,19 +10,6 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 )
 
-func semanticsReads(s *Store) map[string]func() error {
-	ctx := context.Background()
-	return map[string]func() error{
-		"Latest":         func() error { _, e := s.Latest(ctx, "run-1"); return e },
-		"Transitions":    func() error { _, e := s.Transitions(ctx, "run-1", 0, 100); return e },
-		"Recent":         func() error { _, e := s.Recent(ctx, "run-1", 0, 10); return e },
-		"Request":        func() error { _, e := s.Request(ctx, "run-1", 1, 1); return e },
-		"Response":       func() error { _, e := s.Response(ctx, "run-1", 1, 1); return e },
-		"LatestRequest":  func() error { _, e := s.LatestRequest(ctx, "run-1"); return e },
-		"ContextRecords": func() error { _, e := s.ContextRecords(ctx, "run-1", 1, 1, 0, 100); return e },
-		"ContextRequest": func() error { _, e := s.ContextRequest(ctx, "run-1", 1, 1); return e },
-	}
-}
 func recordBytes(t *testing.T, s *Store, through int64) string {
 	t.Helper()
 	var data string

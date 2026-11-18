@@ -335,11 +335,13 @@ func TestHotPathGuardRejectsPlanMutations(t *testing.T) {
 	}
 }
 
+// planGuard is the comparison TestHotPathQueryPlans applies to each golden
+// plan, so the mutations above exercise the check the plans rely on.
 func planGuard(got, want string) error {
 	if got == want {
 		return nil
 	}
-	return fmt.Errorf("query plan changed: got %q, want %q", got, want)
+	return fmt.Errorf("query plan changed; got:\n%s\nwant:\n%s", got, want)
 }
 
 func TestHotPathQueryPlans(t *testing.T) {
@@ -356,8 +358,8 @@ func TestHotPathQueryPlans(t *testing.T) {
 			if !ok {
 				t.Fatalf("hot query %s has no golden plan", q.name)
 			}
-			if got != want {
-				t.Fatalf("plan changed for %s; got:\n%s\nwant:\n%s", q.name, got, want)
+			if err := planGuard(got, want); err != nil {
+				t.Fatalf("%s: %v", q.name, err)
 			}
 		})
 	}

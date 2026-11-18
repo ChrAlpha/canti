@@ -53,8 +53,6 @@ func fullFrame() Frame {
 
 func ptrInt64(n int64) *int64 { return &n }
 
-func unlimited() PromptLimits { return DefaultPromptLimits() }
-
 func mustPrompt(t *testing.T, f Frame, l PromptLimits) Prompt {
 	t.Helper()
 	p, err := f.Prompt(l)

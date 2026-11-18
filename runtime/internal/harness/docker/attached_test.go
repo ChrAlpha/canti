@@ -609,9 +609,38 @@ func TestAttachedCompetingStatesCannotDispatchBesideSurvivingCommand(t *testing.
 	}
 }
 
+// Reconciliation validates the active command record it read before its
+// rebuilt owner may stop anything.
+func TestAttachedInvalidActiveRecordStopsReconciliationBeforeTheDaemon(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	e := effectFor(x, "effect_invalid", "sleep 30")
+	if _, err := x.Drive(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := x.readJob(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Format = 2
+	if err = x.saveJob(r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ControlEnvironment(t.Context(), f.dir, "stop"); err == nil || !strings.Contains(err.Error(), "invalid active command authority") {
+		t.Fatalf("stop beside an invalid active record: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stops != 0 {
+		t.Fatalf("sent %d stops", f.stops)
+	}
+}
+
 func TestAttachedDelayedStopKeepsSameIDQuarantinedAcrossTakeover(t *testing.T) {
 	f := newAttachedFake(t)
 	first, second := f.executor(t), f.executor(t)
+	// Its grace is part of the accepted specification and bounds the stop call.
+	first.cfg.StopGrace = time.Millisecond
 	e := effectFor(first, "effect_old", "sleep 30")
 	if _, err := first.Drive(t.Context(), e); err != nil {
 		t.Fatal(err)
@@ -620,8 +649,7 @@ func TestAttachedDelayedStopKeepsSameIDQuarantinedAcrossTakeover(t *testing.T) {
 	f.dropStop = true
 	release := sync.OnceFunc(func() { close(f.stopRelease) })
 	defer release()
-	first.backend.timeouts.call = 30 * time.Millisecond
-	first.backend.cfg.StopGrace = time.Millisecond
+	first.timeouts.call = 30 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { _, err := first.Cancel(t.Context(), e); done <- err }()
 	<-f.stopEntered
