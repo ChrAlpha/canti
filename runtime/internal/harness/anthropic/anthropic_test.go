@@ -688,7 +688,10 @@ func TestConfirmedContextLimitSignals(t *testing.T) {
 	}
 }
 
-func TestUsagePresenceAndNumericContract(t *testing.T) {
+// provider.Usage owns the numeric contract; the adapter reports whether each
+// counter was present, and stops on an invalid one without losing the
+// response it read.
+func TestUsagePresenceReachesTheResponseAndAnInvalidCounterStops(t *testing.T) {
 	for _, tc := range []struct {
 		name, usage string
 		want        harness.Usage
@@ -697,12 +700,7 @@ func TestUsagePresenceAndNumericContract(t *testing.T) {
 		{"missing", `null`, harness.Usage{}, false},
 		{"zero", `{"input_tokens":0,"output_tokens":0}`, harness.Usage{InputReported: true, OutputReported: true}, false},
 		{"partial", `{"output_tokens":2}`, harness.Usage{OutputTokens: 2, OutputReported: true}, false},
-		{"negative", `{"input_tokens":-1}`, harness.Usage{}, true},
-		{"fractional", `{"output_tokens":0.5}`, harness.Usage{}, true},
-		{"integer overflow", `{"input_tokens":9223372036854775808}`, harness.Usage{}, true},
-		{"sum overflow", `{"input_tokens":9223372036854775807,"output_tokens":1}`, harness.Usage{}, true},
-		{"duplicate", `{"input_tokens":1,"input_tokens":2}`, harness.Usage{}, true},
-		{"cache overflow", `{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}`, harness.Usage{}, true},
+		{"invalid", `{"input_tokens":-1}`, harness.Usage{}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"stop_reason":"end_turn","usage":` + tc.usage + `}`
