@@ -83,7 +83,8 @@ any of them fails until `core.SemanticsVersion` is bumped and its
 transitions are recorded with `-record-semantics`; a rule outside the
 explored limits needs its own test. Before changing a harness boundary,
 specify its durable commit point, attached facts, and behavior after restart.
-Model request bytes and provenance must be committed before sending; a
+Model request bytes and provenance, with the budget anchor a request opens,
+must be committed before sending; a
 decision and its normalized action before it is performed or bound; the executor publishes its durable owner binding before consuming its launch
 latch; a result together with run progress, and with any
 change of harness state it causes, such as the handover head it opens, in one

@@ -22,7 +22,7 @@ is not.
 | --- | --- | --- |
 | `runtime/core/decode.go` | Decision protocol and decoding | Offline tests |
 | `runtime/core/state.go`, `runtime/core/event.go` | Run state, events, intents, transition rules, state invariants | Full transition-table test and trajectory tests |
-| `runtime/internal/harness/frame.go`, `reader_prompt.go`, `context_state.go`, `handover.go` | The request frame, resident epoch, agent handover boundary, earlier-steps index, degradation floor and durable context anchor | Offline tests; long-history measurement over SQLite |
+| `runtime/internal/harness/frame.go`, `reader_prompt.go`, `context_state.go`, `handover.go`, `budget.go` | The request frame, resident epoch, agent handover boundary, context budget anchor, earlier-steps index, degradation floor and durable context anchor | Offline tests; long-history measurement over SQLite |
 | `runtime/internal/harness/model.go` | Model contract: freeze, one attempt with the frozen bytes, decision extraction, `StopError` | Implemented by `anthropic` and `openai` |
 | `runtime/internal/harness/store.go` | `Store` and `Journal` contracts: sequenced atomic commits, bounded recovery reads, run records, budgets, totals | Implemented by `sqlite` |
 | `runtime/internal/harness/runner.go` | Transition derivation and atomic commit | Recording-store tests; used by the loop |
@@ -39,7 +39,7 @@ is not.
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 9, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, and handover progress), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 10, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, and a run's context budget), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
@@ -186,7 +186,7 @@ physical owner for exited/timed-out assertions; it is never an inspected receipt
 
 ## Persistence and recovery
 
-SQLite schema 6 is current-only. A new empty database receives all tables and
+SQLite schema 7 is current-only. A new empty database receives all tables and
 indexes; other schema versions are refused without migration. State, event and
 fact readers are strict, including current semantics. WAL and synchronous=FULL
 retain the existing acknowledged-commit durability assumptions.
@@ -204,9 +204,10 @@ witness does not authorize environment reuse. The witness confirmation time is
 not an actual command exit time; unknown process timestamps remain unset. A local cancellation is
 the only receipt-free Observed. Performed validates a local Outcome and, for a successful handover, the closed done outcome and the head it opens in that same transaction.
 Confirmed rejection commits its response, usage, typed signal, the rejected request's shape and the next head together.
-The run's context_seq points to its latest successful handover or rejection; zero materializes the initial head. The run also records the rejection that opened its current head lineage; a confirmed rejection that opens no head (a terminal minimal or authoritative-orientation rejection, or attempt exhaustion) leaves that pointer and the head's carried rejection and usage unchanged.
+A budget anchor commits its head with the request it freezes. Every frozen request records its budget decision exactly when a budget is in force, it is no protocol repair and the previous request, frozen under the same head, reported input on its last settled attempt; the commit and head recovery recompute that previous request and its usage, check that no head opened since it, and compare the step bytes both requests rendered, and an anchor's capture holds exactly the steps it retains.
+The run's context_seq points to its latest successful handover, budget anchor or rejection; zero materializes the initial head. The run also records the rejection that opened its current head lineage; a confirmed rejection that opens no head (a terminal minimal or authoritative-orientation rejection, or attempt exhaustion) leaves that pointer and the head's carried rejection and usage unchanged.
 A consistent Context read compares the expected run snapshot and resolves that pointer
-within one transaction; fabricated handover, rejection or anchor provenance is rejected. Totals update atomically.
+within one transaction; fabricated handover, budget, rejection or anchor provenance is rejected. Totals update atomically.
 
 Recent and CompletionAtStep read current-format completed steps in bounded
 pages/point reads. Only operator provenance sets StepRecord.Resolved; inspected settlement
@@ -392,9 +393,25 @@ Every request is prepared from committed facts and a materialized `ContextState`
 ID is at most `MaxRunIDBytes` (200) so the archive paths a request and the
 minimal notice render always fit their bounds. The anchor is the context
 boundary: sequence 0 and step 1 is the initial head every run starts from, and a
-successful `canti:handover` or a provider rejection opens the next one. The core
-owns the generic `RequestRejected` transition; the adapters alone classify
-provider overflow.
+successful `canti:handover`, a budget anchor or a provider rejection opens the
+next one. The core owns the generic `RequestRejected` transition; the adapters
+alone classify provider overflow.
+
+The context budget is the run's `ContextTokens` (`-context-tokens`), or, when
+smaller or the only one, the largest input an accepted request reported before
+the head's rejection. A request with completed steps resident, other than a
+protocol repair, is projected from the previous request when it was frozen under
+the same head and its last settled attempt reported input: that input plus the
+rendered bytes this request adds. When the projection exceeds the budget, the request opens a budget anchor
+at its own sequence and is frozen under it: the head keeps the latest completed
+step and, before it, the newest resident steps whose rendered bytes fit a
+quarter of the budget, with the same `Minimal` and rejection. When no step can
+leave, no anchor opens. The frozen request records the decision, and the
+anchoring request carries the replaced head and its step bytes. Without
+reported usage no budget anchor opens, and provider rejection remains the
+fallback. A retry after a rejection is classified by the rejection that settled
+the previous revision, so instructions bound in between do not make it a
+protocol repair.
 
 A confirmed rejection consumes an attempt. When another attempt is permitted:
 a request with resident epoch steps or a protocol repair opens a head at the same
@@ -405,7 +422,7 @@ terminal. Attempt exhaustion opens no head. Repeated overflow remains bounded by
 the core's step-attempt limit. The rejection record keeps the shape of the
 rejected request and the largest input usage any accepted request before it
 reported; the commit checks the shape against the frozen request capture, so
-later reads never reclassify it.
+later reads never reclassify it. A rejection keeps no resident step.
 
 The stable head contains the exact goal and constraints, the principal
 instructions bound at or before its anchor, environment, run and archive
@@ -421,8 +438,8 @@ working. A
 superseded decision renders as one block naming the instruction that set it
 aside. The latest completion is rendered once: in the epoch when it belongs
 there, otherwise as a one-line tail reference, omitted when the index lists it.
-The replaceable tail contains observations, the execution position with
-provider-reported usage, and any protocol repair. When bound instructions
+The replaceable tail contains observations, the execution position with the
+context budget and provider-reported usage, and any protocol repair. When bound instructions
 exist, the execution position also carries one bounded line naming the latest
 instruction by number and the step before which it was received, without
 repeating its text; this changes no stable-prefix byte.
@@ -446,8 +463,8 @@ Per-field cuts, the rendered bytes of each step block, and the total request cap
 are accounted separately and captured per step. Resident steps are loaded in
 bounded pages while the running total is checked, so an unbounded epoch is never
 materialized. Exceeding the resource ceiling fails visibly and terminally; it is
-never a provider rejection. There is no token estimation, model-window table,
-capacity selection or reserve.
+never a provider rejection. There is no tokenizer, model-window table or reserve;
+the only projection is the budget anchor's, from reported usage and rendered bytes.
 
 Native retrieval commits exact observed source bytes with its outcome, including
 original path, range, hash, continuation and errors. The epoch keeps every

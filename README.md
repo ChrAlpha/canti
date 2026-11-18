@@ -123,16 +123,22 @@ Only the current schema, semantics, executor record and context versions are
 supported; an unsupported state directory is rejected with a fresh-state remedy.
 Same-version restarts preserve committed facts and exact frozen request bytes.
 A request keeps every step completed since the current anchor in full; earlier
-history stays in the read-only archive. `canti:handover`, optionally followed by
-a note, closes a phase: the steps before it leave later requests, and an
-earlier-steps index names them for retrieval. The note is archived with its step
-and never rendered automatically. Confirmed provider overflow resets the active
-context at the same unfinished step, retaining the exact goal, constraints and
-an index of the steps before it; a minimal context stays minimal until the agent
-hands over. As Bub's handoff does, a handover moves only the read boundary: it
-generates no summary and deletes no history. `-request-bytes` is a
-resource ceiling, and `-token-budget` uses only reported usage. Status and TUI
-reports distinguish unknown usage, reported zero and lost attempts.
+history stays in the read-only archive, and an earlier-steps index names it for
+retrieval. No boundary carries a summary. `-context-tokens` names the provider
+input each request should stay within: when the input the previous request
+reported, plus the bytes this one adds, would exceed it, earlier steps can
+leave and the request is no protocol repair, canti opens a new anchor that keeps the most recent steps, always
+including the latest result, in full. The largest input an accepted request
+reported before the run's latest confirmed provider overflow is a budget too;
+the smaller one applies. A confirmed overflow
+resets the active context at the same unfinished step, retaining the exact goal,
+constraints and the index; a minimal context stays minimal until the agent hands
+over. `canti:handover`, optionally followed by a note, closes a phase early; the
+note is archived with its step and never rendered automatically. As Bub's handoff
+does, a handover moves only the read boundary: it generates no summary and
+deletes no history. `-request-bytes` is a resource ceiling, and
+`-token-budget` uses only reported usage. Status and TUI reports distinguish
+unknown usage, reported zero and lost attempts.
 An unknown outcome requires explicit inspection or operator resolution and never
 authorizes rerunning the command.
 
