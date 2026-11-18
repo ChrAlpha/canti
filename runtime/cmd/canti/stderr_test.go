@@ -390,29 +390,6 @@ func TestALongFlagErrorKeepsTheWholeUsage(t *testing.T) {
 	}
 }
 
-// cliCommand is the canti test binary running args with the test's
-// environment, without inherited credentials or test hooks, and env.
-func cliCommand(t *testing.T, env []string, args ...string) *exec.Cmd {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(exe, pinHost(args)...)
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "ANTHROPIC_") && !strings.HasPrefix(kv, "CANTI_TEST_") {
-			cmd.Env = append(cmd.Env, kv)
-		}
-	}
-	gorace := "atexit_sleep_ms=0"
-	if v := os.Getenv("GORACE"); v != "" {
-		gorace = v + " " + gorace
-	}
-	cmd.Env = append(cmd.Env, "GORACE="+gorace)
-	cmd.Env = append(append(cmd.Env, "CANTI_TEST_MAIN=1"), env...)
-	return cmd
-}
-
 // awaitUnlockedWhileRunning fails unless the command, which ends when ended
 // closes, first holds the workspace lock of state, then, after proceed, lets
 // it be taken while it still runs, and keeps running for a while after: the

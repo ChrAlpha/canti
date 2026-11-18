@@ -307,23 +307,6 @@ func (r *corpusRig) frozen(t *testing.T, runID string) []harness.Transition {
 	return out
 }
 
-func (r *corpusRig) checkSteps(t *testing.T, runID string) {
-	t.Helper()
-	steps, err := r.store.Recent(context.Background(), runID, 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range steps {
-		o := s.Observation
-		if o.Execution != core.ExecutionExited || o.ExitCode == nil || *o.ExitCode != 0 {
-			t.Errorf("run %s step %d did not succeed: %+v", runID, s.Step, o)
-		}
-		if q := o.Retrieval; q != nil && (q.Error != "" || len(q.Sources)+len(q.Entries) == 0) {
-			t.Errorf("run %s step %d retrieval found nothing: %+v", runID, s.Step, q)
-		}
-	}
-}
-
 func promptText(t *testing.T, body []byte) string {
 	t.Helper()
 	var b struct {

@@ -235,15 +235,6 @@ type result struct {
 	stdout, stderr string
 }
 
-// runCLI runs the test binary as the CLI in a fresh process whose
-// environment holds no model settings or credentials beyond env. A process
-// killed by a signal reports code -1.
-func runCLI(t *testing.T, env []string, args ...string) result {
-	t.Helper()
-	_, wait := startCLI(t, env, args...)
-	return wait()
-}
-
 // hostCommands are the commands that take -host.
 var hostCommands = map[string]bool{"run": true, tuiCommand: true, "resume": true, "stop": true, "resolve": true}
 
@@ -269,15 +260,11 @@ func pinHost(args []string) []string {
 // command on the default -host, and is removed.
 const unpinned = "\x00default-host"
 
-// startCLI starts the CLI process of runCLI and returns it with the wait
-// for its result.
-func startCLI(t *testing.T, env []string, args ...string) (*exec.Cmd, func() result) {
-	t.Helper()
-	return startCLIWith(t, nil, nil, env, args...)
-}
-
-// startCLIWith is startCLI with stdin as the standard input of the process
-// and, unless it is nil, stdout as its standard output.
+// startCLIWith starts the test binary as the CLI in a fresh process whose
+// environment holds no model settings or credentials beyond env, with stdin
+// as its standard input and, unless it is nil, stdout as its standard output.
+// It returns the process with the wait for its result, where a process killed
+// by a signal reports code -1.
 func startCLIWith(t *testing.T, stdin io.Reader, stdout io.Writer, env []string, args ...string) (*exec.Cmd, func() result) {
 	t.Helper()
 	return startCLIIn(t, "", stdin, stdout, env, args...)
@@ -544,26 +531,6 @@ func responsesReply(text, reason string) map[string]any {
 		msg["status"], msg["incomplete_details"] = "incomplete", map[string]string{"reason": reason}
 	}
 	return msg
-}
-
-// responsesToolReply is a Responses API response that calls the decision
-// tool once with d.
-func responsesToolReply(d decision) string {
-	args, _ := json.Marshal(d)
-	data, _ := json.Marshal(map[string]any{"id": "resp_test", "object": "response", "model": "responses-test", "status": "completed",
-		"output": []any{map[string]any{"type": "function_call", "id": "fc_test", "call_id": "call_test", "name": "canti_decision", "arguments": string(args), "status": "completed"}},
-		"usage":  map[string]int{"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}})
-	return string(data)
-}
-
-func toolReply(decisions ...decision) string {
-	blocks := []any{map[string]any{"type": "text", "text": "Narration is not a decision."}}
-	for _, d := range decisions {
-		blocks = append(blocks, map[string]any{"type": "tool_use", "id": "toolu_test", "name": "canti_decision", "input": d})
-	}
-	data, _ := json.Marshal(map[string]any{"model": "claude-test", "stop_reason": "tool_use", "content": blocks,
-		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10}})
-	return string(data)
 }
 
 // archiveText reads the published read-only archive layout through a bounded

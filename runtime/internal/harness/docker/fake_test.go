@@ -36,7 +36,6 @@ type fake struct {
 	replies map[string]reply
 	hooks   map[string]func(*http.Request)
 	log     []string
-	signals map[string]chan struct{}
 }
 
 // reply answers an operation with body, or, with an error status, with body
@@ -55,7 +54,7 @@ exit "$(cat %[1]q/pull.exit 2>/dev/null || echo 0)"
 
 func newFake(t *testing.T) *fake {
 	f := &fake{t: t, ctl: t.TempDir(), stop: make(chan struct{}), replies: map[string]reply{},
-		hooks: map[string]func(*http.Request){}, signals: map[string]chan struct{}{}}
+		hooks: map[string]func(*http.Request){}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(f.stop) })
@@ -252,17 +251,6 @@ func (f *fake) inspected(id, command, status string, exit int, labels map[string
 	return string(b)
 }
 
-// listing is the daemon's listing of containers, each an ID followed by the
-// effect it is labelled with.
-func listing(pairs ...string) string {
-	var cs []map[string]any
-	for i := 0; i < len(pairs); i += 2 {
-		cs = append(cs, map[string]any{"Id": pairs[i], "Labels": map[string]string{"canti.effect": pairs[i+1]}})
-	}
-	b, _ := json.Marshal(cs)
-	return string(b)
-}
-
 // exited makes the job of effect e exit with code, which its shell recorded.
 func (f *fake) exited(code int) {
 	f.reply("inspect", f.container("exited", code))
@@ -309,51 +297,6 @@ func (f *fake) latch(value string) {
 	if err := setLatch(f.x.dir("e"), value); err != nil {
 		f.t.Fatal(err)
 	}
-}
-
-// signal reports that name happened.
-func (f *fake) signal(name string) {
-	ch := f.signalled(name)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	select {
-	case <-ch:
-	default:
-		close(ch)
-	}
-}
-
-func (f *fake) signalled(name string) chan struct{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.signals[name] == nil {
-		f.signals[name] = make(chan struct{})
-	}
-	return f.signals[name]
-}
-
-func (f *fake) happened(name string) bool {
-	select {
-	case <-f.signalled(name):
-		return true
-	default:
-		return false
-	}
-}
-
-// cancelAt returns a context that is cancelled once the fake signals name.
-func (f *fake) cancelAt(name string) context.Context {
-	ctx, cancel := context.WithCancel(f.t.Context())
-	f.t.Cleanup(cancel)
-	ch := f.signalled(name)
-	go func() {
-		defer cancel()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
 }
 
 func (f *fake) effect() harness.Effect {
