@@ -28,6 +28,43 @@ func TestResultAfterTerminalDoesNotRepeatTheAnswerOrStopLine(t *testing.T) {
 	}
 }
 
+func TestInputShowsOnlyPrincipalInputsWithTheirDelivery(t *testing.T) {
+	var b strings.Builder
+	Input(&b, hostrpc.Input{Authority: "principal", Text: "goal"})
+	Input(&b, hostrpc.Input{Authority: "principal", Delivery: "steer", Text: "steer text"})
+	Input(&b, hostrpc.Input{Authority: "principal", Delivery: "follow_up", Text: "later", Truncated: true})
+	Input(&b, hostrpc.Input{Authority: "observation", Text: "evidence"})
+	if got, want := b.String(), "› goal\n› steer text\n» later …\n"; got != want {
+		t.Fatalf("inputs = %q, want %q", got, want)
+	}
+}
+
+func TestWithdrawalStatesTheTotalAndOmittedNames(t *testing.T) {
+	var b strings.Builder
+	Item(&b, hostrpc.Item{Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, WithdrawnTotal: 70, Truncated: true})
+	if got, want := b.String(), "↩ withdrew 2+ input(s) (names omitted): in_1, pos:5\n"; got != want {
+		t.Fatalf("withdrawal = %q, want %q", got, want)
+	}
+	b.Reset()
+	Item(&b, hostrpc.Item{Kind: "withdrawn", Withdrawn: []string{"in_1"}})
+	if got, want := b.String(), "↩ withdrew 1 input(s): in_1\n"; got != want {
+		t.Fatalf("small withdrawal = %q, want %q", got, want)
+	}
+}
+
+func TestItemShowsADecidedStepsPurposeBeforeItsCommand(t *testing.T) {
+	var b strings.Builder
+	Item(&b, hostrpc.Item{Kind: "decided", Purpose: "Inspect the build\nbefore changing it", Command: "go test ./..."})
+	if got, want := b.String(), "# Inspect the build\n# before changing it\n$ go test ./...\n"; got != want {
+		t.Fatalf("decided item = %q, want %q", got, want)
+	}
+	b.Reset()
+	Item(&b, hostrpc.Item{Kind: "decided", Command: "true"})
+	if got, want := b.String(), "$ true\n"; got != want {
+		t.Fatalf("purpose-free item = %q, want %q", got, want)
+	}
+}
+
 func TestItemShowsHandoverRecordedWithOrWithoutANote(t *testing.T) {
 	for _, tc := range []struct {
 		name string

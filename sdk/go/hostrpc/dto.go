@@ -18,26 +18,28 @@ import "log/slog"
 // follow-up, observation, withdrawal and cancellation, and makes cursors
 // opaque agent-log positions; version 9 replaces focus with handover_bytes on
 // a local action's outcome; version 10 adds a run's context_tokens budget and
-// the context_anchored item. Records live with the runtime server contract
-// tests.
-const Protocol = 11
+// the context_anchored item; version 12 adds recorded line membership and a
+// bounded history page ending before a server-issued cursor. Records live
+// with the runtime server contract tests.
+const Protocol = 12
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
-	Validate  *Validation  `json:"validate,omitempty"`
-	Protocol  int          `json:"protocol"`
-	Op        string       `json:"op"`
-	RunID     string       `json:"run_id,omitempty"`
-	Cursor    string       `json:"cursor,omitempty"`
-	Submit    *Submission  `json:"submit,omitempty"`
-	Binding   *Binding     `json:"binding,omitempty"`
-	Observe   *Observation `json:"observe,omitempty"`
-	Withdraw  *Withdrawal  `json:"withdraw,omitempty"`
-	Once      bool         `json:"once,omitempty"`
-	Limit     int          `json:"limit,omitempty"`
-	TimeoutMS int64        `json:"timeout_ms,omitempty"`
-	CleanupMS int64        `json:"cleanup_ms,omitempty"`
-	Resolve   *Resolution  `json:"resolve,omitempty"`
+	Validate  *Validation   `json:"validate,omitempty"`
+	Protocol  int           `json:"protocol"`
+	Op        string        `json:"op"`
+	RunID     string        `json:"run_id,omitempty"`
+	Cursor    string        `json:"cursor,omitempty"`
+	Submit    *Submission   `json:"submit,omitempty"`
+	Binding   *Binding      `json:"binding,omitempty"`
+	Observe   *Observation  `json:"observe,omitempty"`
+	Withdraw  *Withdrawal   `json:"withdraw,omitempty"`
+	History   *HistoryQuery `json:"history,omitempty"`
+	Once      bool          `json:"once,omitempty"`
+	Limit     int           `json:"limit,omitempty"`
+	TimeoutMS int64         `json:"timeout_ms,omitempty"`
+	CleanupMS int64         `json:"cleanup_ms,omitempty"`
+	Resolve   *Resolution   `json:"resolve,omitempty"`
 }
 
 // The operations.
@@ -49,6 +51,7 @@ const (
 	OpInspect   = "inspect"
 	OpView      = "view"      // the state of a run; the latest when RunID is empty
 	OpProgress  = "progress"  // a page of a run's progress after Cursor
+	OpHistory   = "history"   // a page of the current line ending before a cursor
 	OpWait      = "wait"      // wait for a run to pass Cursor, at most TimeoutMS
 	OpStop      = "stop"      // stop a run, the host bounding cleanup by CleanupMS
 	OpResolve   = "resolve"   // record the outcome or the job of an unknown effect
@@ -61,17 +64,18 @@ const (
 
 // Response answers one request: Error, or the result of its operation.
 type Response struct {
-	Validated   *Validated  `json:"validated,omitempty"`
-	Inspection  *Inspection `json:"inspection,omitempty"`
-	Protocol    int         `json:"protocol"`
-	Error       *Error      `json:"error,omitempty"`
-	Hello       *Hello      `json:"hello,omitempty"`
-	Ack         *Ack        `json:"ack,omitempty"`
-	Run         *Run        `json:"run,omitempty"`
-	Page        *Page       `json:"page,omitempty"`
-	Wait        *Wait       `json:"wait,omitempty"`
-	Constraints *string     `json:"constraints,omitempty"`
-	Withdrawn   []Input     `json:"withdrawn,omitempty"`
+	Validated   *Validated   `json:"validated,omitempty"`
+	Inspection  *Inspection  `json:"inspection,omitempty"`
+	Protocol    int          `json:"protocol"`
+	Error       *Error       `json:"error,omitempty"`
+	Hello       *Hello       `json:"hello,omitempty"`
+	Ack         *Ack         `json:"ack,omitempty"`
+	Run         *Run         `json:"run,omitempty"`
+	Page        *Page        `json:"page,omitempty"`
+	History     *HistoryPage `json:"history,omitempty"`
+	Wait        *Wait        `json:"wait,omitempty"`
+	Constraints *string      `json:"constraints,omitempty"`
+	Withdrawn   []Input      `json:"withdrawn,omitempty"`
 }
 
 // Error is a refused or failed operation. Code classifies it for the client.
@@ -89,6 +93,7 @@ const (
 	CodeDriving  = "driving"  // the host already drives the run
 	CodeCursor   = "cursor"   // the cursor names no position of the agent log
 	CodeHeld     = "held"     // held inputs must be withdrawn first
+	CodeExpired  = "expired"  // the pinned history snapshot expired
 	CodeFailed   = "failed"   // anything else; Message says what
 )
 
@@ -338,33 +343,92 @@ type Page struct {
 	Quiescent bool   `json:"quiescent"`
 }
 
+// HistoryQuery asks for the page of the current line that ends before Before,
+// or at the end of the agent log when Before is empty. Limit is clamped to
+// the page bound. The line starts at its latest fresh run.
+type HistoryQuery struct {
+	Before     string `json:"before,omitempty"`
+	Line       string `json:"line,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	LatestOnly bool   `json:"latest_only,omitempty"`
+}
+
+// HistoryRun is one run of the current line as a reopening reader needs it:
+// its final state and what a final outcome shows, or that it is still active.
+// Goal and Constraints are set only for the first page's latest run; Result
+// is set for a returned run. They are cut at a display bound, and Truncated
+// reports that the Result was cut. Driver, Drivable and Why describe the
+// latest run's drive.
+type HistoryRun struct {
+	RunID       string `json:"run_id"`
+	InputID     string `json:"input_id,omitempty"`
+	Ordinal     int    `json:"ordinal,omitempty"`
+	Line        int    `json:"line,omitempty"`
+	Fresh       bool   `json:"fresh,omitempty"`
+	Status      string `json:"status"`
+	Phase       string `json:"phase"`
+	Step        int    `json:"step"`
+	StopReason  string `json:"stop_reason,omitempty"`
+	Result      string `json:"result,omitempty"`
+	EffectID    string `json:"effect_id,omitempty"`
+	Goal        string `json:"goal,omitempty"`
+	Constraints string `json:"constraints,omitempty"`
+	Driver      string `json:"driver"`
+	Drivable    bool   `json:"drivable"`
+	Why         string `json:"why,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+}
+
+// HistoryPage is one page of a line's recorded history, newest page first:
+// Items are in agent-log order within the page, Older names the cursor before
+// which the next older page ends, and Cursor is the snapshot's log end, the
+// position up to which the line was examined: following the log from Cursor
+// misses and repeats nothing. Line is the token a later page passes to stay
+// in this line. Latest is set only on the first page; Runs is newest first on
+// the first page and carries runs that opened since the snapshot on later
+// pages so their inputs keep their goal. Latest is the first element, or nil
+// when the state directory has none. LineStart pins the snapshot line's start;
+// a latest run's Line identifies a later fresh line.
+type HistoryPage struct {
+	Latest    *HistoryRun  `json:"latest,omitempty"`
+	LineStart int          `json:"line_start,omitempty"`
+	Runs      []HistoryRun `json:"runs,omitempty"`
+	Items     []Item       `json:"items"`
+	Line      string       `json:"line,omitempty"`
+	Older     string       `json:"older,omitempty"`
+	Cursor    string       `json:"cursor,omitempty"`
+	Omitted   bool         `json:"omitted,omitempty"`
+}
+
 // Item is one entry of a run's progress. Truncated reports that one of its
 // texts is cut at its cap.
 type Item struct {
-	Pos          int64    `json:"pos"`
-	RunID        string   `json:"run_id,omitempty"`
-	Seq          int64    `json:"seq,omitempty"`
-	Step         int      `json:"step"`
-	Kind         string   `json:"kind"`
-	Command      string   `json:"command,omitempty"`
-	Purpose      string   `json:"purpose,omitempty"`
-	Action       string   `json:"action,omitempty"`
-	Result       string   `json:"result,omitempty"`
-	Local        bool     `json:"local,omitempty"`
-	Resolved     bool     `json:"resolved,omitempty"`
-	Execution    string   `json:"execution,omitempty"`
-	ExitCode     *int     `json:"exit_code,omitempty"`
-	Preview      string   `json:"preview,omitempty"`
-	Detail       string   `json:"detail,omitempty"`
-	Outcome      *Outcome `json:"outcome,omitempty"`
-	AnchorSeq    int64    `json:"anchor_seq,omitempty"`
-	StopReason   string   `json:"stop_reason,omitempty"`
-	Failure      string   `json:"failure,omitempty"`
-	SupersededBy int      `json:"superseded_by,omitempty"`
-	Inputs       int      `json:"inputs,omitempty"`
-	Input        *Input   `json:"input,omitempty"`
-	Withdrawn    []string `json:"withdrawn,omitempty"`
-	Truncated    bool     `json:"truncated,omitempty"`
+	Pos            int64    `json:"pos"`
+	RunID          string   `json:"run_id,omitempty"`
+	Line           int      `json:"line,omitempty"`
+	Seq            int64    `json:"seq,omitempty"`
+	Step           int      `json:"step"`
+	Kind           string   `json:"kind"`
+	Command        string   `json:"command,omitempty"`
+	Purpose        string   `json:"purpose,omitempty"`
+	Action         string   `json:"action,omitempty"`
+	Result         string   `json:"result,omitempty"`
+	Local          bool     `json:"local,omitempty"`
+	Resolved       bool     `json:"resolved,omitempty"`
+	Execution      string   `json:"execution,omitempty"`
+	ExitCode       *int     `json:"exit_code,omitempty"`
+	Preview        string   `json:"preview,omitempty"`
+	Detail         string   `json:"detail,omitempty"`
+	Outcome        *Outcome `json:"outcome,omitempty"`
+	AnchorSeq      int64    `json:"anchor_seq,omitempty"`
+	StopReason     string   `json:"stop_reason,omitempty"`
+	Failure        string   `json:"failure,omitempty"`
+	SupersededBy   int      `json:"superseded_by,omitempty"`
+	Inputs         int      `json:"inputs,omitempty"`
+	Input          *Input   `json:"input,omitempty"`
+	Withdrawn      []string `json:"withdrawn,omitempty"`
+	WithdrawnTotal int      `json:"withdrawn_total,omitempty"`
+	Truncated      bool     `json:"truncated,omitempty"`
 }
 
 // Input is one admitted input as progress reports it, with bounded text.
@@ -377,6 +441,7 @@ type Input struct {
 	Source      string `json:"source,omitempty"`
 	Subject     string `json:"subject,omitempty"`
 	Text        string `json:"text"`
+	Seen        bool   `json:"seen,omitempty"`
 	Truncated   bool   `json:"truncated,omitempty"`
 }
 

@@ -88,6 +88,21 @@ func Validate(ctx context.Context, state string, sub Submission) (Spec, bool, er
 	return spec, opening, nil
 }
 
+// Resolve canonicalizes a submission's config and state without making an
+// admission decision.
+func Resolve(ctx context.Context, state string, sub Submission) (Spec, error) {
+	if err := CheckContextVersion(sub.Spec.Config); err != nil {
+		return sub.Spec, SpecError{Err: err}
+	}
+	spec := sub.Spec
+	p, err := newProvider(spec.Config.API, sub.Binding)
+	if err != nil {
+		return spec, err
+	}
+	spec.Config.Provider = p
+	return spec, nil
+}
+
 // CheckContextVersion is the version gate shared by validation and submission.
 func CheckContextVersion(c RunConfig) error {
 	if c.ContextVersion != ContextVersion {

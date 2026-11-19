@@ -47,18 +47,20 @@ const (
 	withdrawnPositionSQL  = `SELECT COALESCE(withdrawn_pos, 0) FROM inputs WHERE pos = ?`
 	withdrawableSteersSQL = `SELECT ` + inputColumns + ` FROM inputs
 		WHERE run_id = ? AND authority = 'principal' AND disposition = 'steer' ORDER BY pos`
-	markWithdrawnSQL   = `UPDATE inputs SET disposition = 'withdrawn', withdrawn_pos = ? WHERE pos = ?`
+	markWithdrawnSQL   = `UPDATE inputs SET disposition = 'withdrawn', withdrawn_pos = ?, line = ? WHERE pos = ?`
 	steerOrdinalSQL    = `SELECT count(*) FROM inputs WHERE run_id = ? AND authority = 'principal' AND disposition = 'steer' AND pos <= ?`
-	openFollowUpSQL    = `UPDATE inputs SET disposition = 'opened', run_id = ? WHERE pos = ? AND disposition = 'queued'`
+	openFollowUpSQL    = `UPDATE inputs SET disposition = 'opened', run_id = ?, line = ? WHERE pos = ? AND disposition = 'queued'`
 	inputByPositionSQL = `SELECT ` + inputColumns + ` FROM inputs WHERE pos = ?`
 	inputAtSQL         = `SELECT ` + inputColumns + ` FROM inputs WHERE pos = ?`
 	inputsAtSQL        = `SELECT ` + inputColumns + ` FROM inputs WHERE pos IN (SELECT value FROM json_each(?)) ORDER BY pos`
-	deliveredSQL       = `UPDATE inputs SET delivered_pos = ? WHERE pos = ? AND delivered_pos IS NULL`
+	deliveredSQL       = `UPDATE inputs SET delivered_pos = ?, line = ? WHERE pos = ? AND delivered_pos IS NULL`
 	steerBytesSQL      = `SELECT COALESCE(sum(length(CAST(text AS BLOB))), 0) FROM inputs
 		WHERE run_id = ? AND authority = 'principal' AND disposition = 'steer'`
 	withdrawQueuedSQL = `UPDATE inputs SET disposition = 'withdrawn' WHERE disposition = 'queued'`
-	insertInputSQL    = `INSERT INTO inputs (pos, input_id, authority, delivery, disposition, run_id, text, constraints,
-		explicit_constraints, fresh, spec, source, subject, admitted_at, admitted_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertInputSQL    = `INSERT INTO inputs (pos, input_id, authority, delivery, disposition, run_id, line, admitted_line, admitted_disposition, text, constraints,
+		explicit_constraints, fresh, spec, source, subject, admitted_at, admitted_run_id)
+		VALUES (?, ?, ?, ?, ?, ?, (SELECT line FROM runs WHERE id = ?),
+			COALESCE((SELECT line FROM runs WHERE id = ?), (SELECT line FROM runs ORDER BY n DESC LIMIT 1)), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 )
 
 // ValidKey reports whether id can name an input: 1 to 128 ASCII letters,
@@ -208,7 +210,7 @@ func (s *Store) admit(ctx context.Context, tx *sql.Tx, sub harness.InputSubmissi
 		return harness.Admission{}, err
 	}
 	if run.InputPos > 0 {
-		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh, projectData, projectMeta); err != nil {
+		if _, err := insertRun(ctx, tx, run, data, state, run.InputPos, projectData, projectMeta); err != nil {
 			return harness.Admission{}, err
 		}
 	}
@@ -231,6 +233,31 @@ func (s *Store) appendInput(ctx context.Context, tx *sql.Tx, sub harness.InputSu
 	return harness.Admission{Disposition: disposition, Input: in}, nil
 }
 
+func insertRun(ctx context.Context, tx *sql.Tx, run harness.Run, data, state string, inputPos int64, projectData, projectMeta string) (int, error) {
+	line, err := lineForNewRun(ctx, tx, run.Fresh)
+	if err != nil {
+		return 0, err
+	}
+	_, err = tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, inputPos, run.Fresh, projectData, projectMeta, line)
+	return line, err
+}
+
+// lineForNewRun is the recorded line of a run starting now: a fresh run
+// starts its own line at its ordinal; a successor stays on the latest line.
+func lineForNewRun(ctx context.Context, tx *sql.Tx, fresh bool) (int, error) {
+	var line int
+	if fresh {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(max(n), 0) + 1 FROM runs`).Scan(&line); err != nil {
+			return 0, err
+		}
+		return line, nil
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT line FROM runs ORDER BY n DESC LIMIT 1), 1)`).Scan(&line); err != nil {
+		return 0, err
+	}
+	return line, nil
+}
+
 func insertInput(ctx context.Context, tx *sql.Tx, pos int64, sub harness.InputSubmission, runID string, disposition harness.InputDisposition) (harness.Input, error) {
 	in := harness.Input{Pos: pos, InputID: sub.InputID, Authority: sub.Authority, Delivery: sub.Delivery,
 		Disposition: disposition, RunID: runID, AdmittedRunID: runID, Text: sub.Text, Constraints: sub.Constraints,
@@ -245,7 +272,7 @@ func insertInput(ctx context.Context, tx *sql.Tx, pos int64, sub harness.InputSu
 		target = runID
 	}
 	_, err := tx.ExecContext(ctx, insertInputSQL, pos, client, string(sub.Authority), string(sub.Delivery), string(disposition),
-		target, sub.Text, sub.Constraints, sub.ExplicitConstraints, sub.Fresh, string(sub.Spec), sub.Source, sub.Subject,
+		target, target, target, string(disposition), sub.Text, sub.Constraints, sub.ExplicitConstraints, sub.Fresh, string(sub.Spec), sub.Source, sub.Subject,
 		sub.Now.UTC().Format(time.RFC3339Nano), target)
 	return in, err
 }
@@ -361,7 +388,11 @@ func (s *Store) withdrawNamed(ctx context.Context, tx *sql.Tx, inputID string, l
 	if err != nil {
 		return nil, err
 	}
-	if err := markWithdrawn(ctx, tx, in.Pos, pos); err != nil {
+	line, err := latestLineValue(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := markWithdrawn(ctx, tx, in.Pos, pos, line); err != nil {
 		return nil, err
 	}
 	in.Disposition, in.WithdrawnPos = harness.DispositionWithdrawn, pos
@@ -386,8 +417,12 @@ func (s *Store) withdrawAll(ctx context.Context, tx *sql.Tx, latest *harness.Run
 		return nil, err
 	}
 	var out []harness.Input
+	line, err := latestLineValue(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	for _, in := range candidates {
-		if err := markWithdrawn(ctx, tx, in.Pos, pos); err != nil {
+		if err := markWithdrawn(ctx, tx, in.Pos, pos, line); err != nil {
 			return nil, err
 		}
 		in.Disposition, in.WithdrawnPos = harness.DispositionWithdrawn, pos
@@ -438,9 +473,20 @@ func (s *Store) withdrawableSteers(ctx context.Context, tx *sql.Tx, latest *harn
 	return out, errors.Join(rows.Err(), rows.Close())
 }
 
-func markWithdrawn(ctx context.Context, tx *sql.Tx, pos, withdrawnPos int64) error {
-	_, err := tx.ExecContext(ctx, markWithdrawnSQL, withdrawnPos, pos)
+func markWithdrawn(ctx context.Context, tx *sql.Tx, pos, withdrawnPos int64, line any) error {
+	_, err := tx.ExecContext(ctx, markWithdrawnSQL, withdrawnPos, line, pos)
 	return err
+}
+
+func latestLineValue(ctx context.Context, tx *sql.Tx) (any, error) {
+	var line int64
+	if err := tx.QueryRowContext(ctx, `SELECT line FROM runs ORDER BY n DESC LIMIT 1`).Scan(&line); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return line, nil
 }
 
 // steerOrdinal is the 1-based position of a steer among the non-withdrawn
@@ -498,10 +544,11 @@ func (s *Store) OpenFollowUp(ctx context.Context, in harness.Input, run harness.
 		if oldest.Pos != in.Pos {
 			return fmt.Errorf("%w: queued input %d is no longer the oldest", harness.ErrInputSpec, in.Pos)
 		}
-		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh, projectData, projectMeta); err != nil {
+		line, err := insertRun(ctx, tx, run, data, state, run.InputPos, projectData, projectMeta)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, openFollowUpSQL, run.ID, in.Pos); err != nil {
+		if _, err := tx.ExecContext(ctx, openFollowUpSQL, run.ID, line, in.Pos); err != nil {
 			return err
 		}
 		opened := in

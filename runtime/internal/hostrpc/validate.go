@@ -11,56 +11,14 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 )
 
-// Validate owns runtime validation for both the socket and preflight process.
-// It writes no facts and performs no model request or executor launch.
+// Validate owns the shared admission decision for both the socket and
+// preflight process. It writes no facts and performs no model request or
+// executor launch.
 func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, error) {
-	if v == nil {
-		return nil, errors.New("validation request is required")
-	}
-	spec, err := SpecFrom(v.Submission.Spec)
-	if err != nil {
-		return nil, host.SpecError{Err: err}
-	}
-	if h != nil && spec.Config.Workspace != h.Workspace() {
-		return nil, h.CheckLocation(spec.Config.Workspace, v.State)
-	}
-	state, err := host.CanonicalState(spec.Config.Workspace, v.State)
+	state, spec, constraints, b, err := prepareValidation(ctx, v, h)
 	if err != nil {
 		return nil, err
 	}
-	if h != nil {
-		if err := h.CheckLocation(spec.Config.Workspace, state); err != nil {
-			return nil, err
-		}
-	}
-	if err := host.ValidateLayout(spec.Config.Workspace, state); err != nil {
-		return nil, err
-	}
-	if spec.Config.ContextVersion == 0 {
-		spec.Config.ContextVersion = host.ContextVersion
-	}
-	if spec.Config.HistoryImports != "" {
-		spec.Config.HistoryImports, err = host.CanonicalImports(spec.Config.HistoryImports)
-		if err != nil {
-			return nil, host.SpecError{Err: err}
-		}
-	}
-	constraints := v.Submission.Constraints
-	if !v.Submission.ExplicitConstraints && !v.Submission.Fresh {
-		if h != nil {
-			var inherited string
-			inherited, err = h.InheritedConstraints(ctx)
-			constraints = cmp.Or(inherited, constraints)
-		} else {
-			var inherited string
-			inherited, err = readInherited(ctx, state)
-			constraints = cmp.Or(inherited, constraints)
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	b := BindingFrom(&v.Binding)
 	sub := host.Submission{InputID: v.Submission.InputID, Goal: v.Submission.Goal, Constraints: constraints, ExplicitConstraints: v.Submission.ExplicitConstraints,
 		Delivery: harness.InputDelivery(v.Submission.Delivery), Fresh: v.Submission.Fresh, Spec: spec, Binding: b}
 	prepared, opening, err := host.Validate(ctx, state, sub)
@@ -72,6 +30,77 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 			return nil, err
 		}
 	}
+	return validated(state, prepared, constraints)
+}
+
+// Resolve canonicalizes a submission's config and state through the serving
+// host or preflight transport without making an admission decision.
+func Resolve(ctx context.Context, v *Validation, h *host.Host) (*Validated, error) {
+	state, spec, constraints, b, err := prepareValidation(ctx, v, h)
+	if err != nil {
+		return nil, err
+	}
+	sub := host.Submission{InputID: v.Submission.InputID, Goal: v.Submission.Goal, Constraints: constraints, ExplicitConstraints: v.Submission.ExplicitConstraints,
+		Delivery: harness.InputDelivery(v.Submission.Delivery), Fresh: v.Submission.Fresh, Spec: spec, Binding: b}
+	prepared, err := host.Resolve(ctx, state, sub)
+	if err != nil {
+		return nil, err
+	}
+	return validated(state, prepared, constraints)
+}
+
+func prepareValidation(ctx context.Context, v *Validation, h *host.Host) (string, host.Spec, string, host.Binding, error) {
+	if v == nil {
+		return "", host.Spec{}, "", host.Binding{}, errors.New("validation request is required")
+	}
+	spec, err := SpecFrom(v.Submission.Spec)
+	if err != nil {
+		return "", host.Spec{}, "", host.Binding{}, host.SpecError{Err: err}
+	}
+	if h != nil && spec.Config.Workspace != h.Workspace() {
+		return "", host.Spec{}, "", host.Binding{}, h.CheckLocation(spec.Config.Workspace, v.State)
+	}
+	state, err := host.CanonicalState(spec.Config.Workspace, v.State)
+	if err != nil {
+		return "", host.Spec{}, "", host.Binding{}, err
+	}
+	if h != nil {
+		if err := h.CheckLocation(spec.Config.Workspace, state); err != nil {
+			return "", host.Spec{}, "", host.Binding{}, err
+		}
+	}
+	if err := host.ValidateLayout(spec.Config.Workspace, state); err != nil {
+		return "", host.Spec{}, "", host.Binding{}, err
+	}
+	if spec.Config.ContextVersion == 0 {
+		spec.Config.ContextVersion = host.ContextVersion
+	}
+	if spec.Config.HistoryImports != "" {
+		spec.Config.HistoryImports, err = host.CanonicalImports(spec.Config.HistoryImports)
+		if err != nil {
+			return "", host.Spec{}, "", host.Binding{}, host.SpecError{Err: err}
+		}
+	}
+	constraints := v.Submission.Constraints
+	if !v.Submission.ExplicitConstraints && !v.Submission.Fresh {
+		if h != nil {
+			inherited, err := h.InheritedConstraints(ctx)
+			if err != nil {
+				return "", host.Spec{}, "", host.Binding{}, err
+			}
+			constraints = cmp.Or(inherited, constraints)
+		} else {
+			inherited, err := readInherited(ctx, state)
+			if err != nil {
+				return "", host.Spec{}, "", host.Binding{}, err
+			}
+			constraints = cmp.Or(inherited, constraints)
+		}
+	}
+	return state, spec, constraints, BindingFrom(&v.Binding), nil
+}
+
+func validated(state string, prepared host.Spec, constraints string) (*Validated, error) {
 	projectBinding, err := ProjectOfMeta(prepared.Project.Meta(), prepared.Config.NoProjectContext)
 	if err != nil {
 		return nil, err

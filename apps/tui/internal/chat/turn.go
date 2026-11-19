@@ -26,6 +26,7 @@ type Turn struct {
 	Snapshot       Snapshot
 	reconcile      bool
 	owned          bool
+	attached       bool
 	cancel         context.CancelFunc
 	stop           chan struct{}
 	done           chan struct{}
@@ -61,6 +62,16 @@ func (t *Turn) accept(a hostrpc.Ack) {
 	}
 	t.mu.Unlock()
 	t.wake()
+}
+
+// attach names the run a follower joined, so its controls act on that run
+// before any progress row arrives.
+func (t *Turn) attach(runID string) {
+	t.mu.Lock()
+	if runID != "" {
+		t.runID = runID
+	}
+	t.mu.Unlock()
 }
 func (t *Turn) diagnostic(note string) {
 	t.mu.Lock()

@@ -28,6 +28,7 @@ func open(t testing.TB, path string) *Store {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
+	s.SetHistoryLifetime(5 * time.Minute)
 	t.Cleanup(func() { s.Close() })
 	return s
 }
@@ -79,7 +80,7 @@ func unadmitted(t testing.TB, s *Store, id string, limits core.Limits) harness.S
 	initial := fresh(t, id, limits)
 	data, state, err := encodeRun(testRun(id), initial)
 	if err == nil {
-		_, err = s.db.Exec(insertRunSQL, id, core.SemanticsVersion, data, state, nil, false, `{}`, `{}`)
+		_, err = s.db.Exec(insertRunSQL, id, core.SemanticsVersion, data, state, nil, false, `{}`, `{}`, 1)
 	}
 	if err != nil {
 		t.Fatal(err)

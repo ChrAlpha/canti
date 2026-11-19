@@ -41,7 +41,7 @@ func wireMessages() map[string]any {
 	code := 3
 	spec := Spec{Environment: "/environment", EnvironmentWorkdir: "/workspace/subdir", Ephemeral: true, Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
-		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", NoProjectContext: true, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
+		RequestBytes: 262144, ContextVersion: host.ContextVersion, HistoryImports: "/i", NoProjectContext: true, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
 	binding := &ProjectBinding{Disabled: true, Root: "/workspace", InstructionBytes: 10, SkillsIndexBytes: 20, SkillsIndexSHA256: "sha",
 		Instructions: []ProjectFile{{Path: "/workspace/AGENTS.md", ResolvedPath: "/workspace/SHARED.md", Size: 10, SHA256: "sum"}}, InstructionsTotal: 1,
 		Skills:      []ProjectSkill{{Name: "go", Description: "Go conventions.", Path: "/workspace/.agents/skills/go/SKILL.md", ResolvedPath: "/workspace/.agents/skills/go/SKILL.md"}},
@@ -53,26 +53,31 @@ func wireMessages() map[string]any {
 		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", PendingSteers: 2, Queued: 1, Held: 3,
 		Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4, Coverage: UsageCoverage{Attempts: 7, InputReports: 3, OutputReports: 4, Lost: 2}},
 		Budget: Budget{WallTime: "30m0s", Tokens: 5, ContextTokens: 9, OutputBytes: 6, JobTimeout: "10m0s"}, Project: binding}
+	historyRun := HistoryRun{RunID: "run_1", InputID: "in_1", Ordinal: 1, Line: 1, Fresh: true, Status: StatusStopped, Phase: "stopped", Step: 4,
+		StopReason: "cancelled", Result: "r", EffectID: "effect_1", Goal: "g", Constraints: "c", Driver: DriverIdle,
+		Drivable: false, Why: "w", Truncated: true}
 	return map[string]any{
 		"request": Request{Validate: &Validation{State: "/state", Submission: Submission{Goal: "chat"}, Binding: Binding{Provider: "https://p.test"}}, Protocol: Protocol, Op: OpSubmit, RunID: "run_1", Cursor: "pos:5", Once: true, Limit: 6, TimeoutMS: 7, CleanupMS: 8,
 			Submit:   &Submission{InputID: "in_1", Goal: "g", Constraints: "c", ExplicitConstraints: true, Delivery: "steer", Fresh: true, Spec: spec},
 			Binding:  &Binding{Provider: "https://p.test", Fallback: "https://f.test", AnthropicKey: "test-key-1", AnthropicToken: "test-key-2", OpenAIKey: "test-key-3"},
 			Observe:  &Observation{InputID: "obs_1", Source: "ci", Subject: "build", Text: "green"},
 			Withdraw: &Withdrawal{InputID: "in_1"},
+			History:  &HistoryQuery{Before: `{"pos":9,"seq":{"run_1":3},"session":"0123456789abcdef0123456789abcdef"}`, Line: "line:0123456789abcdef0123456789abcdef", Limit: 6, LatestOnly: true},
 			Resolve:  &Resolution{Job: true, Execution: "exited", ExitCode: &code, Note: "n", OwnerID: "owner_1"}},
 		"response": Response{Validated: &Validated{State: "/state", Constraints: "rules", GoalLimit: 32768, ConstraintsLimit: 16384, Project: binding}, Protocol: Protocol, Error: &Error{Code: CodeFailed, Message: "m"},
 			Hello: &Hello{Protocol: Protocol, Version: "dev", ContextVersion: 13, SemanticsVersion: 4, PID: 1, Bindings: []Pair{{API: "anthropic-messages", Provider: "https://p.test"}}},
 			Ack:   &Ack{Replayed: true, Differs: []string{"model", "limits.max_steps"}, InputID: "in_1", Disposition: "steer", Pos: 5, Run: &run},
 			Run:   &run,
-			Page: &Page{Next: "pos:9", More: true, Quiescent: true, Items: []Item{{Pos: 1, RunID: "run_1", Kind: "input", Input: &Input{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "steer", Text: "t"}},
+			Page: &Page{Next: "pos:9", More: true, Quiescent: true, Items: []Item{{Pos: 1, RunID: "run_1", Kind: "input", Input: &Input{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "steer", Text: "t", Seen: true}},
 				{Pos: 2, RunID: "run_1", Kind: "inputs_bound", Step: 2, Inputs: 1}, {Pos: 3, RunID: "run_1", Seq: 2, Step: 1, Kind: "decided",
 					Command: "canti:handover phase one", Purpose: "p", Action: "handover"}, {Pos: 4, RunID: "run_1", Seq: 3, Step: 1, Kind: "completed", Command: "x", Purpose: "p", Action: "retrieve", Result: "r",
 					Local: true, Resolved: true, Execution: "exited", ExitCode: &code, Preview: "pv", Detail: "d",
 					Outcome:   &Outcome{Status: "done", Detail: "d", Retrieval: true, RetrievalError: "re", Sources: 1, Entries: 2, HandoverBytes: 34},
 					AnchorSeq: 5, StopReason: "cancelled", Failure: "f", SupersededBy: 3, Truncated: true}, {Pos: 5, RunID: "run_1", Seq: 5, Step: 2, Kind: "context_reset", AnchorSeq: 5, Failure: "confirmed provider overflow"}, {Pos: 6, RunID: "run_1", Seq: 8, Step: 3, Kind: "context_anchored", AnchorSeq: 8},
-				{Pos: 7, Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, Truncated: true}}},
+				{Pos: 7, Kind: "withdrawn", Withdrawn: []string{"in_1", "pos:5"}, WithdrawnTotal: 70, Truncated: true}}},
 			Inspection: &Inspection{RunID: "run_1", Cursor: "pos:9", EffectID: "effect_1", SampledAt: "2026-11-07T00:00:00Z", Unavailable: "diagnostic", Receipt: &Receipt{DispatchedAt: "2026-11-07T00:00:00Z", Binding: &EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, Cessation: &Cessation{Binding: EnvironmentBinding{BackendID: "daemon_1", EnvironmentID: "container_1", StartEpoch: "epoch_1", AuthorityID: "authority_1", Incarnation: 1, Generation: 2}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", StopIntent: "stop_1", Kind: "environment_stopped", RequestedAt: "2026-11-07T00:00:01Z", ConfirmedAt: "2026-11-07T00:00:02Z"}, EffectID: "effect_1", Spec: "spec_1", OwnerID: "owner_1", Status: "failed", Fenced: true, ExitCode: &code, StartedAt: "2026-11-07T00:00:00Z", FinishedAt: "2026-11-07T00:00:01Z", Preview: "output", OutputPath: "effect_1/output", OutputBytes: 6, OutputAvailable: true, OutputComplete: true, Detail: "retained"}},
 			Wait:       &Wait{Cursor: "pos:9", Quiescent: true, Driver: DriverDriving}, Constraints: new(string),
+			History:   &HistoryPage{Latest: &historyRun, Runs: []HistoryRun{historyRun}, Line: "line:0123456789abcdef0123456789abcdef", LineStart: 1, Cursor: "pos:9", Older: `{"pos":4,"seq":{"run_1":2},"session":"0123456789abcdef0123456789abcdef"}`, Omitted: true, Items: []Item{{Pos: 1, RunID: "run_1", Kind: "input", Input: &Input{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "steer", Text: "t", Seen: true}}}},
 			Withdrawn: []Input{{Pos: 1, InputID: "in_1", Authority: "principal", Delivery: "steer", Disposition: "withdrawn", Text: "t"}}},
 	}
 }
@@ -222,6 +227,51 @@ func declaredValues(t *testing.T, dirs map[string]string) map[string][]string {
 // TestACursorRoundTripsAndRefusesWhatIsNone requires that the wire cursor
 // carries an agent-log position and that a string that is no cursor is
 // refused as host.ErrCursor.
+func TestHistoryReadsTheLineThroughThePublicProtocol(t *testing.T) {
+	h, c := serving(t)
+	ctx := context.Background()
+	empty, err := c.History(ctx, "", 0)
+	if err != nil || empty.Latest != nil || len(empty.Items) != 0 || empty.Cursor != "" || empty.Older != "" {
+		t.Fatalf("empty history = %+v, %v", empty, err)
+	}
+	spec := host.Spec{Config: host.RunConfig{Ephemeral: true, Workspace: h.Workspace(), Image: "debian:bookworm-slim", Network: "none",
+		Memory: "2g", Pids: 512, OutputLimit: 8 << 20, API: host.APIMessages, Model: "m", MaxTokens: 1000, Structured: true,
+		RequestBytes: 256 << 10, ContextVersion: host.ContextVersion},
+		Limits: core.Limits{MaxSteps: 20, MaxAttempts: 3},
+		Budget: harness.Budget{WallTime: time.Hour, ContextTokens: 200_000, OutputBytes: 1 << 20, JobTimeout: time.Minute}}
+	ack, err := h.Submit(ctx, host.Submission{Goal: "history goal", Spec: spec, Now: time.Now(),
+		Binding: host.Binding{Provider: "http://127.0.0.1:1", Keys: host.Keys{AnthropicKey: "k"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Submit(ctx, host.Submission{InputID: "steer-input", Goal: "steer text", Delivery: harness.DeliverySteer, Spec: spec, Now: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.History(ctx, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Latest == nil || page.Latest.RunID != ack.Run.ID || page.Cursor == "" || page.Older == "" || len(page.Items) != 1 {
+		t.Fatalf("newest history page = %+v, want one row with the latest run and an older page", page)
+	}
+	if page.Items[0].Kind != "input" || page.Items[0].Input == nil || page.Items[0].Input.Text != "steer text" {
+		t.Fatalf("newest history row = %+v, want the steer", page.Items[0])
+	}
+	older, err := c.HistoryPage(ctx, page.Older, page.Line, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.Older != "" || older.Latest != nil || len(older.Items) != 1 || older.Items[0].Kind != "input" || older.Items[0].Input == nil || older.Items[0].Input.Text != "history goal" {
+		t.Fatalf("older history page = %+v, want the opening input", older)
+	}
+	if _, err := c.History(ctx, "not-a-cursor", 1); !errors.Is(err, sdk.ErrCursor) {
+		t.Fatalf("history with a bad cursor = %v, want ErrCursor", err)
+	}
+	if _, err := c.History(ctx, CursorOf(host.Cursor(1<<40)), 1); !errors.Is(err, sdk.ErrCursor) {
+		t.Fatalf("history past the log end = %v, want ErrCursor", err)
+	}
+}
+
 func TestACursorRoundTripsAndRefusesWhatIsNone(t *testing.T) {
 	for _, c := range []host.Cursor{0, 42} {
 		if got, err := ParseCursor(CursorOf(c)); err != nil || got != c {

@@ -579,22 +579,24 @@ func TestSetupAdoptsCanonicalStateBeforeConnecting(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(aliasRoot) })
 	alias := filepath.Join(aliasRoot, "state")
-	canonical := make(chan string, 1)
+	var canonicalState string
 	state := protocolHost(t, func(req hostrpc.Request) (hostrpc.Response, bool) {
 		switch req.Op {
+		case hostrpc.OpResolve:
+			return hostrpc.Response{Validated: &hostrpc.Validated{State: canonicalState, Spec: req.Validate.Submission.Spec, GoalLimit: 100}}, false
 		case hostrpc.OpValidate:
 			// Once validation answers, the original spelling disappears. Startup
-			// must connect using the returned identity rather than recreate it.
+			// must use the resolved identity rather than recreate it.
 			if err := os.Remove(alias); err != nil {
 				return hostrpc.Response{Error: &hostrpc.Error{Code: hostrpc.CodeFailed, Message: err.Error()}}, false
 			}
-			return hostrpc.Response{Validated: &hostrpc.Validated{State: <-canonical, Spec: req.Validate.Submission.Spec, GoalLimit: 100}}, false
+			return hostrpc.Response{Validated: &hostrpc.Validated{State: canonicalState, Spec: req.Validate.Submission.Spec, GoalLimit: 100}}, false
 		case hostrpc.OpHello:
 			return hostrpc.Response{Hello: &hostrpc.Hello{Protocol: hostrpc.Protocol}}, false
 		}
 		return hostrpc.Response{}, false
 	})
-	canonical <- state
+	canonicalState = state
 	if err := os.Symlink(state, alias); err != nil {
 		t.Fatal(err)
 	}

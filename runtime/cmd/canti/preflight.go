@@ -9,6 +9,7 @@ import (
 
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
 
+	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
@@ -22,15 +23,21 @@ func preflight(ctx context.Context, in io.Reader, out io.Writer) int {
 	resp := hostrpc.Response{Protocol: hostrpc.Protocol}
 	if err == nil && req.Protocol != hostrpc.Protocol {
 		resp.Error = &hostrpc.Error{Code: hostrpc.CodeProtocol, Message: "runtime and client versions differ; install matching canti and canti-tui executables"}
-	} else if err == nil && req.Op != hostrpc.OpValidate {
-		err = errors.New("preflight requires validate")
+	} else if err == nil && req.Op != hostrpc.OpValidate && req.Op != hostrpc.OpResolve {
+		err = errors.New("preflight requires validate or resolve")
 	}
 	if err == nil && resp.Error == nil {
-		resp.Validated, err = hostserver.Validate(ctx, req.Validate, nil)
+		if req.Op == hostrpc.OpResolve {
+			resp.Validated, err = hostserver.Resolve(ctx, req.Validate, nil)
+		} else {
+			resp.Validated, err = hostserver.Validate(ctx, req.Validate, nil)
+		}
 	}
 	if err != nil {
 		code := hostrpc.CodeFailed
-		if errors.As(err, new(host.SpecError)) {
+		if errors.Is(err, host.ErrHeld) || errors.Is(err, harness.ErrHeld) {
+			code = hostrpc.CodeHeld
+		} else if errors.As(err, new(host.SpecError)) {
 			code = hostrpc.CodeSpec
 		}
 		resp.Error = &hostrpc.Error{Code: code, Message: err.Error()}

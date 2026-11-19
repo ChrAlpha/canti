@@ -255,6 +255,76 @@ func (a *runtimeClient) runtimeExecutable() (string, error) {
 	return filepath.Abs(path)
 }
 
+func (a *runtimeClient) resolve(ctx context.Context, sub hostrpc.Submission, b hostrpc.Binding) (hostrpc.Validated, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	if !utf8.ValidString(sub.Goal) || !utf8.ValidString(sub.Constraints) {
+		return hostrpc.Validated{}, false, hostrpc.SpecError{Err: errors.New("input and -constraints must be valid UTF-8")}
+	}
+	validation := hostrpc.Validation{State: a.state, Submission: sub, Binding: b}
+	req := hostrpc.Request{Protocol: hostrpc.Protocol, Op: hostrpc.OpResolve, Validate: &validation}
+	if err := req.CheckText(); err != nil {
+		return hostrpc.Validated{}, false, err
+	}
+	if path, err := hostrpc.SocketPath(a.state); err == nil {
+		client := &hostrpc.Client{Path: path}
+		v, err := client.ResolveConfig(ctx, validation)
+		if err == nil || !hostrpc.Unavailable(err) {
+			return v, false, err
+		}
+	}
+	exe, err := a.runtimeExecutable()
+	if err != nil {
+		return hostrpc.Validated{}, true, err
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return hostrpc.Validated{}, true, err
+	}
+	if len(body) > preflightRequestLimit {
+		return hostrpc.Validated{}, true, hostrpc.SpecError{Err: errors.New("runtime preflight request exceeds 1 MiB")}
+	}
+	output, err := runPreflight(ctx, exe, body, b, a.env)
+	if err != nil {
+		return hostrpc.Validated{}, true, err
+	}
+	v, err := decodeValidation(output, b)
+	return v, true, err
+}
+
+// validateOn uses one transport selected by Setup; it never silently switches.
+func (a *runtimeClient) validateOn(ctx context.Context, sub hostrpc.Submission, b hostrpc.Binding, preflight bool) (hostrpc.Validated, error) {
+	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	if !preflight {
+		path, err := hostrpc.SocketPath(a.state)
+		if err != nil {
+			return hostrpc.Validated{}, err
+		}
+		return validateServing(ctx, &hostrpc.Client{Path: path}, hostrpc.Validation{State: a.state, Submission: sub, Binding: b})
+	}
+	req := hostrpc.Request{Protocol: hostrpc.Protocol, Op: hostrpc.OpValidate, Validate: &hostrpc.Validation{State: a.state, Submission: sub, Binding: b}}
+	if err := req.CheckText(); err != nil {
+		return hostrpc.Validated{}, err
+	}
+	exe, err := a.runtimeExecutable()
+	if err != nil {
+		return hostrpc.Validated{}, err
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return hostrpc.Validated{}, err
+	}
+	if len(body) > preflightRequestLimit {
+		return hostrpc.Validated{}, hostrpc.SpecError{Err: errors.New("runtime preflight request exceeds 1 MiB")}
+	}
+	output, err := runPreflight(ctx, exe, body, b, a.env)
+	if err != nil {
+		return hostrpc.Validated{}, err
+	}
+	return decodeValidation(output, b)
+}
+
 func (a *runtimeClient) validate(ctx context.Context, sub hostrpc.Submission, b hostrpc.Binding) (hostrpc.Validated, error) {
 	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
 	defer cancel()

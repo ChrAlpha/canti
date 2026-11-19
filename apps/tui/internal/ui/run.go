@@ -16,6 +16,7 @@ import (
 // carries only OS signals and output faults, never bytes or decoded key events.
 func Run(ctx context.Context, c *chat.Controller, input *os.File, output io.Writer, signals <-chan os.Signal, failures <-chan error) (int, error) {
 	m := New(ctx, c)
+	m.followActive()
 	p := tea.NewProgram(m, tea.WithInput(input), tea.WithOutput(output), tea.WithInputLimits(64<<10, c.GoalLimit), tea.WithWindowSize(80, 24), tea.WithoutSignalHandler())
 	relayCtx, cancel := context.WithCancel(context.Background())
 	var relay sync.WaitGroup

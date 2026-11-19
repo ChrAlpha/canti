@@ -30,8 +30,8 @@ func hotFixture(t *testing.T) *Store {
 	ctx := context.Background()
 	now := admittedAt.UTC().Format(time.RFC3339Nano)
 	for i := 1; i <= 4; i++ {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO runs (n, id, semantics, run, initial, fresh, project, project_meta) VALUES (?, ?, 8, '{}', '{}', ?, '{}', '{}')`,
-			i, fmt.Sprintf("run-%d", i), i == 1); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO runs (n, id, semantics, run, initial, fresh, project, project_meta, line) VALUES (?, ?, 8, '{}', '{}', ?, '{}', '{}', ?)`,
+			i, fmt.Sprintf("run-%d", i), i == 1, i); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -167,7 +167,7 @@ var hotPlans = map[string]string{
 	"lastPosSQL":            "2|0|33|SEARCH agent_log USING INTEGER PRIMARY KEY (rowid=?)\n",
 	"logInputsSQL":          "4|0|196|SEARCH inputs USING INTEGER PRIMARY KEY (rowid>?)\n",
 	"logTransitionsSQL":     "5|0|202|SEARCH transitions USING INDEX transitions_pos (pos>?)\n",
-	"logWithdrawalsSQL":     "2|0|0|CO-ROUTINE rows\n5|2|0|CO-ROUTINE (subquery-4)\n8|5|0|CO-ROUTINE (subquery-5)\n10|8|0|CO-ROUTINE page\n18|10|177|SEARCH inputs USING COVERING INDEX inputs_withdrawn (withdrawn_pos>?)\n51|8|49|SCAN p\n54|8|60|SEARCH i USING INDEX inputs_withdrawn (withdrawn_pos=?)\n69|8|0|USE TEMP B-TREE FOR ORDER BY\n87|5|82|SCAN (subquery-5)\n143|5|0|USE TEMP B-TREE FOR ORDER BY\n162|2|82|SCAN (subquery-4)\n214|0|82|SCAN rows\n226|0|0|USE TEMP B-TREE FOR ORDER BY\n",
+	"logWithdrawalsSQL":     "2|0|0|CO-ROUTINE page\n5|2|0|SETUP\n6|5|0|SCAN CONSTANT ROW\n10|5|0|SCALAR SUBQUERY 1\n15|10|177|SEARCH inputs USING COVERING INDEX inputs_withdrawn (withdrawn_pos>?)\n40|2|0|RECURSIVE STEP\n41|40|216|SCAN page\n49|40|0|CORRELATED SCALAR SUBQUERY 3\n54|49|177|SEARCH inputs USING COVERING INDEX inputs_withdrawn (withdrawn_pos>?)\n74|0|214|SCAN p\n81|0|0|CORRELATED SCALAR SUBQUERY 5\n86|81|60|SEARCH inputs USING INDEX inputs_withdrawn (withdrawn_pos=?)\n101|0|0|CORRELATED SCALAR SUBQUERY 7\n104|101|0|CO-ROUTINE i\n109|104|60|SEARCH inputs USING INDEX inputs_withdrawn (withdrawn_pos=?)\n124|101|76|SCAN i\n",
 	"observationKeySQL":     "",
 	"observationsSQL":       "6|0|210|SCAN k USING INDEX observation_keys_latest\n9|0|45|SEARCH i USING INTEGER PRIMARY KEY (rowid=?)\n",
 	"previousCountSQL":      "2|0|0|CO-ROUTINE line\n5|2|0|SETUP\n8|5|39|SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)\n29|2|0|RECURSIVE STEP\n31|29|216|SCAN l\n34|29|45|SEARCH r USING INTEGER PRIMARY KEY (rowid=?)\n47|0|206|SCAN line\n",
@@ -204,7 +204,7 @@ func hotQueries() []hotQuery {
 		{name: "steerCountSQL", sql: steerCountSQL, args: []any{"run-1"}},
 		{name: "boundsSQL", sql: boundsSQL, args: []any{"run-1"}},
 		{name: "steerBytesSQL", sql: steerBytesSQL, args: []any{"run-1"}},
-		{name: "deliveredSQL", sql: deliveredSQL, args: []any{int64(2), int64(1)}},
+		{name: "deliveredSQL", sql: deliveredSQL, args: []any{int64(2), int64(1), int64(1)}},
 		{name: "observationsSQL", sql: observationsSQL, args: []any{harness.MaxObservationKeys}},
 		{name: "observationKeySQL", sql: observationKeySQL, args: []any{"source-0", "subject-0", int64(1)}},
 		{name: "lastPosSQL", sql: lastPosSQL},
@@ -222,9 +222,9 @@ func hotQueries() []hotQuery {
 		{name: "previousIDsSQL", sql: previousIDsSQL, args: []any{"run-4", 16}},
 		{name: "previousCountSQL", sql: previousCountSQL, args: []any{"run-4"}},
 		{name: "steerOrdinalSQL", sql: steerOrdinalSQL, args: []any{"run-1", int64(1)}},
-		{name: "markWithdrawnSQL", sql: markWithdrawnSQL, args: []any{int64(2), int64(1)}},
+		{name: "markWithdrawnSQL", sql: markWithdrawnSQL, args: []any{int64(2), int64(1), int64(1)}},
 		{name: "withdrawableSteersSQL", sql: withdrawableSteersSQL, args: []any{"run-1"}},
-		{name: "openFollowUpSQL", sql: openFollowUpSQL, args: []any{"run-2", int64(1)}},
+		{name: "openFollowUpSQL", sql: openFollowUpSQL, args: []any{"run-2", int64(1), int64(1)}},
 		{name: "latestEventSQL", sql: latestEventSQL, args: []any{"run-1"}},
 		{name: "runOrdinalSQL", sql: runOrdinalSQL, args: []any{"run-1"}},
 		{name: "runPosSQL", sql: runPosSQL, args: []any{"run-1"}},

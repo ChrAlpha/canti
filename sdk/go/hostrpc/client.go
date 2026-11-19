@@ -30,6 +30,8 @@ func (e *RemoteError) Is(target error) bool {
 		return target == ErrConflict
 	case CodeHeld:
 		return target == ErrHeld
+	case CodeExpired:
+		return target == ErrHistoryExpired
 	case CodeClosing:
 		return target == ErrClosing
 	case CodeDriving:
@@ -218,6 +220,54 @@ func (c *Client) CancelEffect(ctx context.Context, id string) (Run, error) {
 func (c *Client) ShutdownHost(ctx context.Context) error {
 	_, err := c.Call(ctx, Request{Op: OpShutdown})
 	return err
+}
+
+// History reads the current line's page ending before the opaque cursor, or
+// at the end of the agent log when it is empty. Pages are read newest first;
+// each page's Older cursor names where the next older page ends.
+// ResolveConfig canonicalizes a submission's config and state without making
+// an admission decision.
+func (c *Client) ResolveConfig(ctx context.Context, v Validation) (Validated, error) {
+	resp, err := c.Call(ctx, Request{Op: OpResolve, Validate: &v})
+	if err != nil {
+		return Validated{}, err
+	}
+	if resp.Validated == nil {
+		return Validated{}, errors.New("hostrpc: resolve without a result")
+	}
+	return *resp.Validated, nil
+}
+
+func (c *Client) History(ctx context.Context, before string, limit int) (HistoryPage, error) {
+	return c.HistoryPage(ctx, before, "", limit)
+}
+
+// HistoryPage is History with the line token the first page returned. A
+// later page passes it so pagination stays in the same line even if a new
+// fresh line opened meanwhile.
+func (c *Client) HistoryPage(ctx context.Context, before, line string, limit int) (HistoryPage, error) {
+	resp, err := c.Call(ctx, Request{Op: OpHistory, History: &HistoryQuery{Before: before, Line: line, Limit: limit}})
+	if err != nil {
+		return HistoryPage{}, err
+	}
+	if resp.History == nil {
+		return HistoryPage{}, errors.New("hostrpc: history without a page")
+	}
+	return *resp.History, nil
+}
+
+// LatestHistory returns the latest run's bounded summary without reading a
+// history page. A reopening client uses it once to recheck whether another
+// client started driving a run after the history page was read.
+func (c *Client) LatestHistory(ctx context.Context) (HistoryPage, error) {
+	resp, err := c.Call(ctx, Request{Op: OpHistory, History: &HistoryQuery{LatestOnly: true}})
+	if err != nil {
+		return HistoryPage{}, err
+	}
+	if resp.History == nil {
+		return HistoryPage{}, errors.New("hostrpc: latest history without an answer")
+	}
+	return *resp.History, nil
 }
 
 // Progress reads the agent log after the opaque cursor, or from its start

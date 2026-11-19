@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -154,19 +155,21 @@ var progressSQL = `SELECT ` + progressColumns + `
 var logTransitionsSQL = `SELECT ` + progressColumns + `
 	FROM transitions WHERE pos > ? ORDER BY pos LIMIT ?`
 
-// logWithdrawalsSQL pages one withdrawal fact per transaction, naming at
-// most withdrawalNames of the inputs it took back. A group is one log row;
-// names are ordered by the withdrawn input's own position.
-var logWithdrawalsSQL = `WITH page AS (
-	SELECT withdrawn_pos FROM inputs WHERE withdrawn_pos > ? GROUP BY withdrawn_pos ORDER BY withdrawn_pos LIMIT ?
-), rows AS (
-	SELECT i.withdrawn_pos,
-		COALESCE(i.input_id, 'pos:' || i.pos) AS name,
-		row_number() OVER (PARTITION BY i.withdrawn_pos ORDER BY i.pos) AS n,
-		count(*) OVER (PARTITION BY i.withdrawn_pos) AS total
-	FROM inputs i JOIN page p ON p.withdrawn_pos = i.withdrawn_pos
+// logWithdrawalsSQL pages one withdrawal fact per transaction. Each page
+// position is found through the withdrawal index with LIMIT, then its names
+// are read through a bounded correlated subquery, so neither the whole
+// matching input set nor a group's names are windowed before the caps apply.
+var logWithdrawalsSQL = `WITH RECURSIVE page(n, withdrawn_pos) AS (
+	SELECT 1, (SELECT min(withdrawn_pos) FROM inputs WHERE withdrawn_pos > ?1)
+	UNION ALL
+	SELECT page.n + 1, (SELECT min(withdrawn_pos) FROM inputs WHERE withdrawn_pos > page.withdrawn_pos)
+	FROM page WHERE page.withdrawn_pos IS NOT NULL AND page.n < ?2
 )
-SELECT withdrawn_pos, name, n, total FROM rows WHERE n <= ? ORDER BY withdrawn_pos, n`
+SELECT p.withdrawn_pos, COALESCE((SELECT line FROM inputs WHERE withdrawn_pos = p.withdrawn_pos LIMIT 1), 0), COALESCE((
+	SELECT group_concat(printf('%d:%s', i.pos, COALESCE(i.input_id, 'pos:' || i.pos)), char(0))
+	FROM (SELECT pos, input_id FROM inputs WHERE withdrawn_pos = p.withdrawn_pos ORDER BY pos LIMIT ?3) i
+), '')
+FROM page p WHERE p.withdrawn_pos IS NOT NULL`
 
 // withdrawalNames bounds the inputs one withdrawn item names.
 const withdrawalNames = 64
@@ -175,7 +178,8 @@ const withdrawalNames = 64
 const runPosSQL = `SELECT COALESCE(max(pos), 0) FROM transitions WHERE run_id = ?`
 
 var logInputsSQL = `SELECT pos, COALESCE(run_id, ''), authority, delivery, disposition, COALESCE(input_id, ''),
-	` + clipped(`text`, ProgressCommandBytes) + `, ` + clipped(`source`, harness.InputKeyBytes) + `, ` + clipped(`subject`, harness.InputKeyBytes) + `
+	` + clipped(`text`, ProgressCommandBytes) + `, ` + clipped(`source`, harness.InputKeyBytes) + `, ` + clipped(`subject`, harness.InputKeyBytes) + `, COALESCE(delivered_pos, 0),
+	COALESCE(admitted_line, 0), COALESCE(admitted_disposition, ''), COALESCE(line, 0)
 	FROM inputs WHERE pos > ? ORDER BY pos LIMIT ?`
 
 // Progress returns at most limit transitions of the run after sequence
@@ -213,13 +217,17 @@ func (s *Store) Progress(ctx context.Context, runID string, after int64, limit i
 
 // LogEntry is one agent-log row: a committed transition or an admitted input.
 type LogEntry struct {
-	Pos          int64
-	RunID        string
-	Transition   *ProgressRow
-	Input        *harness.Input
-	InputCut     bool
-	Withdrawn    []string
-	WithdrawnCut bool
+	Pos               int64
+	RunID             string
+	Transition        *ProgressRow
+	Input             *harness.Input
+	InputCut          bool
+	Withdrawn         []string
+	WithdrawnTotal    int
+	WithdrawnCut      bool
+	OriginLine        int
+	OriginDisposition string
+	InputLine         int
 }
 
 // Log returns at most limit agent-log rows after position after, in position
@@ -227,25 +235,43 @@ type LogEntry struct {
 // text is bounded; no request, response, or evidence body crosses the SQL
 // boundary.
 func (s *Store) Log(ctx context.Context, after int64, limit int) ([]LogEntry, error) {
+	rows, _, err := s.LogPage(ctx, after, limit)
+	return rows, err
+}
+
+// latestPhaseSQL reads only the phase of the latest run's committed state:
+// what a progress page needs to decide Closed, without decoding the state,
+// its decision payload, or the latest event.
+const latestPhaseSQL = `SELECT json_extract(COALESCE(t.to_state, r.initial), '$.Phase')
+	FROM runs r LEFT JOIN transitions t ON t.run_id = r.id
+		AND t.seq = (SELECT max(seq) FROM transitions WHERE run_id = r.id)
+	ORDER BY r.n DESC LIMIT 1`
+
+// LogPage is Log with the quiescence of the same read transaction: rows and
+// the latest run's state are read together, so a run that returns while a
+// page is read cannot be absent from the page while the page says it is
+// closed. Quiescent reports that the latest run was closed, or there was
+// none, in that transaction.
+func (s *Store) LogPage(ctx context.Context, after int64, limit int) ([]LogEntry, bool, error) {
 	if after < 0 || limit <= 0 || limit > 256 {
-		return nil, fmt.Errorf("sqlite: invalid log page")
+		return nil, false, fmt.Errorf("sqlite: invalid log page")
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer tx.Rollback()
 	transitions, err := s.logTransitions(ctx, tx, after, limit)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	inputs, err := s.logInputs(ctx, tx, after, limit)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	withdrawals, err := s.logWithdrawals(ctx, tx, after, limit)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := make([]LogEntry, 0, len(transitions)+len(inputs)+len(withdrawals))
 	out = append(out, transitions...)
@@ -255,11 +281,21 @@ func (s *Store) Log(ctx context.Context, after int64, limit int) ([]LogEntry, er
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out, tx.Commit()
+	var phase sql.NullString
+	err = tx.QueryRowContext(ctx, latestPhaseSQL).Scan(&phase)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	quiescent := !phase.Valid || phase.String == "returned" || phase.String == "stopped"
+	return out, quiescent, tx.Commit()
 }
 
 func (s *Store) logTransitions(ctx context.Context, tx *sql.Tx, after int64, limit int) ([]LogEntry, error) {
-	rows, err := tx.QueryContext(ctx, logTransitionsSQL, after, limit)
+	return s.logTransitionsQuery(ctx, tx, logTransitionsSQL, after, limit)
+}
+
+func (s *Store) logTransitionsQuery(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]LogEntry, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -276,32 +312,70 @@ func (s *Store) logTransitions(ctx context.Context, tx *sql.Tx, after int64, lim
 }
 
 func (s *Store) logWithdrawals(ctx context.Context, tx *sql.Tx, after int64, limit int) ([]LogEntry, error) {
-	rows, err := tx.QueryContext(ctx, logWithdrawalsSQL, after, limit, withdrawalNames)
+	return s.logWithdrawalsQuery(ctx, tx, logWithdrawalsSQL, after, limit, withdrawalNames+1)
+}
+
+func (s *Store) logWithdrawalsQuery(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]LogEntry, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []LogEntry
-	index := map[int64]int{}
 	for rows.Next() {
-		var pos, n, total int64
-		var name string
-		if err := rows.Scan(&pos, &name, &n, &total); err != nil {
+		var pos, line int64
+		var joined string
+		if err := rows.Scan(&pos, &line, &joined); err != nil {
 			return nil, err
 		}
-		i, ok := index[pos]
-		if !ok {
-			i = len(out)
-			index[pos] = i
-			out = append(out, LogEntry{Pos: pos, WithdrawnCut: total > withdrawalNames})
-		}
-		out[i].Withdrawn = append(out[i].Withdrawn, name)
+		names, cut := withdrawalNamesOf(joined)
+		out = append(out, LogEntry{Pos: pos, InputLine: int(line), Withdrawn: names, WithdrawnTotal: len(names), WithdrawnCut: cut})
 	}
 	return out, rows.Err()
 }
 
+// withdrawalNamesOf parses the bounded names of one withdrawal group, in the
+// withdrawn inputs' position order. It reports a cut when more than the cap
+// were read.
+func withdrawalNamesOf(joined string) ([]string, bool) {
+	if joined == "" {
+		return nil, false
+	}
+	type named struct {
+		pos  int64
+		name string
+	}
+	parts := strings.Split(joined, "\x00")
+	all := make([]named, 0, len(parts))
+	for _, part := range parts {
+		number, name, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		pos, err := strconv.ParseInt(number, 10, 64)
+		if err != nil {
+			continue
+		}
+		all = append(all, named{pos: pos, name: name})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].pos < all[j].pos })
+	cut := len(all) > withdrawalNames
+	if cut {
+		all = all[:withdrawalNames]
+	}
+	names := make([]string, len(all))
+	for i, n := range all {
+		names[i] = n.name
+	}
+	return names, cut
+}
+
 func (s *Store) logInputs(ctx context.Context, tx *sql.Tx, after int64, limit int) ([]LogEntry, error) {
-	rows, err := tx.QueryContext(ctx, logInputsSQL, after, limit)
+	return s.logInputsQuery(ctx, tx, logInputsSQL, after, limit)
+}
+
+func (s *Store) logInputsQuery(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]LogEntry, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +386,7 @@ func (s *Store) logInputs(ctx context.Context, tx *sql.Tx, after int64, limit in
 		var in harness.Input
 		var authority, delivery, disposition string
 		var text, source, subject []byte
-		if err := rows.Scan(&in.Pos, &in.RunID, &authority, &delivery, &disposition, &in.InputID, &text, &source, &subject); err != nil {
+		if err := rows.Scan(&in.Pos, &in.RunID, &authority, &delivery, &disposition, &in.InputID, &text, &source, &subject, &in.DeliveredPos, &e.OriginLine, &e.OriginDisposition, &e.InputLine); err != nil {
 			return nil, err
 		}
 		cut := ProgressFields(0)

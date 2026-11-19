@@ -47,11 +47,13 @@ type Options struct {
 
 // The points a host reports to Options.Checkpoint.
 const (
-	PointAdmitting   = "submit.admitting"   // the checks of admission passed, before its transaction
-	PointSubmitted   = "submit.committed"   // the admission transaction committed, before Submit returns
-	PointWaiting     = "wait.registered"    // a Wait registered for changes, before it rereads the journal
-	PointWithdrawing = "withdraw.admitting" // a Withdraw holds admission, before its transaction
-	PointClosing     = "shutdown.linearized"
+	PointAdmitting     = "submit.admitting"   // the checks of admission passed, before its transaction
+	PointSubmitted     = "submit.committed"   // the admission transaction committed, before Submit returns
+	PointWaiting       = "wait.registered"    // a Wait registered for changes, before it rereads the journal
+	PointWithdrawing   = "withdraw.admitting" // a Withdraw holds admission, before its transaction
+	PointHistory       = "history.read"       // a history page is read, before it returns
+	PointHistoryLatest = "history.latest"     // the latest-run recheck is read, before it returns
+	PointClosing       = "shutdown.linearized"
 )
 
 // Host is the runtime host of one state directory: it owns the state

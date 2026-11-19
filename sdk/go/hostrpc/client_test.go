@@ -51,6 +51,7 @@ func TestClientMapsWireErrorsWithoutRuntimeTypes(t *testing.T) {
 		{CodeClosing, ErrClosing},
 		{CodeDriving, ErrDriving},
 		{CodeCursor, ErrCursor},
+		{CodeExpired, ErrHistoryExpired},
 		{CodeProtocol, ErrProtocol},
 	} {
 		t.Run(tc.code, func(t *testing.T) {
@@ -89,6 +90,20 @@ func TestClientKeepsProgressAndWaitCursorsOpaque(t *testing.T) {
 	}
 	if request := <-requests; request.Op != OpWait || request.RunID != "" || request.Cursor != cursor {
 		t.Fatalf("wait request = %+v", request)
+	}
+}
+
+func TestClientHistoryKeepsBeforeAndCursorOpaque(t *testing.T) {
+	const before, newest, older = "opaque:before", "opaque:newest", "opaque:older"
+	client, requests := answerOnce(t, Response{Protocol: Protocol, History: &HistoryPage{
+		Latest: &HistoryRun{RunID: "r"}, Cursor: newest, Older: older,
+		Items: []Item{{Pos: 1, Kind: "input", Input: &Input{Authority: "principal", Text: "t"}}}}})
+	page, err := client.History(testContext(t), before, 7)
+	if err != nil || page.Cursor != newest || page.Older != older || page.Latest == nil || len(page.Items) != 1 {
+		t.Fatalf("History = %+v, %v", page, err)
+	}
+	if request := <-requests; request.Op != OpHistory || request.History == nil || request.History.Before != before || request.History.Limit != 7 {
+		t.Fatalf("history request = %+v", request)
 	}
 }
 

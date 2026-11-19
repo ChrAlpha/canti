@@ -33,6 +33,21 @@ PTY_TESTS = \
 	TestChatPTYHangupCancelsTheDockerJob \
 	TestChatPTYHangupDetachesFromAHostProcess \
 	TestChatPTYHangupStopsTheActiveRun \
+	TestChatPTYReopenFollowsADetachedRunOnce \
+	TestChatPTYStoppedRunWithHeldInputsStartsAndWithdraws \
+	TestChatPTYReopenShowsAQueuedGoalOpenedBetweenHistoryPages \
+	TestChatPTYReopenMarksFreshThenNonFreshBeforeTheFirstFrame \
+	TestChatPTYReopenKeepsANonFreshPredecessorAboveTheSeparator \
+	TestChatPTYReopenFollowsARunStartedAfterHistory \
+	TestChatPTYReopensEarlierStepsAndAnswer \
+	TestChatPTYReopensAStoppedRunWithItsReason \
+	TestChatPTYReopensAllEightRunsWhole \
+	TestChatPTYReopenShowsATruncatedAnswerNotice \
+	TestChatPTYReopenShowsAQueuedFollowUpBeforeItOpens \
+	TestChatPTYReopenNineRunsShowsOmission \
+	TestChatPTYAttachedTruncatedAnswerShowsTheNotice \
+	TestChatPTYReopenedHistoryOmitsAFragment \
+	TestChatPTYReopensTheLineAndFreshStartsEmpty \
 	TestChatPTYInterruptsDockerJobAndKeepsLine \
 	TestChatPTYResolutionGuidanceSurvivesAltScreen \
 	TestChatPTYSecondInterruptExitsBlockedCleanupWithFullStderr \

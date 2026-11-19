@@ -40,7 +40,7 @@ is not.
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 11, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, and the project context bound at run creation), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 12, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, the project context bound at run creation, and bounded newest-first history pages for reopening a line, with line tokens, follow watermarks, run summaries, held inputs, and bounded withdrawal names), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
@@ -187,7 +187,7 @@ physical owner for exited/timed-out assertions; it is never an inspected receipt
 
 ## Persistence and recovery
 
-SQLite schema 8 is current-only. A new empty database receives all tables and
+SQLite schema 9 is current-only. The schema records each run’s line and each settled input’s line, so reopening reads one line by index range without deriving membership from journal positions. A new empty database receives all tables and
 indexes; other schema versions are refused without migration. State, event and
 fact readers are strict, including current semantics. WAL and synchronous=FULL
 retain the existing acknowledged-commit durability assumptions.

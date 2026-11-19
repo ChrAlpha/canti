@@ -18,8 +18,8 @@ import (
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
-const transcriptBytes = 64 << 10
-const transcriptEntries = 256
+const transcriptBytes = chat.HistoryBytes
+const transcriptEntries = chat.HistoryEntries
 
 type phase uint8
 
@@ -74,8 +74,10 @@ type Model struct {
 	viewport          viewport.Model
 	phase             phase
 	entries           []string
+	owners            []string
 	bytes             int
 	omitted           bool
+	omission          string
 	final, notice     string
 	shownTerminal     map[string]bool
 	held              int
@@ -87,6 +89,10 @@ type Model struct {
 	exitAfter         bool
 	code              int
 	err               error
+	history           chat.History
+	attachCmd         tea.Cmd
+	localInputs       map[string]bool
+	linePending       bool
 }
 
 func New(ctx context.Context, c *chat.Controller) Model {
@@ -97,10 +103,17 @@ func New(ctx context.Context, c *chat.Controller) Model {
 	editor.SetHeight(3)
 	editor.SetWidth(76)
 	editor.Focus()
-	return Model{controller: c, ctx: ctx, editor: editor, viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(12)), width: 80, height: 24,
-		resolvedSteer: map[string]uint64{}, shownTerminal: map[string]bool{}}
+	m := Model{controller: c, ctx: ctx, editor: editor, viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(12)), width: 80, height: 24,
+		resolvedSteer: map[string]uint64{}, shownTerminal: map[string]bool{}, localInputs: map[string]bool{}}
+	m.seedHistory(c.History())
+	return m
 }
-func (m Model) Init() tea.Cmd { return textarea.Blink }
+func (m Model) Init() tea.Cmd {
+	if m.attachCmd != nil {
+		return tea.Batch(textarea.Blink, m.attachCmd)
+	}
+	return textarea.Blink
+}
 func next(t *chat.Turn) tea.Cmd {
 	return func() tea.Msg {
 		e, err := t.Next(context.Background())
@@ -272,6 +285,10 @@ func (m *Model) submitDraft(delivery string) tea.Cmd {
 	}
 	s := chat.NewSnapshot(goal)
 	m.clearDraft()
+	if m.localInputs == nil {
+		m.localInputs = map[string]bool{}
+	}
+	m.localInputs[s.InputID] = true
 	m.steerPending = &pendingSteer{snap: s, delivery: delivery, inFlight: true}
 	m.lastSteerID, m.lastSteerAttempt = s.InputID, 0
 	delete(m.resolvedSteer, s.InputID)
@@ -489,6 +506,10 @@ func (m *Model) start(s chat.Snapshot, clear bool) tea.Cmd {
 	m.phase = submitting
 	m.notice = ""
 	m.final = ""
+	if m.localInputs == nil {
+		m.localInputs = map[string]bool{}
+	}
+	m.localInputs[s.InputID] = true
 	if clear {
 		m.clearDraft()
 		m.add("\n› " + s.Goal + "\n")
@@ -511,17 +532,7 @@ func (m Model) fact(f fact) (tea.Model, tea.Cmd) {
 	case e.Diagnostic != "":
 		m.add(e.Diagnostic + "\n")
 	case e.Item != nil:
-		if e.Item.Kind == "returned" || e.Item.Kind == "stopped" {
-			if m.shownTerminal == nil {
-				m.shownTerminal = map[string]bool{}
-			}
-			if e.Item.RunID != "" {
-				m.shownTerminal[e.Item.RunID] = true
-			}
-		}
-		var b strings.Builder
-		present.Item(&b, *e.Item)
-		m.add(b.String())
+		m.addItem(*e.Item)
 	case e.Omitted > 0:
 		m.add(fmt.Sprintf("… %d progress entries omitted\n", e.Omitted))
 	case e.Result != nil:
@@ -529,8 +540,49 @@ func (m Model) fact(f fact) (tea.Model, tea.Cmd) {
 	}
 	return m, next(m.turn)
 }
+func (m *Model) addItem(it hostrpc.Item) {
+	if m.linePending && it.Line > m.history.LineStart {
+		m.add("\n── a new line started ──\n")
+		m.linePending = false
+	}
+	if it.Kind == "returned" || it.Kind == "stopped" {
+		if m.shownTerminal == nil {
+			m.shownTerminal = map[string]bool{}
+		}
+		if it.RunID != "" {
+			m.shownTerminal[it.RunID] = true
+		}
+	}
+	if it.Kind == "input" && it.Input != nil {
+		if it.Input.Authority == "principal" {
+			if m.localInputs[it.Input.InputID] {
+				delete(m.localInputs, it.Input.InputID)
+			} else {
+				var b strings.Builder
+				present.Input(&b, *it.Input)
+				m.add(b.String())
+			}
+		}
+		return
+	}
+	var b strings.Builder
+	present.Item(&b, it)
+	m.add(b.String())
+	if it.Kind == "returned" && it.Truncated {
+		m.add(truncatedAnswer())
+	}
+}
+
 func (m Model) complete(out chat.Result) (tea.Model, tea.Cmd) {
 	m.turn = nil
+	if out.AttachFailed && !m.exitAfter {
+		m.phase = ready
+		if out.Err != nil {
+			m.notice = "Following the active run stopped: " + out.Err.Error()
+			m.add("canti: following the active run stopped: " + present.Clean(out.Err.Error()) + "\n")
+		}
+		return m, nil
+	}
 	answer, note := present.Result(out)
 	if out.Run.RunID != "" && m.shownTerminal[out.Run.RunID] {
 		answer, note = present.ResultAfterTerminal(out)
@@ -616,7 +668,12 @@ func tail(s string, limit int) string {
 	}
 	return s
 }
-func (m *Model) add(s string) {
+func (m *Model) add(s string) { m.addOwned("", s) }
+
+// addOwned appends an entry that belongs to a restored run block. Eviction
+// removes a whole block at once, so later live activity cannot leave one of
+// its steps or answers without its goal.
+func (m *Model) addOwned(owner, s string) {
 	if s == "" {
 		return
 	}
@@ -627,14 +684,24 @@ func (m *Model) add(s string) {
 		m.omitted = true
 	}
 	for len(m.entries) > 0 && (m.bytes+len(s) > transcriptBytes || len(m.entries) >= transcriptEntries) {
-		m.bytes -= len(m.entries[0])
-		m.entries[0] = ""
-		m.entries = m.entries[1:]
+		n := 1
+		if m.owners[0] != "" {
+			for n < len(m.owners) && m.owners[n] == m.owners[0] {
+				n++
+			}
+		}
+		for i := 0; i < n; i++ {
+			m.bytes -= len(m.entries[i])
+		}
+		m.entries = m.entries[n:]
+		m.owners = m.owners[n:]
 		m.omitted = true
+		m.omission = omissionNotice
 	}
 	m.entries = append(m.entries, s)
+	m.owners = append(m.owners, owner)
 	m.bytes += len(s)
-	m.viewport.SetContent(m.transcript())
+	m.viewport.SetContent(strings.Join(m.entries, ""))
 	if bottom {
 		m.viewport.GotoBottom()
 	}
@@ -642,13 +709,17 @@ func (m *Model) add(s string) {
 func (m Model) transcript() string {
 	s := strings.Join(m.entries, "")
 	if m.omitted {
-		s = "… earlier transcript omitted\n" + s
+		s = omissionNotice + s
 	}
 	return s
 }
 func (m Model) View() tea.View {
 	status := map[phase]string{ready: "ready", submitting: "submitting · draft editable", running: "running · draft editable", stopping: "stopping · waiting for cleanup · draft editable", unconfirmed: "acceptance unknown · Ctrl+R reconcile", closing: "closing"}[m.phase]
-	content := "canti-tui\n" + status + " · current launch flags apply to each new input\n" + m.notice + "\n" + m.viewport.View() + "\n\n" + m.editor.View() + "\nEnter send, or steer while running · Ctrl+F follow-up while running · Ctrl+X cancel effect · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+R recover or withdraw · Ctrl+C stop/exit"
+	omission := ""
+	if m.omission != "" {
+		omission = m.omission + "\n"
+	}
+	content := "canti-tui\n" + status + " · current launch flags apply to each new input\n" + m.notice + "\n" + omission + m.viewport.View() + "\n\n" + m.editor.View() + "\nEnter send, or steer while running · Ctrl+F follow-up while running · Ctrl+X cancel effect · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+R recover or withdraw · Ctrl+C stop/exit"
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v

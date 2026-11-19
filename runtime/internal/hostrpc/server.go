@@ -303,11 +303,17 @@ func (s *Server) do(ctx context.Context, req Request) Response {
 			w := PageOf(p)
 			resp.Page = &w
 		}
+	case OpHistory:
+		resp.History, err = s.history(ctx, req)
 	case OpWait:
 		resp.Wait, err = s.wait(ctx, req)
 	case OpStop:
 		resp.Run, err = s.stop(ctx, req)
 	case OpResolve:
+		if req.Validate != nil {
+			resp.Validated, err = Resolve(ctx, req.Validate, s.Host)
+			break
+		}
 		resp.Run, err = s.resolve(ctx, req)
 	case OpInherited:
 		var c string
@@ -354,6 +360,39 @@ func (s *Server) do(ctx context.Context, req Request) Response {
 		resp.Error = errorOf(err)
 	}
 	return resp
+}
+
+// history answers a bounded page of the current line, newest page first.
+func (s *Server) history(ctx context.Context, req Request) (*HistoryPage, error) {
+	q := req.History
+	if q == nil {
+		q = &HistoryQuery{}
+	}
+	var c host.HistoryCursor
+	if q.Before != "" {
+		var err error
+		c, err = host.ParseHistoryCursor(q.Before)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if q.LatestOnly {
+		if q.Before != "" || q.Line != "" {
+			return nil, fmt.Errorf("%w: latest-only history carries no cursor or line", host.ErrCursor)
+		}
+		p, err := s.Host.LatestHistory(ctx)
+		if err != nil {
+			return nil, err
+		}
+		w := HistoryOf(p)
+		return &w, nil
+	}
+	p, err := s.Host.History(ctx, c, q.Limit, q.Line)
+	if err != nil {
+		return nil, err
+	}
+	w := HistoryOf(p)
+	return &w, nil
 }
 
 func (s *Server) submit(ctx context.Context, req Request) (*Ack, error) {
@@ -494,6 +533,8 @@ func (s *Server) resolve(ctx context.Context, req Request) (*Run, error) {
 func errorOf(err error) *Error {
 	code := CodeFailed
 	switch {
+	case errors.Is(err, host.ErrHeld), errors.Is(err, harness.ErrHeld):
+		code = CodeHeld
 	case errors.As(err, new(host.SpecError)):
 		code = CodeSpec
 	case errors.Is(err, host.ErrConflict):
@@ -502,10 +543,10 @@ func errorOf(err error) *Error {
 		code = CodeClosing
 	case errors.Is(err, host.ErrDriving):
 		code = CodeDriving
+	case errors.Is(err, host.ErrHistoryExpired):
+		code = CodeExpired
 	case errors.Is(err, host.ErrCursor):
 		code = CodeCursor
-	case errors.Is(err, host.ErrHeld):
-		code = CodeHeld
 	case errors.Is(err, harness.ErrInputConflict), errors.Is(err, host.ErrConflict):
 		code = CodeConflict
 	case errors.Is(err, harness.ErrInputSpec):

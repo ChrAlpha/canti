@@ -142,6 +142,8 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	o.cfg.Binding = binding(credentials(), o.cfg.Spec.API, o.url)
 	o.cfg.Environment = runtimeEnvironment()
+	terminalInput := isatty.IsTerminal(os.Stdin.Fd())
+	o.cfg.LoadHistory = terminalInput
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -150,7 +152,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(diagnostic, "canti-tui: %v\n", err)
 		return code
 	}
-	if isatty.IsTerminal(os.Stdin.Fd()) {
+	if terminalInput {
 		code, err = ui.Run(ctx, c, os.Stdin, diagnostic, signals, failures)
 	} else {
 		code, err = pipe.Run(ctx, c, os.Stdin, out, diagnostic, signals, failures)

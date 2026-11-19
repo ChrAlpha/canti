@@ -9,6 +9,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -33,7 +35,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 const (
 	journalModeSQL        = `PRAGMA journal_mode`
@@ -63,6 +65,7 @@ CREATE TABLE runs (
 	project_meta TEXT NOT NULL,
 	input_pos INTEGER,
 	fresh INTEGER NOT NULL DEFAULT 0,
+	line INTEGER NOT NULL,
 	input_tokens INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	output_bytes INTEGER NOT NULL DEFAULT 0,
@@ -74,6 +77,7 @@ CREATE TABLE runs (
 	output_reports INTEGER NOT NULL DEFAULT 0,
 	lost_attempts INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX runs_line ON runs (line, n);
 CREATE TABLE inputs (
 	pos INTEGER PRIMARY KEY,
 	input_id TEXT,
@@ -83,6 +87,9 @@ CREATE TABLE inputs (
 	withdrawn_pos INTEGER,
 	delivered_pos INTEGER,
 	run_id TEXT REFERENCES runs (id),
+	line INTEGER,
+	admitted_line INTEGER,
+	admitted_disposition TEXT NOT NULL DEFAULT '',
 	admitted_run_id TEXT,
 	text TEXT NOT NULL,
 	constraints TEXT NOT NULL DEFAULT '',
@@ -95,6 +102,9 @@ CREATE TABLE inputs (
 );
 CREATE UNIQUE INDEX inputs_client ON inputs (input_id);
 CREATE INDEX inputs_run ON inputs (run_id, pos);
+CREATE INDEX inputs_line ON inputs (line, pos);
+CREATE INDEX inputs_line_withdrawn ON inputs (line, withdrawn_pos, pos) WHERE withdrawn_pos IS NOT NULL;
+CREATE INDEX inputs_queued_line ON inputs (disposition, line, pos) WHERE disposition = 'queued';
 CREATE INDEX inputs_disposition ON inputs (disposition, pos);
 CREATE INDEX inputs_observation ON inputs (source, subject, pos);
 CREATE INDEX inputs_withdrawn ON inputs (withdrawn_pos, pos) WHERE withdrawn_pos IS NOT NULL;
@@ -137,7 +147,7 @@ const performedIndex = `CREATE INDEX transitions_performed ON transitions (run_i
 
 const (
 	sameRunSQL     = `SELECT semantics, initial, run = ? AND initial = ? AND input_pos IS ? AND fresh = ? AND project = ? AND project_meta = ? FROM runs WHERE id = ?`
-	insertRunSQL   = `INSERT INTO runs (id, semantics, run, initial, input_pos, fresh, project, project_meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	insertRunSQL   = `INSERT INTO runs (id, semantics, run, initial, input_pos, fresh, project, project_meta, line) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	runSQL         = `SELECT semantics, run, input_pos, fresh FROM runs WHERE id = ?`
 	projectSQL     = `SELECT project FROM runs WHERE id = ?`
 	projectMetaSQL = `SELECT project_meta FROM runs WHERE id = ?`
@@ -229,10 +239,20 @@ var queries = []string{
 // Store is a harness.Journal backed by one SQLite database file. It is safe
 // for concurrent use, including by several Stores on the same file.
 type Store struct {
-	db       *sql.DB
-	stmts    map[string]*sql.Stmt
-	readOnly bool
-	onCommit atomic.Pointer[func()]
+	db            *sql.DB
+	stmts         map[string]*sql.Stmt
+	readOnly      bool
+	onCommit      atomic.Pointer[func()]
+	historyTTL    time.Duration
+	historyCloses sync.WaitGroup
+	historyKey    [32]byte
+	historyClosed bool
+	historySlots  int
+	historyOps    sync.WaitGroup
+	histories     struct {
+		mu      sync.Mutex
+		entries map[string]*historySession
+	}
 }
 
 var _ harness.Journal = (*Store)(nil)
@@ -248,7 +268,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries))}
+	s := &Store{db: db, stmts: make(map[string]*sql.Stmt, len(queries)), historyTTL: historySessionTTL}
+	s.histories.entries = make(map[string]*historySession)
+	if _, err := rand.Read(s.historyKey[:]); err != nil {
+		db.Close()
+		return nil, err
+	}
 	err = s.write(ctx, s.initialize)
 	for deadline := time.Now().Add(time.Second); busy(err) && time.Now().Before(deadline) && ctx.Err() == nil; {
 		time.Sleep(10 * time.Millisecond)
@@ -304,7 +329,22 @@ func (s *Store) initialize(ctx context.Context, tx *sql.Tx) error {
 }
 
 // Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.histories.mu.Lock()
+	s.historyClosed = true
+	open := make([]*historySession, 0, len(s.histories.entries))
+	for key, session := range s.histories.entries {
+		delete(s.histories.entries, key)
+		open = append(open, session)
+	}
+	s.histories.mu.Unlock()
+	for _, session := range open {
+		s.closeSession(session)
+	}
+	s.historyOps.Wait()
+	s.historyCloses.Wait()
+	return s.db.Close()
+}
 
 // SetOnCommit installs the function every successful write calls after its
 // transaction commits. It is the single notification point for readers of the
@@ -400,7 +440,11 @@ func (s *Store) CreateRunWithProject(ctx context.Context, run harness.Run, initi
 		if err := s.checkAdmission(ctx, tx); err != nil {
 			return err
 		}
-		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state, nil, run.Fresh, projectData, metaData)
+		line, err := lineForNewRun(ctx, tx, run.Fresh)
+		if err != nil {
+			return err
+		}
+		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state, nil, run.Fresh, projectData, metaData, line)
 		return err
 	})
 }
@@ -552,7 +596,7 @@ func (s *Store) commit(ctx context.Context, tx *sql.Tx, t harness.Transition) er
 		r.event, r.from, r.to, r.facts, t.To.Step, t.To.Attempt, t.To.RequestRev); err != nil {
 		return err
 	}
-	if err := s.markDelivered(ctx, tx, pos, t.Facts.Delivered); err != nil {
+	if err := s.deliverInputs(ctx, tx, pos, r.run, t.Facts.Delivered); err != nil {
 		return err
 	}
 	if t.Facts.ContextState != nil {
@@ -707,13 +751,24 @@ func (s *Store) checkInputs(ctx context.Context, tx *sql.Tx, t harness.Transitio
 	return nil
 }
 
+func (s *Store) deliverInputs(ctx context.Context, tx *sql.Tx, pos int64, runID string, d *harness.Delivered) error {
+	if d == nil {
+		return nil
+	}
+	var line int64
+	if err := tx.QueryRowContext(ctx, runLineSQL, runID).Scan(&line); err != nil {
+		return missing(err, "run")
+	}
+	return s.markDelivered(ctx, tx, pos, line, d)
+}
+
 // markDelivered records the first request position that showed each input.
-func (s *Store) markDelivered(ctx context.Context, tx *sql.Tx, pos int64, d *harness.Delivered) error {
+func (s *Store) markDelivered(ctx context.Context, tx *sql.Tx, pos, line int64, d *harness.Delivered) error {
 	if d == nil {
 		return nil
 	}
 	for _, inputPos := range d.Positions {
-		if _, err := s.stmt(ctx, tx, deliveredSQL).ExecContext(ctx, pos, inputPos); err != nil {
+		if _, err := s.stmt(ctx, tx, deliveredSQL).ExecContext(ctx, pos, line, inputPos); err != nil {
 			return err
 		}
 	}

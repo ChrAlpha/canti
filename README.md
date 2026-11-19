@@ -135,7 +135,7 @@ explicit resolution.
 | `canti observe -source S -subject K` | Admit evidence about a subject; it never starts or wakes a run |
 | `canti withdraw [-input ID]` | Take back held inputs and print them as JSON Lines |
 | `canti cancel` | Cancel the current effect; the run continues with a cancelled observation |
-| `canti-tui -environment DIR -context-tokens N [-fresh]` | Talk with the agent: all inputs and runs form one line, and a run follows the previous run of that line |
+| `canti-tui -environment DIR -context-tokens N [-fresh]` | Talk with the agent: all inputs and runs form one line, reopening shows that line's earlier runs, and a run follows the previous run of that line; `-fresh` starts a new line |
 | `canti resume` | Continue the latest run, for example after a crash |
 | `canti status`, `canti history` | Print journal-only run state, including the bound project context, as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |

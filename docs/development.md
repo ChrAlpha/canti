@@ -351,13 +351,68 @@ editor; a second Ctrl+C abandons that cleanup wait, leaving recovery to
 The TUI combines answers, diagnostics, and committed step output in one
 viewport. Its typed progress queue retains at most 128 entries and 64 KiB; acceptance and
 final outcome have separate bounded protocol slots. The transcript retains at
-most 256 entries and 64 KiB, with omission notices. Final outcome and recovery
-guidance survive progress eviction. Only text from this
-process invocation is displayed: a new invocation does **not** load previous
-conversation or execution history. On exit, the retained transcript
-is printed to standard error. The alternate screen and this bounded tail do
-not preserve a complete native terminal or tmux scrollback. Use `canti history`
-for a run's full recorded transitions. Display history is separate from the
+most 256 entries and 64 KiB, with omission notices; a notice names `canti
+history` for a run's full recorded transitions. Final outcome and recovery
+guidance survive progress eviction.
+
+When the first input of an invocation is not `-fresh`, `canti-tui` reopens the
+state directory's current line before showing the editor. It reads through the
+host protocol, newest runs first, at most eight runs and eight pages, and stops
+at the same 256-entry/64 KiB transcript bound. The line begins at its latest
+`-fresh` run, so earlier lines are never shown. The viewport receives each
+run's goal and principal inputs (steers and follow-ups), its committed steps with
+their purpose, command, and bounded output as live steps show them, and its
+final answer, stop reason, or unresolved effect as it stood at the snapshot,
+oldest first within the bound.
+Runs are retained or omitted whole, and the budget includes run headers,
+outcomes, separators and guidance, so a retained run keeps its goal and a run
+is never shown as a fragment; a closed run's final state is shown from its run
+summary when its last transition is not a displayable stop event. Held and
+withdrawn principal inputs are shown with their state; a withdrawal whose
+names are capped is shown as `N+` (names omitted). An
+omission notice says earlier history is omitted and points to `canti history`.
+A restored run block is evicted whole when later live activity exceeds the
+transcript bound, never as an answer without its goal. A separator marks the start of this invocation's
+activity. Every run and settled input records its line at write time; the first page
+opens one server-side read snapshot, and later pages carrying its token read
+inside that same transaction until the last page or a fixed lifetime (no
+longer than the startup deadline). A pinned page therefore reads only its
+recorded line and the dispositions and Seen flags as recorded at the snapshot;
+a queued input that settles later remains queued on the pinned page. Run
+summaries are taken once from that snapshot, so a run that closes later is
+shown as it stood then; its terminal outcome, including a fresh follow-up's
+opening, is rendered only by live follow. Live following starts at the
+snapshot's log end, not at the last displayed row, so a fresh follow-up's goal
+does not replay its predecessor's later rows. If the line's latest run is active and the host is
+driving it, the TUI follows it from that point, so the handoff repeats and
+skips no entry. If the recheck finds that the latest run's recorded line is newer
+than the snapshot line, so a fresh line and its non-fresh successors are
+recognized, it attaches at the snapshot cursor and emits `a new line started`
+as a follow event immediately before the first item of the new line; an old
+run's return, which came earlier in the journal, stays above the separator.
+History pages and the recheck share one
+startup deadline, including the frame-time recheck; no second five-second
+window starts. No recheck is sent after a required history page fails.
+The first page opens the snapshot transaction and its summaries are read once;
+no continuation re-reads run state. A line with more runs than the summary
+bound reports an omission, and queued NULL-line inputs are read only when the
+snapshot's line is the latest line. An expired or evicted snapshot is a typed
+history-snapshot-expired error, distinct from an invalid cursor and handled like any failed required page.
+After reading history it rechecks the latest run with a bounded point read and
+follows it if another client started driving it after the page; auto mode may
+refresh that recheck once at frame time, under the same deadline. A run that
+closed after the page is drained from the same cursor. An active run
+the host is not driving is shown from history with a
+notice to continue it with `canti resume`; a failed history page leaves a
+diagnostic and no attachment, and an attachment failure returns the editor with
+a notice rather than exiting it. `-fresh` suppresses the reopened history.
+
+Pipe (non-TTY) mode does not replay history: its standard output is the
+sequence of answers of this invocation, and its standard error reports only
+this invocation's progress. Use `canti history` for a previous run. On exit,
+the retained transcript, including a reopened line, is printed to standard
+error. The alternate screen and this bounded tail do not preserve a complete
+native terminal or tmux scrollback. Display history is separate from the
 previous runs supplied to the model; the next request names the closed runs of
 the line and their archive paths. Retrieve earlier dialogue explicitly.
 
@@ -372,7 +427,8 @@ editable throughout cleanup. It rejects any existing host,
 including a different process winning a startup race; every successful Hello
 must report the PID of the child it launched. Use `-host auto` to attach to a
 shared host. The setup briefly opens an owned host to initialize the state
-layout, then releases it; between inputs no host or admission lock is held.
+layout and read the reopened line, then releases it; between inputs no host or
+admission lock is held.
 Ctrl+C requests persistent stop and waits for cleanup. A second signal abandons
 the wait and shuts down the owned host, returning error status 1; unfinished
 cleanup remains recoverable through `canti stop`.
@@ -547,10 +603,10 @@ among its differences when it names another one. Workspace notes are
 ordinary files and are not automatically read, apart from the instruction files
 and skills index bound at run creation.
 
-Each run stores current context version 24. Schema 8 keeps one agent log of
+Each run stores current context version 24. Schema 9 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
 instructions, ephemeral executor record format 2, attached executor format 1,
-host protocol 11 and capture helper protocol 3 form one current contract. Unsupported formats and context
+host protocol 12 and capture helper protocol 3 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. A run created under an earlier context version is
 refused; within the current version, resuming and driving a run use its stored

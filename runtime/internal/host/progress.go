@@ -2,8 +2,11 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
@@ -175,6 +178,7 @@ type InputItem struct {
 	Source      string
 	Subject     string
 	Text        string
+	Seen        bool
 	Truncated   bool
 }
 
@@ -187,6 +191,7 @@ type Item struct {
 	RunID string
 	Seq   int64
 	Step  int
+	Line  int
 	Kind  ItemKind
 
 	Command, Purpose string // ItemDecided: the decision's payload and purpose
@@ -204,8 +209,9 @@ type Item struct {
 	SupersededBy int // ItemCompleted: the instruction that superseded the decision
 	Inputs       int // ItemInputsBound: the bound instruction count
 
-	Input     *InputItem // ItemInput
-	Withdrawn []string   // ItemWithdrawn: the inputs it took back, by ID or position, bounded
+	Input          *InputItem // ItemInput
+	Withdrawn      []string   // ItemWithdrawn: the inputs it took back, by ID or position, bounded
+	WithdrawnTotal int        // ItemWithdrawn: the total number of inputs, before the name cap
 
 	Reason  core.StopReason // ItemStopRequested, ItemStopped
 	Failure string          // ItemRetrying, ItemNeedsResolution, ItemStopRequested
@@ -235,6 +241,9 @@ type Cursor int64
 
 // ErrCursor reports a cursor that is not a position of the agent log.
 var ErrCursor = errors.New("host: the cursor names no position of the agent log")
+
+// ErrHistoryExpired reports a pinned history snapshot that is no longer open.
+var ErrHistoryExpired = errors.New("host: history snapshot expired")
 
 // cursor checks that c is a position of the agent log, and returns the
 // latest one.
@@ -272,6 +281,9 @@ type Page struct {
 const (
 	PageRows  = 64
 	PageBytes = 256 << 10
+	// maxLineRuns bounds the runs a history read walks back to find the
+	// line's fresh boundary, so startup work does not grow with the line.
+	maxLineRuns = 64
 )
 
 // Progress returns the page of the agent log after cursor: at most limit
@@ -285,51 +297,15 @@ func (h *Host) Progress(ctx context.Context, after Cursor, limit int) (Page, err
 	if _, err := h.cursor(ctx, after); err != nil {
 		return Page{}, err
 	}
-	rows, err := h.store.Log(ctx, int64(after), limit)
+	rows, quiescent, err := h.store.LogPage(ctx, int64(after), limit)
 	if err != nil {
 		return Page{}, err
 	}
 	working := h.ownsWork()
-	p := Page{Next: after, More: len(rows) == limit, Quiescent: h.quiescent(ctx) && !working}
+	p := Page{Next: after, More: len(rows) == limit, Quiescent: quiescent && !working}
 	bytes := 0
 	for _, r := range rows {
-		if r.Transition != nil {
-			if r.Transition.Seq == 1 && r.Transition.Kind == "request_frozen" {
-				item := Item{Pos: r.Pos, RunID: r.RunID, Seq: 1, Step: r.Transition.Step, Kind: ItemRunStarted}
-				p.Items = append(p.Items, item)
-				bytes += item.bytes()
-				p.Next = Cursor(r.Pos)
-				continue
-			}
-			item, ok := project(*r.Transition)
-			if !ok {
-				p.Next = Cursor(r.Pos)
-				continue
-			}
-			item.Pos = r.Pos
-			item.RunID = r.RunID
-			size := item.bytes()
-			if bytes+size > PageBytes {
-				p.More = true
-				return p, nil
-			}
-			bytes += size
-			p.Items = append(p.Items, item)
-		} else if r.Input != nil {
-			item := Item{Pos: r.Pos, RunID: r.Input.RunID, Kind: ItemInput, Input: &InputItem{
-				InputID: r.Input.InputID, Authority: r.Input.Authority, Delivery: r.Input.Delivery,
-				Disposition: r.Input.Disposition, Source: r.Input.Source, Subject: r.Input.Subject,
-				Text: r.Input.Text, Truncated: r.InputCut,
-			}}
-			size := item.bytes()
-			if bytes+size > PageBytes {
-				p.More = true
-				return p, nil
-			}
-			bytes += size
-			p.Items = append(p.Items, item)
-		} else if r.Withdrawn != nil {
-			item := Item{Pos: r.Pos, Kind: ItemWithdrawn, Withdrawn: r.Withdrawn, Truncated: r.WithdrawnCut}
+		if item, ok := h.itemOf(ctx, r, true); ok {
 			size := item.bytes()
 			if bytes+size > PageBytes {
 				p.More = true
@@ -341,6 +317,260 @@ func (h *Host) Progress(ctx context.Context, after Cursor, limit int) (Page, err
 		p.Next = Cursor(r.Pos)
 	}
 	return p, nil
+}
+
+// itemOf projects one agent-log row into the item a reader shows, or reports
+// that the row shows nothing. Progress and History share it, so a reopened
+// line shows a step exactly as live progress does.
+func (h *Host) itemOf(ctx context.Context, r sqlite.LogEntry, origin bool) (Item, bool) {
+	if r.Transition != nil {
+		if r.Transition.Seq == 1 && r.Transition.Kind == "request_frozen" {
+			line, _ := h.store.RunLine(ctx, r.RunID)
+			return Item{Pos: r.Pos, RunID: r.RunID, Seq: 1, Step: r.Transition.Step, Line: line, Kind: ItemRunStarted}, true
+		}
+		item, ok := project(*r.Transition)
+		if !ok {
+			return Item{}, false
+		}
+		item.Pos, item.RunID = r.Pos, r.RunID
+		if r.RunID != "" {
+			item.Line, _ = h.store.RunLine(ctx, r.RunID)
+		}
+		return item, true
+	}
+	if r.Input != nil {
+		disposition := r.Input.Disposition
+		line := r.InputLine
+		if origin {
+			disposition = harness.InputDisposition(r.OriginDisposition)
+		}
+		if origin || r.Input.Disposition == harness.DispositionQueued {
+			line = r.OriginLine
+		}
+		return Item{Pos: r.Pos, RunID: r.Input.RunID, Line: line, Kind: ItemInput, Input: &InputItem{
+			InputID: r.Input.InputID, Authority: r.Input.Authority, Delivery: r.Input.Delivery,
+			Disposition: disposition, Source: r.Input.Source, Subject: r.Input.Subject,
+			Text: r.Input.Text, Seen: r.Input.DeliveredPos != 0, Truncated: r.InputCut,
+		}}, true
+	}
+	if r.Withdrawn != nil {
+		return Item{Pos: r.Pos, Line: r.InputLine, Kind: ItemWithdrawn, Withdrawn: r.Withdrawn, WithdrawnTotal: r.WithdrawnTotal, Truncated: r.WithdrawnCut}, true
+	}
+	return Item{}, false
+}
+
+// HistoryRun is one run of the current line as a reopening reader needs it:
+// its record and latest state, its serial position, what a final outcome
+// needs, and whether the host is driving it. Goal and Constraints are set
+// only on the first page's latest run; Result is set for a returned run. All
+// three are cut at historyTextBytes and report Truncated.
+type HistoryRun struct {
+	Run         harness.Run
+	State       core.State
+	Ordinal     int
+	Line        int
+	Fresh       bool
+	Driving     bool
+	Drivable    bool
+	Why         string
+	Goal        string
+	Constraints string
+	Result      string
+	Truncated   bool
+}
+
+// HistoryPage is one page of the current line's recorded history. Items are
+// in agent-log order within the page; Older is where the next older page
+// ends; Cursor is the snapshot's log end, the position up to which the line
+// was examined. Line pins later pages to the same line. Latest is set only on
+// the first page; later pages carry line runs so their queued goal is not
+// lost. LineStart and the latest run's Line let a recheck distinguish a new
+// fresh line from a non-fresh successor.
+type HistoryPage struct {
+	Latest    *HistoryRun
+	Runs      []HistoryRun
+	Items     []Item
+	Line      string
+	LineStart int
+	Older     HistoryCursor
+	Cursor    Cursor
+	Omitted   bool
+}
+
+// HistoryCursor is the opaque position and per-run transition sequence
+// frontier of the next older history page. Pos is exclusive; Seq bounds each
+// run's (run_id, seq) seek so an old page does not scan newer transitions.
+type HistoryCursor struct {
+	Pos     Cursor
+	Seq     map[string]int64
+	Session string
+}
+
+// The bounds of a reopened line: the fresh-run walk and membership window,
+// the first-page run summaries, and each summary text.
+const (
+	maxHistoryRuns   = 8
+	historyTextBytes = 8 << 10
+)
+
+// History returns the newest page of the current line ending before before,
+// or at the end of the agent log when before is zero. The journal reads share
+// one transaction, so the latest run and the page describe the same log
+// position. Cursor names where following the log continues. An empty state
+// directory has no latest run and no rows.
+func (h *Host) History(ctx context.Context, before HistoryCursor, limit int, line string) (HistoryPage, error) {
+	token, err := historyLine(line)
+	if err != nil {
+		return HistoryPage{}, err
+	}
+	if before.Pos < 0 {
+		return HistoryPage{}, fmt.Errorf("%w: %d is negative", ErrCursor, before.Pos)
+	}
+	if before.Pos > 0 {
+		if _, err := h.cursor(ctx, before.Pos); err != nil {
+			return HistoryPage{}, err
+		}
+	}
+	if limit <= 0 || limit > PageRows {
+		limit = PageRows
+	}
+	// A continuation has no latest-run read of its own: the snapshot session
+	// carries the runs and their summaries from page one.
+	data, err := h.store.History(ctx, sqlite.HistoryCursor{Pos: int64(before.Pos), Seq: before.Seq, Session: before.Session}, limit, maxLineRuns, maxHistoryRuns, token)
+	if err != nil {
+		if errors.Is(err, sqlite.ErrHistoryExpired) {
+			return HistoryPage{}, fmt.Errorf("%w: %v", ErrHistoryExpired, err)
+		}
+		if errors.Is(err, sqlite.ErrHistoryCursor) {
+			return HistoryPage{}, fmt.Errorf("%w: %v", ErrCursor, err)
+		}
+		return HistoryPage{}, err
+	}
+	p := HistoryPage{Older: HistoryCursor{Pos: Cursor(data.Older.Pos), Seq: data.Older.Seq, Session: data.Older.Session}, Cursor: Cursor(data.Cursor), Line: historyLineToken(data.Line), LineStart: data.Line.Start, Omitted: data.Omitted}
+	for _, row := range data.Rows {
+		if item, ok := h.itemOf(ctx, row, false); ok {
+			p.Items = append(p.Items, item)
+		}
+	}
+	for i, summary := range data.Runs {
+		driving := h.Driving(summary.Run.ID)
+		latest := before.Pos == 0 && i == 0
+		run := h.historyRun(summary, latest, driving)
+		if latest {
+			value := run
+			p.Latest = &value
+		}
+		p.Runs = append(p.Runs, run)
+	}
+	h.checkpoint(PointHistory)
+	return p, nil
+}
+
+// historyLine parses the opaque line token a later page carries. An empty
+// token asks History to fix the line from the latest run.
+func historyLine(s string) (sqlite.HistoryLine, error) {
+	if s == "" {
+		return sqlite.HistoryLine{}, nil
+	}
+	rest, ok := strings.CutPrefix(s, "line:")
+	if !ok || rest == "" || strings.Contains(rest, ":") {
+		return sqlite.HistoryLine{}, fmt.Errorf("%w: history line token %q is invalid", ErrCursor, s)
+	}
+	return sqlite.HistoryLine{Session: rest}, nil
+}
+
+func historyLineToken(line sqlite.HistoryLine) string {
+	if line.Start == 0 {
+		return ""
+	}
+	if line.Session == "" {
+		return ""
+	}
+	return "line:" + line.Session
+}
+
+// ParseHistoryCursor reads the server-issued opaque Older token. A bare
+// position is invalid; the cursor always carries Pos and, when needed, Seq.
+func ParseHistoryCursor(s string) (HistoryCursor, error) {
+	var c struct {
+		Pos     int64            `json:"pos"`
+		Seq     map[string]int64 `json:"seq"`
+		Session string           `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(s), &c); err != nil || c.Pos <= 0 || c.Seq == nil || c.Session == "" {
+		return HistoryCursor{}, fmt.Errorf("%w: history cursor %q is invalid", ErrCursor, s)
+	}
+	return HistoryCursor{Pos: Cursor(c.Pos), Seq: c.Seq, Session: c.Session}, nil
+}
+
+func nonNilSeq(seq map[string]int64) map[string]int64 {
+	if seq == nil {
+		return map[string]int64{}
+	}
+	return seq
+}
+
+// HistoryCursorToken is the opaque token a later page passes as Before.
+func HistoryCursorToken(c HistoryCursor) string {
+	if c.Pos == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(struct {
+		Pos     int64            `json:"pos"`
+		Seq     map[string]int64 `json:"seq"`
+		Session string           `json:"session"`
+	}{Pos: int64(c.Pos), Seq: nonNilSeq(c.Seq), Session: c.Session})
+	return string(data)
+}
+
+// LatestHistory returns the latest run's bounded summary for a startup
+// recheck: after reading history, a client asks once more whether another
+// client started driving the run, and follows it from the history cursor if
+// so. The latest run's recorded Line identifies a later line. It reads point
+// rows only, never a full view.
+func (h *Host) LatestHistory(ctx context.Context) (HistoryPage, error) {
+	summary, err := h.store.LatestSummary(ctx)
+	if errors.Is(err, harness.ErrNotFound) {
+		return HistoryPage{}, nil
+	}
+	if err != nil {
+		return HistoryPage{}, err
+	}
+	run := h.historyRun(summary, true, h.Driving(summary.Run.ID))
+	h.checkpoint(PointHistoryLatest)
+	return HistoryPage{Latest: &run, Runs: []HistoryRun{run}}, nil
+}
+
+// historyRun projects one stored summary. Only the latest run carries what a
+// reopening client needs to show or follow it; earlier runs carry their final
+// state so a stop reason without a terminal progress item is not lost.
+func (h *Host) historyRun(summary sqlite.HistoryRun, latest bool, driving bool) HistoryRun {
+	run := HistoryRun{Run: summary.Run, State: summary.State, Ordinal: summary.Ordinal, Line: summary.Line, Fresh: summary.Run.Fresh, Driving: driving}
+	if summary.State.Phase == core.PhaseReturned {
+		run.Result, run.Truncated = historyText(summary.State.Decision.Payload)
+	}
+	if !latest {
+		return run
+	}
+	run.Goal, _ = historyText(summary.Run.Goal)
+	run.Constraints, _ = historyText(summary.Run.Constraints)
+	if config, err := DecodeConfig(summary.Run, h.opts.Workspace); err == nil {
+		view := View{Run: summary.Run, Config: config, Snapshot: harness.Snapshot{State: summary.State}, Ordinal: summary.Ordinal, Driving: driving}
+		run.Drivable, run.Why = h.drivability(view)
+	}
+	return run
+}
+
+// historyText cuts a summary text at historyTextBytes on a rune boundary.
+func historyText(s string) (string, bool) {
+	if len(s) <= historyTextBytes {
+		return s, false
+	}
+	i := historyTextBytes
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i], true
 }
 
 // bytes is what the texts of it take.

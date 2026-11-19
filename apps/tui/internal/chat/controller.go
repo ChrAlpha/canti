@@ -29,6 +29,7 @@ const (
 type Config struct {
 	Workspace, State, RuntimePath, HostMode string
 	Fresh                                   bool
+	LoadHistory                             bool
 	HostWait                                time.Duration
 	Spec                                    hostrpc.Spec
 	Constraints                             string
@@ -44,10 +45,10 @@ type Snapshot struct{ InputID, Goal string }
 func NewSnapshot(goal string) Snapshot { return Snapshot{"in_" + strings.ToLower(rand.Text()), goal} }
 
 type Result struct {
-	Run                                                     hostrpc.Run
-	Err                                                     error
-	Code                                                    int
-	Rejected, Uncertain, NoInputFits, Detached, Interrupted bool
+	Run                                                                   hostrpc.Run
+	Err                                                                   error
+	Code                                                                  int
+	Rejected, Uncertain, NoInputFits, Detached, Interrupted, AttachFailed bool
 }
 
 func result(r hostrpc.Run, err error) Result {
@@ -75,14 +76,18 @@ func result(r hostrpc.Run, err error) Result {
 // Controller serializes turns. Runtime process fields are used only by Setup
 // or its single active worker. UI drafts are never retained here.
 type Controller struct {
-	cfg           Config
-	runtime       runtimeClient
-	GoalLimit     int
-	mu            sync.Mutex
-	current       *Turn
-	uncertain     *Snapshot
-	uncertainStop bool
-	fresh         bool
+	cfg             Config
+	runtime         runtimeClient
+	GoalLimit       int
+	mu              sync.Mutex
+	current         *Turn
+	uncertain       *Snapshot
+	uncertainStop   bool
+	fresh           bool
+	history         History
+	latest          *hostrpc.HistoryRun
+	latestErr       error
+	startupDeadline time.Time
 }
 
 func New(cfg Config) *Controller {
@@ -93,31 +98,122 @@ func (c *Controller) submission(s Snapshot, delivery string, fresh bool) hostrpc
 	return hostrpc.Submission{InputID: s.InputID, Goal: s.Goal, Constraints: c.cfg.Constraints,
 		ExplicitConstraints: c.cfg.ExplicitConstraints, Delivery: delivery, Fresh: fresh, Spec: c.cfg.Spec}
 }
+
+// startupResolvable reports refusals the editor can resolve after history
+// loads. Held inputs are the only such refusal; every other refusal keeps its
+// startup behavior.
+func startupResolvable(err error) bool { return errors.Is(err, hostrpc.ErrHeld) }
+
 func (c *Controller) Setup(ctx, shutdown context.Context) error {
 	if err := c.runtime.checkHostMode(); err != nil {
 		return hostrpc.SpecError{Err: err}
 	}
-	v, err := c.runtime.validate(ctx, c.submission(Snapshot{Goal: "chat"}, "", c.cfg.Fresh), c.cfg.Binding)
-	if err != nil && strings.Contains(err.Error(), "name a delivery") {
-		// A working run rejects an input without a delivery, but startup only
-		// needs the canonical config and limits; ask as a steer without touching
-		// the open run.
-		v, err = c.runtime.validate(ctx, c.submission(Snapshot{Goal: "chat"}, "steer", false), c.cfg.Binding)
-	}
+	ownedStarted := false
+	defer func() {
+		if ownedStarted {
+			c.runtime.closeHost(shutdown)
+		}
+	}()
+	admission, admissionCancel := context.WithTimeout(ctx, preflightTimeout)
+	defer admissionCancel()
+	// Resolve canonical config over the same transport Validate uses: an
+	// existing host when present, otherwise preflight. Resolve makes no
+	// admission decision.
+	v, preflight, err := c.runtime.resolve(admission, c.submission(Snapshot{Goal: "chat"}, "", c.cfg.Fresh), c.cfg.Binding)
 	if err != nil {
 		return err
 	}
 	c.cfg.Spec = v.Spec
 	c.cfg.State, c.runtime.state = v.State, v.State
+	// Validate only to classify the prospective admission.
+	_, verr := c.runtime.validateOn(admission, c.submission(Snapshot{Goal: "chat"}, "", c.cfg.Fresh), c.cfg.Binding, preflight)
+	if verr != nil && strings.Contains(verr.Error(), "name a delivery") {
+		_, verr = c.runtime.validateOn(admission, c.submission(Snapshot{Goal: "chat"}, "steer", false), c.cfg.Binding, preflight)
+	}
+	held := startupResolvable(verr)
+	if verr != nil && !held {
+		return verr
+	}
+	connected := false
+	if held {
+		// Held inputs are resolvable in the editor. Start/attach the real host
+		// for this state directory and resolve through it; no sibling path.
+		if c.Owned() {
+			ownedStarted = true
+		}
+		if _, err = c.runtime.connect(ctx); err != nil {
+			return err
+		}
+		connected = true
+		v, preflight, err = c.runtime.resolve(admission, c.submission(Snapshot{Goal: "chat"}, "steer", false), c.cfg.Binding)
+		if err != nil {
+			return err
+		}
+		c.cfg.Spec = v.Spec
+		c.cfg.State, c.runtime.state = v.State, v.State
+	}
 	c.GoalLimit = v.GoalLimit
-	_, err = c.runtime.connect(ctx)
+	if !connected {
+		if c.Owned() {
+			ownedStarted = true
+		}
+		_, err = c.runtime.connect(ctx)
+	}
+	if err == nil && c.cfg.LoadHistory && !c.cfg.Fresh {
+		c.loadStartup(ctx)
+	}
 	if c.Owned() {
 		c.runtime.closeHost(shutdown)
+		ownedStarted = false
 	}
 	if err == nil {
 		err = ctx.Err()
 	}
 	return err
+}
+
+// History is the reopened line read during Setup, or the zero History when
+// the launch skipped it or read no earlier run.
+func (c *Controller) History() History { return c.history }
+
+// loadStartup gives history pages and the latest-run recheck one deadline,
+// and sends no recheck after a required history page failed.
+func (c *Controller) loadStartup(ctx context.Context) {
+	startup, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	c.startupDeadline, _ = startup.Deadline()
+	c.history = c.loadHistory(startup)
+	if c.history.Err == nil {
+		c.latest, c.latestErr = c.loadLatest(startup)
+	}
+}
+
+// Latest is the bounded latest-run recheck read during Setup, and LatestErr
+// reports why it could not be read. It is read through the Setup host, before
+// an owned host is released, and bounded by the history startup deadline.
+func (c *Controller) Latest() *hostrpc.HistoryRun { return c.latest }
+func (c *Controller) LatestErr() error            { return c.latestErr }
+
+// loadHistory reads the current line through the public protocol. It keeps
+// the newest entries within the transcript bound and never fails Setup: a
+// load error is a diagnostic the viewer can show beside a usable editor.
+func (c *Controller) loadHistory(ctx context.Context) History {
+	return collectHistory(ctx, func(ctx context.Context, before, line string, limit int) (hostrpc.HistoryPage, error) {
+		var page hostrpc.HistoryPage
+		err := c.runtime.retry(ctx, func(cl *hostrpc.Client) error {
+			var err error
+			page, err = cl.HistoryPage(ctx, before, line, limit)
+			return err
+		})
+		return page, err
+	})
+}
+
+// loadLatest rechecks the latest run through the same setup host, with the
+// same deadline as history. In owned mode this runs before the host is
+// released, so the recheck never starts a second owned host.
+func (c *Controller) loadLatest(ctx context.Context) (*hostrpc.HistoryRun, error) {
+	return c.LatestHistory(ctx)
 }
 func (c *Controller) Check(goal string) error {
 	switch {
@@ -211,25 +307,93 @@ func (c *Controller) Follow(ctx context.Context, s Snapshot, ack hostrpc.Ack) (*
 		} else {
 			out = c.accepted(ctx, client, t, ack, false)
 		}
-		if c.Owned() {
-			c.runtime.closeHost(ctx)
-		}
-		if ctx.Err() != nil {
-			out.Interrupted = true
-			if c.Owned() {
-				out.Code = Error
-				if out.Err == nil {
-					out.Err = fmt.Errorf("owned runtime cleanup interrupted: %w", ctx.Err())
-				}
-			}
-		}
-		cancel()
-		c.mu.Lock()
-		c.current = nil
-		c.mu.Unlock()
-		t.finish(out)
+		c.finishFollow(ctx, t, out)
 	}()
 	return t, nil
+}
+
+// Attach follows a run that a host is already driving from cursor, without
+// admitting an input, driving work, or taking ownership of the run. It
+// reports through the same progress and result path as a followed run.
+func (c *Controller) Attach(ctx context.Context, run hostrpc.HistoryRun, cursor string) (*Turn, error) {
+	if run.RunID == "" {
+		return nil, errors.New("attach requires a run")
+	}
+	c.mu.Lock()
+	if c.current != nil {
+		c.mu.Unlock()
+		return nil, errors.New("a run is still active")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	t := newTurn(Snapshot{InputID: run.InputID, Goal: run.Goal}, c.Owned(), cancel)
+	t.attach(run.RunID)
+	t.attached = true
+	c.current = t
+	c.mu.Unlock()
+	go func() {
+		var out Result
+		client, err := c.runtime.connect(ctx)
+		if err != nil {
+			out = Result{Err: err, Code: Error}
+		} else {
+			out = c.follow(ctx, client, t, run.RunID, cursor)
+		}
+		c.finishFollow(ctx, t, out)
+	}()
+	return t, nil
+}
+
+// RefreshLatest is a bounded frame-time recheck in auto mode: another client
+// can start or finish a run after Setup's recheck but before the first frame.
+func (c *Controller) RefreshLatest(ctx context.Context) (*hostrpc.HistoryRun, error) {
+	if !c.startupDeadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, c.startupDeadline)
+		defer cancel()
+	}
+	return c.LatestHistory(ctx)
+}
+
+// LatestHistory rechecks the latest run with a bounded point read. A
+// reopening client uses it after loading history so a run another client
+// started driving in the meantime is followed from the history cursor.
+func (c *Controller) LatestHistory(ctx context.Context) (*hostrpc.HistoryRun, error) {
+	var page hostrpc.HistoryPage
+	err := c.runtime.retry(ctx, func(cl *hostrpc.Client) error {
+		var err error
+		page, err = cl.LatestHistory(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return page.Latest, nil
+}
+
+// finishFollow ends a follower that took no admission: it releases an owned
+// runtime, distinguishes cancellation, clears the controller, and publishes
+// the outcome.
+func (c *Controller) finishFollow(ctx context.Context, t *Turn, out Result) {
+	if t.attached && out.Err != nil {
+		out.AttachFailed = true
+	}
+	if c.Owned() {
+		c.runtime.closeHost(ctx)
+	}
+	if ctx.Err() != nil {
+		out.Interrupted = true
+		if c.Owned() {
+			out.Code = Error
+			if out.Err == nil {
+				out.Err = fmt.Errorf("owned runtime cleanup interrupted: %w", ctx.Err())
+			}
+		}
+	}
+	t.cancel()
+	c.mu.Lock()
+	c.current = nil
+	c.mu.Unlock()
+	t.finish(out)
 }
 
 func (c *Controller) run(ctx context.Context, t *Turn) Result {
@@ -409,13 +573,15 @@ func (c *Controller) stop(ctx context.Context, client rpcRun, t *Turn, id, curso
 		}
 		return result(hostrpc.Run{RunID: id}, fmt.Errorf("stopping run %s: %w; finish with \"canti stop -run %[1]s\"", id, err))
 	}
-	return drain(ctx, client, cursor, t.progress)
+	out, _ := drain(ctx, client, cursor, t.progress)
+	return out
 }
-func drain(ctx context.Context, src rpcRun, cursor string, emit func(hostrpc.Item)) Result {
+
+func drain(ctx context.Context, src rpcRun, cursor string, emit func(hostrpc.Item)) (Result, string) {
 	for {
 		page, err := src.Progress(ctx, cursor, 64)
 		if err != nil {
-			return result(hostrpc.Run{}, err)
+			return result(hostrpc.Run{}, err), cursor
 		}
 		for _, item := range page.Items {
 			emit(item)
@@ -423,7 +589,7 @@ func drain(ctx context.Context, src rpcRun, cursor string, emit func(hostrpc.Ite
 		cursor = page.Next
 		if !page.More {
 			r, err := src.View(ctx, "")
-			return result(r, err)
+			return result(r, err), cursor
 		}
 	}
 }
@@ -468,9 +634,12 @@ func follow(ctx context.Context, src rpcRun, cursor string, emit func(hostrpc.It
 		cancel()
 		if errors.Is(err, context.DeadlineExceeded) {
 			// A bounded wake-up keeps the chat responsive when the host owns
-			// work that produces no further row.
+			// work that produces no further row. A closed View is not enough:
+			// drain pages committed before the view was read.
 			if r, viewErr := src.View(ctx, ""); viewErr == nil && (r.Status != hostrpc.StatusActive || r.Driver != hostrpc.DriverDriving) {
-				return followed{Result: result(r, nil)}
+				out, next := drain(ctx, src, cursor, emit)
+				cursor = next
+				return followed{Result: out}
 			}
 			continue
 		}

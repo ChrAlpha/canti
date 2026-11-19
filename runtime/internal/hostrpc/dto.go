@@ -212,28 +212,66 @@ func StateOf(r Run) (harness.Snapshot, error) {
 func PageOf(p host.Page) Page {
 	w := Page{Items: make([]Item, 0, len(p.Items)), Next: CursorOf(p.Next), More: p.More, Quiescent: p.Quiescent}
 	for _, it := range p.Items {
-		item := Item{Pos: it.Pos, RunID: it.RunID, Seq: it.Seq, Step: it.Step, Kind: word(itemWords, it.Kind), Command: it.Command, Purpose: it.Purpose,
-			Action: word(actionWords, harness.ActionName(it.Action)), Result: it.Result, Local: it.Local, Resolved: it.Resolved,
-			Execution: word(executionWords, it.Execution), ExitCode: it.ExitCode, Preview: it.Preview, Detail: it.Detail, AnchorSeq: it.AnchorSeq,
-			StopReason: word(reasonWords, it.Reason), Failure: it.Failure, SupersededBy: it.SupersededBy, Inputs: it.Inputs,
-			Withdrawn: append([]string{}, it.Withdrawn...), Truncated: it.Truncated}
-		if o := it.Outcome; o != nil {
-			item.Outcome = &Outcome{Status: word(outcomeWords, o.Status), Detail: o.Detail, Retrieval: o.Retrieval, RetrievalError: o.RetrievalError,
-				Sources: o.Sources, Entries: o.Entries, HandoverBytes: o.HandoverBytes}
-		}
-		if in := it.Input; in != nil {
-			item.Input = &Input{Pos: it.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),
-				Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text, Truncated: in.Truncated}
-		}
-		w.Items = append(w.Items, item)
+		w.Items = append(w.Items, ItemOf(it))
 	}
 	return w
+}
+
+// ItemOf is the wire form of one progress item.
+func ItemOf(it host.Item) Item {
+	item := Item{Pos: it.Pos, RunID: it.RunID, Line: it.Line, Seq: it.Seq, Step: it.Step, Kind: word(itemWords, it.Kind), Command: it.Command, Purpose: it.Purpose,
+		Action: word(actionWords, harness.ActionName(it.Action)), Result: it.Result, Local: it.Local, Resolved: it.Resolved,
+		Execution: word(executionWords, it.Execution), ExitCode: it.ExitCode, Preview: it.Preview, Detail: it.Detail, AnchorSeq: it.AnchorSeq,
+		StopReason: word(reasonWords, it.Reason), Failure: it.Failure, SupersededBy: it.SupersededBy, Inputs: it.Inputs,
+		Withdrawn: append([]string{}, it.Withdrawn...), WithdrawnTotal: it.WithdrawnTotal, Truncated: it.Truncated}
+	if o := it.Outcome; o != nil {
+		item.Outcome = &Outcome{Status: word(outcomeWords, o.Status), Detail: o.Detail, Retrieval: o.Retrieval, RetrievalError: o.RetrievalError,
+			Sources: o.Sources, Entries: o.Entries, HandoverBytes: o.HandoverBytes}
+	}
+	if in := it.Input; in != nil {
+		item.Input = &Input{Pos: it.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),
+			Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text, Seen: in.Seen, Truncated: in.Truncated}
+	}
+	return item
+}
+
+// HistoryOf is the wire form of p.
+func HistoryOf(p host.HistoryPage) HistoryPage {
+	w := HistoryPage{Line: p.Line, LineStart: p.LineStart, Cursor: cursorString(p.Cursor), Older: host.HistoryCursorToken(p.Older), Omitted: p.Omitted, Items: make([]Item, 0, len(p.Items))}
+	if p.Latest != nil {
+		latest := HistoryRunOf(*p.Latest)
+		w.Latest = &latest
+	}
+	for _, run := range p.Runs {
+		w.Runs = append(w.Runs, HistoryRunOf(run))
+	}
+	for _, it := range p.Items {
+		w.Items = append(w.Items, ItemOf(it))
+	}
+	return w
+}
+
+// HistoryRunOf is the wire form of one run summary.
+func HistoryRunOf(run host.HistoryRun) HistoryRun {
+	return HistoryRun{RunID: run.Run.ID, InputID: run.Run.InputID, Ordinal: run.Ordinal, Line: run.Line, Fresh: run.Fresh,
+		Status: status(run.State.Phase), Phase: word(phaseWords, run.State.Phase), Step: run.State.Step,
+		StopReason: word(reasonWords, run.State.Reason), Result: run.Result, EffectID: run.State.EffectID,
+		Goal: run.Goal, Constraints: run.Constraints, Driver: driver(run.Driving), Drivable: run.Drivable,
+		Why: run.Why, Truncated: run.Truncated}
+}
+
+// cursorString is the wire form of c, empty when it names no position.
+func cursorString(c host.Cursor) string {
+	if c == 0 {
+		return ""
+	}
+	return CursorOf(c)
 }
 
 // InputOf is the wire form of one admitted input.
 func InputOf(in harness.Input) Input {
 	return Input{Pos: in.Pos, InputID: in.InputID, Authority: word(authorityWords, in.Authority), Delivery: word(deliveryWords, in.Delivery),
-		Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text}
+		Disposition: word(dispositionWords, in.Disposition), Source: in.Source, Subject: in.Subject, Text: in.Text, Seen: in.DeliveredPos != 0}
 }
 
 // AckOf is the wire form of a host acknowledgement.

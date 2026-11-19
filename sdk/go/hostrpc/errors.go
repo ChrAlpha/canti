@@ -6,11 +6,12 @@ import (
 )
 
 var (
-	ErrConflict = errors.New("hostrpc: input conflict")
-	ErrHeld     = errors.New("hostrpc: held inputs must be withdrawn first")
-	ErrClosing  = errors.New("hostrpc: host is closing")
-	ErrDriving  = errors.New("hostrpc: run is already driving")
-	ErrCursor   = errors.New("hostrpc: invalid cursor")
+	ErrConflict       = errors.New("hostrpc: input conflict")
+	ErrHeld           = errors.New("hostrpc: held inputs must be withdrawn first")
+	ErrClosing        = errors.New("hostrpc: host is closing")
+	ErrDriving        = errors.New("hostrpc: run is already driving")
+	ErrCursor         = errors.New("hostrpc: invalid cursor")
+	ErrHistoryExpired = errors.New("hostrpc: history snapshot expired")
 )
 
 type SpecError struct{ Err error }

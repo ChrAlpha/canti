@@ -236,3 +236,87 @@ func TestTUIReplaysLostSubmitAcknowledgementWithoutAnotherRun(t *testing.T) {
 		t.Fatalf("submission identities: %q", ids)
 	}
 }
+
+// historyHold is a host socket proxy that holds the first History response
+// until release, so a test can build the next line while the client still
+// holds the snapshot it asked for. All other protocol traffic is forwarded.
+type historyHold struct {
+	listener net.Listener
+	held     chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	done     chan struct{}
+}
+
+func (f *fixture) holdFirstHistory(t *testing.T) *historyHold {
+	t.Helper()
+	socket := f.socket()
+	upstream := filepath.Join(f.state, "history-upstream.sock")
+	proxyPath := filepath.Join(f.state, "history-proxy.sock")
+	_ = os.Remove(upstream)
+	_ = os.Remove(proxyPath)
+	if err := os.Link(socket, upstream); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", proxyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(proxyPath, socket); err != nil {
+		listener.Close()
+		t.Fatal(err)
+	}
+	h := &historyHold{listener: listener, held: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
+	var first sync.Once
+	go func() {
+		defer close(h.done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+				for {
+					var request hostrpc.Request
+					if decoder.Decode(&request) != nil {
+						return
+					}
+					remote, err := net.DialTimeout("unix", upstream, time.Second)
+					if err != nil {
+						return
+					}
+					remote.SetDeadline(time.Now().Add(30 * time.Second))
+					if json.NewEncoder(remote).Encode(request) != nil {
+						remote.Close()
+						return
+					}
+					var response hostrpc.Response
+					if json.NewDecoder(remote).Decode(&response) != nil {
+						remote.Close()
+						return
+					}
+					remote.Close()
+					if request.Op == hostrpc.OpHistory {
+						first.Do(func() {
+							close(h.held)
+							<-h.release
+						})
+					}
+					if encoder.Encode(response) != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		h.Release()
+		listener.Close()
+		<-h.done
+	})
+	return h
+}
+
+func (h *historyHold) Release() { h.once.Do(func() { close(h.release) }) }

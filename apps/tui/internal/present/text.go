@@ -68,17 +68,50 @@ func excerpt(s string, tail bool) []string {
 // hidden reports a character that is not a tab or a graphic character.
 func hidden(r rune) bool { return r != '\t' && (!unicode.IsGraphic(r) || r == utf8.RuneError) }
 
+// Input shows one principal input as a message line. Observations and inputs
+// with no principal authority are not shown.
+func Input(w io.Writer, in hostrpc.Input) {
+	if in.Authority != "principal" {
+		return
+	}
+	prefix := "› "
+	if in.Delivery == "follow_up" {
+		prefix = "» "
+	}
+	text := Clean(in.Text)
+	switch in.Disposition {
+	case "queued":
+		text += " (queued)"
+	case "withdrawn":
+		text += " (withdrawn)"
+	}
+	if in.Truncated {
+		text += " …"
+	}
+	fmt.Fprintln(w, prefix+text)
+}
+
 // render shows item it: the command of an accepted exec decision, and the
 // result of a completed step.
 func Item(w io.Writer, it hostrpc.Item) {
 	switch {
 	case it.Kind == "withdrawn":
-		fmt.Fprintf(w, "↩ withdrew %d input(s): %s\n", len(it.Withdrawn), strings.Join(it.Withdrawn, ", "))
+		total := len(it.Withdrawn)
+		fmt.Fprintf(w, "↩ withdrew %d", total)
+		if it.Truncated {
+			fmt.Fprint(w, "+ input(s) (names omitted)")
+		} else {
+			fmt.Fprintf(w, " input(s)")
+		}
+		fmt.Fprintf(w, ": %s\n", strings.Join(it.Withdrawn, ", "))
 	case it.Kind == "context_reset":
 		fmt.Fprintf(w, "↳ context reset at sequence %d; continuing step %d from archive navigation\n", it.AnchorSeq, it.Step)
 	case it.Kind == "context_anchored":
 		fmt.Fprintf(w, "↳ context anchored at sequence %d within the context budget; step %d continues with the most recent steps\n", it.AnchorSeq, it.Step)
 	case it.Kind == "decided":
+		if purpose := excerpt(it.Purpose, false); len(purpose) > 0 {
+			fmt.Fprintf(w, "# %s\n", strings.Join(purpose, "\n# "))
+		}
 		fmt.Fprintf(w, "$ %s\n", strings.Join(excerpt(it.Command, false), "\n  "))
 	case it.Kind == "returned":
 		if answer := Clean(it.Result); answer != "" {
