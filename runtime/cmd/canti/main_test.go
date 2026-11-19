@@ -1049,7 +1049,7 @@ func TestRunFlagsDefaults(t *testing.T) {
 		Budget: harness.Budget{WallTime: 4 * time.Hour, OutputBytes: 256 << 20, JobTimeout: 10 * time.Minute},
 		Limits: core.Limits{MaxSteps: 500, MaxAttempts: 3},
 	}
-	if s != want {
+	if !reflect.DeepEqual(s, want) {
 		t.Errorf("defaults = %+v\nwant %+v", s, want)
 	}
 	var fs flag.FlagSet

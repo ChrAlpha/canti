@@ -438,18 +438,20 @@ type status struct {
 			JobTimeout    string `json:"job_timeout"`
 		} `json:"budget"`
 	} `json:"run"`
-	Seq        int64           `json:"seq"`
-	Phase      core.Phase      `json:"phase"`
-	Intent     core.Intent     `json:"intent"`
-	Step       int             `json:"step"`
-	Attempt    int             `json:"attempt"`
-	RequestRev int             `json:"request_rev"`
-	Reason     core.StopReason `json:"reason"`
-	Decision   *core.Decision  `json:"decision"`
-	EffectID   string          `json:"effect_id"`
-	Inputs     int             `json:"inputs"`
-	Seen       int             `json:"seen"`
-	Totals     struct {
+	Seq                int64                   `json:"seq"`
+	Phase              core.Phase              `json:"phase"`
+	Intent             core.Intent             `json:"intent"`
+	Step               int                     `json:"step"`
+	Attempt            int                     `json:"attempt"`
+	RequestRev         int                     `json:"request_rev"`
+	Reason             core.StopReason         `json:"reason"`
+	Decision           *core.Decision          `json:"decision"`
+	EffectID           string                  `json:"effect_id"`
+	Inputs             int                     `json:"inputs"`
+	Seen               int                     `json:"seen"`
+	Project            *hostrpc.ProjectBinding `json:"project"`
+	ProjectUnavailable string                  `json:"project_unavailable"`
+	Totals             struct {
 		Coverage     harness.UsageCoverage `json:"coverage"`
 		InputTokens  int64                 `json:"input_tokens"`
 		OutputTokens int64                 `json:"output_tokens"`

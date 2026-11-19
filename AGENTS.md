@@ -45,6 +45,12 @@ verification before a non-trivial change. Keep one coherent intent per commit.
   layout and meta encoding of published step records. It imports only the
   standard library and knows no action protocol; the harness supplies what
   discovery skips.
+- `runtime/internal/project/` owns read-only discovery of the workspace's
+  instruction files and `.agents/skills` index for a new run: Pi's per-directory
+  instruction rule, symbolic links that stay inside their mount, bounded reads,
+  frontmatter validation, and skip diagnostics. It imports only the
+  standard library. The host binds its snapshot at admission; the harness
+  renders the committed snapshot and never reads the workspace for it.
 - `runtime/internal/host/` owns the runtime host of one state directory: its lock
   and journal for the host's lifetime, admission and input identity, the
   drives of runs, stop, resolution, shutdown, and the progress projection

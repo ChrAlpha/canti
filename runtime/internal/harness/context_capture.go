@@ -29,6 +29,7 @@ type ContextBytes struct {
 	Anchor, Previous, Index, Notice, EpochHeader     int
 	Instructions, EpochInstructions                  int
 	Observations, Progress, Latest, Repair           int
+	Project, Skills                                  int                `json:",omitempty"`
 	Steps                                            []ContextStepBytes `json:",omitempty"`
 }
 

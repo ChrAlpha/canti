@@ -1,6 +1,7 @@
 package hostrpc
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 func ResolutionOf(job bool, obs harness.Observation, ownerID string) Resolution {
@@ -121,7 +123,7 @@ func SpecOf(s host.Spec) Spec {
 	c, b, l := s.Config, s.Budget, s.Limits
 	return Spec{Ephemeral: c.Ephemeral, Environment: c.Environment, EnvironmentWorkdir: c.EnvironmentWorkdir, Workspace: c.Workspace, Image: c.Image, Network: c.Network, Memory: c.Memory, CPUs: c.CPUs, Pids: c.Pids, OutputLimit: c.OutputLimit,
 		API: c.API, Model: c.Model, MaxTokens: c.MaxTokens, Effort: c.Effort, Structured: c.Structured, DecisionFormat: c.DecisionFormat,
-		Fallbacks: c.Fallbacks, RequestBytes: c.RequestBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports,
+		Fallbacks: c.Fallbacks, RequestBytes: c.RequestBytes, ContextVersion: c.ContextVersion, HistoryImports: c.HistoryImports, NoProjectContext: c.NoProjectContext,
 		MaxSteps: l.MaxSteps, MaxAttempts: l.MaxAttempts,
 		WallTime: b.WallTime.String(), TokenBudget: b.Tokens, ContextTokens: b.ContextTokens, OutputBudget: b.OutputBytes, JobTimeout: b.JobTimeout.String()}
 }
@@ -139,7 +141,7 @@ func SpecFrom(s Spec) (host.Spec, error) {
 	return host.Spec{
 		Config: host.RunConfig{Ephemeral: s.Ephemeral, Environment: s.Environment, EnvironmentWorkdir: s.EnvironmentWorkdir, Workspace: s.Workspace, Image: s.Image, Network: s.Network, Memory: s.Memory, CPUs: s.CPUs, Pids: s.Pids, OutputLimit: s.OutputLimit,
 			API: s.API, Model: s.Model, MaxTokens: s.MaxTokens, Effort: s.Effort, Structured: s.Structured, DecisionFormat: s.DecisionFormat,
-			Fallbacks: s.Fallbacks, RequestBytes: s.RequestBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports,
+			Fallbacks: s.Fallbacks, RequestBytes: s.RequestBytes, ContextVersion: s.ContextVersion, HistoryImports: s.HistoryImports, NoProjectContext: s.NoProjectContext,
 		},
 		Budget: harness.Budget{WallTime: wall, Tokens: s.TokenBudget, ContextTokens: s.ContextTokens, OutputBytes: s.OutputBudget, JobTimeout: job},
 		Limits: core.Limits{MaxSteps: s.MaxSteps, MaxAttempts: s.MaxAttempts},
@@ -171,14 +173,20 @@ func PairsOf(pairs []host.Pair) []Pair {
 // RunOf is the wire form of v.
 func RunOf(v host.View, driveErr error) Run {
 	s, r, t, b := v.Snapshot.State, v.Run, v.Totals, v.Run.Budget
+	binding, projectErr := ProjectOfMeta(v.Project, v.Config.NoProjectContext)
+	v.ProjectUnavailable = project.BoundDiagnostic(v.ProjectUnavailable)
+	if projectErr != nil && v.ProjectUnavailable == "" {
+		v.ProjectUnavailable = project.BoundDiagnostic(projectErr.Error())
+	}
 	w := Run{RunID: r.ID, InputID: r.InputID, InputPos: r.InputPos, Fresh: r.Fresh, Goal: r.Goal, Constraints: r.Constraints,
 		Ordinal: v.Ordinal,
 		Status:  status(s.Phase), Phase: word(phaseWords, s.Phase), Step: s.Step, StopReason: word(reasonWords, s.Reason), EffectID: s.EffectID,
 		Cursor: CursorOf(v.Cursor()), ContextVersion: v.Config.ContextVersion, API: v.Config.API, Provider: v.Config.Provider,
 		Driver: driver(v.Driving), Drivable: v.Drivable, Why: v.Why,
 		PendingSteers: v.PendingSteers, Queued: v.Queued, Held: v.Held,
-		Totals: Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
-		Budget: Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, ContextTokens: b.ContextTokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()}}
+		Totals:  Totals{InputTokens: t.Usage.InputTokens, OutputTokens: t.Usage.OutputTokens, OutputBytes: t.OutputBytes, Steps: t.Steps, Coverage: UsageCoverage{Attempts: t.Coverage.Attempts, InputReports: t.Coverage.InputReports, OutputReports: t.Coverage.OutputReports, Lost: t.Coverage.Lost}},
+		Budget:  Budget{WallTime: b.WallTime.String(), Tokens: b.Tokens, ContextTokens: b.ContextTokens, OutputBytes: b.OutputBytes, JobTimeout: b.JobTimeout.String()},
+		Project: binding, ProjectUnavailable: v.ProjectUnavailable}
 	w.Ephemeral, w.Environment = v.Config.Ephemeral, EnvironmentOf(v.Config)
 	if s.Phase == core.PhaseReturned {
 		w.Result = s.Decision.Payload
@@ -237,6 +245,110 @@ func AckOf(a host.Ack, v *host.View, driveErr error) Ack {
 		w.Run = &run
 	}
 	return w
+}
+
+// ProjectOf projects a bound project snapshot without instruction content.
+// A disabled run is explicit; an enabled run with no files or skills has no
+// projection.
+func ProjectOf(snapshot project.Snapshot, disabled bool) (*ProjectBinding, error) {
+	return ProjectOfMeta(snapshot.Meta(), disabled)
+}
+
+// MaxProjectBindingBytes is the encoded budget of one project projection.
+// It is well below the 1 MiB TUI preflight limit even after JSON escaping.
+const MaxProjectBindingBytes = 256 << 10
+
+// ProjectOfMeta projects content-free metadata, with bounded skill, skip and
+// instruction pages and the totals they omit.
+func ProjectOfMeta(meta project.Meta, disabled bool) (*ProjectBinding, error) {
+	if disabled {
+		return &ProjectBinding{Disabled: true}, nil
+	}
+	if meta.Root == "" && len(meta.Instructions) == 0 && len(meta.Skills) == 0 && len(meta.Skipped) == 0 && meta.SkillsIndexBytes == 0 {
+		return nil, nil
+	}
+	out := &ProjectBinding{Root: meta.Root, InstructionsTotal: len(meta.Instructions), SkillsTotal: meta.SkillsTotal, SkillsMore: meta.SkillsTotal - len(meta.Skills),
+		SkippedTotal: meta.SkippedTotal, SkippedMore: meta.SkippedTotal - len(meta.Skipped),
+		SkillsOmitted: meta.SkillsOmitted, SkillsIndexBytes: meta.SkillsIndexBytes,
+		SkillsIndexSHA256: meta.SkillsIndexSHA256, InstructionBytes: meta.InstructionBytes}
+	for _, in := range meta.Instructions {
+		out.Instructions = append(out.Instructions, ProjectFile{Path: in.Path, ResolvedPath: in.ResolvedPath, Size: in.Size, SHA256: in.SHA256})
+	}
+	for _, skill := range meta.Skills {
+		out.Skills = append(out.Skills, ProjectSkill{Name: skill.Name, Description: skill.Description, Path: skill.Path, ResolvedPath: skill.ResolvedPath})
+	}
+	for _, skip := range meta.Skipped {
+		out.Skipped = append(out.Skipped, ProjectSkip{Path: skip.Path, Reason: skip.Reason})
+	}
+	return fitProjectBinding(out)
+}
+
+func fitProjectBinding(out *ProjectBinding) (*ProjectBinding, error) {
+	if fitsProjectBinding(out) {
+		return out, nil
+	}
+	// Keep as many entries as fit; a binary search over each immutable page
+	// avoids remarshalling for every discarded entry.
+	out.Skills = fitSkillPage(out, out.Skills, out.SkillsTotal)
+	out.Skipped = fitSkipPage(out, out.Skipped, out.SkippedTotal)
+	out.Instructions = fitInstructionPage(out, out.Instructions, out.InstructionsTotal)
+	if !fitsProjectBinding(out) {
+		return nil, fmt.Errorf("project: metadata projection exceeds %d bytes", MaxProjectBindingBytes)
+	}
+	return out, nil
+}
+
+func fitsProjectBinding(out *ProjectBinding) bool {
+	data, err := json.Marshal(out)
+	return err == nil && len(data)+1 <= MaxProjectBindingBytes
+}
+
+func fitSkillPage(out *ProjectBinding, items []ProjectSkill, total int) []ProjectSkill {
+	best := 0
+	low, high := 0, len(items)
+	for low <= high {
+		mid := (low + high) / 2
+		out.Skills, out.SkillsMore = items[:mid], total-mid
+		if fitsProjectBinding(out) {
+			best, low = mid, mid+1
+		} else {
+			high = mid - 1
+		}
+	}
+	out.Skills, out.SkillsMore = items[:best], total-best
+	return out.Skills
+}
+
+func fitSkipPage(out *ProjectBinding, items []ProjectSkip, total int) []ProjectSkip {
+	best := 0
+	low, high := 0, len(items)
+	for low <= high {
+		mid := (low + high) / 2
+		out.Skipped, out.SkippedMore = items[:mid], total-mid
+		if fitsProjectBinding(out) {
+			best, low = mid, mid+1
+		} else {
+			high = mid - 1
+		}
+	}
+	out.Skipped, out.SkippedMore = items[:best], total-best
+	return out.Skipped
+}
+
+func fitInstructionPage(out *ProjectBinding, items []ProjectFile, total int) []ProjectFile {
+	best := 0
+	low, high := 0, len(items)
+	for low <= high {
+		mid := (low + high) / 2
+		out.Instructions, out.InstructionsMore = items[:mid], total-mid
+		if fitsProjectBinding(out) {
+			best, low = mid, mid+1
+		} else {
+			high = mid - 1
+		}
+	}
+	out.Instructions, out.InstructionsMore = items[:best], total-best
+	return out.Instructions
 }
 
 // EnvironmentOf projects stored wiring without sampling a live environment.

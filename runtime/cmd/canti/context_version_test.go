@@ -24,6 +24,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 var recordContext = flag.Bool("record-context", false, "record the context rules of a context version that has none")
@@ -69,6 +70,19 @@ func TestContextVersionPinsItsRules(t *testing.T) {
 		host.ContextVersion, strings.Join(changed, "\n"))
 }
 
+func corpusProject() project.Snapshot {
+	content := "Use tabs.\n"
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	skillPath := "/workspace/.agents/skills/go/SKILL.md"
+	index := project.Index{Entries: []project.IndexEntry{{Name: "go", Description: "Go conventions.", Path: skillPath}}}
+	return project.Snapshot{
+		Root:         "/workspace",
+		Instructions: []project.Instruction{{Path: "/workspace/AGENTS.md", Size: len(content), SHA256: sum, Content: content}},
+		Skills:       []project.Skill{{Name: "go", Description: "Go conventions.", Path: skillPath}},
+		SkillsTotal:  1, SkillsIndex: index.Encode(), SkillsIndexSHA256: digestIndex(index.Text()),
+	}
+}
+
 func contextRules(t *testing.T) string {
 	t.Helper()
 	spec := runSpec(t)
@@ -85,7 +99,10 @@ func contextRules(t *testing.T) string {
 		IndexPurpose   int
 		ReadBytes      int
 		MaxRunID       int
-	}{spec.Config, cfg.Limits, harness.MaxRequestBytes, harness.HandoverBytes, harness.IndexSteps, harness.IndexBytes, harness.IndexPurposeBytes, archive.MaxBytes, harness.MaxRunIDBytes})
+		ProjectBytes   int
+		ProjectFiles   int
+		SkillsIndex    int
+	}{spec.Config, cfg.Limits, harness.MaxRequestBytes, harness.HandoverBytes, harness.IndexSteps, harness.IndexBytes, harness.IndexPurposeBytes, archive.MaxBytes, harness.MaxRunIDBytes, project.MaxInstructionBytes, project.MaxInstructionFiles, project.MaxSkillsIndexBytes})
 	fmt.Fprintf(&b, "context version %d\nsemantics %d\ndefaults %s\nactions %q %q\n", host.ContextVersion, core.SemanticsVersion, defaults, harness.RetrievePrefix, harness.HandoverPrefix)
 	text := "frozen original evidence"
 	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
@@ -96,6 +113,9 @@ func contextRules(t *testing.T) string {
 	for _, tool := range []bool{false, true} {
 		initial := harness.Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: host.Environment(spec.Config, spec.Budget), RunID: run.ID, Step: 1, MaxSteps: 20, Attempt: 1, MaxAttempts: 4, DecisionTool: tool, RetrievalEnabled: true, ImportsEnabled: true, ContextState: &harness.ContextState{FirstStep: 1}}
 		frames := []harness.Frame{initial}
+		projected := initial
+		projected.Project = corpusProject()
+		frames = append(frames, projected)
 		persistent := initial
 		persistent.NativeArchive = true
 		persistent.Environment = host.Environment(host.RunConfig{Environment: "/environment", EnvironmentWorkdir: "/workspace"}, spec.Budget)
@@ -444,3 +464,5 @@ func frozenRequests(t *testing.T, f *fixture, label string) string {
 	}
 	return b.String()
 }
+
+func digestIndex(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }

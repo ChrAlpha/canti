@@ -4,6 +4,7 @@ package docker_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,13 +15,25 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	"github.com/ChrAlpha/canti/runtime/internal/host"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 func prepareAttachedDocker(t *testing.T, user string) (context.Context, string, string, string, string, string) {
 	t.Helper()
+	return prepareAttachedDockerMounts(t, user, nil)
+}
+
+func prepareAttachedDockerMounts(t *testing.T, user string, extra []string) (context.Context, string, string, string, string, string) {
+	t.Helper()
+	return prepareAttachedDockerMountsIn(t, user, t.TempDir(), extra)
+}
+
+func prepareAttachedDockerMountsIn(t *testing.T, user, workspace string, extra []string) (context.Context, string, string, string, string, string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	t.Cleanup(cancel)
-	control, workspace, state := t.TempDir(), t.TempDir(), t.TempDir()
+	control, state := t.TempDir(), t.TempDir()
 	helper := filepath.Join(t.TempDir(), "canti-job")
 	build := exec.CommandContext(ctx, "go", "build", "-o", helper, "github.com/ChrAlpha/canti/runtime/cmd/canti-job")
 	if out, err := build.CombinedOutput(); err != nil {
@@ -45,7 +58,9 @@ func prepareAttachedDocker(t *testing.T, user string) (context.Context, string, 
 		t.Skip("attached execution requires a local Unix Docker endpoint")
 	}
 	name := fmt.Sprintf("canti-attached-it-%d", time.Now().UnixNano())
-	args := []string{"--host", endpoint, "run", "-d", "--name", name, "--label", "io.canti.control=" + control, "--label", "io.canti.authority=" + authorityID, "--label", "io.canti.test=persistent-environment", "--mount", "type=bind,src=" + filepath.Join(control, "public") + ",dst=/canti,readonly", "--mount", "type=bind,src=" + filepath.Join(control, "spool") + ",dst=/var/lib/canti/jobs", "--mount", "type=bind,src=" + workspace + ",dst=/workspace", "--user", user, "--env", "HOME=/root", "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--init", "alpine:3.23", "/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 1; done"}
+	args := []string{"--host", endpoint, "run", "-d", "--name", name, "--label", "io.canti.control=" + control, "--label", "io.canti.authority=" + authorityID, "--label", "io.canti.test=persistent-environment", "--mount", "type=bind,src=" + filepath.Join(control, "public") + ",dst=/canti,readonly", "--mount", "type=bind,src=" + filepath.Join(control, "spool") + ",dst=/var/lib/canti/jobs", "--mount", "type=bind,src=" + workspace + ",dst=/workspace"}
+	args = append(args, extra...)
+	args = append(args, "--user", user, "--env", "HOME=/root", "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--init", "alpine:3.23", "/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 1; done")
 	output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("prepare task environment: %v %s", err, output)
@@ -150,7 +165,7 @@ func TestAttachedDockerRejectsSymlinkBindSources(t *testing.T) {
 		t.Run(hidden, func(t *testing.T) {
 			control, workspace, state := t.TempDir(), t.TempDir(), t.TempDir()
 			helper := filepath.Join(t.TempDir(), "protocol-fixture")
-			if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
+			if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555); err != nil {
 				t.Fatal(err)
 			}
 			if err := docker.InitEnvironment(control, helper); err != nil {
@@ -369,5 +384,205 @@ func TestAttachedDockerSupportedUserWritesCommandEvidence(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPersistentProjectBindingReadsANestedMount(t *testing.T) {
+	overlay := t.TempDir()
+	if err := os.WriteFile(filepath.Join(overlay, "AGENTS.md"), []byte("overlay rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "shadow"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "shadow", "AGENTS.md"), []byte("underlay rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("root rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, []string{"--mount", "type=bind,src=" + overlay + ",dst=/workspace/shadow,readonly"})
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: "/workspace/shadow", OutputLimit: 8 << 20}
+	p, err := host.BindProject(ctx, state, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Instructions) != 2 || p.Instructions[0].Content != "root rules\n" || p.Instructions[1].Content != "overlay rules\n" {
+		t.Fatalf("instructions = %+v", p.Instructions)
+	}
+}
+
+func TestPersistentProjectBindingSkipsAResolvedSkillPathWithAControlCharacter(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "notes\nfile.md")
+	if err := os.WriteFile(target, []byte("---\nname: linked\ndescription: d\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(workspace, ".agents/skills/linked")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, nil)
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: "/workspace", OutputLimit: 8 << 20}
+	p, err := host.BindProject(ctx, state, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Skills) != 0 || len(p.Skipped) != 1 || !strings.Contains(p.Skipped[0].Reason, "control character") {
+		t.Fatalf("skills = %+v skipped = %+v", p.Skills, p.Skipped)
+	}
+}
+
+func TestPersistentProjectReadRefusesAStoppedEnvironment(t *testing.T) {
+	ctx, control, workspace, state, endpoint, id := prepareAttachedDockerMounts(t, "0:0", nil)
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := docker.EnvironmentWorkdir(ctx, a, workspace, state, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := docker.NewAttached(docker.AttachedConfig{Attachment: a, Workspace: workspace, State: state, Workdir: cwd, OutputLimit: 8 << 20, PreviewLimit: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := docker.ControlEnvironment(ctx, control, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.ReadProject(ctx, "/workspace", "/workspace"); err == nil {
+		t.Fatal("read project context from a stopped environment")
+	}
+}
+
+func TestPersistentProjectBindingReadsARegularFileBind(t *testing.T) {
+	overlay := filepath.Join(t.TempDir(), "AGENTS.md")
+	if err := os.WriteFile(overlay, []byte("file bind rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("underlay rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, []string{"--mount", "type=bind,src=" + overlay + ",dst=/workspace/AGENTS.md,readonly"})
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: "/workspace", OutputLimit: 8 << 20}
+	p, err := host.BindProject(ctx, state, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Instructions) != 1 || p.Instructions[0].Content != "file bind rules\n" {
+		t.Fatalf("instructions = %+v", p.Instructions)
+	}
+}
+
+func TestPersistentProjectBindingFollowsALinkIntoANestedMount(t *testing.T) {
+	overlay := t.TempDir()
+	if err := os.WriteFile(filepath.Join(overlay, "AGENTS.md"), []byte("overlay through link\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "shadow"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "shadow", "AGENTS.md"), []byte("underlay through link\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("shadow/AGENTS.md", filepath.Join(workspace, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, []string{"--mount", "type=bind,src=" + overlay + ",dst=/workspace/shadow,readonly"})
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: "/workspace", OutputLimit: 8 << 20}
+	p, err := host.BindProject(ctx, state, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Instructions) != 1 || p.Instructions[0].Content != "overlay through link\n" {
+		t.Fatalf("instructions = %+v", p.Instructions)
+	}
+}
+
+func TestPersistentProjectBindingRefusesAnInstructionUnderATmpfsMount(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "vol"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "vol", "AGENTS.md"), []byte("underlay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, []string{"--mount", "type=tmpfs,dst=/workspace/vol"})
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: "/workspace/vol", OutputLimit: 8 << 20}
+	if _, err := host.BindProject(ctx, state, c); err == nil || !strings.Contains(err.Error(), "unreadable mount") {
+		t.Fatalf("tmpfs project binding = %v", err)
+	}
+}
+
+func TestPersistentProjectBindingBoundsLongPathPages(t *testing.T) {
+	workspace := t.TempDir()
+	workdir := filepath.Join(workspace, strings.Repeat("d", 200))
+	for i := 0; i < 14; i++ {
+		workdir = filepath.Join(workdir, strings.Repeat(string(rune('a'+i%26)), 200))
+	}
+	skills := filepath.Join(workdir, ".agents", "skills")
+	for i := 0; i < 64; i++ {
+		valid := filepath.Join(skills, fmt.Sprintf("v%02d", i))
+		if err := os.MkdirAll(valid, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(valid, "SKILL.md"), []byte(fmt.Sprintf("---\nname: v%02d\ndescription: valid\n---\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		invalid := filepath.Join(skills, fmt.Sprintf("i%02d", i))
+		if err := os.MkdirAll(invalid, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(invalid, "SKILL.md"), []byte("---\nname: invalid\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	visible := "/workspace" + strings.TrimPrefix(workdir, workspace)
+	ctx, control, _, state, endpoint, id := prepareAttachedDockerMountsIn(t, "0:0", workspace, nil)
+	a, err := docker.AttachEnvironment(ctx, control, endpoint, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := host.RunConfig{Environment: control, Workspace: workspace, Attachment: &a, EnvironmentWorkdir: visible, OutputLimit: 8 << 20}
+	p, err := host.BindProject(ctx, state, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SkillsTotal != 64 || p.SkippedTotal != 64 || len(p.Skills) != 64 || len(p.Skipped) != 64 {
+		t.Fatalf("pages = skills %d/%d skipped %d/%d", len(p.Skills), p.SkillsTotal, len(p.Skipped), p.SkippedTotal)
+	}
+	data, err := json.Marshal(p)
+	if err != nil || len(data) > 4<<20 {
+		t.Fatalf("encoded snapshot = %d, %v", len(data), err)
 	}
 }

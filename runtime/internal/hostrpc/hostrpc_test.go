@@ -41,13 +41,18 @@ func wireMessages() map[string]any {
 	code := 3
 	spec := Spec{Environment: "/environment", EnvironmentWorkdir: "/workspace/subdir", Ephemeral: true, Workspace: "/w", Image: "debian:bookworm-slim", Network: "none", Memory: "2g", CPUs: "1", Pids: 512, OutputLimit: 8 << 20,
 		API: "anthropic-messages", Model: "m", MaxTokens: 1000, Effort: "low", Structured: true, DecisionFormat: "tool", Fallbacks: true,
-		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
+		RequestBytes: 262144, ContextVersion: 13, HistoryImports: "/i", NoProjectContext: true, MaxSteps: 20, MaxAttempts: 3, WallTime: "30m0s", TokenBudget: 7, ContextTokens: 9, OutputBudget: 8, JobTimeout: "10m0s"}
+	binding := &ProjectBinding{Disabled: true, Root: "/workspace", InstructionBytes: 10, SkillsIndexBytes: 20, SkillsIndexSHA256: "sha",
+		Instructions: []ProjectFile{{Path: "/workspace/AGENTS.md", ResolvedPath: "/workspace/SHARED.md", Size: 10, SHA256: "sum"}}, InstructionsTotal: 1,
+		Skills:      []ProjectSkill{{Name: "go", Description: "Go conventions.", Path: "/workspace/.agents/skills/go/SKILL.md", ResolvedPath: "/workspace/.agents/skills/go/SKILL.md"}},
+		SkillsTotal: 3, SkillsMore: 2,
+		Skipped: []ProjectSkip{{Path: "/workspace/.agents/skills/bad/SKILL.md", Reason: "missing description"}}, SkippedTotal: 2, SkippedMore: 1, SkillsOmitted: 1}
 	run := Run{Ephemeral: true, Environment: &Environment{Directory: "/environment", ContainerID: "container_1", DaemonID: "daemon_1", Incarnation: 1, Workdir: "/workspace"}, RunID: "run_1",
 		InputID: "in_1", InputPos: 5, Fresh: true, Goal: "g", Constraints: "c", Status: StatusStopped, Phase: "stopped",
 		Step: 4, StopReason: "cancelled", Result: "r", EffectID: "effect_1", Cursor: "pos:9", ContextVersion: 13, API: "anthropic-messages",
 		Provider: "https://p.test", Driver: DriverIdle, Drivable: false, Why: "w", DriveError: "e", PendingSteers: 2, Queued: 1, Held: 3,
 		Totals: Totals{InputTokens: 1, OutputTokens: 2, OutputBytes: 3, Steps: 4, Coverage: UsageCoverage{Attempts: 7, InputReports: 3, OutputReports: 4, Lost: 2}},
-		Budget: Budget{WallTime: "30m0s", Tokens: 5, ContextTokens: 9, OutputBytes: 6, JobTimeout: "10m0s"}}
+		Budget: Budget{WallTime: "30m0s", Tokens: 5, ContextTokens: 9, OutputBytes: 6, JobTimeout: "10m0s"}, Project: binding}
 	return map[string]any{
 		"request": Request{Validate: &Validation{State: "/state", Submission: Submission{Goal: "chat"}, Binding: Binding{Provider: "https://p.test"}}, Protocol: Protocol, Op: OpSubmit, RunID: "run_1", Cursor: "pos:5", Once: true, Limit: 6, TimeoutMS: 7, CleanupMS: 8,
 			Submit:   &Submission{InputID: "in_1", Goal: "g", Constraints: "c", ExplicitConstraints: true, Delivery: "steer", Fresh: true, Spec: spec},
@@ -55,7 +60,7 @@ func wireMessages() map[string]any {
 			Observe:  &Observation{InputID: "obs_1", Source: "ci", Subject: "build", Text: "green"},
 			Withdraw: &Withdrawal{InputID: "in_1"},
 			Resolve:  &Resolution{Job: true, Execution: "exited", ExitCode: &code, Note: "n", OwnerID: "owner_1"}},
-		"response": Response{Validated: &Validated{State: "/state", Constraints: "rules", GoalLimit: 32768, ConstraintsLimit: 16384}, Protocol: Protocol, Error: &Error{Code: CodeFailed, Message: "m"},
+		"response": Response{Validated: &Validated{State: "/state", Constraints: "rules", GoalLimit: 32768, ConstraintsLimit: 16384, Project: binding}, Protocol: Protocol, Error: &Error{Code: CodeFailed, Message: "m"},
 			Hello: &Hello{Protocol: Protocol, Version: "dev", ContextVersion: 13, SemanticsVersion: 4, PID: 1, Bindings: []Pair{{API: "anthropic-messages", Provider: "https://p.test"}}},
 			Ack:   &Ack{Replayed: true, Differs: []string{"model", "limits.max_steps"}, InputID: "in_1", Disposition: "steer", Pos: 5, Run: &run},
 			Run:   &run,

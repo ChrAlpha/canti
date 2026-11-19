@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 // Frame is the input assembled by the harness for one model request:
@@ -13,6 +15,7 @@ import (
 // other history representation.
 type Frame struct {
 	NativeArchive                                  bool
+	Project                                        project.Snapshot
 	Goal, Constraints, Environment                 string
 	Step, MaxSteps, Attempt, MaxAttempts           int
 	RunID                                          string
@@ -58,6 +61,9 @@ type Rejection struct{ Error, Response string }
 // anchor.
 func (f Frame) Validate() error {
 	if err := f.validatePosition(); err != nil {
+		return err
+	}
+	if err := f.Project.Validate(); err != nil {
 		return err
 	}
 	if err := f.validateResident(); err != nil {

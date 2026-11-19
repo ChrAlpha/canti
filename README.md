@@ -98,6 +98,29 @@ native `canti:retrieve` for archive access; `/canti/runs`,
 `-image`, `-network`, `-memory`, `-cpus` and `-pids` apply only to `-ephemeral`;
 provision the persistent environment's resources and network externally.
 
+A new run binds the workspace's project context when it opens. It reads one
+instruction file per directory from the workspace root down to the command
+working directory, using Pi's precedence (`AGENTS.override.md`, `AGENTS.md`,
+`AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`), and adds the name, description and
+job-visible path of each `.agents/skills/*/SKILL.md` skill. Persistent runs read the context inside the environment, so they see nested
+mounts exactly as a command does; ephemeral runs read the host workspace
+directly and follow only relative links. An instruction file that escapes the
+workspace or whose target is not a regular file—including a real directory
+named `AGENTS.md`—refuses admission. A skill with the same defect, a control
+character in its path, or a resolved target named `.env`/`.env.*` is skipped
+with a diagnostic; this is stricter than Pi for directory instruction
+candidates. The request carries file provenance
+and hashes, not a live read:
+editing or deleting the files during a run does not change that run, and the
+next run binds the new content. Instruction files are limited to 64 files and 64 KiB in
+total and are refused, not cut, when over; the skills index is limited to
+16 KiB and reports how many skills it leaves out. A required name that cannot
+fit the bounded view projection is reported unavailable rather than sent
+oversized. `-no-project-context`
+disables the binding, and `canti status` and preflight report what was or would
+be bound. A command working directory set with `-environment-workdir` selects
+the end of the instruction chain.
+
 Every canti command takes `-workspace` (default the current directory). Keep the
 journal's `-state` outside the workspace, environment authority and every
 container mount. Resume, inspection and stop use the accepted stored execution
@@ -114,7 +137,7 @@ explicit resolution.
 | `canti cancel` | Cancel the current effect; the run continues with a cancelled observation |
 | `canti-tui -environment DIR -context-tokens N [-fresh]` | Talk with the agent: all inputs and runs form one line, and a run follows the previous run of that line |
 | `canti resume` | Continue the latest run, for example after a crash |
-| `canti status`, `canti history` | Print journal-only run state as JSON, or transitions as JSON Lines |
+| `canti status`, `canti history` | Print journal-only run state, including the bound project context, as JSON, or transitions as JSON Lines |
 | `canti stop` | Stop the run, cancelling its job and recording the job's result |
 | `canti resolve -job` or `-execution STATE` | Recover an inspected effect, or record an operator assertion with `-note` and, for exited/timed-out work, `-owner` |
 | `canti environment init/attach/inspect/stop/start/detach/retire` | Prepare and control an explicitly provisioned development environment; see the development guide |

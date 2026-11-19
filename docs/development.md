@@ -288,6 +288,20 @@ a provider rejection remains the fallback. Unknown usage is retained as unknown;
 no counts are estimated.
 Status and TUI reports show coverage and lost attempts alongside reported totals.
 
+A new run also binds the workspace's project context: one instruction file per
+directory from the workspace root down to `-environment-workdir` (or the
+workspace root), using Pi's `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`,
+`CLAUDE.md`, `CLAUDE.MD` precedence, plus the `.agents/skills/*/SKILL.md` index.
+Symbolic links inside a mount are followed and their resolved paths are
+recorded; links that escape or non-regular instruction targets refuse admission
+and are skipped for skills, and a resolved target named `.env` or `.env.*` is
+never read. Skill paths containing control characters are diagnostic-only. Instruction files are at most 64 files and 64 KiB in total and are refused with
+their paths and sizes when over; the skills index is at most 16 KiB and states
+how many skills it leaves out. The snapshot is committed with the run and rendered
+only from the journal, so editing or deleting the files during a run does not
+change it. `-no-project-context` disables the binding, and `canti status`
+reports what a run bound.
+
 `run -input ID` names the input: a later `run` with the same input ID names
 the same input instead of admitting another, reporting its current disposition
 and run, and fails when the text, constraints, delivery, or freshness differ.
@@ -372,10 +386,16 @@ The TUI always uses the public protocol and never opens the journal. `-runtime
 PATH` selects the runtime executable; otherwise it finds `canti` on PATH.
 Before creating state it calls the runtime's versioned `preflight` interface,
 which validates configuration, layout, credentials, execution resource settings
-and context admission without writes. A live host binds validation to its own
-state/workspace and supplies the constraints a non-fresh input inherits from
-the latest run, unless the submission states its own. Validation reserves no
-admission or input identity; Submit rechecks everything under the host lock.
+and context admission without writes, and reaches the same state-dependent
+decision as Submit for that submission: an unsupported context version, a
+missing delivery on a working run, a held or unfinished run, a steer budget
+overflow, a follow-up spec, and the request cap. A live host binds validation to its own state/workspace and
+supplies the constraints a non-fresh input inherits from the latest run, unless
+the submission states its own. It reads no project content for a submission
+that would join an open run. Validation reserves no admission or input
+identity and does not replay an existing InputID, so it reports no conflict
+when that ID names different content; Submit remains authoritative for replay
+and rechecks everything under the host lock.
 Preflight requires exactly one JSON request of at most 1 MiB. The client caps
 stdout at 1 MiB and stderr at 16 KiB, kills the process group on overflow or
 cancellation, limits total time to 30 seconds and inherited-pipe cleanup to one
@@ -524,12 +544,13 @@ archive, a directory named relative to the command's working directory and
 stored canonical. A new run needs it to exist; a retry of an input names its
 admitted run even after the directory is gone, and names `history_imports`
 among its differences when it names another one. Workspace notes are
-ordinary files and are not automatically read.
+ordinary files and are not automatically read, apart from the instruction files
+and skills index bound at run creation.
 
-Each run stores current context version 22. Schema 7 keeps one agent log of
+Each run stores current context version 23. Schema 8 keeps one agent log of
 transitions and admitted inputs, semantics 8 bounds and supersedes principal
-instructions, ephemeral executor record format 2, attached executor format 1 and
-host protocol 10 form one current contract. Unsupported formats and context
+instructions, ephemeral executor record format 2, attached executor format 1,
+host protocol 11 and helper protocol 2 form one current contract. Unsupported formats and context
 versions are rejected; use a fresh state directory. No migration or old-run
 settlement path is supported. A run created under an earlier context version is
 refused; within the current version, resuming and driving a run use its stored

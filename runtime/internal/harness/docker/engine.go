@@ -320,9 +320,12 @@ func (c *stdioConn) fail(err error) error {
 
 func (c *stdioConn) Close() error {
 	c.once.Do(func() {
-		c.in.Close()
+		// End the process before closing its stdin. The real docker CLI logs a
+		// CloseWrite error from dial-stdio when stdin closes first; that text
+		// would otherwise become a transport error on a later read.
 		syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
 		c.cmd.Wait()
+		c.in.Close()
 	})
 	return nil
 }

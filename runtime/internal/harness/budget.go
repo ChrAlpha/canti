@@ -120,7 +120,7 @@ func CheckBudgetedCapture(t Transition, retried bool) error {
 		return fmt.Errorf("%w: the context capture does not render the resident epoch", ErrFacts)
 	}
 	total := b.System + b.Goal + b.Constraints + b.HeadInstructions + b.Environment + b.Anchor + b.Previous + b.Index +
-		b.Notice + b.EpochHeader + b.EpochInstructions + b.Observations + b.Progress + b.Latest + b.Repair
+		b.Notice + b.EpochHeader + b.EpochInstructions + b.Observations + b.Progress + b.Latest + b.Repair + b.Project + b.Skills
 	for i, s := range b.Steps {
 		if s.Step != first+i || s.Bytes < 0 {
 			return fmt.Errorf("%w: the context capture does not render the resident epoch", ErrFacts)

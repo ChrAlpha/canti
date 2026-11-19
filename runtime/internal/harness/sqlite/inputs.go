@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 const latestRunsSQL = `SELECT r.id, r.semantics, r.initial, t.kind, t.semantics, t.event, t.to_state FROM runs r
@@ -202,8 +203,12 @@ func (s *Store) admit(ctx context.Context, tx *sql.Tx, sub harness.InputSubmissi
 	if err != nil {
 		return harness.Admission{}, err
 	}
+	projectData, projectMeta, err := encodeProject(sub.Project)
+	if err != nil {
+		return harness.Admission{}, err
+	}
 	if run.InputPos > 0 {
-		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh); err != nil {
+		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh, projectData, projectMeta); err != nil {
 			return harness.Admission{}, err
 		}
 	}
@@ -461,7 +466,7 @@ func (s *Store) Queued(ctx context.Context) (harness.Input, error) {
 
 // OpenFollowUp turns the queued input at in.Pos into the opened input of run
 // in one transaction, after the latest run returned.
-func (s *Store) OpenFollowUp(ctx context.Context, in harness.Input, run harness.Run, initial core.State) (harness.Admission, error) {
+func (s *Store) OpenFollowUp(ctx context.Context, in harness.Input, run harness.Run, initial core.State, snapshot project.Snapshot) (harness.Admission, error) {
 	if in.Disposition != harness.DispositionQueued {
 		return harness.Admission{}, fmt.Errorf("%w: input %d is %s", harness.ErrNotWithdrawable, in.Pos, in.Disposition)
 	}
@@ -470,6 +475,10 @@ func (s *Store) OpenFollowUp(ctx context.Context, in harness.Input, run harness.
 	// queued row's text remains the run's goal.
 	run.Goal = in.Text
 	data, state, err := encodeRun(run, initial)
+	if err != nil {
+		return harness.Admission{}, err
+	}
+	projectData, projectMeta, err := encodeProject(snapshot)
 	if err != nil {
 		return harness.Admission{}, err
 	}
@@ -489,7 +498,7 @@ func (s *Store) OpenFollowUp(ctx context.Context, in harness.Input, run harness.
 		if oldest.Pos != in.Pos {
 			return fmt.Errorf("%w: queued input %d is no longer the oldest", harness.ErrInputSpec, in.Pos)
 		}
-		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh); err != nil {
+		if _, err := tx.ExecContext(ctx, insertRunSQL, run.ID, core.SemanticsVersion, data, state, run.InputPos, run.Fresh, projectData, projectMeta); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, openFollowUpSQL, run.ID, in.Pos); err != nil {
@@ -555,6 +564,19 @@ func (s *Store) heldCount(ctx context.Context, tx *sql.Tx, latest *harness.Run, 
 	return held, nil
 }
 
+// ValidateSubmission exposes the admission shape checks without writing.
+func ValidateSubmission(sub harness.InputSubmission) error { return validateSubmission(sub) }
+
+// CheckSteer reports whether text would exceed the run's bound instruction budget.
+func (s *Store) CheckSteer(ctx context.Context, runID, text string) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return s.checkSteerBudget(ctx, tx, runID, text)
+}
+
 func (s *Store) checkSteerBudget(ctx context.Context, tx *sql.Tx, runID, text string) error {
 	var used int64
 	if err := tx.QueryRowContext(ctx, steerBytesSQL, runID).Scan(&used); err != nil {
@@ -567,6 +589,9 @@ func (s *Store) checkSteerBudget(ctx context.Context, tx *sql.Tx, runID, text st
 }
 
 func validateSubmission(sub harness.InputSubmission) error {
+	if sub.InputID != "" && !ValidKey(sub.InputID) {
+		return fmt.Errorf("%w: input ID must be 1 to 128 ASCII letters, digits, underscores, or hyphens", harness.ErrInputSpec)
+	}
 	switch sub.Authority {
 	case harness.AuthorityPrincipal:
 		if sub.Text == "" || !utf8.ValidString(sub.Text) || !utf8.ValidString(sub.Constraints) {
@@ -593,9 +618,6 @@ func validateSubmission(sub harness.InputSubmission) error {
 		}
 	default:
 		return fmt.Errorf("%w: unknown authority %q", harness.ErrInputSpec, sub.Authority)
-	}
-	if sub.InputID != "" && !ValidKey(sub.InputID) {
-		return fmt.Errorf("%w: input ID must be 1 to 128 ASCII letters, digits, underscores, or hyphens", harness.ErrInputSpec)
 	}
 	if sub.Authority == harness.AuthorityPrincipal && sub.Fresh && sub.Delivery == harness.DeliverySteer {
 		return fmt.Errorf("%w: a steer cannot start a fresh line", harness.ErrInputSpec)

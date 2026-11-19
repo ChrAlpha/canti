@@ -181,8 +181,8 @@ func (r contextReport) writeText(w io.Writer) error {
 func (t *textLines) capture(c *harness.ContextCapture) {
 	t.line("Rendered prompt bytes: %d / %d", c.Bytes.Total, c.Bytes.Limit)
 	b := c.Bytes
-	t.line("Composition bytes: system %d; goal %d; constraints %d; head instructions %d; environment %d; anchor %d; previous %d; index %d; notice %d; epoch header %d; epoch instructions %d; observations %d; latest %d",
-		b.System, b.Goal, b.Constraints, b.HeadInstructions, b.Environment, b.Anchor, b.Previous, b.Index, b.Notice, b.EpochHeader, b.EpochInstructions, b.Observations, b.Latest)
+	t.line("Composition bytes: system %d; goal %d; constraints %d; project %d; skills %d; head instructions %d; environment %d; anchor %d; previous %d; index %d; notice %d; epoch header %d; epoch instructions %d; observations %d; latest %d",
+		b.System, b.Goal, b.Constraints, b.Project, b.Skills, b.HeadInstructions, b.Environment, b.Anchor, b.Previous, b.Index, b.Notice, b.EpochHeader, b.EpochInstructions, b.Observations, b.Latest)
 	t.line("Preparation: %s; latest step %d sequence %d; resident sources %d; bound instructions %d; observation keys %d; latest observation position %d",
 		c.Preparation, c.LatestStep, c.LatestSeq, len(c.Sources), c.InstructionCount, c.ObservationKeys, c.ObservationPos)
 	if c.PreviousRun != "" {

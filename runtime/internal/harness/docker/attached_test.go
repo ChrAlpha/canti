@@ -65,7 +65,7 @@ func newUnattachedFake(t *testing.T) *attachedFake {
 	f.daemonID = "daemon"
 	f.endpoint = "unix://" + filepath.Join(f.dir, "engine.sock")
 	helper := filepath.Join(t.TempDir(), "helper")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
+	if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitEnvironment(f.dir, helper); err != nil {
@@ -1085,7 +1085,7 @@ func TestAttachedFreshAuthorityCannotReopenTheOldPhysicalContainer(t *testing.T)
 		}
 	}
 	helper := filepath.Join(t.TempDir(), "canti-job")
-	os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555)
+	os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555)
 	if err := InitEnvironment(f.dir, helper); err != nil {
 		t.Fatal(err)
 	}
@@ -1502,5 +1502,17 @@ func TestEnvironmentSameIdentityReattachDoesNotRepeatSpoolWriteChallenge(t *test
 	after, err := os.ReadFile(filepath.Join(f.dir, "authority", "environment.json"))
 	if err != nil || string(before) != string(after) || f.probes != 1 {
 		t.Fatalf("same-identity reattach changed authority/challenged again: probes=%d: %v", f.probes, err)
+	}
+}
+
+func TestAttachedProjectReadRechecksEpochAfterExecCreation(t *testing.T) {
+	f := newAttachedFake(t)
+	x := f.executor(t)
+	f.changeEpochOnCreate = true
+	if _, err := x.ReadProject(t.Context(), "/workspace", "/workspace"); err == nil {
+		t.Fatal("read project context after the environment changed during exec creation")
+	}
+	if f.starts != 0 {
+		t.Fatalf("sent %d starts into a changed epoch", f.starts)
 	}
 }

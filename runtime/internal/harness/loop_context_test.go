@@ -20,6 +20,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/anthropic"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 func TestALongerActionNameIsNotAHandover(t *testing.T) {
@@ -1334,7 +1335,7 @@ func TestCommitRefusesARequestThatSkipsItsBudgetAnchor(t *testing.T) {
 		// sections still sum to the total.
 		c := &capture.Bytes
 		c.Index, c.Progress = 0, 0
-		rest := c.System + c.Goal + c.Constraints + c.HeadInstructions + c.Environment + c.Anchor + c.Previous + c.Notice +
+		rest := c.System + c.Goal + c.Constraints + c.Project + c.Skills + c.HeadInstructions + c.Environment + c.Anchor + c.Previous + c.Notice +
 			c.EpochHeader + c.EpochInstructions + c.Observations + c.Latest + c.Repair
 		for _, step := range c.Steps {
 			rest += step.Bytes
@@ -1385,7 +1386,7 @@ func TestPreflightCountsTheContextBudgetLine(t *testing.T) {
 	check := func(r harness.Run, total int) error {
 		cfg := harness.LoopConfig{Environment: "Alpine Linux container", Limits: harness.DefaultPromptLimits()}
 		cfg.Limits.Total = total
-		return harness.CheckOrientation(cfg, r, core.Limits{MaxSteps: 4, MaxAttempts: 3})
+		return harness.CheckOrientation(cfg, r, project.Snapshot{}, core.Limits{MaxSteps: 4, MaxAttempts: 3})
 	}
 	need := func(r harness.Run) int {
 		var n int

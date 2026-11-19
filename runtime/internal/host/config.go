@@ -19,6 +19,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
+	projectctx "github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 // RunConfig is the host wiring stored with a run; every later command
@@ -46,11 +47,15 @@ type RunConfig struct {
 	RequestBytes       int                `json:"request_bytes"`
 	ContextVersion     int                `json:"context_version"`
 	HistoryImports     string             `json:"history_imports,omitempty"`
+	// NoProjectContext disables binding the workspace's instruction files and
+	// skills index at run creation. It is the benchmark control arm; the
+	// zero value binds them.
+	NoProjectContext bool `json:"no_project_context,omitempty"`
 }
 
 // ContextVersion names the rules that decide the context of a run, which
 // testdata/context-v<version>.txt records; see TestContextVersionPinsItsRules.
-const ContextVersion = 22
+const ContextVersion = 23
 
 // Spec is what a new run is created with: its stored configuration, the
 // budgets the harness measures, and the core limits.
@@ -58,6 +63,11 @@ type Spec struct {
 	Config RunConfig
 	Budget harness.Budget
 	Limits core.Limits
+	// Project is the workspace snapshot bound at admission. It is never
+	// stored in the input specification or the run configuration; the journal
+	// keeps it beside the run and the loop reads it only when it builds a
+	// request.
+	Project projectctx.Snapshot `json:"-"`
 }
 
 // NewRun checks s and returns the run of goal and constraints created at now,
@@ -108,7 +118,11 @@ func newRun(goal, constraints string, s Spec, now time.Time, requireWindow bool)
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-max-steps must be nonnegative and -max-attempts must be positive")
 	}
-	err = harness.CheckOrientation(ContextConfig(c, b), run, s.Limits)
+	snapshot := s.Project
+	if c.NoProjectContext {
+		snapshot = projectctx.Snapshot{}
+	}
+	err = harness.CheckOrientation(ContextConfig(c, b), run, snapshot, s.Limits)
 	if err != nil {
 		return harness.Run{}, core.State{}, fmt.Errorf("-request-bytes: %w", err)
 	}

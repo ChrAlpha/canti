@@ -20,6 +20,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/executortest"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 const runID = "run-1"
@@ -468,6 +469,11 @@ type fixture struct {
 
 func newFixture(t *testing.T, limits core.Limits, budget harness.Budget, replies ...reply) *fixture {
 	t.Helper()
+	return newProjectFixture(t, limits, budget, project.Snapshot{}, replies...)
+}
+
+func newProjectFixture(t *testing.T, limits core.Limits, budget harness.Budget, snapshot project.Snapshot, replies ...reply) *fixture {
+	t.Helper()
 	dir := t.TempDir()
 	c := &clock{now: created}
 	f := &fixture{
@@ -484,7 +490,7 @@ func newFixture(t *testing.T, limits core.Limits, budget harness.Budget, replies
 		t.Fatal(err)
 	}
 	run := harness.Run{ID: runID, Goal: "Count the Go files.", Constraints: "Do not modify files.", Budget: budget, Created: created}
-	if err := f.store.CreateRun(context.Background(), run, state); err != nil {
+	if err := f.store.CreateRunWithProject(context.Background(), run, state, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	f.cfg = harness.LoopConfig{

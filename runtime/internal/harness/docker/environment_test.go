@@ -1,22 +1,25 @@
 package docker
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 func TestEnvironmentInitializationPinsTheHelperAndNeverResetsAuthority(t *testing.T) {
 	dir := t.TempDir()
 	helper := filepath.Join(t.TempDir(), "canti-job")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
+	if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitEnvironment(dir, helper); err != nil {
 		t.Fatal(err)
 	}
 	m, s, err := readEnvironment(dir)
-	if err != nil || s.Gate != "unattached" || m.HelperProtocol != 1 {
+	if err != nil || s.Gate != "unattached" || m.HelperProtocol != jobrunner.Protocol {
 		t.Fatalf("init=%+v %+v: %v", m, s, err)
 	}
 	if err = InitEnvironment(dir, "/missing/new-helper"); err != nil {
@@ -34,7 +37,7 @@ func TestEnvironmentInitializationPinsTheHelperAndNeverResetsAuthority(t *testin
 }
 func TestEnvironmentInitializationRefusesAnUnsupportedHelper(t *testing.T) {
 	helper := filepath.Join(t.TempDir(), "wrong-helper")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 2\n"), 0555); err != nil {
+	if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol+1)), 0555); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitEnvironment(t.TempDir(), helper); err == nil {
@@ -45,7 +48,7 @@ func TestEnvironmentInitializationRefusesAnUnsupportedHelper(t *testing.T) {
 func TestEnvironmentInitializationDoesNotResetRetainedPartialAuthority(t *testing.T) {
 	dir := t.TempDir()
 	helper := filepath.Join(t.TempDir(), "canti-job")
-	os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555)
+	os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555)
 	if err := InitEnvironment(dir, helper); err != nil {
 		t.Fatal(err)
 	}

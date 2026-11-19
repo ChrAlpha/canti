@@ -139,6 +139,12 @@ func (f Frame) readerHead(capture *ContextBytes, l PromptLimits) string {
 	if f.Constraints != "" {
 		capture.Constraints = section(&b, "Constraints", f.Constraints+"\n")
 	}
+	if text := f.projectText(); text != "" {
+		capture.Project = section(&b, "Project instructions", text)
+	}
+	if text := f.skillsText(); text != "" {
+		capture.Skills = section(&b, "Skills", text)
+	}
 	c := f.contextState()
 	if head := f.headInstructions(); len(head) > 0 {
 		capture.Instructions = section(&b, "Principal instructions", f.instructionHead(head, l))
@@ -159,6 +165,56 @@ func (f Frame) readerHead(capture *ContextBytes, l PromptLimits) string {
 	}
 	capture.EpochHeader = section(&b, "Steps since the anchor", "Every step completed since the anchor follows in full, oldest first, with each principal instruction bound after the anchor where it was received. Superseded decisions name the instruction that set them aside.\n")
 	return b.String()
+}
+
+// projectText renders the workspace instructions bound when the run opened.
+// It is part of the stable head, so a later edit to the files cannot change
+// this run's requests.
+func (f Frame) projectText() string {
+	if len(f.Project.Instructions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Standing instructions from the workspace, bound when this run opened. They are not evidence; later edits to their files do not change this run's requests.\n")
+	for _, in := range f.Project.Instructions {
+		fmt.Fprintf(&b, "### %s (sha256 %s)\n", in.Path, shortSHA(in.SHA256))
+		if in.ResolvedPath != "" {
+			fmt.Fprintf(&b, "Resolved path: %s\n", in.ResolvedPath)
+		}
+		writeVerbatim(&b, in.Content)
+	}
+	return b.String()
+}
+
+// skillsText renders the bound skills index. The bodies stay in the
+// workspace and are read through bash only when a description matches.
+func (f Frame) skillsText() string {
+	index := f.Project.SkillsIndexText()
+	if index == "" {
+		return ""
+	}
+	return "Skills available in this workspace. Their instructions are not included; read a SKILL.md through bash when its description matches the task.\n" + index
+}
+
+func shortSHA(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// writeVerbatim fences s without clipping it. Project content is bounded
+// before it is committed, so cutting it again would only obscure it.
+func writeVerbatim(b *strings.Builder, s string) {
+	marks := strings.Repeat("`", fence(s))
+	b.WriteString(marks)
+	b.WriteByte('\n')
+	b.WriteString(s)
+	if !strings.HasSuffix(s, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString(marks)
+	b.WriteByte('\n')
 }
 
 // headInstructions returns the instructions bound at or before the head's

@@ -36,6 +36,7 @@ func registerSpec(fs *flag.FlagSet, s *host.Spec) {
 	fs.BoolVar(&c.Fallbacks, "fallbacks", false, "enable server-side refusal fallbacks of "+host.APIMessages)
 	fs.IntVar(&c.RequestBytes, "request-bytes", 8<<20, "resource `bytes` for rendered and serialized requests (1..8388608); does not predict provider context fit")
 	fs.StringVar(&c.HistoryImports, "history-imports", "", "read-only imported history `directory` exposed under "+archive.ImportsRoot)
+	fs.BoolVar(&c.NoProjectContext, "no-project-context", false, "do not bind the workspace's instruction files and skills index at run creation")
 	fs.IntVar(&l.MaxSteps, "max-steps", 500, "decision `steps` per run; 0 is unlimited")
 	fs.IntVar(&l.MaxAttempts, "max-attempts", 3, "model `attempts` per step")
 	fs.DurationVar(&b.WallTime, "wall-time", 4*time.Hour, "run `time` budget; 0 is unlimited")

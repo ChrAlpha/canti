@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-const Protocol = 1
+const Protocol = 2
 const MetadataLimit = 16 << 10
 
 // lingerGrace bounds how long capture waits, once the foreground shell has

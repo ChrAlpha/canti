@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 var retrievalSystem = retrievalInstructions(false)
@@ -31,6 +32,9 @@ func (f Frame) contextSystem() string {
 	s := system
 	if f.DecisionTool {
 		s = toolSystem
+	}
+	if len(f.Project.Instructions) > 0 {
+		s = strings.Replace(s, systemEvidence, systemEvidence+systemProjectRule, 1)
 	}
 	if f.RetrievalEnabled {
 		section := retrievalSystem
@@ -59,15 +63,15 @@ func (l *Loop) completion(ctx context.Context, snap Snapshot) (*StepRecord, erro
 	return &steps[0], nil
 }
 
-func (l *Loop) frame(run Run, s core.State) Frame {
-	return Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment,
+func (l *Loop) frame(run Run, s core.State, snapshot project.Snapshot) Frame {
+	return Frame{Goal: run.Goal, Constraints: run.Constraints, Environment: l.cfg.Environment, Project: snapshot,
 		Step: s.Step, MaxSteps: s.Limits.MaxSteps, Attempt: s.Attempt, MaxAttempts: s.Limits.MaxAttempts, RunID: s.RunID, ContextState: &ContextState{FirstStep: 1},
 		NativeArchive: l.cfg.NativeArchive, DecisionTool: l.cfg.DecisionTool, RetrievalEnabled: l.cfg.Reader != nil, ImportsEnabled: l.cfg.Reader != nil && l.cfg.Reader.Imports != ""}
 }
 
 // CheckOrientation checks only the actual authoritative orientation, with no
 // reservation for future work, handovers, or hypothetical failure growth.
-func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
+func CheckOrientation(cfg LoopConfig, run Run, snapshot project.Snapshot, limits core.Limits) error {
 	cfg, err := normalize(cfg)
 	if err != nil {
 		return err
@@ -76,7 +80,7 @@ func CheckOrientation(cfg LoopConfig, run Run, limits core.Limits) error {
 	if err != nil {
 		return err
 	}
-	f := (&Loop{cfg: cfg}).frame(run, state)
+	f := (&Loop{cfg: cfg}).frame(run, state, snapshot)
 	f.Budget, f.BudgetSource, _ = EffectiveBudget(run.Budget.ContextTokens, InitialContext())
 	limit := cfg.Limits.Total
 	cfg.Limits.Total = MaxRequestBytes
@@ -139,12 +143,15 @@ func (l *Loop) prepare(ctx context.Context, run Run, snap Snapshot) (Snapshot, e
 }
 
 func (l *Loop) readerFrame(ctx context.Context, run Run, snap Snapshot) (Frame, error) {
-	f := l.frame(run, snap.State)
+	f := l.frame(run, snap.State, project.Snapshot{})
 	current, err := l.journal.Context(ctx, snap)
 	if err != nil {
 		return f, err
 	}
 	f.ContextState = &current
+	if f.Project, err = l.journal.Project(ctx, run.ID); err != nil {
+		return f, contextError{fmt.Errorf("harness: project context of run %s: %w", run.ID, err)}
+	}
 	if err := l.fillFrame(ctx, run, snap, current, &f); err != nil {
 		return f, err
 	}

@@ -53,7 +53,7 @@ func TestAdmissionRefusesWhileAnyRunIsOpenOrAbandonedUnknown(t *testing.T) {
 				s := open(t, tempPath(t))
 				ctx := context.Background()
 				drive := func(id string, steps []stepFn) {
-					if _, err := s.db.Exec(`INSERT INTO runs (id, semantics, run, initial) VALUES (?, ?, ?, ?)`, id, core.SemanticsVersion,
+					if _, err := s.db.Exec(`INSERT INTO runs (id, semantics, run, initial, project, project_meta) VALUES (?, ?, ?, ?, '{}', '{}')`, id, core.SemanticsVersion,
 						`{"ID":"`+id+`","Goal":"g","Constraints":"","Budget":{"WallTime":0,"Tokens":0,"OutputBytes":0,"JobTimeout":0},"Created":"0001-01-01T00:00:00Z","Config":"eyJleGVjdXRvciI6InN0dWIifQ=="}`,
 						`{"RunID":"`+id+`","Step":1,"Attempt":1,"RequestRev":0,"Phase":"idle","Limits":{"MaxSteps":3,"MaxAttempts":2},"Decision":{"kind":"","payload":""},"EffectID":"","Reason":""}`); err != nil {
 						t.Fatal(err)

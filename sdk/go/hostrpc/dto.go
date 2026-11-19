@@ -20,7 +20,7 @@ import "log/slog"
 // a local action's outcome; version 10 adds a run's context_tokens budget and
 // the context_anchored item. Records live with the runtime server contract
 // tests.
-const Protocol = 10
+const Protocol = 11
 
 // Request is one operation. Op names it; the fields it uses are set.
 type Request struct {
@@ -132,6 +132,7 @@ type Spec struct {
 	RequestBytes       int    `json:"request_bytes"`
 	ContextVersion     int    `json:"context_version"`
 	HistoryImports     string `json:"history_imports"`
+	NoProjectContext   bool   `json:"no_project_context"`
 	MaxSteps           int    `json:"max_steps"`
 	MaxAttempts        int    `json:"max_attempts"`
 	WallTime           string `json:"wall_time"`
@@ -224,34 +225,80 @@ type Ack struct {
 // otherwise; Drivable reports that the host drives it or could continue it
 // without a client's credential, and Why says what is missing otherwise.
 type Run struct {
-	Environment    *Environment `json:"environment,omitempty"`
-	Ephemeral      bool         `json:"ephemeral"`
-	RunID          string       `json:"run_id"`
-	Ordinal        int          `json:"ordinal,omitempty"`
-	InputID        string       `json:"input_id,omitempty"`
-	InputPos       int64        `json:"input_pos,omitempty"`
-	Fresh          bool         `json:"fresh,omitempty"`
-	Goal           string       `json:"goal"`
-	Constraints    string       `json:"constraints"`
-	Status         string       `json:"status"`
-	Phase          string       `json:"phase"`
-	Step           int          `json:"step"`
-	StopReason     string       `json:"stop_reason,omitempty"`
-	Result         string       `json:"result,omitempty"`
-	EffectID       string       `json:"effect_id,omitempty"`
-	Cursor         string       `json:"cursor"`
-	ContextVersion int          `json:"context_version"`
-	API            string       `json:"api"`
-	Provider       string       `json:"provider,omitempty"`
-	Driver         string       `json:"driver"`
-	Drivable       bool         `json:"drivable"`
-	Why            string       `json:"why,omitempty"`
-	DriveError     string       `json:"drive_error,omitempty"`
-	PendingSteers  int          `json:"pending_steers,omitempty"`
-	Queued         int          `json:"queued,omitempty"`
-	Held           int          `json:"held,omitempty"`
-	Totals         Totals       `json:"totals"`
-	Budget         Budget       `json:"budget"`
+	Environment        *Environment    `json:"environment,omitempty"`
+	Ephemeral          bool            `json:"ephemeral"`
+	RunID              string          `json:"run_id"`
+	Ordinal            int             `json:"ordinal,omitempty"`
+	InputID            string          `json:"input_id,omitempty"`
+	InputPos           int64           `json:"input_pos,omitempty"`
+	Fresh              bool            `json:"fresh,omitempty"`
+	Goal               string          `json:"goal"`
+	Constraints        string          `json:"constraints"`
+	Status             string          `json:"status"`
+	Phase              string          `json:"phase"`
+	Step               int             `json:"step"`
+	StopReason         string          `json:"stop_reason,omitempty"`
+	Result             string          `json:"result,omitempty"`
+	EffectID           string          `json:"effect_id,omitempty"`
+	Cursor             string          `json:"cursor"`
+	ContextVersion     int             `json:"context_version"`
+	API                string          `json:"api"`
+	Provider           string          `json:"provider,omitempty"`
+	Driver             string          `json:"driver"`
+	Drivable           bool            `json:"drivable"`
+	Why                string          `json:"why,omitempty"`
+	DriveError         string          `json:"drive_error,omitempty"`
+	PendingSteers      int             `json:"pending_steers,omitempty"`
+	Queued             int             `json:"queued,omitempty"`
+	Held               int             `json:"held,omitempty"`
+	Totals             Totals          `json:"totals"`
+	Budget             Budget          `json:"budget"`
+	Project            *ProjectBinding `json:"project,omitempty"`
+	ProjectUnavailable string          `json:"project_unavailable,omitempty"`
+}
+
+// ProjectBinding is the metadata of the project context a run bound, without
+// instruction content: paths, sizes, hashes, skills, skipped skills and the
+// rendered index's size and hash. Disabled marks a run admitted with
+// -no-project-context.
+type ProjectBinding struct {
+	Disabled          bool           `json:"disabled,omitempty"`
+	Root              string         `json:"root,omitempty"`
+	Instructions      []ProjectFile  `json:"instructions,omitempty"`
+	InstructionsTotal int            `json:"instructions_total,omitempty"`
+	InstructionsMore  int            `json:"instructions_more,omitempty"`
+	Skills            []ProjectSkill `json:"skills,omitempty"`
+	SkillsTotal       int            `json:"skills_total,omitempty"`
+	SkillsMore        int            `json:"skills_more,omitempty"`
+	Skipped           []ProjectSkip  `json:"skipped,omitempty"`
+	SkippedTotal      int            `json:"skipped_total,omitempty"`
+	SkippedMore       int            `json:"skipped_more,omitempty"`
+	SkillsIndexBytes  int            `json:"skills_index_bytes,omitempty"`
+	SkillsIndexSHA256 string         `json:"skills_index_sha256,omitempty"`
+	SkillsOmitted     int            `json:"skills_omitted,omitempty"`
+	InstructionBytes  int            `json:"instruction_bytes,omitempty"`
+}
+
+// ProjectFile is one instruction file bound by a run.
+type ProjectFile struct {
+	Path         string `json:"path"`
+	ResolvedPath string `json:"resolved_path,omitempty"`
+	Size         int    `json:"size"`
+	SHA256       string `json:"sha256"`
+}
+
+// ProjectSkill is one skill in a run's bound index.
+type ProjectSkill struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Path         string `json:"path"`
+	ResolvedPath string `json:"resolved_path,omitempty"`
+}
+
+// ProjectSkip is one skill-like path a run skipped, with its reason.
+type ProjectSkip struct {
+	Path   string `json:"path,omitempty"`
+	Reason string `json:"reason"`
 }
 
 // Totals are a run's measured usage.

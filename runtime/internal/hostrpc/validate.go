@@ -61,18 +61,24 @@ func Validate(ctx context.Context, v *Validation, h *host.Host) (*Validated, err
 		}
 	}
 	b := BindingFrom(&v.Binding)
-	sub := host.Submission{Goal: v.Submission.Goal, Constraints: constraints, ExplicitConstraints: v.Submission.ExplicitConstraints,
+	sub := host.Submission{InputID: v.Submission.InputID, Goal: v.Submission.Goal, Constraints: constraints, ExplicitConstraints: v.Submission.ExplicitConstraints,
 		Delivery: harness.InputDelivery(v.Submission.Delivery), Fresh: v.Submission.Fresh, Spec: spec, Binding: b}
-	if err := host.Validate(ctx, state, sub); err != nil {
+	prepared, opening, err := host.Validate(ctx, state, sub)
+	if err != nil {
 		return nil, err
 	}
-	if sub.Delivery == "" {
-		if err := validateCredential(ctx, state, spec.Config, b, h); err != nil {
+	if opening {
+		if err := validateCredential(ctx, state, prepared.Config, b, h); err != nil {
 			return nil, err
 		}
 	}
+	projectBinding, err := ProjectOfMeta(prepared.Project.Meta(), prepared.Config.NoProjectContext)
+	if err != nil {
+		return nil, err
+	}
 	l := harness.DefaultPromptLimits()
-	return &Validated{State: state, Spec: SpecOf(spec), Constraints: constraints, GoalLimit: l.Goal, ConstraintsLimit: l.Constraints}, nil
+	return &Validated{State: state, Spec: SpecOf(prepared), Constraints: constraints, GoalLimit: l.Goal, ConstraintsLimit: l.Constraints,
+		Project: projectBinding}, nil
 }
 
 func readInherited(ctx context.Context, state string) (string, error) {

@@ -3,16 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
 )
 
 func TestEnvironmentInitializationIsIndependentOfRunState(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "control")
 	helper := filepath.Join(t.TempDir(), "canti-job")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho 1\n"), 0555); err != nil {
+	if err := os.WriteFile(helper, []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol)), 0555); err != nil {
 		t.Fatal(err)
 	}
 	var out, diagnostics bytes.Buffer

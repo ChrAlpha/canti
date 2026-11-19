@@ -8,6 +8,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
+	projectctx "github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 // View is the state of a run as the host reports it: the run, its stored
@@ -15,16 +16,18 @@ import (
 // its work, whether the host could drive it by itself, and the input counts
 // of the agent log.
 type View struct {
-	Run           harness.Run
-	Config        RunConfig
-	Snapshot      harness.Snapshot
-	Pos           int64
-	Ordinal       int
-	Totals        harness.Totals
-	Driving       bool
-	PendingSteers int
-	Queued        int
-	Held          int
+	Run                harness.Run
+	Config             RunConfig
+	Project            projectctx.Meta
+	ProjectUnavailable string
+	Snapshot           harness.Snapshot
+	Pos                int64
+	Ordinal            int
+	Totals             harness.Totals
+	Driving            bool
+	PendingSteers      int
+	Queued             int
+	Held               int
 	// Drivable reports that the host drives the run or could continue it
 	// without a client's credential: it finishes a pending stop, which needs
 	// none, or holds a credential bound to the run's API and provider. Why
@@ -46,6 +49,11 @@ func (h *Host) View(ctx context.Context, id string) (View, error) {
 		return View{}, err
 	}
 	v := View{Run: run, Config: c, Driving: h.Driving(run.ID)}
+	if v.Project, err = h.store.ProjectMeta(ctx, run.ID); err != nil {
+		v.ProjectUnavailable = projectctx.BoundDiagnostic(err.Error())
+		v.Project = projectctx.Meta{}
+		err = nil
+	}
 	for range 5 {
 		if v.Snapshot, err = h.store.Latest(ctx, run.ID); err != nil {
 			return v, err

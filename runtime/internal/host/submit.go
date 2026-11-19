@@ -79,6 +79,9 @@ func (a Ack) Opened() bool { return a.Run.ID != "" }
 // and, when it opens a run, the run in one transaction. Admission drives
 // nothing: a steer or queued follow-up only acknowledges.
 func (h *Host) Submit(ctx context.Context, s Submission) (Ack, error) {
+	if err := CheckContextVersion(s.Spec.Config); err != nil {
+		return Ack{}, SpecError{Err: err}
+	}
 	ctx, leave, err := h.Enter(ctx)
 	if err != nil {
 		return Ack{}, err
@@ -195,12 +198,10 @@ func (h *Host) admit(ctx context.Context, s Submission) (Ack, error) {
 // quiescent: its resolved execution, provider, budget, and limits, and the
 // check that a credential can drive it.
 func (h *Host) openingSubmission(ctx context.Context, s Submission) (harness.InputSubmission, error) {
-	spec := s.Spec
-	resolved, err := ResolveExecution(ctx, spec.Config, h.opts.State)
+	spec, err := Prepare(ctx, h.opts.State, s.Spec)
 	if err != nil {
-		return harness.InputSubmission{}, SpecError{err}
+		return harness.InputSubmission{}, err
 	}
-	spec.Config = resolved
 	p, err := newProvider(spec.Config.API, s.Binding)
 	if err != nil {
 		return harness.InputSubmission{}, err
@@ -220,7 +221,7 @@ func (h *Host) openingSubmission(ctx context.Context, s Submission) (harness.Inp
 	}
 	return harness.InputSubmission{InputID: s.InputID, Authority: harness.AuthorityPrincipal, Delivery: s.Delivery,
 		Text: s.Goal, Constraints: s.Constraints, ExplicitConstraints: s.ExplicitConstraints, Fresh: s.Fresh,
-		Spec: data, Run: run, Initial: initial, Now: s.Now}, nil
+		Spec: data, Run: run, Initial: initial, Project: spec.Project, Now: s.Now}, nil
 }
 
 // workingSubmission prepares a steer or follow-up while the agent works. It
@@ -228,6 +229,10 @@ func (h *Host) openingSubmission(ctx context.Context, s Submission) (harness.Inp
 // spec it will open with, which the follow-up start resolves and checks when
 // it opens the run.
 func (h *Host) workingSubmission(ctx context.Context, s Submission) (harness.InputSubmission, error) {
+	return workingSubmission(s)
+}
+
+func workingSubmission(s Submission) (harness.InputSubmission, error) {
 	if s.Delivery == "" {
 		return harness.InputSubmission{}, SpecError{fmt.Errorf("the agent is working: name a delivery")}
 	}

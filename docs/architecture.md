@@ -33,13 +33,14 @@ is not.
 | `runtime/internal/harness/artifacts.go` | Observation and output reference records | Types |
 | `runtime/internal/harness/history.go` | The read-only step records that jobs read, derived from committed facts | Offline tests over SQLite; Docker-backed gate tests |
 | `runtime/internal/archive` | Read-only access to the step records, artifacts, and imported history that jobs see: path safety, the retrieval operations, their continuations, and the evidence each returns | Offline tests on real directories |
+| `runtime/internal/project` | Read-only discovery of a workspace's instruction files and `.agents/skills` index at run creation: Pi's per-directory rule, symlinks inside the workspace, bounded reads, and skip diagnostics | Offline tests on real directories |
 | `runtime/internal/harness/sqlite` | The journal on one SQLite file | Tests on real database files, including SIGKILL recovery |
 | `runtime/internal/harness/docker` | One container per effect through the Docker Engine API, start latch, output capture | Fake-daemon tests and Docker integration tests |
 | `runtime/internal/harness/provider` | One HTTP exchange of frozen bytes, status classification, strict JSON envelopes, shared by the model adapters | Through the adapter tests |
 | `runtime/internal/harness/openai` | Non-streaming Responses adapter | Tests against a local HTTP server; CLI runs against a scripted Responses server; an opt-in live test |
 | `runtime/internal/harness/anthropic` | Non-streaming Anthropic Messages adapter | Tests against a local HTTP server; an opt-in live test and live runs with one model per evaluation through a Messages-compatible gateway ([V1 acceptance](v1-acceptance.md#live-provider-findings)) |
 | `runtime/internal/host` | The runtime host of one state directory: its lock and journal, serial admission with input identity, drives, stop and resolution, host shutdown, progress pages and waits; the stored run config, context version, and the construction of a run's loop, model adapter, and executor from its stored provider and a given credential | Offline tests over SQLite; through the CLI tests |
-| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 10, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, and a run's context budget), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
+| `runtime/internal/hostrpc` | The host protocol over a Unix socket in the state directory: one request and one response per connection, wire messages pinned per protocol version (version 11, with typed inputs, steering and follow-ups, observations, withdrawal, effect cancellation, opaque agent-log cursors, handover and budget anchor progress, a run's context budget, and the project context bound at run creation), side-effect-free preflight validation, peer user checks at both ends, bounded reads, writes, answers, and waits | Offline tests over real sockets; golden wire records |
 | `runtime/cmd/canti` | Operational CLI, runtime host and side-effect-free preflight; flags, signals, environment and credential | Subprocess tests; Docker-backed gate tests |
 | `sdk/go/hostrpc` | Runtime-independent protocol types and Unix client, errors and opaque progress cursors | Protocol and socket tests |
 | `apps/tui/cmd/canti-tui` | Flags, environment, runtime selection and composition | Startup tests; root-orchestrated app acceptance launches separate runtime and TUI executables |
@@ -186,7 +187,7 @@ physical owner for exited/timed-out assertions; it is never an inspected receipt
 
 ## Persistence and recovery
 
-SQLite schema 7 is current-only. A new empty database receives all tables and
+SQLite schema 8 is current-only. A new empty database receives all tables and
 indexes; other schema versions are refused without migration. State, event and
 fact readers are strict, including current semantics. WAL and synchronous=FULL
 retain the existing acknowledged-commit durability assumptions.
@@ -426,7 +427,8 @@ rejected request and the largest input usage any accepted request before it
 reported; the commit checks the shape against the frozen request capture, so
 later reads never reclassify it. A rejection keeps no resident step.
 
-The stable head contains the exact goal and constraints, the principal
+The stable head contains the exact goal and constraints, the project
+instructions and skills index bound when the run opened, the principal
 instructions bound at or before its anchor, environment, run and archive
 navigation, the closed runs of the line, the earlier-steps index, and the epoch
 header. The closed runs render newest first with their goal
@@ -480,12 +482,102 @@ and the step's `command`, and the projection derives its byte count from there.
 No other action may carry a context change. Unknown `canti:` names, including
 words that only begin with `canti:handover`, fail locally.
 
+### Project context
+
+A run binds a project snapshot in the same transaction that inserts its run row
+and opening input. The snapshot holds, for every instruction file, the
+job-visible path, the resolved path when a symbolic link is involved, its byte
+size, SHA-256 and exact UTF-8 content; it also holds the rendered skills index,
+its SHA-256, total counts, and a bounded page of skills and skipped-skill
+diagnostics with omitted counts. A second content-free metadata column holds the
+same paths, sizes and hashes without instruction bodies or the rendered index;
+status, acknowledgements, progress and resume read only that column; corrupt
+metadata of a closed run degrades to "metadata unavailable" and never blocks
+startup or a queued follow-up. The request builder reads the full column only
+for that run's requests. Neither column is
+read by admission or predecessor navigation. A later process renders exactly the
+committed snapshot, so changing or deleting the workspace files cannot change
+the run; a new run reads the workspace again.
+
+Pi 1.5.0's `dist/core/resource-loader.js` `loadContextFileFromDir` tries
+`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in that
+order and loads at most one per directory; `loadProjectContextFiles` walks from
+the working directory to the root and puts ancestors first. canti follows that
+per-directory rule from the workspace root to the mapped working directory but
+does not read a user's global agent directory or anything above the workspace:
+the principal's `-workspace` choice is the authority boundary. An ephemeral
+run reads the host workspace through one `os.Root` opened on the workspace
+directory itself, resolves relative links component by component, and does not
+follow an absolute link because the host cannot resolve it as the container
+would; directories are opened with `O_DIRECTORY|O_NONBLOCK`. A persistent run
+runs the pinned `canti-job` helper inside the environment, under the same user
+and environment as a job, with a 10 s read deadline. The helper uses ordinary
+kernel resolution, opens files with `O_NONBLOCK` and directories with
+`O_DIRECTORY|O_NONBLOCK`, and checks every opened descriptor's real path from
+`/proc/self/fd` against the workspace mount point before reading; an overlay
+mounted below the workspace counts as inside. A path under a volume, tmpfs, or
+other mount without a readable bind source refuses admission for an instruction
+and is skipped with a diagnostic for a skill. A link that leaves the workspace,
+or an instruction target that is not a regular file (including a real
+directory named like an instruction), refuses admission; this is stricter than
+Pi, which skips a directory candidate. The same defect on a skill path is a
+diagnostic, a skill path containing a control character is skipped with a
+diagnostic, and a dangling `SKILL.md` is reported rather than treated as absent. A resolved target named `.env` or `.env.*`
+refuses admission for an instruction file and is skipped for a skill, following
+the archive's rule. A working-directory link to a non-directory refuses
+admission. The snapshot records both the link path and the resolved path. The
+project-instructions mandate is added to the system prompt only when the run
+binds instruction files, so a run without project context keeps the earlier
+prompt. Containment is by path, not
+inode identity: a file hard-linked into the workspace by a host user is treated
+as workspace content, and `nlink` is not refused. A job cannot create a hard
+link across its mounts (`EXDEV`), so it cannot make an outside file appear at a
+workspace path.
+
+Pi 1.5.0's `dist/core/package-manager.js` collects `.agents/skills` from the
+working directory through its ancestors to the repository root, and
+`dist/core/skills.js` loads `SKILL.md` name and description with the Agent Skills
+limits. canti scans the same workspace chain nearest-first, keeps the first skill
+of a duplicated name, and skips a skill with a diagnostic when its frontmatter
+is ambiguous, its name exceeds 64 characters or its description exceeds 1,024
+characters. The helper and host exchange the index as newline-delimited JSON:
+one entry object per line followed by one trailer with the entry, omitted and
+skipped counts. The host validates the structured entries and renders the
+model-facing list from them; it never parses that rendering back. A path with a
+control character is checked in both its visible and resolved forms and skipped
+with the same diagnostic. A missing name falls back to the skill
+directory, with a diagnostic that it was derived, and
+`disable-model-invocation: true` keeps the skill out of the index, as in Pi. The
+frontmatter subset is strict: plain or single-line quoted scalars, YAML escapes
+(an out-of-range `\U` escape is an error), and `|`/`>` block scalars with
+default, `-`, or `+` chomping, where `|+` keeps trailing blank lines. Multiline
+quoted scalars, nested or malformed mappings for a parsed field, flow
+collections, and a closing marker followed by text are unsupported and skip the
+skill with a diagnostic;
+Pi accepts multiline quoted scalars, which canti deliberately does not. The
+closing marker is `---` at column 0, with optional trailing whitespace; an
+indented `---` inside a block is content. Instruction content is bounded at 64
+files and 64 KiB and refused with the files and sizes when over; the rendered
+skills index is bounded at 16 KiB and names how many more skills exist in the
+workspace. The snapshot stores at
+most 64 skills and 64 diagnostics, with their totals; the wire projection uses
+that bounded page and stays below the TUI preflight cap even for 1,024 legal
+maximum-length descriptions; a required name that cannot fit makes the
+projection unavailable rather than oversized, and diagnostics built from
+workspace or metadata values are clipped to the same 256 KiB bound. `-no-project-context` records the opt-out in the
+run configuration.
+
 The system prompt states the decision protocol, the native retrieval syntax and
 the handover contract. The mandate is the goal as amended by the principal's
-instructions: where they conflict, the latest instruction wins over the goal and
-earlier instructions, and constraints narrow all of them. Retrieved records,
+instructions: where they conflict, the latest principal instruction wins over
+the goal and earlier principal instructions, and constraints narrow all of them.
+Project instructions bound from the workspace are standing instructions from the
+repository, not evidence; they apply unless the goal, a later principal
+instruction, or the constraints say otherwise, and they never widen the
+constraints. They were bound when the run opened, so edits to their files do not
+change that run's requests; the next run binds them again. Retrieved records,
 commands and outputs are evidence; environment restrictions narrow the mandate
-unless explicitly lifted. Workspace notes remain ordinary files.
+unless explicitly lifted. Other workspace notes remain ordinary files.
 Omitted history remains available through the archive.
 
 The input archive holds exactly what the agent was shown. A `RequestFrozen`

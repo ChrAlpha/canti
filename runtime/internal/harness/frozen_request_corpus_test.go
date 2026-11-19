@@ -3,6 +3,7 @@ package harness_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 var updateRequests = flag.Bool("update-requests", false, "rewrite the current testdata/frozen-requests-v<version> from the records the scenarios commit")
@@ -28,7 +30,7 @@ const (
 	corpusThirdRun = "run_5d1e8c3a7b2f4e9d6a0c8b5f3e1d9a72"
 	corpusSteps    = "/canti/runs/" + corpusRun + "/steps"
 	corpusListing  = `printf 'alpha\nbeta\ngamma\n'`
-	corpusVersion  = 22
+	corpusVersion  = 23
 )
 
 type frozenScenario struct {
@@ -51,12 +53,24 @@ type frozenRun struct {
 	id, goal    string
 	constraints string // instead of the corpus constraints
 	fresh       bool   // starts a new line
+	project     project.Snapshot
 	replies     []string
 	steers      []string // principal steers admitted before the first request
 	steps       []string // stepOutcome of every completed step, oldest first
 	budget      harness.Budget
 	resolve     *harness.Observation // operator resolution of an unknown outcome
 	stop        core.StopReason      // the reason the run stops with instead of returning
+}
+
+func corpusProjectSnapshot() project.Snapshot {
+	content := "Use tabs.\n"
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	skillPath := "/workspace/.agents/skills/go/SKILL.md"
+	index := project.Index{Entries: []project.IndexEntry{{Name: "go", Description: "Go conventions.", Path: skillPath}}}
+	return project.Snapshot{Root: "/workspace",
+		Instructions: []project.Instruction{{Path: "/workspace/AGENTS.md", Size: len(content), SHA256: sum, Content: content}},
+		Skills:       []project.Skill{{Name: "go", Description: "Go conventions.", Path: skillPath}},
+		SkillsTotal:  1, SkillsIndex: index.Encode(), SkillsIndexSHA256: digestIndex(index.Text())}
 }
 
 func corpusDecision(kind core.Kind, payload string) string {
@@ -76,6 +90,8 @@ func frozenScenarios() []frozenScenario {
 	overflow := `raw:{"model":"claude-opus-5","stop_reason":"model_context_window_exceeded","content":[{"type":"text","text":"{\"kind\":\"exec\",\"payload\":\"never execute partial\"}"}],"usage":{"input_tokens":13,"output_tokens":2}}`
 	handover := func(text string) string { return corpusDecision(core.Exec, "canti:handover "+text) }
 	return slices.Concat(persistentScenarios(limits), []frozenScenario{
+		{name: "project-context", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Follow the repository rules.", project: corpusProjectSnapshot(), replies: []string{corpusDecision(core.Return, "followed")}}},
+			marks: map[string][]string{"run1-step01-rev1.json": {"## Project instructions", "### /workspace/AGENTS.md (sha256 " + corpusProjectSnapshot().Instructions[0].SHA256[:12] + ")", "Use tabs.", "## Skills", "- go: Go conventions.", "Path: /workspace/.agents/skills/go/SKILL.md"}}},
 		{name: "fresh-run", limits: limits, runs: []frozenRun{{id: corpusRun, goal: "Answer immediately.", replies: []string{corpusDecision(core.Return, "done")}}},
 			marks: map[string][]string{"run1-step01-rev1.json": {"## Steps since the anchor", "anchor sequence 0"}}},
 		{name: "shell-and-retrieval", limits: limits, outputs: map[string]string{corpusListing: "alpha\nbeta\ngamma\n"}, runs: []frozenRun{{id: corpusRun, goal: "Find beta in original history.", replies: []string{corpusDecision(core.Exec, corpusListing), corpusRetrieve("read", corpusSteps+"/00000001/preview", "", "Read the preview."), corpusRetrieve("search", corpusSteps+"/00000001/preview", `,"query":"beta"`, "Find beta."), corpusRetrieve("discover", corpusSteps, `,"query":"beta"`, "Find original step."), corpusDecision(core.Return, "beta is line 2.")}, steps: []string{"1 exited 0 output complete", "2 done retrieval 1 sources 0 entries", "3 done retrieval 1 sources 0 entries", "4 done retrieval 3 sources 0 entries"}}},
@@ -445,3 +461,5 @@ func persistentScenarios(limits core.Limits) []frozenScenario {
 		runs:  []frozenRun{{id: corpusRun, goal: "Read original environment evidence across context reset.", replies: []string{corpusRetrieve("read", "/canti/imports/notes", "", "Read original evidence."), overflow, corpusDecision(core.Exec, "canti:handover PERSISTENT_ORIGINAL_EVIDENCE retained; next report it"), corpusDecision(core.Return, "Evidence retained.")}, steps: []string{"1 done retrieval 1 sources 0 entries", "2 done handover 53 bytes"}}},
 		marks: map[string][]string{"run1-step02-rev2.json": {"## Earlier steps", "logical addresses"}, "run1-step03-rev1.json": {"## Earlier steps", "- Step 1:", "- Step 2:"}}}}
 }
+
+func digestIndex(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }

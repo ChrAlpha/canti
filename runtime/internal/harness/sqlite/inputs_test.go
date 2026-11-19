@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 var admittedAt = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
@@ -344,7 +345,7 @@ func TestOpenFollowUpAfterAReturn(t *testing.T) {
 	d.decide([]byte(`{"kind":"return","payload":"done"}`), harness.Usage{})
 	next := submission(t, "run-2", "Then report.", false)
 	next.Run.Goal, next.Run.Constraints = "ignored", "resolved by the host"
-	got, err := s.OpenFollowUp(ctx, follow.Input, next.Run, next.Initial)
+	got, err := s.OpenFollowUp(ctx, follow.Input, next.Run, next.Initial, project.Snapshot{})
 	if err != nil || got.Disposition != harness.DispositionOpened || got.Run == nil {
 		t.Fatalf("open follow-up = %+v, %v", got, err)
 	}
@@ -360,7 +361,7 @@ func TestOpenFollowUpAfterAReturn(t *testing.T) {
 	if err != nil || queuedInput.Disposition == harness.DispositionQueued {
 		t.Fatalf("opened input = %+v, %v", queuedInput, err)
 	}
-	if again, err := s.OpenFollowUp(ctx, follow.Input, next.Run, next.Initial); err == nil {
+	if again, err := s.OpenFollowUp(ctx, follow.Input, next.Run, next.Initial, project.Snapshot{}); err == nil {
 		t.Fatalf("second open = %+v", again)
 	}
 	previous, more, err := s.PreviousRuns(ctx, got.Run.ID)

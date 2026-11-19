@@ -22,6 +22,7 @@ import (
 
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 	modernc "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -32,7 +33,7 @@ import (
 // reinterpreted.
 var ErrIncompatible = errors.New("sqlite: incompatible record")
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 const (
 	journalModeSQL        = `PRAGMA journal_mode`
@@ -58,6 +59,8 @@ CREATE TABLE runs (
 	semantics INTEGER NOT NULL,
 	run TEXT NOT NULL,
 	initial TEXT NOT NULL,
+	project TEXT NOT NULL,
+	project_meta TEXT NOT NULL,
 	input_pos INTEGER,
 	fresh INTEGER NOT NULL DEFAULT 0,
 	input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -133,13 +136,15 @@ CREATE INDEX transitions_superseded ON transitions (run_id, seq)
 const performedIndex = `CREATE INDEX transitions_performed ON transitions (run_id, seq) WHERE kind = 'performed';`
 
 const (
-	sameRunSQL   = `SELECT semantics, initial, run = ? AND initial = ? AND input_pos IS ? AND fresh = ? FROM runs WHERE id = ?`
-	insertRunSQL = `INSERT INTO runs (id, semantics, run, initial, input_pos, fresh) VALUES (?, ?, ?, ?, ?, ?)`
-	runSQL       = `SELECT semantics, run, input_pos, fresh FROM runs WHERE id = ?`
-	lastRunSQL   = `SELECT semantics, run, input_pos, fresh FROM runs WHERE n = (SELECT max(n) FROM runs)`
-	initialSQL   = `SELECT semantics, initial FROM runs WHERE id = ?`
-	totalsSQL    = `SELECT input_tokens, output_tokens, output_bytes, steps, usage_attempts, input_reports, output_reports, lost_attempts FROM runs WHERE id = ?`
-	addSQL       = `UPDATE runs SET input_tokens = ?, output_tokens = ?, output_bytes = ?, steps = ?,
+	sameRunSQL     = `SELECT semantics, initial, run = ? AND initial = ? AND input_pos IS ? AND fresh = ? AND project = ? AND project_meta = ? FROM runs WHERE id = ?`
+	insertRunSQL   = `INSERT INTO runs (id, semantics, run, initial, input_pos, fresh, project, project_meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	runSQL         = `SELECT semantics, run, input_pos, fresh FROM runs WHERE id = ?`
+	projectSQL     = `SELECT project FROM runs WHERE id = ?`
+	projectMetaSQL = `SELECT project_meta FROM runs WHERE id = ?`
+	lastRunSQL     = `SELECT semantics, run, input_pos, fresh FROM runs WHERE n = (SELECT max(n) FROM runs)`
+	initialSQL     = `SELECT semantics, initial FROM runs WHERE id = ?`
+	totalsSQL      = `SELECT input_tokens, output_tokens, output_bytes, steps, usage_attempts, input_reports, output_reports, lost_attempts FROM runs WHERE id = ?`
+	addSQL         = `UPDATE runs SET input_tokens = ?, output_tokens = ?, output_bytes = ?, steps = ?,
         usage_attempts = ?, input_reports = ?, output_reports = ?, lost_attempts = ? WHERE id = ?`
 	latestSQL = `SELECT seq, kind, semantics, to_state FROM transitions WHERE run_id = ? ORDER BY seq DESC LIMIT 1`
 	sameSQL   = `SELECT semantics, from_state, to_state, event_id = ? AND kind = ? AND semantics = ? AND event = ? AND from_state = ? AND to_state = ? AND facts = ?
@@ -211,7 +216,7 @@ const (
 )
 
 var queries = []string{
-	sameRunSQL, insertRunSQL, runSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
+	sameRunSQL, insertRunSQL, runSQL, projectSQL, projectMetaSQL, lastRunSQL, initialSQL, totalsSQL, addSQL,
 	latestSQL, headSQL, sameSQL, insertSQL, transitionsSQL, requestSQL, responseSQL, recentSQL,
 	stepsSQL, savedSQL, acceptedSQL, progressSQL, logWithdrawalsSQL,
 	contextSeqSQL, contextHeadSQL, rejectionSeqSQL, receiptSQL, agentPosSQL, bumpPosSQL,
@@ -349,12 +354,19 @@ func (s *Store) stmt(ctx context.Context, tx *sql.Tx, query string) *sql.Stmt {
 	return tx.StmtContext(ctx, s.stmts[query])
 }
 
-// CreateRun records run with its initial state at sequence zero. The state
-// must be the fresh state of the same run. Repeating an identical create
-// succeeds without change; different content under an existing ID fails. A
-// run created by an admitted input, which the host alone does, is created
-// with its input in the same transaction instead.
+// CreateRun records run with its initial state at sequence zero and no
+// project snapshot. The state must be the fresh state of the same run.
+// Repeating an identical create succeeds without change; different content
+// under an existing ID fails. A run created by an admitted input, which the
+// host alone does, is created with its input in the same transaction instead.
 func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.State) error {
+	return s.CreateRunWithProject(ctx, run, initial, project.Snapshot{})
+}
+
+// CreateRunWithProject is CreateRun with the project snapshot bound to the run,
+// stored in the same transaction and read only when the run's requests are
+// built.
+func (s *Store) CreateRunWithProject(ctx context.Context, run harness.Run, initial core.State, snapshot project.Snapshot) error {
 	if run.InputPos != 0 || run.InputID != "" {
 		return errors.New("sqlite: a run with an input is created by admission")
 	}
@@ -362,11 +374,15 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 	if err != nil {
 		return err
 	}
+	projectData, metaData, err := encodeProject(snapshot)
+	if err != nil {
+		return err
+	}
 	return s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var same bool
 		var semantics int
 		var stored string
-		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, data, state, nil, run.Fresh, run.ID).Scan(&semantics, &stored, &same)
+		err := s.stmt(ctx, tx, sameRunSQL).QueryRowContext(ctx, data, state, nil, run.Fresh, projectData, metaData, run.ID).Scan(&semantics, &stored, &same)
 		if err == nil {
 			var initial core.State
 			if err := decodeState(semantics, stored, &initial); err != nil {
@@ -384,9 +400,59 @@ func (s *Store) CreateRun(ctx context.Context, run harness.Run, initial core.Sta
 		if err := s.checkAdmission(ctx, tx); err != nil {
 			return err
 		}
-		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state, nil, run.Fresh)
+		_, err = s.stmt(ctx, tx, insertRunSQL).ExecContext(ctx, run.ID, core.SemanticsVersion, data, state, nil, run.Fresh, projectData, metaData)
 		return err
 	})
+}
+
+// Project returns the project snapshot bound to run and checks that it is
+// self-consistent. It reads no other run and no transition.
+func (s *Store) Project(ctx context.Context, runID string) (project.Snapshot, error) {
+	var data string
+	if err := s.stmts[projectSQL].QueryRowContext(ctx, runID).Scan(&data); err != nil {
+		return project.Snapshot{}, missing(err, "run")
+	}
+	var snapshot project.Snapshot
+	if err := strict(data, &snapshot); err != nil {
+		return project.Snapshot{}, fmt.Errorf("%w: run %q project: %v", ErrIncompatible, runID, err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return project.Snapshot{}, fmt.Errorf("%w: run %q project: %v", ErrIncompatible, runID, err)
+	}
+	return snapshot, nil
+}
+
+func encodeProject(snapshot project.Snapshot) (string, string, error) {
+	if err := snapshot.Validate(); err != nil {
+		return "", "", err
+	}
+	meta := snapshot.Meta()
+	if err := meta.Validate(); err != nil {
+		return "", "", err
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return "", "", err
+	}
+	metaData, err := json.Marshal(meta)
+	return string(data), string(metaData), err
+}
+
+// ProjectMeta returns the content-free project metadata of run. It never
+// decodes an instruction body or the rendered index.
+func (s *Store) ProjectMeta(ctx context.Context, runID string) (project.Meta, error) {
+	var data string
+	if err := s.stmts[projectMetaSQL].QueryRowContext(ctx, runID).Scan(&data); err != nil {
+		return project.Meta{}, missing(err, "run")
+	}
+	var meta project.Meta
+	if err := strict(data, &meta); err != nil {
+		return project.Meta{}, fmt.Errorf("%w: run %q project metadata: %v", ErrIncompatible, runID, err)
+	}
+	if err := meta.Validate(); err != nil {
+		return project.Meta{}, fmt.Errorf("%w: run %q project metadata: %v", ErrIncompatible, runID, err)
+	}
+	return meta, nil
 }
 
 func encodeRun(run harness.Run, initial core.State) (string, string, error) {

@@ -90,7 +90,7 @@ func binding(url string) Binding { return Binding{Provider: url, Keys: Keys{Anth
 
 func submit(t *testing.T, h *Host, s Submission) Ack {
 	t.Helper()
-	if s.Spec == (Spec{}) {
+	if s.Spec.Config == (RunConfig{}) && s.Spec.Budget == (harness.Budget{}) && s.Spec.Limits == (core.Limits{}) && s.Spec.Project.Root == "" {
 		s.Spec = testSpec(h)
 	}
 	if s.Goal == "" {

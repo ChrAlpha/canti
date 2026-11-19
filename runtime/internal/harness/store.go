@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ChrAlpha/canti/runtime/core"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 // ErrStaleSnapshot reports a commit whose sequence is not the next one for
@@ -94,6 +95,10 @@ type Journal interface {
 	Latest(ctx context.Context, runID string) (Snapshot, error)
 	// Context reads the head and context pointer in one snapshot, rejecting a stale expected position.
 	Context(ctx context.Context, expected Snapshot) (ContextState, error)
+	// Project returns the project snapshot bound when the run opened. It is
+	// read only when that run's requests are built, never by admission or
+	// predecessor navigation.
+	Project(ctx context.Context, runID string) (project.Snapshot, error)
 	Request(ctx context.Context, runID string, step, rev int) (Request, error)
 	LatestRequest(ctx context.Context, runID string) (Request, error)
 	Response(ctx context.Context, runID string, step, attempt int) (Response, error)
@@ -268,7 +273,10 @@ type InputSubmission struct {
 	Source, Subject     string
 	Run                 Run
 	Initial             core.State
-	Now                 time.Time
+	// Project is the workspace snapshot bound when this input opens a run;
+	// it is stored in the run's row in the same transaction as Run.
+	Project project.Snapshot
+	Now     time.Time
 }
 
 // Admission is what became of a submitted input. Run is set when the input

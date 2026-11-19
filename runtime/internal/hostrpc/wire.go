@@ -58,6 +58,10 @@ const Protocol = wire.Protocol
 
 type Validation = wire.Validation
 type Validated = wire.Validated
+type ProjectBinding = wire.ProjectBinding
+type ProjectFile = wire.ProjectFile
+type ProjectSkill = wire.ProjectSkill
+type ProjectSkip = wire.ProjectSkip
 
 const OpValidate = wire.OpValidate
 

@@ -96,7 +96,7 @@ type inputAck struct {
 }
 
 func (a *app) checkNewInput(ctx context.Context, goal, constraints string, spec host.Spec, url string) error {
-	if err := host.Validate(ctx, a.state, host.Submission{Goal: goal, Constraints: constraints, Spec: spec}); err != nil {
+	if _, _, err := host.Validate(ctx, a.state, host.Submission{Goal: goal, Constraints: constraints, Spec: spec}); err != nil {
 		return err
 	}
 	return a.checkCredential(ctx, spec.Config, url)

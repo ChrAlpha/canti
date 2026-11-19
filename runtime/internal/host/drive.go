@@ -150,11 +150,10 @@ func (h *Host) startFollowUp(ctx context.Context, snap harness.Snapshot) error {
 		if err := strictSpec(in.Spec, &spec); err != nil {
 			return fmt.Errorf("queued input %d: %w", in.Pos, err)
 		}
-		resolved, err := ResolveExecution(ctx, spec.Config, h.opts.State)
+		spec, err = Prepare(ctx, h.opts.State, spec)
 		if err != nil {
-			return fmt.Errorf("queued input %d: %w", in.Pos, SpecError{err})
+			return fmt.Errorf("queued input %d: %w", in.Pos, err)
 		}
-		spec.Config = resolved
 		constraints := in.Constraints
 		if !in.ExplicitConstraints && !in.Fresh {
 			predecessor, err := h.store.LastRun(ctx)
@@ -168,7 +167,7 @@ func (h *Host) startFollowUp(ctx context.Context, snap harness.Snapshot) error {
 			return fmt.Errorf("queued input %d: %w", in.Pos, SpecError{err})
 		}
 		binding, _ = h.bindingFor(in.Pos)
-		admission, err := h.store.OpenFollowUp(ctx, in, next, initial)
+		admission, err := h.store.OpenFollowUp(ctx, in, next, initial, spec.Project)
 		if err != nil {
 			return err
 		}

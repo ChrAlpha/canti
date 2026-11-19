@@ -20,11 +20,12 @@ type Validation struct {
 // Validated contains canonical configuration and the constraints/limits
 // required to present input errors. Admission always checks them again.
 type Validated struct {
-	State            string `json:"state"`
-	Spec             Spec   `json:"spec"`
-	Constraints      string `json:"constraints"`
-	GoalLimit        int    `json:"goal_limit"`
-	ConstraintsLimit int    `json:"constraints_limit"`
+	State            string          `json:"state"`
+	Spec             Spec            `json:"spec"`
+	Constraints      string          `json:"constraints"`
+	GoalLimit        int             `json:"goal_limit"`
+	ConstraintsLimit int             `json:"constraints_limit"`
+	Project          *ProjectBinding `json:"project,omitempty"`
 }
 
 // Validate checks a prospective submission through the runtime without admitting a

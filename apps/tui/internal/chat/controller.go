@@ -98,6 +98,12 @@ func (c *Controller) Setup(ctx, shutdown context.Context) error {
 		return hostrpc.SpecError{Err: err}
 	}
 	v, err := c.runtime.validate(ctx, c.submission(Snapshot{Goal: "chat"}, "", c.cfg.Fresh), c.cfg.Binding)
+	if err != nil && strings.Contains(err.Error(), "name a delivery") {
+		// A working run rejects an input without a delivery, but startup only
+		// needs the canonical config and limits; ask as a steer without touching
+		// the open run.
+		v, err = c.runtime.validate(ctx, c.submission(Snapshot{Goal: "chat"}, "steer", false), c.cfg.Binding)
+	}
 	if err != nil {
 		return err
 	}
@@ -250,7 +256,7 @@ func (c *Controller) run(ctx context.Context, t *Turn) Result {
 		if out.Rejected && errors.As(err, new(hostrpc.SpecError)) {
 			out.Code = Usage
 			_, fitErr := c.runtime.validate(ctx, c.submission(Snapshot{Goal: "chat"}, "", c.cfg.Fresh), c.cfg.Binding)
-			out.NoInputFits = errors.As(fitErr, new(hostrpc.SpecError))
+			out.NoInputFits = errors.As(fitErr, new(hostrpc.SpecError)) && !strings.Contains(fitErr.Error(), "name a delivery")
 		}
 		return out
 	}

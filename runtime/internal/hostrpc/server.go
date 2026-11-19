@@ -364,10 +364,10 @@ func (s *Server) submit(ctx context.Context, req Request) (*Ack, error) {
 	if err != nil {
 		return nil, host.SpecError{Err: err}
 	}
-	switch {
-	case spec.Config.ContextVersion != host.ContextVersion:
-		return nil, host.SpecError{Err: fmt.Errorf("the client creates runs of context version %d and this host renders %d", spec.Config.ContextVersion, host.ContextVersion)}
-	case spec.Config.Workspace != s.Host.Workspace():
+	if err := host.CheckContextVersion(spec.Config); err != nil {
+		return nil, host.SpecError{Err: err}
+	}
+	if spec.Config.Workspace != s.Host.Workspace() {
 		return nil, host.SpecError{Err: fmt.Errorf("the run's workspace %s is not the host's %s", spec.Config.Workspace, s.Host.Workspace())}
 	}
 	sub := req.Submit

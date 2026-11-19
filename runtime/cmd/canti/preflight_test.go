@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +22,8 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/docker"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
+	"github.com/ChrAlpha/canti/runtime/internal/jobrunner"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 	"github.com/ChrAlpha/canti/sdk/go/hostrpc"
 )
 
@@ -159,7 +163,7 @@ func TestCompiledPreflightRemovesProviderCredentialsBeforeDockerFailure(t *testi
 	c := &v.Submission.Spec
 	c.Ephemeral, c.Environment = false, filepath.Join(t.TempDir(), "environment")
 	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
-	helperBytes := []byte("#!/bin/sh\necho 1\n")
+	helperBytes := []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol))
 	helper := filepath.Join(t.TempDir(), "helper")
 	if err := os.WriteFile(helper, helperBytes, 0555); err != nil {
 		t.Fatal(err)
@@ -242,7 +246,10 @@ func TestPersistentPreflightChecksActualMountsBeforeCreatingState(t *testing.T) 
 	c := &v.Submission.Spec
 	c.Ephemeral, c.Environment = false, filepath.Join(filepath.Dir(c.Workspace), "environment")
 	c.Image, c.Network, c.Memory, c.CPUs, c.Pids = "", "", "", "", 0
-	helperBytes := []byte("#!/bin/sh\necho 1\n")
+	// This fixture proxies only the attachment observation; project context
+	// has its own persistent helper tests.
+	c.NoProjectContext = true
+	helperBytes := []byte(fmt.Sprintf("#!/bin/sh\necho %d\n", jobrunner.Protocol))
 	helper := filepath.Join(t.TempDir(), "helper")
 	if err := os.WriteFile(helper, helperBytes, 0555); err != nil {
 		t.Fatal(err)
@@ -364,4 +371,52 @@ func TestPersistentPreflightChecksActualMountsBeforeCreatingState(t *testing.T) 
 		}
 		assertNoState(t, v.State)
 	}
+}
+
+func TestPreflightReportsTheProspectiveProjectBindingWithoutState(t *testing.T) {
+	validation := testPreflightValidation(t)
+	workspace := validation.Submission.Spec.Workspace
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("Use tabs.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".agents/skills/go"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".agents/skills/go/SKILL.md"), []byte("---\nname: go\ndescription: Go conventions.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".agents/skills/bad"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".agents/skills/bad/SKILL.md"), []byte("---\nname: bad\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response := callPreflight(t, preflightRequest(t, validation))
+	if response.Error != nil || response.Validated == nil || response.Validated.Project == nil {
+		t.Fatalf("preflight = %+v", response)
+	}
+	p := response.Validated.Project
+	if len(p.Instructions) != 1 || p.Instructions[0].Path != "/workspace/AGENTS.md" || p.Instructions[0].Size != len("Use tabs.\n") ||
+		p.Instructions[0].SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte("Use tabs.\n"))) {
+		t.Fatalf("instructions = %+v", p.Instructions)
+	}
+	if len(p.Skills) != 1 || p.Skills[0].Name != "go" || p.Skills[0].Path != "/workspace/.agents/skills/go/SKILL.md" {
+		t.Fatalf("skills = %+v", p.Skills)
+	}
+	if len(p.Skipped) != 1 || !strings.Contains(p.Skipped[0].Reason, "description") {
+		t.Fatalf("skipped = %+v", p.Skipped)
+	}
+	index := project.Index{Entries: []project.IndexEntry{{Name: "go", Description: "Go conventions.", Path: "/workspace/.agents/skills/go/SKILL.md"}}}
+	if p.SkillsIndexBytes != len(index.Text()) || p.SkillsIndexSHA256 == "" {
+		t.Fatalf("index projection = %+v", p)
+	}
+	assertNoState(t, validation.State)
+
+	disabled := testPreflightValidation(t)
+	disabled.Submission.Spec.NoProjectContext = true
+	response = callPreflight(t, preflightRequest(t, disabled))
+	if response.Error != nil || response.Validated == nil || response.Validated.Project == nil || !response.Validated.Project.Disabled {
+		t.Fatalf("disabled preflight = %+v", response)
+	}
+	assertNoState(t, disabled.State)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/internal/harness/sqlite"
 	"github.com/ChrAlpha/canti/runtime/internal/host"
 	hostserver "github.com/ChrAlpha/canti/runtime/internal/hostrpc"
+	projectctx "github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 func statusCommand(fs *flag.FlagSet, a *app) action {
@@ -29,6 +30,15 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 			return exitError, err
 		}
 		st, b := snap.State, run.Budget
+		bound, err := store.ProjectMeta(ctx, run.ID)
+		projectUnavailable := ""
+		if err != nil {
+			projectUnavailable, bound = projectctx.BoundDiagnostic(err.Error()), projectctx.Meta{}
+		}
+		project, projectErr := hostserver.ProjectOfMeta(bound, c.NoProjectContext)
+		if projectErr != nil && projectUnavailable == "" {
+			projectUnavailable = projectctx.BoundDiagnostic(projectErr.Error())
+		}
 		var decision *core.Decision
 		if st.Decision.Kind != "" {
 			decision = &st.Decision
@@ -37,8 +47,10 @@ func statusCommand(fs *flag.FlagSet, a *app) action {
 			"run": map[string]any{"id": run.ID, "ordinal": ordinal(ctx, store, run.ID), "goal": run.Goal, "constraints": run.Constraints, "created": run.Created,
 				"input_id": run.InputID, "input_pos": run.InputPos, "fresh": run.Fresh,
 				"budget": map[string]any{"wall_time": b.WallTime.String(), "tokens": b.Tokens, "context_tokens": b.ContextTokens, "output_bytes": b.OutputBytes, "job_timeout": b.JobTimeout.String()}},
-			"execution": map[string]any{"ephemeral": c.Ephemeral, "environment": hostserver.EnvironmentOf(c)},
-			"seq":       snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
+			"execution":           map[string]any{"ephemeral": c.Ephemeral, "environment": hostserver.EnvironmentOf(c)},
+			"project":             project,
+			"project_unavailable": projectUnavailable,
+			"seq":                 snap.Seq, "phase": st.Phase, "intent": st.Intent(), "step": st.Step, "attempt": st.Attempt,
 			"request_rev": st.RequestRev, "reason": st.Reason, "decision": decision, "effect_id": st.EffectID,
 			"inputs": st.Inputs, "seen": st.Seen,
 			"totals": map[string]any{"input_tokens": t.Usage.InputTokens, "output_tokens": t.Usage.OutputTokens, "output_bytes": t.OutputBytes, "steps": t.Steps, "coverage": t.Coverage},

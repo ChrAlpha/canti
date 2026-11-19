@@ -30,7 +30,7 @@ func hotFixture(t *testing.T) *Store {
 	ctx := context.Background()
 	now := admittedAt.UTC().Format(time.RFC3339Nano)
 	for i := 1; i <= 4; i++ {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO runs (n, id, semantics, run, initial, fresh) VALUES (?, ?, 8, '{}', '{}', ?)`,
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO runs (n, id, semantics, run, initial, fresh, project, project_meta) VALUES (?, ?, 8, '{}', '{}', ?, '{}', '{}')`,
 			i, fmt.Sprintf("run-%d", i), i == 1); err != nil {
 			t.Fatal(err)
 		}
@@ -250,6 +250,8 @@ type hotPathExemption struct {
 
 var hotPathExemptions = map[string]hotPathExemption{
 	"sameRunSQL":     {sameRunSQL, "CreateRun replay equality check, not an admission or prepare path"},
+	"projectSQL":     {projectSQL, "project snapshot read when a run's request is built"},
+	"projectMetaSQL": {projectMetaSQL, "project metadata read by status and views"},
 	"insertRunSQL":   {insertRunSQL, "write, not a read plan"},
 	"initialSQL":     {initialSQL, "run initial-state recovery read"},
 	"totalsSQL":      {totalsSQL, "run usage projection read"},

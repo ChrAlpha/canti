@@ -13,6 +13,7 @@ import (
 	"github.com/ChrAlpha/canti/runtime/core"
 	"github.com/ChrAlpha/canti/runtime/internal/archive"
 	"github.com/ChrAlpha/canti/runtime/internal/harness"
+	"github.com/ChrAlpha/canti/runtime/internal/project"
 )
 
 func inputPath(root string, pos int64) string {
@@ -88,7 +89,7 @@ func TestQueuedFollowUpIsPublishedWhenItsRunFirstFreezes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.OpenFollowUp(ctx, queued.Input, harness.Run{ID: "next", Goal: "later", Created: created}, initial); err != nil {
+	if _, err := f.store.OpenFollowUp(ctx, queued.Input, harness.Run{ID: "next", Goal: "later", Created: created}, initial, project.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.Step(ctx, "next"); err != nil {
